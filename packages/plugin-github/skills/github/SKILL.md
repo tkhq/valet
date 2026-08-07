@@ -52,11 +52,12 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 ### Pull Requests
 - `github.list_pull_requests` — list PRs for a repo
 - `github.get_pull_request` — get a specific PR by number
-- `github.inspect_pull_request` — get detailed PR info (files, comments, check runs)
+- `github.inspect_pull_request` — get detailed PR info (files, comments, check runs); set `includePatch` for the diff and `pathPrefixes` to scope to a folder
 - `github.create_pull_request` — create a new PR
 - `github.update_pull_request` — update a PR (title, body, state, labels)
 - `github.merge_pull_request` — merge a PR
 - `github.create_comment` — comment on an issue or PR
+- `github.create_review` — post a PR review with optional inline comments; set `updateExisting` to replace its own previous review
 
 ### Branches & Commits
 - `github.create_branch` — create a branch from a ref
