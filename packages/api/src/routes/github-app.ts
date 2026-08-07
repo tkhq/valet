@@ -263,9 +263,13 @@ githubAppRouter.post("/manifest", async (c) => {
     callback_urls: [`${apiBase}/api/me/github/callback`],
     ...(webhookOn ? { hook_attributes: { url: `${apiBase}/webhooks/github-app` } } : {}),
     public: false,
-    default_events: webhookOn
-      ? ["installation", "installation_repositories", ...(eventsOverride ?? triggerEvents)]
-      : [],
+    // Subscribe ONLY to events an App may subscribe to. GitHub delivers
+    // the App-lifecycle events (`installation`,
+    // `installation_repositories`) to every App on its own, and rejects a
+    // manifest that lists them: "Default events unsupported", plus a second
+    // rejection because they map to no permission. Listing them here cost
+    // us every App creation until it was found by hand.
+    default_events: webhookOn ? (eventsOverride ?? triggerEvents) : [],
     // GitHub's manifest schema key is `default_permissions` — a bare
     // `permissions` key makes the app-creation form reject the manifest.
     default_permissions: permissionOverride ?? {

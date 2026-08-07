@@ -205,14 +205,22 @@ describe("POST /api/org/github-app/manifest", () => {
       body: JSON.stringify({}),
     });
     const body = (await res.json()) as PostGithubAppManifestResponse;
-    // installation sync events + every ingestable trigger family (no ping —
-    // GitHub sends it unconditionally on webhook creation).
-    expect(body.manifest.default_events.slice(0, 2)).toEqual(["installation", "installation_repositories"]);
+    // Every ingestable trigger family, and NOTHING GitHub delivers on its
+    // own. `ping` and the App-lifecycle events are the exclusions.
     const triggerFamilies = githubPlugin.triggers!.map((t) => t.id.slice("github.".length));
-    expect(body.manifest.default_events.slice(2).sort()).toEqual(
+    expect(body.manifest.default_events.sort()).toEqual(
       triggerFamilies.filter((e) => e !== "ping").sort(),
     );
     expect(body.manifest.default_events).not.toContain("ping");
+    // GitHub REJECTS the whole manifest when these appear — it delivers
+    // them to every App regardless, so subscribing is both unnecessary and
+    // fatal ("Default events unsupported: installation and
+    // installation_repositories"). They also map to no permission, which
+    // trips a second rejection. Asserting their ABSENCE is the regression
+    // guard: an earlier version of this test asserted their presence and so
+    // locked in a manifest GitHub always refused.
+    expect(body.manifest.default_events).not.toContain("installation");
+    expect(body.manifest.default_events).not.toContain("installation_repositories");
     expect(body.manifest.hook_attributes).toEqual({ url: "https://valet.example.com/webhooks/github-app" });
   });
 
