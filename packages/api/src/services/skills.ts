@@ -17,12 +17,12 @@
  * starting ANY session.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { validateSkillFrontmatter, type Principal, type SkillSource } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
-import { skills, type SkillRow } from "../schema/index.js";
+import { skills, teamMembers, type SkillRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 
 export type SkillOrigin = "local" | "repo";
@@ -271,12 +271,12 @@ export async function updateSkill(
         contentSha: updated.contentSha,
         updatedAt: updated.updatedAt,
       })
-      .where(writeScope(row))
+      .where(writeScope(owner, row))
       .returning({ id: skills.id });
-    // The scope above re-states in the database what `ownedSkillRow` read a
+    // The scope above re-asks in the database what `ownedSkillRow` read a
     // moment ago. Nothing matched means the row stopped being this caller's
-    // local skill in between, and the caller must not be told the edit
-    // landed.
+    // local skill in between — the team was deleted, or their membership of
+    // it was revoked — and the caller must not be told the edit landed.
     if (written.length === 0) return null;
   } catch (err) {
     if (isPgUniqueViolation(err)) throw new SkillNameConflictError(name);
@@ -290,16 +290,26 @@ export async function updateSkill(
  *
  * `ownedSkillRow` answers "may this caller write this row" with a SELECT,
  * and a write that then filters on `id` alone trusts an answer the database
- * is no longer being asked. Membership of the owning team can be revoked in
- * that gap. Repeating the owner and the origin on the write closes it, so
- * authority is checked where the row is changed.
+ * is no longer being asked. The owner columns and `origin` never change
+ * after insert, so repeating them proves nothing on its own — the answer
+ * that CAN go stale is team membership, which an admin may revoke in the gap
+ * between the two statements. This restates the membership check inside the
+ * write, so one statement under one snapshot decides.
+ *
+ * A transaction would not be enough on its own, and the advisory lock is the
+ * wrong tool: `removeMember` never takes it, so locking here would serialize
+ * against the wrong party.
  */
-function writeScope(row: SkillRow) {
+export function writeScope(owner: SkillOwner, row: SkillRow) {
   return and(
     eq(skills.id, row.id),
+    eq(skills.orgId, owner.orgId),
     eq(skills.ownerType, row.ownerType),
     eq(skills.ownerId, row.ownerId),
     eq(skills.origin, row.origin),
+    row.ownerType === "team"
+      ? sql`exists (select 1 from ${teamMembers} where ${teamMembers.teamId} = ${row.ownerId} and ${teamMembers.userId} = ${owner.userId})`
+      : undefined,
   );
 }
 
@@ -315,7 +325,7 @@ export async function deleteSkill(
   const row = await ownedSkillRow(db, owner, id);
   if (!row) return "not_found";
   if (row.origin !== "local") return "not_local";
-  const removed = await db.delete(skills).where(writeScope(row)).returning({ id: skills.id });
+  const removed = await db.delete(skills).where(writeScope(owner, row)).returning({ id: skills.id });
   // Same reasoning as `updateSkill`: the write carries its own authority
   // check, and a row that stopped matching reports not found.
   return removed.length > 0 ? "deleted" : "not_found";

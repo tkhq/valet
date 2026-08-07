@@ -8,8 +8,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, skills, users } from "../schema/index.js";
-import { addMember, createTeam, deleteTeam } from "./teams.js";
+import { orgMembers, orgs, skills, users, type SkillRow } from "../schema/index.js";
+import { addMember, createTeam, deleteTeam, removeMember } from "./teams.js";
 import {
   createSkill,
   deleteSkill,
@@ -20,6 +20,7 @@ import {
   SkillNotLocalError,
   SkillValidationError,
   updateSkill,
+  writeScope,
   type SkillOwner,
 } from "./skills.js";
 
@@ -198,6 +199,67 @@ describe("stored skills service", () => {
 
     expect(await deleteSkill(db, owner("u1"), created.id)).toBe("deleted");
     expect(await listSkills(db, owner("u1"))).toEqual([]);
+  });
+});
+
+/**
+ * `writeScope` is the predicate `updateSkill` and `deleteSkill` carry on the
+ * statement that changes the row. Its job is to re-ask the one authority
+ * question that can change between the read and the write — team membership
+ * — so it is exercised directly here: the read that precedes it in the
+ * service would mask the difference.
+ */
+describe("writeScope", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: ORG, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "u1");
+    await seedUser(db, "u2");
+  });
+
+  // u1 creates the team and stays its only admin, so u2 is the one who can
+  // be removed — a team must keep an admin.
+  async function teamSkill() {
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+    const row = await createSkill(db, owner("u2"), {
+      name: "deploy",
+      description: "How to deploy the service.",
+      content: BODY,
+      teamId: team.id,
+    });
+    return { team, row };
+  }
+
+  function rename(row: SkillRow, by: SkillOwner) {
+    return db
+      .update(skills)
+      .set({ name: "renamed" })
+      .where(writeScope(by, row))
+      .returning({ id: skills.id });
+  }
+
+  it("writes a team skill for a member", async () => {
+    const { row } = await teamSkill();
+    expect(await rename(row, owner("u2"))).toHaveLength(1);
+  });
+
+  it("stops a write by a member removed after the row was read", async () => {
+    const { team, row } = await teamSkill();
+    await removeMember(db, { teamId: team.id, userId: "u2" });
+
+    expect(await rename(row, owner("u2"))).toEqual([]);
+  });
+
+  it("writes a personal skill without consulting any team", async () => {
+    const row = await createSkill(db, owner("u1"), {
+      name: "mine",
+      description: "Personal.",
+      content: BODY,
+    });
+    expect(await rename(row, owner("u1"))).toHaveLength(1);
   });
 });
 
