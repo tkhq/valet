@@ -48,17 +48,35 @@ const WORKSPACE_PLUGIN: ValetPlugin = {
 const BARE_PLUGIN: ValetPlugin = { name: "fixture-bare", version: "1.0.0" };
 
 describe("GET /api/skills", () => {
-  it("lists no plugin skills — Integrations owns those", async () => {
-    // A plugin's skills belong to that integration, and Integrations already
-    // lists every installed plugin. This route answers "what has this owner
-    // added", so a fresh org with plugins installed sees an empty list.
+  it("lists every plugin skill with its owning plugin name", async () => {
     api = await bootTestApi({ plugins: [GITHUB_PLUGIN, WORKSPACE_PLUGIN, BARE_PLUGIN] });
 
     const res = await fetch(`${api.baseUrl}/api/skills`);
     expect(res.status).toBe(200);
     const { skills } = (await res.json()) as ListSkillsResponse;
 
-    expect(skills).toEqual([]);
+    expect(skills).toEqual([
+      {
+        name: "github",
+        description: "How to use the GitHub tools.",
+        origin: "plugin",
+        plugin: "fixture-github",
+        takesArgs: false,
+      },
+      {
+        name: "google-docs",
+        description: "Edit a document.",
+        origin: "plugin",
+        plugin: "fixture-workspace",
+        takesArgs: false,
+      },
+      {
+        name: "google-sheets",
+        origin: "plugin",
+        plugin: "fixture-workspace",
+        takesArgs: true,
+      },
+    ]);
   });
 
   it("omits the body from the listing", async () => {

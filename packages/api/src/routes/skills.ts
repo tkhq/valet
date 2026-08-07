@@ -113,14 +113,16 @@ skillsRouter.get("/", async (c) => {
   );
   const shadowedIds = new Set(shadowed.map((row) => row.id));
 
-  // Plugin skills are deliberately absent: a plugin's skills are part of that
-  // integration, and Integrations already lists every installed plugin. This
-  // route answers "which skills has this owner added". Plugin names are still
-  // read above, because a stored skill that collides with one is shadowed and
-  // has to say so.
+  // Both kinds, in one list. A reader of this page asks "what can the
+  // assistant read", and the answer includes the skills the installed
+  // plugins ship — which is also the only way a shadow warning makes sense,
+  // since the skill doing the shadowing is usually one of them.
   const resp: ListSkillsResponse = {
-    // Listing order matches delivery order, so the `kept` rows come first.
-    skills: [...kept, ...shadowed].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
+    skills: [
+      ...pluginSkills.map(toPluginSummary),
+      // Listing order matches delivery order, so the `kept` rows come first.
+      ...[...kept, ...shadowed].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
+    ],
   };
   return c.json(resp);
 });

@@ -99,15 +99,15 @@ describe("POST /api/skills", () => {
 });
 
 describe("GET /api/skills with stored skills", () => {
-  it("reports the origin of a stored skill, and omits plugin skills", async () => {
+  it("reports the origin of every skill", async () => {
     api = await bootTestApi({ plugins: [GITHUB_PLUGIN] });
     await post(api.baseUrl, DEPLOY);
 
     const { skills } = (await (await fetch(`${api.baseUrl}/api/skills`)).json()) as ListSkillsResponse;
     const byName = new Map(skills.map((s) => [s.name, s]));
 
+    expect(byName.get("github")?.origin).toBe("plugin");
     expect(byName.get("deploy")?.origin).toBe("local");
-    expect(byName.has("github")).toBe(false);
   });
 
   it("marks a stored skill a plugin skill shadows", async () => {
