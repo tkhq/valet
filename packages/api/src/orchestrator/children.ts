@@ -442,23 +442,26 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
     if (rows.length === 0) return null;
 
     const childRows = await deps.db
-      .select()
+      .select({ status: agentSessions.status })
       .from(agentSessions)
       .where(eq(agentSessions.id, req.childSessionId))
       .limit(1);
     const child = childRows[0];
-    if (!child) return null;
+    // A deleted child answers the same null as a missing one — deletion
+    // must not leave the transcript readable through the watch edge.
+    if (!child || child.status === "deleted") return null;
 
-    const childSession = await deps.engineHost.sessionFor(
-      req.childSessionId,
-      await loadSessionMeta(deps.db, {
-        id: req.childSessionId,
-        userId: child.userId,
-        orgId: child.orgId,
-        workspace: child.workspace,
-      }),
-    );
-    return childSession.thread().readEntries({
+    // Read the store directly. Waking the child through the engine host
+    // would mint a sandbox token, run reconcile (resuming any unsettled
+    // work under the reader's timing), and re-create engine rows for a
+    // child deleted while cached — a read must do none of that.
+    const data = await deps.engineStore.getSession(req.childSessionId);
+    if (!data) return null;
+    const threads = await deps.engineStore.listThreads(req.childSessionId);
+    // The spawner prompts the child's default thread ("web:default").
+    const thread = threads.find((t) => t.key === "web:default") ?? threads[0];
+    if (!thread) return [];
+    return deps.engineStore.getEntries(req.childSessionId, thread.id, {
       limit: req.limit ?? CHILD_READ_DEFAULT_LIMIT,
       includeCompacted: true,
     });
@@ -473,9 +476,12 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
  * that writes a large report would otherwise take that whole report into
  * its parent's context: a real child on 2026-08-06 produced over 100KB.
  *
- * This ceiling is only safe because `child_read` can fetch what it cuts.
- * Do NOT lower it, or truncate anywhere else, without leaving the parent a
- * way to read the remainder — the parent has no other channel to its child.
+ * For completed results this ceiling is safe because `child_read` can
+ * fetch what it cuts — the text is a persisted thread entry. A settlement
+ * ERROR is not a thread entry, so a truncated error's tail is gone; the
+ * failure notice below says so instead of promising recovery. Do NOT
+ * lower the ceiling, or truncate anywhere else, without keeping this
+ * distinction — the parent has no other channel to its child.
  */
 export const CHILD_RESULT_MAX_CHARS = 16_000;
 
@@ -487,12 +493,22 @@ export const CHILD_RESULT_MAX_CHARS = 16_000;
  * the id to pass to `child_read`.
  */
 export function resultBody(result: SubmissionResult, childSessionId: string): string {
-  const full =
-    result.outcome === "failed" || result.outcome === "aborted"
-      ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
-      : (result.text ?? "");
+  const isFailure = result.outcome === "failed" || result.outcome === "aborted";
+  const full = isFailure
+    ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
+    : (result.text ?? "");
   if (full.length <= CHILD_RESULT_MAX_CHARS) return full;
   const dropped = full.length - CHILD_RESULT_MAX_CHARS;
+  if (isFailure) {
+    // The error string lives only in the settlement outcome, not in the
+    // child's transcript — child_read cannot return the dropped tail.
+    return (
+      full.slice(0, CHILD_RESULT_MAX_CHARS) +
+      `\n\n[Truncated. ${dropped} more characters of this error were dropped and ` +
+      `are not recoverable. Call child_read with child_session_id ` +
+      `"${childSessionId}" to inspect the child's transcript instead.]`
+    );
+  }
   return (
     full.slice(0, CHILD_RESULT_MAX_CHARS) +
     `\n\n[Truncated. ${dropped} more characters follow this point. To read the ` +

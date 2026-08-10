@@ -283,6 +283,13 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
   return lines.join("\n");
 }
 
+/**
+ * Byte ceiling on one `child_read` result. Matches the api's
+ * `CHILD_RESULT_MAX_CHARS` on the settled signal: the recovery path must
+ * not re-admit the flood the signal ceiling exists to prevent.
+ */
+export const CHILD_READ_MAX_CHARS = 16_000;
+
 export const childReadTool = defineTool({
   name: "child_read",
   description:
@@ -316,7 +323,21 @@ export const childReadTool = defineTool({
       };
     }
     if (entries.length === 0) return { text: `(child ${args.child_session_id} has no messages)` };
-    return { text: renderEntries(`child:${args.child_session_id}`, entries) };
+    const rendered = renderEntries(`child:${args.child_session_id}`, entries);
+    // The store's limit counts entries, not bytes — one oversized entry
+    // (the exact case the settled-signal ceiling truncates) would flood
+    // the parent's context through the recovery path. Keep the most
+    // recent tail; the head is older transcript.
+    if (rendered.length > CHILD_READ_MAX_CHARS) {
+      const dropped = rendered.length - CHILD_READ_MAX_CHARS;
+      return {
+        text:
+          `[Truncated: the ${dropped} oldest characters were dropped. Pass a ` +
+          `lower limit to read fewer, more recent messages in full.]\n\n` +
+          rendered.slice(-CHILD_READ_MAX_CHARS),
+      };
+    }
+    return { text: rendered };
   },
 });
 

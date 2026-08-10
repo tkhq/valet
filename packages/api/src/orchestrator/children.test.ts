@@ -711,10 +711,104 @@ describe("buildChildReader", () => {
       .set({ settled: true })
       .where(eq(childWatches.childSessionId, spawned.childSessionId));
 
+    // Seed the report so the assertion proves CONTENT survives settlement,
+    // not merely that the authz edge does.
+    const childSession = await api.providers.engineHost.sessionFor(spawned.childSessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const childThread = childSession.thread();
+    await api.providers.engineStore.appendEntries(spawned.childSessionId, childThread.id, [
+      {
+        id: "e-settled-report",
+        sessionId: spawned.childSessionId,
+        threadId: childThread.id,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "settled report body the parent came back for",
+        createdAt: Date.now(),
+      },
+    ]);
+
     const entries = await reader(
       { childSessionId: spawned.childSessionId },
       { parentSessionId: "parent-settled" },
     );
     expect(entries).not.toBeNull();
+    const text = (entries ?? []).map((e) => (e.type === "message" ? e.content : "")).join("\n");
+    expect(text).toContain("settled report body the parent came back for");
+  });
+
+  it("returns null for a soft-deleted child, same as for one that never existed", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-del", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "to be deleted" },
+      {
+        parentSessionId: "parent-del",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // The DELETE route soft-deletes; the watch edge survives. Deletion must
+    // close the transcript to the parent all the same.
+    await api.providers.db
+      .update(agentSessions)
+      .set({ status: "deleted" })
+      .where(eq(agentSessions.id, spawned.childSessionId));
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-del" },
+    );
+    expect(entries).toBeNull();
+  });
+
+  it("is a pure read: purged engine rows answer null and are NOT re-created", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-purged", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "short lived" },
+      {
+        parentSessionId: "parent-purged",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // A delete-while-cached purges the engine rows (session.destroy) while
+    // the watch and agent_sessions rows remain. A read must answer null —
+    // waking through the engine host here used to re-CREATE a live engine
+    // session under the deleted id.
+    await api.providers.engineHost.destroy(spawned.childSessionId);
+    await api.providers.engineStore.deleteSession(spawned.childSessionId);
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-purged" },
+    );
+    expect(entries).toBeNull();
+    expect(await api.providers.engineStore.getSession(spawned.childSessionId)).toBeNull();
   });
 });
