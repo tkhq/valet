@@ -1,14 +1,14 @@
 # Agent Skills Design — the skill format V2 targets
 
 **Date:** 2026-08-05
-**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, and authoring from both the Skills tab and the agent actions. The repository importer is not built.
-**Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, and which parts of the format are not implemented yet.
+**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync from public repositories.
+**Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, how a repository's skills are mirrored and kept in step, and which parts of the format are not implemented yet.
 
 ## Context
 
 A skill is a markdown playbook that tells the agent how to use one integration or how to do one task. Valet ships eleven of them inside plugin packages.
 
-Valet targets the Agent Skills specification, <https://agentskills.io/specification>. The reason is interoperability: a skill written for another agent must work here, and a skill written here must work elsewhere. A format of our own would block the skill importer before it starts.
+Valet targets the Agent Skills specification, <https://agentskills.io/specification>. The reason is interoperability: a skill written for another agent must work here, and a skill written here must work elsewhere. A format of our own would block repository sync before it starts.
 
 Before this change the skills were flat files in a shared `skills/` directory, no code validated them, and nothing let the model read one. All three are now closed.
 
@@ -51,11 +51,21 @@ The hyphenated YAML key `allowed-tools` becomes the camelCase property `allowedT
 The validator RETURNS violations. The caller decides how loud a violation is:
 
 - `loadSkillFromMarkdown` throws. Every caller today is a plugin that loads a skill we ship, so a violation there is a build-time bug.
-- A future importer reading a third-party repository must call the validator itself, report the violations, and skip that one skill. One malformed third-party skill must not stop the API process.
+- Repository sync calls the validator itself, reports the violations as warnings, and skips that one skill. One malformed third-party skill must not stop the API process, and must not stop the rest of its repository from being mirrored.
 
 ## Frontmatter parsing
 
-`packages/engine/src/roles-skills/parser.ts` is a minimal parser, not a YAML library. It reads `key: value` pairs plus ONE level of nesting, which is the depth `metadata` needs. It does not read deeper nesting, lists, multi-line strings, or YAML anchors. A skill that needs any of those must wait for a real YAML parser.
+`packages/engine/src/roles-skills/parser.ts` is a minimal parser, not a YAML library. It reads three shapes:
+
+1. `key: value` pairs.
+2. ONE level of nesting, which is the depth `metadata` needs.
+3. Block scalars — `|`, `|-`, `|+`, `>`, `>-`, and `>+`.
+
+Block scalars are how a real `SKILL.md` writes a description that is longer than one line, so the parser cannot skip them. The block is the more-indented lines that follow the header. The parser dedents them by the indentation of the block's own first line, not by a fixed two spaces. A literal block (`|`) keeps the line breaks. A folded block (`>`) joins the lines with spaces, and keeps a line break where an empty line or a deeper-indented line sits. The chomping indicator changes the TRAILING newline only: `-` strips it, `+` keeps it and every trailing empty line, and no indicator clips the block to exactly one. The key that comes back at the parent indentation ends the block and is read as a key again.
+
+The parser does not read deeper nesting, lists, quoted multi-line flow scalars, explicit indentation indicators (`|2`), or YAML anchors. A skill that needs any of those must wait for a real YAML parser.
+
+`description` is the field every turn pays for, and the field the model reads to choose a skill, so a description the parser could not read must be loud. `validateSkillFrontmatter` rejects a description that is only a block scalar header. Without that rule the skill loads with `|-` for its description, passes every other check, and no model ever finds it.
 
 ## How a skill reaches the model
 
@@ -105,13 +115,16 @@ Precedence: a plugin skill wins over a stored skill, and a personal skill wins o
 
 ## Authoring
 
-A skill is written in the product. A repository is a mirror of what Valet holds, not the authority over it — the importer fills `repo` rows, and it takes nothing away from the two paths below.
+A skill is written in the product, or mirrored from a repository. The two paths hold different kinds of skills: a person or an agent writes a `local` skill here, and a tracked repository fills `repo` rows that only sync writes. A team that wants review and version history behind a skill keeps it in a repository and lets Valet mirror it.
 
-A person writes a skill on the web Skills tab. `/skills/new` opens an empty editor, and `/skills/stored/$skillId` reads a stored skill and edits or removes it. The body is written in the split markdown editor the memory explorer uses, so the rendering sits beside the text. The three fields are the whole skill: `name` and `description` are its frontmatter, and the body is the markdown the agent reads. A new skill belongs to the author, or to a team they are on.
+A person writes a skill on the web Skills tab. `/skills/new` opens an empty editor, and `/skills/stored/$skillId` reads a stored skill and edits or removes it. The body is written in the split markdown editor the memory explorer uses, so the rendering sits beside the text. The three fields are the whole skill: `name` and `description` are its frontmatter, and the body is the markdown the agent reads. A new skill belongs to the author, or to a team they are on. The repositories panel above the grid points Valet at a repository to mirror; it never edits a skill.
 
 The tab addresses a stored skill by row id rather than by name, because a shadowed skill shares its name with the skill that shadows it — only the id reaches it. `/skills/$skillName` reads a skill by name, which is how a plugin skill is opened.
 
 A `repo` skill is read-only on that page: no Edit, no Delete. The next sync would overwrite an edit made here, so the page says where to change it instead. That is the same rule `SkillNotLocalError` enforces in the service, so the page and the API never disagree.
+
+- **HTTP.** `POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name, for the shadowing reason above. `POST`, `GET`, and `DELETE /api/skills/sources` add, list, and remove a tracked repository, and `POST /api/skills/sources/:id/sync` re-reads one now.
+- **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions.
 
 Three write surfaces exist, and they share one implementation:
 
@@ -136,9 +149,10 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 
 ## Not implemented
 
-- **Bundled resources.** A spec skill may ship `scripts/`, `references/`, and `assets/`. Valet reads `SKILL.md` and nothing else. A skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open.
+- **Bundled resources.** A spec skill may ship `scripts/`, `references/`, and `assets/`. Sync reads `SKILL.md` and nothing else. A skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open. Carrying those files needs its own table, and `github.read_repo_file` decodes as UTF-8, so it cannot carry a binary asset either.
 - **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
-- **Repository import and sync.** The `skills` table carries `origin='repo'`, `source_id`, and `upstream_path` for it, but there is no `skill_sources` table, no importer, and no scheduler. Nothing writes a `repo` row today. `github.list_repo_directory` plus `github.read_repo_file` are the read primitives an importer will compose: list the repository root to find skill directories, then read each `<directory>/SKILL.md`. An importer must call `validateSkillFrontmatter` itself and skip the skills that fail, because `loadSkillFromMarkdown` throws.
+- **Private and authenticated repositories.** See the scope line in Repository sync above. The missing piece is a repo-authority check, not the transport.
+- **Write-back.** Sync reads. Nothing pushes a locally written skill into a repository.
 - **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.
 - **`argsSchema` on a stored skill.** Only a plugin can supply one, because it is code, not frontmatter. A stored skill takes no arguments.
