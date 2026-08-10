@@ -112,7 +112,9 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
           db
             .select({ one: sql`1` })
             .from(childWatches)
-            .where(eq(childWatches.childSessionId, agentSessions.id)),
+            .where(
+              and(eq(childWatches.orgId, orgId), eq(childWatches.childSessionId, agentSessions.id)),
+            ),
         ),
       ),
     );

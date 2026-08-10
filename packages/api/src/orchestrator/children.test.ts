@@ -337,6 +337,62 @@ describe("buildChildSpawner", () => {
     );
     expect(result.childSessionId).toBeTruthy();
   });
+
+  it("ignores another org's watch rows when counting live sessions", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-cross-org", {
+      userId: "local-user",
+      orgId: "org-cross-watch",
+      workspace: "/tmp",
+    });
+
+    // Fill the org to the ceiling with plain live sessions, then point a
+    // DIFFERENT org's watch row at one of them. Session ids are globally
+    // unique today, but the count must not lean on that: a foreign watch
+    // must not release this org's slot.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `s_cross_${i}`,
+        userId: "local-user",
+        orgId: "org-cross-watch",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    await api.providers.db.insert(childWatches).values({
+      childSessionId: "s_cross_0",
+      queueItemId: "qi-foreign",
+      parentSessionId: "parent-foreign",
+      parentThreadId: "th-f",
+      actorUserId: "other-user",
+      orgId: "org-somewhere-else",
+      settled: true,
+      createdAt: now,
+    });
+
+    const attempt = spawner(
+      { prompt: "over the ceiling despite the foreign watch" },
+      {
+        parentSessionId: "parent-cross-org",
+        parentThreadId: "th-f",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    const err = await attempt.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChildLimitError);
+    if (err instanceof ChildLimitError) {
+      expect(err.code).toBe("org_ceiling");
+    }
+  });
 });
 
 describe("ChildWatcher", () => {
