@@ -51,6 +51,16 @@ vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
 }));
 
+// The repositories panel has its own suite
+// (`components/skills/-skill-sources-panel.test.tsx`); here it only has to
+// render, so its hooks return an empty, settled list.
+vi.mock("~/api/skill-sources", () => ({
+  useSkillSources: () => ({ data: { sources: [] }, isLoading: false, error: null }),
+  useAddSkillSource: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
 import { SkillsIndexPage } from "./skills.index";
 
 describe("SkillsIndexPage", () => {
@@ -121,5 +131,10 @@ describe("SkillsIndexPage", () => {
     currentState = { isLoading: false, error: new Error("boom") };
     render(<SkillsIndexPage />);
     expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
+  });
+
+  it("offers the GitHub import above the grid", () => {
+    render(<SkillsIndexPage />);
+    expect(screen.getByRole("button", { name: /import from github/i })).toBeTruthy();
   });
 });

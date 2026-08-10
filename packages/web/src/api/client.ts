@@ -54,6 +54,10 @@ import type {
   ListSkillsResponse,
   CreateSkillRequest,
   UpdateSkillRequest,
+  ListSkillSourcesResponse,
+  CreateSkillSourceRequest,
+  SkillSourceSyncResponse,
+  DeleteSkillSourceResponse,
   SkillResponse,
   DeleteSkillResponse,
   ListTeamMembersResponse,
@@ -485,6 +489,17 @@ export const api = {
     request<SkillResponse>("PATCH", `/skills/stored/${encodeURIComponent(id)}`, body),
   deleteSkill: (id: string) =>
     request<DeleteSkillResponse>("DELETE", `/skills/stored/${encodeURIComponent(id)}`),
+
+  // skill sources — public GitHub repositories Valet mirrors skills from.
+  // Adding one imports it right away, so the create call returns what the
+  // first sync did.
+  listSkillSources: () => request<ListSkillSourcesResponse>("GET", "/skills/sources"),
+  createSkillSource: (body: CreateSkillSourceRequest) =>
+    request<SkillSourceSyncResponse>("POST", "/skills/sources", body),
+  syncSkillSource: (id: string) =>
+    request<SkillSourceSyncResponse>("POST", `/skills/sources/${encodeURIComponent(id)}/sync`),
+  deleteSkillSource: (id: string) =>
+    request<DeleteSkillSourceResponse>("DELETE", `/skills/sources/${encodeURIComponent(id)}`),
 
   // repos (GitHub/repo integration plan, Task 7): union of every RepoHost
   // the caller has access to — only `github` today.

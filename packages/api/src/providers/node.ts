@@ -16,6 +16,8 @@ import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
+import { SkillSyncService } from "../services/skill-sync.js";
+import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -413,6 +415,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
   // `start()`/`stop()` are called from `main.ts`.
+  // Skill-repository sync (agent-skills design). Reads PUBLIC repositories
+  // only, so the reader takes no credential deps — see
+  // `services/skill-repo-reader.ts` for why an authenticated importer is
+  // deliberately not wired in yet. `start()`/`stop()` are called from
+  // `main.ts` alongside the other loops.
+  const skillSync = new SkillSyncService({ db, reader: new PublicSkillRepoReader() });
+
   const prebuildService = new SourceService({
     db,
     builder: imageBuilder,
@@ -436,6 +445,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowScheduler,
     webhookRateLimiter,
     eventDispatcher,
+    skillSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

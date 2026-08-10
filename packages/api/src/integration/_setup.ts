@@ -28,6 +28,8 @@ import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
+import { SkillSyncService } from "../services/skill-sync.js";
+import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -135,9 +137,10 @@ export interface BootTestApiOpts {
    * default) means "prebuilds unavailable", same as a `local` sandbox
    * backend boot. Prebuild route tests supply a fake `ImageBuilder`. */
   imageBuilder?: ImageBuilder | null;
-  /** Overrides the `apiUrl`/`githubUrl` the constructed `PrebuildService`
-   * resolves GitHub credentials/contents through — point this at
-   * `startGithubFixture()`'s `url`. Ignored when `imageBuilder` is unset. */
+  /** Overrides the GitHub API base URL two constructed services read
+   * through: the `PrebuildService`'s credential/contents resolution (ignored
+   * when `imageBuilder` is unset), and the skill-sync reader. Point it at
+   * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
 }
 
@@ -345,6 +348,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
 
+  // Skill-repository sync. Constructed with the same real deps
+  // `buildNodeProviders` uses, but NEVER started on its timer — tests drive
+  // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
+  const skillSync = new SkillSyncService({
+    db,
+    reader: new PublicSkillRepoReader({ apiUrl: opts.githubApiUrl }),
+  });
+
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here); routes must treat this as
   // "unavailable", same as a `local` sandbox-backend boot.
@@ -377,6 +388,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowScheduler,
     webhookRateLimiter,
     eventDispatcher,
+    skillSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

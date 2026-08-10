@@ -11,7 +11,15 @@ import { and, eq, sql } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, skills, teamMembers, teams, workflowDefinitions, type TeamRow } from "../schema/index.js";
+import {
+  orgMembers,
+  skills,
+  skillSources,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+  type TeamRow,
+} from "../schema/index.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -323,15 +331,17 @@ export interface DeleteTeamOptions {
 }
 
 /**
- * Deletes a team, its memberships, and the skills it owns. Rejects while the
- * team owns any workflow.
+ * Deletes a team, its memberships, the skills it owns, and the skill
+ * repositories it tracks. Rejects while the team owns any workflow.
  *
  * Skills are removed rather than blocking, because a skill is a document,
  * not a running thing — there is nothing to cancel first. They must go
  * somewhere: every read path for a team-owned skill goes through
  * `isTeamMember`, so a surviving row would sit in the table forever with no
  * owner who can ever reach it, the same orphan `deleteWorkflowDefinition`
- * closes for `workflow_webhooks`.
+ * closes for `workflow_webhooks`. A tracked repository is unreachable the
+ * same way, and it would go on polling GitHub for a team that no longer
+ * exists, so it goes with them.
  */
 export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<void> {
   const teamRows = await db.select().from(teams).where(eq(teams.id, opts.teamId)).limit(1);
@@ -343,6 +353,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(skills)
       .where(and(eq(skills.ownerType, "team"), eq(skills.ownerId, opts.teamId)));
+    await tx
+      .delete(skillSources)
+      .where(and(eq(skillSources.ownerType, "team"), eq(skillSources.ownerId, opts.teamId)));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

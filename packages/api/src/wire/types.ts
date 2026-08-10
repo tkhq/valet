@@ -936,6 +936,69 @@ export interface DeleteSkillResponse {
   ok: true;
 }
 
+// ── REST: skill sources ──────────────────────────────────────────────────
+
+/**
+ * A tracked skill repository. Valet mirrors its `SKILL.md` files into the
+ * skill catalog as `repo`-origin skills, and keeps mirroring as the
+ * repository moves.
+ *
+ * Public repositories only. Nothing here carries a GitHub credential.
+ */
+export interface SkillSourceSummary {
+  id: string;
+  /** `owner/repo`. */
+  repo: string;
+  /** Branch, tag, or commit. Empty means the default branch. */
+  ref: string;
+  /** Directory that holds the skill directories. Empty means the root. */
+  subpath: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  enabled: boolean;
+  /** `pending` — never synced. `ok` — synced. `warning` — synced, but at
+   * least one skill was skipped. `error` — the last sync failed. */
+  status: "pending" | "ok" | "warning" | "error";
+  /** Skills this source currently mirrors. */
+  skillCount: number;
+  lastSyncedAt: number | null;
+  /** Commit the last sync read. */
+  lastSha: string | null;
+  /** What the last sync has to report: the failure for `error`, the skills
+   * it skipped for `warning`, null otherwise. */
+  lastMessage: string | null;
+}
+
+export interface ListSkillSourcesResponse {
+  sources: SkillSourceSummary[];
+}
+
+export interface CreateSkillSourceRequest {
+  /** `owner/repo`, or a GitHub URL. A `/tree/` URL also sets `ref` and
+   * `subpath`, unless the fields below give them explicitly. */
+  repo: string;
+  ref?: string;
+  subpath?: string;
+  /** Track the repository for a team the caller belongs to instead of for
+   * the caller. A non-member or unknown id 404s. */
+  teamId?: string;
+}
+
+/** What a sync did. Returned by the create route too, because adding a
+ * source imports it right away. */
+export interface SkillSourceSyncResponse {
+  source: SkillSourceSummary;
+  imported: number;
+  updated: number;
+  deleted: number;
+  /** One line per skill the sync skipped, each naming the fix. */
+  warnings: string[];
+}
+
+export interface DeleteSkillSourceResponse {
+  ok: true;
+}
+
 export interface CredentialSummary {
   service: string;
   type: CredentialKind;

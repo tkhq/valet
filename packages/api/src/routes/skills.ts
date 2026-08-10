@@ -21,11 +21,18 @@
  * A detail route never fills `{{placeholder}}` values, because reading a
  * skill is not invoking it — the `skill` tool does that (see
  * `plugins/skill-tool.ts`).
+ *
+ * `/sources` holds the tracked repositories Valet mirrors skills from. Those
+ * routes are owner-scoped the same way, and both the create route and the
+ * "sync now" route call the one `SkillSyncService.syncOnce` the background
+ * sweep calls (`services/skill-sync.ts`).
  */
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import type { SkillSource, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { partitionByName } from "../plugins/assemble.js";
 import {
   createSkill,
@@ -38,14 +45,30 @@ import {
   updateSkill,
   type SkillOwner,
 } from "../services/skills.js";
-import type { SkillRow } from "../schema/index.js";
+import {
+  countSkillsPerSource,
+  createSkillSource,
+  deleteSkillSource,
+  listSkillSources,
+  markSkillSourceDue,
+  ownedSkillSourceRow,
+  SkillSourceConflictError,
+  SkillSourceInputError,
+} from "../services/skill-sources.js";
+import type { SkillSyncOutcome } from "../services/skill-sync.js";
+import { skillSources, type SkillRow, type SkillSourceRow } from "../schema/index.js";
 import type {
   CreateSkillRequest,
+  CreateSkillSourceRequest,
   DeleteSkillResponse,
+  DeleteSkillSourceResponse,
   GetSkillResponse,
+  ListSkillSourcesResponse,
   ListSkillsResponse,
   PluginSkillSummary,
   SkillResponse,
+  SkillSourceSummary,
+  SkillSourceSyncResponse,
   StoredSkillSummary,
   UpdateSkillRequest,
 } from "../wire/types.js";
@@ -213,6 +236,80 @@ skillsRouter.delete("/stored/:id", async (c) => {
   return c.json(resp);
 });
 
+// ── Tracked repositories ──────────────────────────────────────────────────
+//
+// Registered BEFORE `/:name` below: Hono matches in registration order, so a
+// `/sources` route added after it would be swallowed by the skill-by-name
+// route.
+//
+// Adding a source imports it right away. The point of the feature is "point
+// Valet at a repository and pull the skills in", and a repository that 404s
+// must say so while the person is still looking at the box they typed it
+// into. The sweep keeps it fresh afterwards.
+
+skillsRouter.get("/sources", async (c) => {
+  const { db } = c.var.providers;
+  const rows = await listSkillSources(db, owner(c));
+  const counts = await countSkillsPerSource(
+    db,
+    rows.map((row) => row.id),
+  );
+  const resp: ListSkillSourcesResponse = {
+    sources: rows.map((row) => toSourceSummary(row, counts.get(row.id) ?? 0)),
+  };
+  return c.json(resp);
+});
+
+skillsRouter.post("/sources", async (c) => {
+  let body: CreateSkillSourceRequest;
+  try {
+    body = (await c.req.json()) as CreateSkillSourceRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.repo !== "string" || body.repo.length === 0) {
+    return c.json({ error: "Enter a repository. Write it as owner/repo, or paste its GitHub URL." }, 400);
+  }
+
+  const { db, skillSync } = c.var.providers;
+  let sourceId: string;
+  try {
+    const row = await createSkillSource(db, owner(c), {
+      repo: body.repo,
+      ref: body.ref,
+      subpath: body.subpath,
+      teamId: body.teamId,
+    });
+    sourceId = row.id;
+  } catch (err) {
+    const { body: errBody, status } = sourceErrorResponse(err);
+    return c.json(errBody, status);
+  }
+
+  // A failed first sync is reported ON the row, not as a failed request: the
+  // source exists, and its error is what the person needs to read.
+  const outcome = await skillSync.syncOnce(sourceId);
+  return c.json(await syncResponse(c, sourceId, outcome), 201);
+});
+
+skillsRouter.post("/sources/:id/sync", async (c) => {
+  const { db, skillSync } = c.var.providers;
+  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"));
+  if (!row) return c.json({ error: "skill source not found" }, 404);
+
+  await markSkillSourceDue(db, row.id);
+  const outcome = await skillSync.syncOnce(row.id);
+  return c.json(await syncResponse(c, row.id, outcome));
+});
+
+skillsRouter.delete("/sources/:id", async (c) => {
+  const { db } = c.var.providers;
+  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"));
+  if (!deleted) return c.json({ error: "skill source not found" }, 404);
+  const resp: DeleteSkillSourceResponse = { ok: true };
+  return c.json(resp);
+});
+
 // ── One skill, by name ────────────────────────────────────────────────────
 
 skillsRouter.get("/:name", async (c) => {
@@ -245,4 +342,50 @@ skillsRouter.get("/:name", async (c) => {
  * listing route reports both. */
 function isShadowed(plugins: ValetPlugin[], row: SkillRow): boolean {
   return ownedSkills(plugins).some((entry) => entry.skill.name === row.name);
+}
+
+function toSourceSummary(row: SkillSourceRow, skillCount: number): SkillSourceSummary {
+  return {
+    id: row.id,
+    repo: row.repoFullName,
+    ref: row.ref,
+    subpath: row.subpath,
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
+    enabled: row.enabled,
+    status: row.status,
+    skillCount,
+    lastSyncedAt: row.lastSyncedAt,
+    lastSha: row.lastSha,
+    lastMessage: row.lastError,
+  };
+}
+
+/** Re-reads the source row after a sync, so the response carries the status
+ * the sync just recorded rather than the one it started from. */
+async function syncResponse(
+  c: { var: { providers: { db: AppDb } } },
+  sourceId: string,
+  outcome: SkillSyncOutcome | null,
+): Promise<SkillSourceSyncResponse> {
+  const { db } = c.var.providers;
+  const rows = await db.select().from(skillSources).where(eq(skillSources.id, sourceId)).limit(1);
+  const counts = await countSkillsPerSource(db, [sourceId]);
+  const row = rows[0];
+  if (!row) throw new NotFoundError("skill source", sourceId);
+  return {
+    source: toSourceSummary(row, counts.get(sourceId) ?? 0),
+    imported: outcome?.imported ?? 0,
+    updated: outcome?.updated ?? 0,
+    deleted: outcome?.deleted ?? 0,
+    warnings: outcome?.warnings ?? [],
+  };
+}
+
+/** Maps a source-service error onto its HTTP status. */
+function sourceErrorResponse(err: unknown): { body: Record<string, unknown>; status: 400 | 404 | 409 } {
+  if (err instanceof SkillSourceInputError) return { body: { error: err.message }, status: 400 };
+  if (err instanceof SkillSourceConflictError) return { body: { error: err.message }, status: 409 };
+  if (err instanceof NotFoundError) return { body: { error: err.message }, status: 404 };
+  throw err;
 }
