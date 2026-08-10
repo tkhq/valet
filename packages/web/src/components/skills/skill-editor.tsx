@@ -24,22 +24,7 @@ import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
 import { useTeams } from "~/api/settings";
-import { ApiError } from "~/api/client";
-
-/** Server-side messages carry the corrective action; a network failure does
- * not, so it gets one here. */
-export function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    const payload = err.payload;
-    if (typeof payload === "object" && payload !== null && "error" in payload) {
-      const message = (payload as { error: unknown }).error;
-      if (typeof message === "string") return message;
-    }
-    return err.message;
-  }
-  if (err instanceof Error) return `${err.message}. Check the server is running, then try again.`;
-  return "Could not save the skill. Try again.";
-}
+import { errorText } from "~/lib/error-text";
 
 /** Owner of a new skill: the caller, or a team the caller belongs to. The
  * value is the `teamId` the create route takes, and "" means the caller. A
@@ -157,7 +142,7 @@ export function SkillEditor({
         />
       </div>
 
-      {!!error && <p className="text-sm text-danger-500">{errorText(error)}</p>}
+      {!!error && <p className="text-sm text-danger-500">{errorText(error, "Could not save the skill. Try again.")}</p>}
 
       <div className="flex items-center gap-2">
         <Button type="submit" size="sm" disabled={!complete || pending}>

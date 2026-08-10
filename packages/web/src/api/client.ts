@@ -97,6 +97,14 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  CreateEventSubscriptionRequest,
+  CreateEventSubscriptionResponse,
+  GetEventCatalogResponse,
+  GetEventResponse,
+  ListEventsResponse,
+  ListEventSubscriptionsResponse,
+  PatchEventSubscriptionRequest,
+  PatchEventSubscriptionResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -375,6 +383,29 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
+
+  // events (event-system design): org feed, per-event detail with delivery
+  // attempts, the plugin trigger catalog, and subscription CRUD
+  getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
+  listEvents: (params?: { service?: string; key?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.service) qs.set("service", params.service);
+    if (params?.key) qs.set("key", params.key);
+    return request<ListEventsResponse>("GET", qs.size > 0 ? `/events?${qs}` : "/events");
+  },
+  getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
+  listEventSubscriptions: () =>
+    request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
+  createEventSubscription: (body: CreateEventSubscriptionRequest) =>
+    request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
+  patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
+    request<PatchEventSubscriptionResponse>(
+      "PATCH",
+      `/event-subscriptions/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deleteEventSubscription: (id: string) =>
+    request<void>("DELETE", `/event-subscriptions/${encodeURIComponent(id)}`),
 
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),

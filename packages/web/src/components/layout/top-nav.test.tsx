@@ -98,7 +98,15 @@ describe("TopNav", () => {
     const labels = within(nav)
       .getAllByRole("link")
       .map((el) => el.textContent);
-    expect(labels).toEqual(["Chat", "Memory", "Sessions", "Workflows", "Skills", "Integrations"]);
+    expect(labels).toEqual([
+      "Chat",
+      "Memory",
+      "Sessions",
+      "Workflows",
+      "Events",
+      "Skills",
+      "Integrations",
+    ]);
   });
 
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put

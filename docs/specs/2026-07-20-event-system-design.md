@@ -273,6 +273,21 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
 - Workflow editor: an "event" trigger node type whose save/update syncs an
   `event_subscriptions` row.
 
+## Web UI
+
+`/events` (packages/web: `routes/events.tsx`, `components/events/`) is the
+first UI over this system. Two tabs:
+
+- **Activity** — the org feed with service/key filters drawn from the
+  catalog. A row expands into the event payload and its delivery attempts,
+  so "why didn't my trigger fire" is answerable from the page.
+- **Subscriptions** — list, create, enable/disable, and delete over the
+  CRUD routes. The create dialog offers only catalog keys. Targets: the
+  caller's orchestrator, the org orchestrator, or an owned workflow.
+
+Subscription filters are API-only for now: a row shows its filter count,
+and the create dialog does not build filters yet.
+
 ## Error handling
 
 - Rejected/unverifiable webhooks → `event_drop_log` with reason
