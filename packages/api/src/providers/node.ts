@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
@@ -11,7 +11,8 @@ import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzl
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader,
+  buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
@@ -290,6 +291,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `engineHost` exists, before any orchestrator session can actually wake
   // and try to call `task`.
   let spawnerRef: ChildSpawner | undefined;
+  let readerRef: ChildReader | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -314,10 +316,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
     },
+    childReader: (req, ctx) => {
+      if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
+      return readerRef(req, ctx);
+    },
   });
 
   const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
   spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
+  readerRef = buildChildReader({ db, engineHost, engineStore });
 
   const channelHost = new ChannelHost({
     db,

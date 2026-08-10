@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import {
   VirtualSandboxProvider,
+  type ChildReader,
   type ChildSpawner,
   type SandboxProvider,
   type ValetPlugin,
@@ -24,7 +25,7 @@ import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/w
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -250,10 +251,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
 
   // Same circular-construction indirection as providers/node.ts — see its
-  // comment. Test callers that want to unit-test the spawner/watcher
+  // comment. Test callers that want to unit-test the spawner/watcher/reader
   // directly still can (they're plain exported functions/classes); this
-  // wiring only matters for exercising `task` through a real orchestrator.
+  // wiring only matters for exercising `task` and `child_read` through a
+  // real orchestrator.
   let spawnerRef: ChildSpawner | undefined;
+  let readerRef: ChildReader | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -280,12 +283,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
     },
+    childReader: (req, ctx) => {
+      if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
+      return readerRef(req, ctx);
+    },
   });
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
   const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(blobsRoot, "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
+  readerRef = buildChildReader(childrenDeps);
 
   const channelHost = new ChannelHost({
     db,

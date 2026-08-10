@@ -10,6 +10,7 @@ import {
   parseOrchestratorSessionId,
   NoCredentialsError,
   type BlobStore,
+  type ChildReader,
   type ChildSpawner,
   type CredentialStore,
   type EventStream,
@@ -108,6 +109,13 @@ export interface EngineHostOpts {
    * (depth limit 1, decision 10) since `childSessionFor` never sets it.
    */
   childSpawner?: ChildSpawner;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childReader`,
+   * which is what the engine's `child_read` built-in calls. Paired with
+   * `childSpawner`: a session that can spawn children is exactly the
+   * session that may read them back.
+   */
+  childReader?: ChildReader;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -919,6 +927,7 @@ export class EngineHost {
         apiBaseUrl,
         internalToken: internalToken(),
         ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
+        ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
