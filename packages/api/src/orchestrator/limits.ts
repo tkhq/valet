@@ -8,11 +8,13 @@ export const MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR = 10;
 
 /**
  * Org-wide aggregate cap that workflow-spawned and orchestrator-spawned
- * sessions both count against. Approximated (decision 21) as: unsettled
- * `child_watches` rows for the org + `agent_sessions` rows for the org that
- * aren't `deleted`. Workflow-spawned sessions don't exist yet (Phase 5+),
- * so today this is effectively (unsettled children) + (live interactive +
- * orchestrator sessions).
+ * sessions both count against. Counted (decision 21) as: unsettled
+ * `child_watches` rows for the org + non-child `agent_sessions` rows for
+ * the org that aren't `deleted`. A child counts through its watch row only
+ * — once while running, zero once settled; its `agent_sessions` row
+ * outlives settlement and must not hold the slot. Workflow-spawned
+ * sessions still bypass this count (no `agent_sessions` row) — closing
+ * that is part of the batch-fan-out work.
  */
 export const ORG_ACTIVE_SESSION_CEILING = 25;
 

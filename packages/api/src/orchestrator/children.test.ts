@@ -234,6 +234,109 @@ describe("buildChildSpawner", () => {
       .where(and(eq(eventDropLog.orgId, "org-ceiling-test"), eq(eventDropLog.reason, "org_ceiling")));
     expect(drops).toHaveLength(1);
   });
+
+  it("releases a settled child's org-ceiling slot: an org full of finished children can spawn again", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-release", {
+      userId: "local-user",
+      orgId: "org-release-test",
+      workspace: "/tmp",
+    });
+
+    // Fill the org to the ceiling entirely with SETTLED children. Each child
+    // keeps its agent_sessions row after settlement (spawn inserts it; nothing
+    // deletes it) — finished work must not consume capacity forever.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `child_done_${i}`,
+        userId: "local-user",
+        orgId: "org-release-test",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await api.providers.db.insert(childWatches).values({
+        childSessionId: `child_done_${i}`,
+        queueItemId: `qi-done-${i}`,
+        parentSessionId: "parent-other",
+        parentThreadId: "th-r",
+        actorUserId: "local-user",
+        orgId: "org-release-test",
+        settled: true,
+        createdAt: now,
+      });
+    }
+
+    const result = await spawner(
+      { prompt: "after the batch settles" },
+      {
+        parentSessionId: "parent-release",
+        parentThreadId: "th-r",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    expect(result.childSessionId).toBeTruthy();
+  });
+
+  it("counts a running child once toward the ceiling, not twice", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-single-count", {
+      userId: "local-user",
+      orgId: "org-single-count",
+      workspace: "/tmp",
+    });
+
+    // Ceiling - 1 RUNNING children under a different parent: each one has
+    // both an agent_sessions row and an unsettled watch. Double-counting
+    // would read this as 2*(ceiling-1) and reject; the true load leaves
+    // exactly one free slot.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING - 1; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `child_run_${i}`,
+        userId: "local-user",
+        orgId: "org-single-count",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await api.providers.db.insert(childWatches).values({
+        childSessionId: `child_run_${i}`,
+        queueItemId: `qi-run-${i}`,
+        parentSessionId: "parent-other",
+        parentThreadId: "th-s",
+        actorUserId: "local-user",
+        orgId: "org-single-count",
+        settled: false,
+        createdAt: now,
+      });
+    }
+
+    const result = await spawner(
+      { prompt: "fits in the last slot" },
+      {
+        parentSessionId: "parent-single-count",
+        parentThreadId: "th-s",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    expect(result.childSessionId).toBeTruthy();
+  });
 });
 
 describe("ChildWatcher", () => {

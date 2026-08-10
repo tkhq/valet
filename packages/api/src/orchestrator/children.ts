@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { and, count, eq, ne } from "drizzle-orm";
+import { and, count, eq, ne, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
   ValidationError as EngineValidationError,
@@ -97,10 +97,25 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
     .select({ n: count() })
     .from(childWatches)
     .where(and(eq(childWatches.orgId, orgId), eq(childWatches.settled, false)));
+  // Child sessions are counted through their watch rows above — a running
+  // child once (unsettled watch), a settled child zero. Their agent_sessions
+  // rows outlive settlement, so counting them here would double-count every
+  // running child and hold a settled child's slot forever.
   const [{ n: liveSessionsOrgWide }] = await db
     .select({ n: count() })
     .from(agentSessions)
-    .where(and(eq(agentSessions.orgId, orgId), ne(agentSessions.status, "deleted")));
+    .where(
+      and(
+        eq(agentSessions.orgId, orgId),
+        ne(agentSessions.status, "deleted"),
+        notExists(
+          db
+            .select({ one: sql`1` })
+            .from(childWatches)
+            .where(eq(childWatches.childSessionId, agentSessions.id)),
+        ),
+      ),
+    );
   const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
   if (total >= ORG_ACTIVE_SESSION_CEILING) {
     const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + live sessions), limit ${ORG_ACTIVE_SESSION_CEILING}`;
