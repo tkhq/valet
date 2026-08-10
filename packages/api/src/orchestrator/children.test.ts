@@ -542,7 +542,7 @@ describe("classifyWatcherError", () => {
   });
 });
 
-// Paul Henry's 2026-08-06 report: a child produced a >100KB final message and
+// A 2026-08-06 incident report: a child produced a >100KB final message and
 // the whole thing is what the parent would carry. The signal body is the only
 // channel from a child to its parent, and it lands in the parent's context on
 // every later turn, so it needs a ceiling. The ceiling is only safe because
