@@ -582,6 +582,20 @@ describe("resultBody", () => {
     expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
     expect(body).toContain("child_read");
   });
+
+  it("points a completed-but-textless result at child_read instead of an empty body", () => {
+    // `text` is undefined when the terminal entry is gone at read time
+    // (e.g. compacted away between settlement and the read).
+    const body = resultBody({ queueItemId: "q1", outcome: "completed" }, childId);
+    expect(body).not.toBe("");
+    expect(body).toContain("child_read");
+    expect(body).toContain(childId);
+  });
+
+  it("passes a genuinely empty terminal text through unchanged", () => {
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "" }, childId);
+    expect(body).toBe("");
+  });
 });
 
 // The reader is the other half of bounding the settled body: a parent that

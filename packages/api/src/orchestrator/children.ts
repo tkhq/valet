@@ -494,6 +494,15 @@ export const CHILD_RESULT_MAX_CHARS = 16_000;
  */
 export function resultBody(result: SubmissionResult, childSessionId: string): string {
   const isFailure = result.outcome === "failed" || result.outcome === "aborted";
+  // `text` is undefined when no terminal entry matched at read time — e.g.
+  // the child's final message was compacted away between settlement and
+  // this read. An empty body would leave the parent no lead to follow.
+  if (!isFailure && result.text === undefined) {
+    return (
+      `[No result text was captured for this ${result.outcome} child submission. ` +
+      `Call child_read with child_session_id "${childSessionId}" to read the child's transcript.]`
+    );
+  }
   const full = isFailure
     ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
     : (result.text ?? "");

@@ -332,8 +332,9 @@ export const childReadTool = defineTool({
       const dropped = rendered.length - CHILD_READ_MAX_CHARS;
       return {
         text:
-          `[Truncated: the ${dropped} oldest characters were dropped. Pass a ` +
-          `lower limit to read fewer, more recent messages in full.]\n\n` +
+          `[Truncated: this is the most recent ${CHILD_READ_MAX_CHARS} characters; ` +
+          `${dropped} older characters were dropped. No \`limit\` value recovers ` +
+          `them — \`limit\` only picks how many recent entries are fetched.]\n\n` +
           rendered.slice(-CHILD_READ_MAX_CHARS),
       };
     }
