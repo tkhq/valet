@@ -196,7 +196,7 @@ Normative ceilings; defaults are per-org configurable:
 
 - **Per-binding admission throttle** — default 60 admissions/min per binding; beyond it, events are coalesced or dropped with a drop-log entry.
 - **Per-thread pending submissions** — default max 20; beyond it, admission is rejected with channel feedback rather than queued silently.
-- **Org-level active-session ceiling** — one aggregate cap that workflow-spawned and orchestrator-spawned sessions *both* count against; the per-orchestrator child limit (above) is a sub-limit, not an alternative.
+- **Org-level active-session ceiling** — one aggregate cap that workflow-spawned and orchestrator-spawned sessions *both* count against; the per-orchestrator child limit (above) is a sub-limit, not an alternative. Counting: unsettled child watches + non-child live sessions. A child counts through its watch row only — once while running, zero after settlement — because its `agent_sessions` row outlives settlement and must not hold the slot forever.
 - **Scheduled dispatch never stacks** — a schedule tick whose prior tick's turn is unsettled is skipped (with a drop-log entry), so a slow turn cannot pile up scheduled work.
 - **Signal hop budget** — the engine maintains a hop count in the signal envelope for cross-orchestrator chains; default max 3. Exceeding it rejects the signal and emits an attention event, so delegation loops die loudly instead of ricocheting.
 
