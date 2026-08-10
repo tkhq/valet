@@ -13,11 +13,14 @@ import { eq, and } from "drizzle-orm";
 import type { QueueItem, SignalContent } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
+  buildChildReader,
   buildChildSpawner,
   ChildWatcher,
   ChildLimitError,
   classifyWatcherError,
   type ChildrenDeps,
+  resultBody,
+  CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, childWatches, eventDropLog } from "../schema/index.js";
@@ -536,5 +539,182 @@ describe("classifyWatcherError", () => {
       kind: "permanent",
       alreadyLogged: false,
     });
+  });
+});
+
+// Paul Henry's 2026-08-06 report: a child produced a >100KB final message and
+// the whole thing is what the parent would carry. The signal body is the only
+// channel from a child to its parent, and it lands in the parent's context on
+// every later turn, so it needs a ceiling. The ceiling is only safe because
+// `child_read` can fetch the rest — do not lower one without the other.
+describe("resultBody", () => {
+  const childId = "sess_child_abc";
+
+  it("passes a short result through untouched", () => {
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "all done" }, childId);
+    expect(body).toBe("all done");
+  });
+
+  it("bounds a result that is over the ceiling", () => {
+    const huge = "x".repeat(CHILD_RESULT_MAX_CHARS + 50_000);
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId);
+    expect(body.length).toBeLessThan(huge.length);
+    expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
+  });
+
+  it("keeps the start of an over-long result", () => {
+    const huge = "HEAD-MARKER" + "x".repeat(CHILD_RESULT_MAX_CHARS + 1_000);
+    expect(resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId)).toContain("HEAD-MARKER");
+  });
+
+  it("names how many characters were dropped and how to read them", () => {
+    const huge = "x".repeat(CHILD_RESULT_MAX_CHARS + 1_234);
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId);
+    expect(body).toContain("1234");
+    expect(body).toContain("child_read");
+    // The corrective action is only actionable with the id to act on.
+    expect(body).toContain(childId);
+  });
+
+  it("bounds a failure result too, so a huge error cannot flood the parent", () => {
+    const huge = "e".repeat(CHILD_RESULT_MAX_CHARS + 10_000);
+    const body = resultBody({ queueItemId: "q1", outcome: "failed", error: huge }, childId);
+    expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
+    expect(body).toContain("child_read");
+  });
+});
+
+// The reader is the other half of bounding the settled body: a parent that
+// gets a truncated result has no other way to reach the rest, because
+// `thread_read` stays inside one session.
+describe("buildChildReader", () => {
+  it("returns the child's messages to the parent that spawned it", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-read", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "count the incidents" },
+      {
+        parentSessionId: "parent-read",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // The spawn prompt is still queued, not yet a persisted entry, so seed
+    // the report the child would have written. This is the content a parent
+    // comes back for after a truncated child.settled.
+    const childSession = await api.providers.engineHost.sessionFor(spawned.childSessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const childThread = childSession.thread();
+    await api.providers.engineStore.appendEntries(spawned.childSessionId, childThread.id, [
+      {
+        id: "e-child-report",
+        sessionId: spawned.childSessionId,
+        threadId: childThread.id,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "the tail of the report that the signal truncated",
+        createdAt: Date.now(),
+      },
+    ]);
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-read" },
+    );
+    expect(entries).not.toBeNull();
+    const text = (entries ?? [])
+      .map((e) => (e.type === "message" ? e.content : ""))
+      .join("\n");
+    expect(text).toContain("the tail of the report that the signal truncated");
+  });
+
+  it("returns null for a session the caller did not spawn", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-owner", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "secret work" },
+      {
+        parentSessionId: "parent-owner",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // A different orchestrator naming a real child id it does not own.
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-stranger" },
+    );
+    expect(entries).toBeNull();
+  });
+
+  it("returns null for a session id that does not exist, same as for one it cannot see", async () => {
+    api = await bootTestApi();
+    const reader = buildChildReader(childrenDeps(api));
+    const entries = await reader(
+      { childSessionId: "child_does-not-exist" },
+      { parentSessionId: "parent-read" },
+    );
+    expect(entries).toBeNull();
+  });
+
+  it("still reads a child after it has settled, which is when the parent needs it", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-settled", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "long report" },
+      {
+        parentSessionId: "parent-settled",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    // `markSettled` updates the row rather than deleting it; if that ever
+    // changes to a delete, the parent loses the truncated remainder forever.
+    await api.providers.db
+      .update(childWatches)
+      .set({ settled: true })
+      .where(eq(childWatches.childSessionId, spawned.childSessionId));
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-settled" },
+    );
+    expect(entries).not.toBeNull();
   });
 });

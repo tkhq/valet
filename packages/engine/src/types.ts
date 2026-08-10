@@ -1560,6 +1560,23 @@ export type ChildSpawner = (
 ) => Promise<SpawnChildResult>;
 
 /**
+ * Reads the messages of a child session on behalf of its parent.
+ *
+ * A `child.settled` signal carries a bounded copy of the child's result, so
+ * a parent that needs the whole thing has to come back for it. This is the
+ * only way it can: `thread_read` reaches threads inside one session, and a
+ * child is a separate session.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`.
+ * A caller cannot tell "not yours" from "does not exist", which keeps the
+ * ids of other people's sessions unguessable.
+ */
+export type ChildReader = (
+  req: { childSessionId: string; limit?: number },
+  ctx: { parentSessionId: string },
+) => Promise<SessionEntry[] | null>;
+
+/**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,
  * sandbox, model, etc. — the engine does not maintain a registry of session
  * creation options across restarts.

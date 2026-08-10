@@ -21,6 +21,7 @@ import { and, count, eq, ne } from "drizzle-orm";
 import {
   PendingCapError,
   ValidationError as EngineValidationError,
+  type ChildReader,
   type ChildSpawner,
   type Principal,
   type SessionStore,
@@ -377,7 +378,7 @@ export class ChildWatcher {
       content: {
         kind: "signal",
         signalType: "child.settled",
-        body: resultBody(result),
+        body: resultBody(result, watch.childSessionId),
         attributes: {
           child_session_id: watch.childSessionId,
           outcome: result.outcome,
@@ -409,9 +410,92 @@ export class ChildWatcher {
   }
 }
 
-function resultBody(result: SubmissionResult): string {
-  if (result.outcome === "failed" || result.outcome === "aborted") {
-    return result.error ?? result.text ?? `child submission ${result.outcome}`;
-  }
-  return result.text ?? "";
+/** Messages `child_read` returns when the caller names no limit. */
+const CHILD_READ_DEFAULT_LIMIT = 30;
+
+/**
+ * Builds the `ChildReader` injected into every orchestrator's
+ * `toolConfig.childReader`, which is what the engine's `child_read` built-in
+ * calls.
+ *
+ * Authority comes from `child_watches`: a row exists only because this
+ * parent spawned this child, and `markSettled` updates the row instead of
+ * deleting it, so the edge outlives the child's run. A settled child stays
+ * readable, which is the point — the parent reads it after the truncated
+ * result arrives.
+ */
+export function buildChildReader(deps: ChildrenDeps): ChildReader {
+  return async (req, ctx) => {
+    const rows = await deps.db
+      .select({ childSessionId: childWatches.childSessionId })
+      .from(childWatches)
+      .where(
+        and(
+          eq(childWatches.childSessionId, req.childSessionId),
+          eq(childWatches.parentSessionId, ctx.parentSessionId),
+        ),
+      )
+      .limit(1);
+    // No row means the caller does not own this child, or it does not
+    // exist. Both answer `null`: telling them apart would confirm that
+    // somebody else's session id is real.
+    if (rows.length === 0) return null;
+
+    const childRows = await deps.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, req.childSessionId))
+      .limit(1);
+    const child = childRows[0];
+    if (!child) return null;
+
+    const childSession = await deps.engineHost.sessionFor(
+      req.childSessionId,
+      await loadSessionMeta(deps.db, {
+        id: req.childSessionId,
+        userId: child.userId,
+        orgId: child.orgId,
+        workspace: child.workspace,
+      }),
+    );
+    return childSession.thread().readEntries({
+      limit: req.limit ?? CHILD_READ_DEFAULT_LIMIT,
+      includeCompacted: true,
+    });
+  };
+}
+
+/**
+ * Ceiling on the child result carried inline in a `child.settled` signal.
+ *
+ * The signal lands in the parent's thread, so the parent pays for it in
+ * context on that turn and on every later turn until compaction. A child
+ * that writes a large report would otherwise take that whole report into
+ * its parent's context: a real child on 2026-08-06 produced over 100KB.
+ *
+ * This ceiling is only safe because `child_read` can fetch what it cuts.
+ * Do NOT lower it, or truncate anywhere else, without leaving the parent a
+ * way to read the remainder — the parent has no other channel to its child.
+ */
+export const CHILD_RESULT_MAX_CHARS = 16_000;
+
+/**
+ * The child's result as the parent receives it, bounded.
+ *
+ * `childSessionId` is part of the signature rather than read from the watch
+ * row because the truncation notice is useless without it: the parent needs
+ * the id to pass to `child_read`.
+ */
+export function resultBody(result: SubmissionResult, childSessionId: string): string {
+  const full =
+    result.outcome === "failed" || result.outcome === "aborted"
+      ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
+      : (result.text ?? "");
+  if (full.length <= CHILD_RESULT_MAX_CHARS) return full;
+  const dropped = full.length - CHILD_RESULT_MAX_CHARS;
+  return (
+    full.slice(0, CHILD_RESULT_MAX_CHARS) +
+    `\n\n[Truncated. ${dropped} more characters follow this point. To read the ` +
+    `full result, call child_read with child_session_id "${childSessionId}".]`
+  );
 }
