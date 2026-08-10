@@ -77,6 +77,7 @@ const SUPPORTED_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
   'llm',
   'orchestrator',
   'tool',
+  'workflow',
 ]);
 
 /** Node types allowed as a foreach body (decision 1: no nested foreach/if/approval/stop). */
@@ -86,6 +87,7 @@ const FOREACH_BODY_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
   'set',
   'orchestrator',
   'session',
+  'workflow',
 ]);
 
 /** Allowed keys per node type — the unknown-key lint's ground truth. */
@@ -100,6 +102,7 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
   tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
+  workflow: ['id', 'type', 'workflowId', 'input'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
 
@@ -319,6 +322,12 @@ function validateNodeFields(
         errors.push(`${label}: trigger.dataSchema must be an object`);
       }
       break;
+    case 'workflow':
+      if (!isNonEmptyString(node.workflowId)) {
+        errors.push(`${label}: workflow.workflowId must be a non-empty string naming the called workflow`);
+      }
+      checkJsonTemplates(label, 'input', node.input, refCtx, errors);
+      break;
     case 'set':
       if (!isPlainObject(node.values)) {
         errors.push(`${label}: set.values must be an object mapping names to values`);
@@ -533,7 +542,7 @@ function validateForeachNode(
   }
 
   if (!isPlainObject(node.body) || typeof node.body.type !== 'string') {
-    errors.push(`${label}: foreach.body must be a single inline node object (llm/tool/set/orchestrator/session)`);
+    errors.push(`${label}: foreach.body must be a single inline node object (llm/tool/set/orchestrator/session/workflow)`);
     return;
   }
   if (!FOREACH_BODY_TYPES.has(node.body.type)) {

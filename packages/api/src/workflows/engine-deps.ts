@@ -34,6 +34,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
+import { definitionVersionId } from "./definition-version.js";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import type { Api, Model, Usage } from "@mariozechner/pi-ai";
 import {
@@ -431,6 +432,26 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const runId = parseWorkflowDispatchId(req.invocationId);
       const ctx = await resolveRunContext(opts, runId);
       return invokeActionImpl(req, { userId: ctx.actorUserId, orgId: ctx.orgId, owner: ctx.owner });
+    },
+
+    /**
+     * The `workflow` node's definition lookup (batch-fanout design
+     * decision 1). Exact-owner match only: the calling run's principal
+     * must equal the referenced definition's `{ownerType, ownerId}` —
+     * team-shared references arrive with RBAC Phase B. A mismatch answers
+     * the same `null` as a missing id.
+     */
+    async resolveWorkflow(workflowId, owner) {
+      if (owner === undefined) return null;
+      const rows = await opts.db
+        .select()
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, workflowId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return null;
+      if (row.ownerType !== owner.ownerType || row.ownerId !== owner.ownerId) return null;
+      return { definition: row.definition, definitionVersionId: definitionVersionId(row.definition) };
     },
   };
 }

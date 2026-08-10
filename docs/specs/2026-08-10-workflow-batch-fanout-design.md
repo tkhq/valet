@@ -58,6 +58,15 @@ The webhook trigger (#190) is the supported surface for external runners: one `I
 
 Out of scope: the workflows UI overhaul (parallel track), template gallery rebuild, and any change to the frozen v1 stack.
 
+## Deviations (Phase 1 implementation)
+
+- Starting the child run goes through the `WorkflowStore` directly (`createRun` + `requestWake`) — `LocalRunHost.start` is exactly that pair, so the engine port gained only `resolveWorkflow`, kept optional: an unwired host fails the node loudly instead of silently skipping.
+- The child trigger payload's `type` is `'workflow'` (added to `WorkflowTriggerPayload`); the rendered node `input` becomes `data`.
+- Parent linkage rides in `RunParams` (`parentRunId`/`parentNodeId`/`parentIteration`) — a jsonb column, so no migration.
+- The parked parent waits on a new `{ kind: 'run', runId }` condition. Settle-time wake of the parent lives in the interpreter's settle paths; the host sweep independently wakes parents of settled children (lost-wake backstop). Cancel propagates to child runs as the same durable `cancel` signal `terminate()` writes.
+- Owner match is exact `{ownerType, ownerId}` equality (covers identically-owned team workflows without new authz surface).
+- Wave concurrency is fixed at 5 in the interpreter (`WAVE_CONCURRENCY`), not yet configurable.
+
 ## Open questions
 
 - Billing attribution for child runs: inherit the parent run's owner (matches schedule/event fire-time billing) — confirm.
