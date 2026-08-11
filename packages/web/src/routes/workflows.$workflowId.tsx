@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { MoreHorizontal } from "lucide-react";
 import type { WorkflowDefinition } from "@valet/workflow";
 import type { ListWorkflowRunsResponse } from "@valet/api/wire";
 import {
@@ -15,7 +16,15 @@ import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { Editor } from "~/components/workflows/editor/editor";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import {
+  Badge,
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+} from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import { cn } from "~/lib/cn";
 
@@ -153,13 +162,6 @@ function WorkflowEditorPane({
           </Button>
           <Button
             size="sm"
-            variant={drawer === "history" ? "secondary" : "ghost"}
-            onClick={() => setDrawer((d) => (d === "history" ? null : "history"))}
-          >
-            History
-          </Button>
-          <Button
-            size="sm"
             variant={drawer === "triggers" ? "secondary" : "ghost"}
             onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
@@ -168,6 +170,22 @@ function WorkflowEditorPane({
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant={drawer === "history" ? "secondary" : "ghost"}
+                aria-label="More"
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
+                Version history
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 

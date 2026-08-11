@@ -3,10 +3,15 @@
  * Rendered when the run is parked on an `approval` node's signal wait
  * (`findPendingApproval` in `./run-detail-helpers`). Approve/Deny call
  * `POST /workflows/runs/:runId/approvals/:nodeId` via `useResolveApproval`.
+ *
+ * Given accent-tinted styling and a "waiting on you" framing — the run
+ * genuinely cannot proceed without this, so it should read as the one
+ * thing on the page demanding attention, not another card in the list.
  */
 import { useState } from "react";
+import { Hand } from "lucide-react";
 import { useResolveApproval } from "~/api/workflows";
-import { Button } from "~/components/primitives";
+import { Button, Input } from "~/components/primitives";
 
 export interface ApprovalCardProps {
   runId: string;
@@ -23,16 +28,21 @@ export function ApprovalCard({ runId, nodeId, prompt }: ApprovalCardProps) {
   }
 
   return (
-    <div className="rounded border border-line bg-paper p-4 space-y-3">
-      <div className="text-sm font-medium text-ink">
-        {prompt ?? `Approval required: ${nodeId}`}
+    <div className="rounded-md border border-accent-300 bg-accent-50 p-4 space-y-3 dark:border-accent-800 dark:bg-accent-950/40">
+      <div className="flex items-start gap-2.5">
+        <Hand className="mt-0.5 h-4 w-4 shrink-0 text-accent-600 dark:text-accent-400" aria-hidden />
+        <div className="min-w-0 flex-1 space-y-1">
+          <p className="text-xs font-medium uppercase tracking-wide text-accent-700 dark:text-accent-400">
+            Waiting on you
+          </p>
+          <p className="text-sm font-medium text-ink">{prompt ?? `Approval required: ${nodeId}`}</p>
+        </div>
       </div>
-      <input
-        type="text"
+      <Input
         value={note}
         onChange={(e) => setNote(e.target.value)}
         placeholder="Optional note"
-        className="w-full rounded border border-line bg-[--bg] px-2 py-1.5 text-sm text-ink placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
+        aria-label="Optional note"
       />
       <div className="flex gap-2">
         <Button size="sm" onClick={() => respond(true)} disabled={resolve.isPending}>

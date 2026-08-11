@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
+import { formatDate } from "~/lib/format-when";
 import {
   Button,
   Dialog,
@@ -72,11 +73,7 @@ export function OrganizationGeneralPage() {
           </FieldRow>
           <FieldRow label="Created">
             <Input
-              value={new Date(orgQ.data.createdAt).toLocaleDateString(undefined, {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-              })}
+              value={formatDate(orgQ.data.createdAt)}
               readOnly
               disabled
               aria-label="Created"

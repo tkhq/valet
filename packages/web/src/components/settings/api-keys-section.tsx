@@ -1,15 +1,8 @@
 import { useState } from "react";
 import { Button, Input, Spinner } from "~/components/primitives";
 import { useApiKeys, useCreateApiKey, useRevokeApiKey, type CreatedApiKey } from "~/api/api-keys";
-
-function formatDate(value: Date | string | number | null): string {
-  if (!value) return "Never";
-  return new Date(value).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
+import { formatDateOr } from "~/lib/format-when";
+import { useCopyToClipboard } from "~/lib/use-copy";
 
 /**
  * You · API keys panel. Owns its own loading/error/empty states (mirrors
@@ -95,18 +88,7 @@ function KeyRevealBlock({
   created: CreatedApiKey;
   onDismiss: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(created.key);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be denied/unavailable — the key is still
-      // selectable text in the block below.
-    }
-  }
+  const { copied, copy } = useCopyToClipboard();
 
   return (
     <div className="space-y-3 rounded-md border border-line bg-ink-wash p-4">
@@ -118,7 +100,7 @@ function KeyRevealBlock({
         <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded border border-line bg-[--bg] px-3 py-2 font-mono text-xs text-ink">
           {created.key}
         </code>
-        <Button type="button" variant="secondary" size="sm" onClick={() => void copy()}>
+        <Button type="button" variant="secondary" size="sm" onClick={() => void copy(created.key)}>
           {copied ? "Copied" : "Copy"}
         </Button>
       </div>
@@ -154,10 +136,10 @@ function ApiKeyRow({
         <div className="truncate font-mono text-xs text-muted">{start ?? "…"}</div>
       </div>
       <div className="hidden shrink-0 text-xs text-muted sm:block">
-        Created {formatDate(createdAt)}
+        Created {formatDateOr(createdAt, "—")}
       </div>
       <div className="hidden shrink-0 text-xs text-muted sm:block">
-        Last used {formatDate(lastRequest)}
+        Last used {formatDateOr(lastRequest, "Never")}
       </div>
       {confirming ? (
         <span className="flex shrink-0 items-center gap-2">

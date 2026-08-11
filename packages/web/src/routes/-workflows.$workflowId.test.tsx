@@ -164,7 +164,10 @@ describe("WorkflowEditorPage", () => {
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    // "Version history" lives in the toolbar's overflow menu — Radix
+    // dropdowns don't open on a plain jsdom click, but the keyboard path does.
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("Version history"));
     expect(screen.getByText("v2")).toBeTruthy();
     expect(screen.getByText("current")).toBeTruthy();
 

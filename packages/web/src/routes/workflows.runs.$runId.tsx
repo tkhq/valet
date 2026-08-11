@@ -2,10 +2,10 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import type { WorkflowRunDetail } from "@valet/api/wire";
 import { useCancelRun, useRunDetail } from "~/api/workflows";
 import { ApprovalCard } from "~/components/workflows/approval-card";
+import { CheckpointList } from "~/components/workflows/checkpoint-list";
 import {
   findApprovalPrompt,
   findPendingApproval,
-  jsonPreview,
   statusByNodeId,
 } from "~/components/workflows/run-detail-helpers";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
@@ -109,26 +109,7 @@ export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetai
 
         {pending && <ApprovalCard runId={runId} nodeId={pending.nodeId} prompt={prompt} />}
 
-        <ul className="space-y-2">
-          {checkpoints.map((cp) => (
-            <li
-              key={`${cp.nodeId}:${cp.iteration}`}
-              className="rounded border border-line bg-paper p-3"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-ink">{cp.nodeId}</span>
-                <span className="text-xs text-muted">{cp.status}</span>
-              </div>
-              {cp.error && <div className="mt-1 text-xs text-danger-500">{cp.error}</div>}
-              {cp.result !== undefined && (
-                <pre className="mt-2 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
-                  {jsonPreview(cp.result)}
-                </pre>
-              )}
-            </li>
-          ))}
-          {checkpoints.length === 0 && <li className="text-sm text-muted">No checkpoints yet.</li>}
-        </ul>
+        <CheckpointList checkpoints={checkpoints} />
       </div>
     </>
   );

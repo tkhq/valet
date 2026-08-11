@@ -11,6 +11,7 @@ import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
+import { useCopyToClipboard } from "~/lib/use-copy";
 
 /** Collapse a workspace path down to a header-friendly badge: any
  * multi-segment path shows only its LAST segment ("ws-19",
@@ -62,7 +63,7 @@ export function SessionHeader({
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
   const [pauseError, setPauseError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy: copyToClipboard } = useCopyToClipboard();
 
   async function destroy() {
     if (!confirm(`Delete session and tear down its sandbox?`)) return;
@@ -102,30 +103,8 @@ export function SessionHeader({
         userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
       },
     });
-    try {
-      await navigator.clipboard.writeText(transcript);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch (err) {
-      // Clipboard permission denied — fall back to a hidden textarea. This
-      // is the sole reason this handler doesn't just await writeText and
-      // trust it; some browsers block programmatic clipboard writes.
-      const el = document.createElement("textarea");
-      el.value = transcript;
-      el.style.position = "fixed";
-      el.style.opacity = "0";
-      document.body.appendChild(el);
-      el.select();
-      try {
-        document.execCommand("copy");
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
-      } catch (fallbackErr) {
-        console.error("copy transcript failed:", err, fallbackErr);
-      } finally {
-        document.body.removeChild(el);
-      }
-    }
+    const ok = await copyToClipboard(transcript);
+    if (!ok) console.error("copy transcript failed");
   }
 
   // Single-row masthead. The workspace path lives in a hover tooltip on

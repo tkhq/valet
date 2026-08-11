@@ -14,6 +14,7 @@ import { ApiError } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Badge, Button, Spinner, Switch } from "~/components/primitives";
+import { formatDateOr } from "~/lib/format-when";
 
 /**
  * `/settings/connected-accounts` — You · Connected accounts. Telegram
@@ -23,15 +24,6 @@ import { Badge, Button, Spinner, Switch } from "~/components/primitives";
 export const Route = createFileRoute("/settings/connected-accounts")({
   component: ConnectedAccountsPage,
 });
-
-function formatLinkedSince(createdAt: number | undefined): string {
-  if (!createdAt) return "";
-  return new Date(createdAt).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
 
 /** Server sends `{ error: "telegram bot not configured" }` for the one
  * documented failure (bot token removed between load and click); fall back
@@ -126,7 +118,7 @@ export function ConnectedAccountsPage() {
               <div>{telegram.externalId}</div>
               {telegram.createdAt && (
                 <div className="text-xs text-muted">
-                  Linked since {formatLinkedSince(telegram.createdAt)}
+                  Linked since {formatDateOr(telegram.createdAt, "")}
                 </div>
               )}
             </div>
