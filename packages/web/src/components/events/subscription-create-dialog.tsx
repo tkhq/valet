@@ -1,17 +1,5 @@
 import { useState } from "react";
-import {
-  Button,
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-  ErrorRow,
-  Input,
-  LoadingRow,
-} from "~/components/primitives";
+import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRow, SelectMenu } from "~/components/primitives";
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
@@ -77,8 +65,16 @@ export function SubscriptionCreateDialog({
     );
   }
 
+  function handleOpenChange(next: boolean) {
+    // Closing via Cancel, the overlay, or Escape must not leave a stale
+    // error or stale field values for the next "New subscription" open —
+    // the dialog stays mounted between opens.
+    if (!next) reset();
+    onOpenChange(next);
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         title="New subscription"
         description="Pick the events to match and what a match runs."
@@ -160,23 +156,16 @@ export function SubscriptionCreateDialog({
                 Run a workflow
               </label>
               {target.kind === "workflow" && (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button type="button" variant="secondary" size="sm" className="ml-6">
-                      {workflows.find((w) => w.id === target.workflowId)?.name ?? "Pick a workflow"}
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    {workflows.map((w) => (
-                      <DropdownMenuItem
-                        key={w.id}
-                        onSelect={() => setTarget({ kind: "workflow", workflowId: w.id })}
-                      >
-                        {w.name}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <div className="ml-6">
+                  <SelectMenu
+                    value={target.workflowId}
+                    onChange={(workflowId) => setTarget({ kind: "workflow", workflowId })}
+                    triggerLabel={
+                      workflows.find((w) => w.id === target.workflowId)?.name ?? "Pick a workflow"
+                    }
+                    options={workflows.map((w) => ({ value: w.id, label: w.name }))}
+                  />
+                </div>
               )}
               {workflows.length === 0 && (
                 <p className="ml-6 text-xs text-muted">
@@ -190,7 +179,7 @@ export function SubscriptionCreateDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
+          <Button type="button" variant="secondary" onClick={() => handleOpenChange(false)}>
             Cancel
           </Button>
           <Button type="button" disabled={!canSubmit} onClick={submit}>

@@ -52,11 +52,13 @@ export function useEvents(
   });
 }
 
-export function useEvent(id: string | null, opts?: Partial<UseQueryOptions<GetEventResponse>>) {
+export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResponse>>) {
   return useQuery<GetEventResponse>({
-    queryKey: qkEvents.detail(id ?? ""),
-    queryFn: () => api.getEvent(id ?? ""),
-    enabled: id !== null,
+    queryKey: qkEvents.detail(id),
+    queryFn: () => api.getEvent(id),
+    // Deliveries advance (pending -> delivered/failed) while a row stays
+    // expanded; poll so the badge follows.
+    refetchInterval: 15_000,
     ...opts,
   });
 }

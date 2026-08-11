@@ -19,8 +19,16 @@ import {
   useEventSubscriptions,
   usePatchEventSubscription,
 } from "~/api/events";
+import { useMe } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
+import { errorText } from "~/lib/error-text";
 import { SubscriptionCreateDialog } from "./subscription-create-dialog";
+
+/** An org-owned subscription is everyone's to manage; a personal one is
+ * only its creator's — mirrors the server's `canMutateSubscription`. */
+function canMutate(sub: EventSubscriptionWire, userId: string | undefined): boolean {
+  return sub.ownerType === "org" || sub.ownerId === userId;
+}
 
 function describeTarget(
   target: EventSubscriptionTargetWire,
@@ -41,6 +49,7 @@ function describeTarget(
 export function SubscriptionsPanel() {
   const subsQ = useEventSubscriptions();
   const workflowsQ = useWorkflows();
+  const meQ = useMe();
   const [creating, setCreating] = useState(false);
 
   const workflowNames = useMemo(
@@ -70,7 +79,12 @@ export function SubscriptionsPanel() {
       {subsQ.data && subsQ.data.subscriptions.length > 0 && (
         <div className="divide-y divide-line border-t border-line">
           {subsQ.data.subscriptions.map((sub) => (
-            <SubscriptionRow key={sub.id} sub={sub} workflowNames={workflowNames} />
+            <SubscriptionRow
+              key={sub.id}
+              sub={sub}
+              workflowNames={workflowNames}
+              mutable={canMutate(sub, meQ.data?.id)}
+            />
           ))}
         </div>
       )}
@@ -83,13 +97,17 @@ export function SubscriptionsPanel() {
 function SubscriptionRow({
   sub,
   workflowNames,
+  mutable,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
+  /** False for a colleague's personal subscription — visible, not actionable. */
+  mutable: boolean;
 }) {
   const patch = usePatchEventSubscription();
   const del = useDeleteEventSubscription();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [toggleError, setToggleError] = useState<string | null>(null);
 
   return (
     <div className="flex items-center gap-3 py-3">
@@ -113,27 +131,36 @@ function SubscriptionRow({
             </span>
           )}
         </div>
+        {toggleError && <p className="mt-1 text-xs text-danger-500">{toggleError}</p>}
       </div>
 
       <Switch
         checked={sub.enabled}
-        disabled={patch.isPending}
+        disabled={patch.isPending || !mutable}
         aria-label={sub.enabled ? `Disable ${sub.name}` : `Enable ${sub.name}`}
-        onCheckedChange={(enabled) => patch.mutate({ id: sub.id, body: { enabled } })}
+        onCheckedChange={(enabled) => {
+          setToggleError(null);
+          patch.mutate(
+            { id: sub.id, body: { enabled } },
+            { onError: (err) => setToggleError(errorText(err)) },
+          );
+        }}
       />
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button type="button" variant="ghost" size="sm" aria-label={`${sub.name} actions`}>
-            <MoreHorizontal className="h-4 w-4" aria-hidden />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem className="text-danger-500" onSelect={() => setConfirmDelete(true)}>
-            Delete subscription
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {mutable && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="ghost" size="sm" aria-label={`${sub.name} actions`}>
+              <MoreHorizontal className="h-4 w-4" aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem className="text-danger-500" onSelect={() => setConfirmDelete(true)}>
+              Delete subscription
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
       <ConfirmDialog
         open={confirmDelete}
@@ -143,7 +170,7 @@ function SubscriptionRow({
         confirmLabel="Delete subscription"
         pendingLabel="Deleting…"
         pending={del.isPending}
-        error={del.error?.message}
+        error={del.error != null ? errorText(del.error) : undefined}
         onConfirm={() => del.mutate(sub.id, { onSuccess: () => setConfirmDelete(false) })}
       />
     </div>

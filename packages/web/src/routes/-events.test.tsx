@@ -4,9 +4,12 @@
  * and expands one into deliveries + payload; the Subscriptions tab lists
  * rules with a resolved workflow-target name, toggles `enabled` through
  * the patch mutation, and creates a subscription from catalog-picked keys.
- * Mocks `~/api/events` and `~/api/workflows` the same way
- * `-workflows.index.test.tsx` mocks its api module — this suite cares that
- * the page renders from query data and calls the right mutation.
+ * Mocks `~/api/events`, `~/api/workflows`, and `~/api/settings` the same
+ * way `-workflows.index.test.tsx` mocks its api module — this suite cares
+ * that the page renders from query data and calls the right mutation.
+ * `useMe` resolves to user "u1", the owner of the one fixture subscription,
+ * so mutate controls render by default; one test flips ownership to prove
+ * they gate on it.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -116,6 +119,10 @@ vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
 }));
 
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
+}));
+
 import { EventsPage } from "./events";
 
 beforeEach(() => {
@@ -155,7 +162,22 @@ describe("EventsPage — Subscriptions", () => {
   it("toggles enabled through the patch mutation", () => {
     openSubscriptionsTab();
     fireEvent.click(screen.getByRole("switch", { name: "Disable PR alerts" }));
-    expect(patchMutate).toHaveBeenCalledWith({ id: "sub_1", body: { enabled: false } });
+    expect(patchMutate).toHaveBeenCalledWith(
+      { id: "sub_1", body: { enabled: false } },
+      expect.anything(),
+    );
+  });
+
+  it("hides the actions menu and disables the switch for another user's personal subscription", () => {
+    subscriptionsData.subscriptions[0].ownerId = "someone-else";
+    try {
+      openSubscriptionsTab();
+      expect(screen.queryByRole("button", { name: "PR alerts actions" })).toBeNull();
+      const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
+      expect(toggle.disabled).toBe(true);
+    } finally {
+      subscriptionsData.subscriptions[0].ownerId = "u1";
+    }
   });
 
   it("creates a subscription from a name, catalog-picked keys, and the default target", async () => {

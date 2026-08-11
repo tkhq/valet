@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { TabBar } from "~/components/primitives";
+import { TabBar, tabPanelId } from "~/components/primitives";
 import { EventFeed } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
 
@@ -20,6 +20,7 @@ export const Route = createFileRoute("/events")({
   component: EventsPage,
 });
 
+const TABS_LABEL = "Events sections";
 const TABS = [
   { id: "activity", label: "Activity" },
   { id: "subscriptions", label: "Subscriptions" },
@@ -39,10 +40,17 @@ export function EventsPage() {
         </p>
 
         <div className="mt-6">
-          <TabBar tabs={TABS} active={tab} onSelect={setTab} label="Events sections" />
+          <TabBar tabs={TABS} active={tab} onSelect={setTab} label={TABS_LABEL} />
         </div>
 
-        <div className="mt-6">{tab === "activity" ? <EventFeed /> : <SubscriptionsPanel />}</div>
+        <div
+          role="tabpanel"
+          id={tabPanelId(TABS_LABEL, tab)}
+          aria-labelledby={`${tabPanelId(TABS_LABEL, tab)}-tab`}
+          className="mt-6"
+        >
+          {tab === "activity" ? <EventFeed /> : <SubscriptionsPanel />}
+        </div>
       </div>
     </div>
   );

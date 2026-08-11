@@ -2,16 +2,20 @@ import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import {
   Button,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
   EmptyRow,
   ErrorRow,
   LoadingRow,
+  SelectMenu,
 } from "~/components/primitives";
 import { useEventCatalog, useEvents } from "~/api/events";
 import { EventRow } from "./event-row";
+
+/** Sentinel for "no filter applied" — same convention as `OWNER_SELF`. */
+const ALL = "";
+
+/** The feed API's own page size; the UI has no pagination yet, so a feed
+ * at exactly this count may be hiding older events. */
+const FEED_PAGE_SIZE = 50;
 
 /**
  * The org's event feed: every normalized event ingested from integration
@@ -21,10 +25,10 @@ import { EventRow } from "./event-row";
  * answerable from this page alone.
  */
 export function EventFeed() {
-  const [service, setService] = useState<string | undefined>(undefined);
-  const [key, setKey] = useState<string | undefined>(undefined);
+  const [service, setService] = useState(ALL);
+  const [key, setKey] = useState(ALL);
   const catalogQ = useEventCatalog();
-  const eventsQ = useEvents({ service, key });
+  const eventsQ = useEvents({ service: service || undefined, key: key || undefined });
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const services = catalogQ.data?.services ?? [];
@@ -35,51 +39,28 @@ export function EventFeed() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="secondary" size="sm">
-              {service ?? "All services"}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem
-              onSelect={() => {
-                setService(undefined);
-                setKey(undefined);
-              }}
-            >
-              All services
-            </DropdownMenuItem>
-            {services.map((s) => (
-              <DropdownMenuItem
-                key={s.service}
-                onSelect={() => {
-                  setService(s.service);
-                  setKey(undefined);
-                }}
-              >
-                {s.service}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <SelectMenu
+          value={service}
+          onChange={(next) => {
+            setService(next);
+            setKey(ALL);
+          }}
+          options={[
+            { value: ALL, label: "All services" },
+            ...services.map((s) => ({ value: s.service, label: s.service })),
+          ]}
+        />
 
         {service && keysForService.length > 0 && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="secondary" size="sm" className="font-mono text-xs">
-                {key ?? "All events"}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuItem onSelect={() => setKey(undefined)}>All events</DropdownMenuItem>
-              {keysForService.map((k) => (
-                <DropdownMenuItem key={k} className="font-mono text-xs" onSelect={() => setKey(k)}>
-                  {k}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <SelectMenu
+            value={key}
+            onChange={setKey}
+            triggerClassName="font-mono text-xs"
+            options={[
+              { value: ALL, label: "All events" },
+              ...keysForService.map((k) => ({ value: k, label: <span className="font-mono text-xs">{k}</span> })),
+            ]}
+          />
         )}
 
         <div className="flex-1" />
@@ -96,7 +77,9 @@ export function EventFeed() {
       </div>
 
       {eventsQ.isLoading && <LoadingRow label="Loading events…" />}
-      {eventsQ.error != null && <ErrorRow>Failed to load events.</ErrorRow>}
+      {eventsQ.error != null && (
+        <ErrorRow>Failed to load events. Press refresh to try again.</ErrorRow>
+      )}
 
       {eventsQ.data && eventsQ.data.events.length === 0 && (
         <EmptyRow>
@@ -116,6 +99,13 @@ export function EventFeed() {
             />
           ))}
         </div>
+      )}
+
+      {eventsQ.data && eventsQ.data.events.length >= FEED_PAGE_SIZE && (
+        <p className="pt-1 text-xs text-muted">
+          Showing the most recent {FEED_PAGE_SIZE} events. Narrow with a service or event filter to
+          see more of this type.
+        </p>
       )}
     </div>
   );

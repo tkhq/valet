@@ -15,9 +15,9 @@ import {
   ErrorRow,
   Input,
   LoadingRow,
-  Spinner,
 } from "~/components/primitives";
 import { ApiError } from "~/api/client";
+import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
 import {
   useAddTeamMember,
@@ -92,7 +92,7 @@ function CreateTeamRow() {
           if (err instanceof ApiError && err.status === 409) {
             setError("A team with that name already exists.");
           } else {
-            setError(err.message);
+            setError(errorText(err));
           }
         },
       },
@@ -196,7 +196,7 @@ function TeamRow({
         confirmLabel="Delete team"
         pendingLabel="Deleting…"
         pending={deleteTeam.isPending}
-        error={deleteTeam.error?.message}
+        error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
         onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
       />
     </div>

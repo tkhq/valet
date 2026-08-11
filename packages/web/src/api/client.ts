@@ -397,7 +397,8 @@ export const api = {
     const qs = new URLSearchParams();
     if (params?.service) qs.set("service", params.service);
     if (params?.key) qs.set("key", params.key);
-    return request<ListEventsResponse>("GET", qs.size > 0 ? `/events?${qs}` : "/events");
+    const q = qs.toString();
+    return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
   },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   listEventSubscriptions: () =>
