@@ -164,6 +164,12 @@ export async function deleteWorkflowSchedule(
     .where(and(...conditions))
     .limit(1);
   if (rows.length === 0) return "not_found";
-  await db.delete(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
+  // Delete under the same predicate the check used, not `id` alone. The
+  // scoping is unreachable-by-luck otherwise: ids are UUID primary keys and
+  // no code path reassigns `workflow_id` or `org_id`, so today the select
+  // and the delete cannot resolve to different rows. Repeating the
+  // conditions makes the constraint a property of the statement instead of
+  // an invariant a later change could break without touching this file.
+  await db.delete(workflowSchedules).where(and(...conditions));
   return "ok";
 }
