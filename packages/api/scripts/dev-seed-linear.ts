@@ -18,7 +18,16 @@ const db = new PGlite(dataDir);
 await db.waitReady;
 
 const key = deriveSecretKey(process.env.VALET_ENCRYPTION_KEY ?? "dev-key-not-secure");
-const store = new PgCredentialStore(db, key);
+// PGlite's query() lacks the rowCount field PgQueryable requires; adapt.
+const store = new PgCredentialStore(
+  {
+    query: async (sql: string, params?: unknown[]) => {
+      const result = await db.query<Record<string, unknown>>(sql, params);
+      return { rows: result.rows, rowCount: result.rows.length };
+    },
+  },
+  key,
+);
 
 const now = Date.now();
 await db.query(

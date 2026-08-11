@@ -12,6 +12,7 @@
  *   4. Create a workflow webhook trigger, POST to its URL -> run settles.
  */
 import { createHmac } from "node:crypto";
+import type { WorkflowWebhookResponse } from "../src/wire/types.js";
 
 const API = "http://localhost:8788";
 const SECRET = "dev-webhook-secret";
@@ -140,14 +141,12 @@ const run = await poll("subscription-started run to settle", async () => {
 console.log(`ok: event-triggered workflow run ${run.runId} settled`);
 
 // ── 4. direct workflow webhook trigger ─────────────────────────────────────
-const hook = await json<{ url?: string; secret?: string; hookId?: string }>(
+const hook = await json<WorkflowWebhookResponse>(
   await req("POST", `/api/workflows/${workflow.id}/webhook`),
   "create workflow webhook",
 );
-const hookId = hook.hookId ?? hook.secret ?? (hook.url ? new URL(hook.url, API).pathname.split("/").pop() : undefined);
-if (!hookId) fail(`workflow webhook response missing an id: ${JSON.stringify(hook)}`);
 
-const fired = await fetch(`${API}/api/hooks/workflows/${workflow.id}/${hookId}`, {
+const fired = await fetch(`${API}/api/hooks/workflows/${workflow.id}/${hook.hookId}`, {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({ smoke: true }),
