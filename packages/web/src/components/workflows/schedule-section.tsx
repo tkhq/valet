@@ -1,6 +1,15 @@
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
-import { Button, EmptyRow, ErrorRow, Input, Label, LoadingRow } from "~/components/primitives";
+import type { WorkflowScheduleWire } from "@valet/api/wire";
+import {
+  Button,
+  ConfirmDialog,
+  EmptyRow,
+  ErrorRow,
+  Input,
+  Label,
+  LoadingRow,
+} from "~/components/primitives";
 import { useCreateWorkflowSchedule, useDeleteWorkflowSchedule, useWorkflowSchedules } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
 import { formatWhen } from "~/lib/format-when";
@@ -15,6 +24,7 @@ export function ScheduleSection({ workflowId }: { workflowId: string }) {
   const [cron, setCron] = useState("");
   const [timezone, setTimezone] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<WorkflowScheduleWire | null>(null);
 
   const schedules = schedulesQ.data?.schedules ?? [];
   const canSubmit = name.trim().length > 0 && cron.trim().length > 0 && !create.isPending;
@@ -67,8 +77,7 @@ export function ScheduleSection({ workflowId }: { workflowId: string }) {
                 size="sm"
                 variant="ghost"
                 aria-label={`Delete schedule ${s.name}`}
-                disabled={del.isPending}
-                onClick={() => del.mutate(s.scheduleId)}
+                onClick={() => setDeleting(s)}
               >
                 <Trash2 className="h-3.5 w-3.5" aria-hidden />
               </Button>
@@ -76,7 +85,7 @@ export function ScheduleSection({ workflowId }: { workflowId: string }) {
           ))}
         </ul>
       )}
-      {!schedulesQ.isLoading && schedules.length === 0 && (
+      {!schedulesQ.isLoading && schedulesQ.error == null && schedules.length === 0 && (
         <EmptyRow className="mt-2 py-0 text-xs">No schedules yet.</EmptyRow>
       )}
 
@@ -114,6 +123,23 @@ export function ScheduleSection({ workflowId }: { workflowId: string }) {
           {create.isPending ? "Adding…" : "Add schedule"}
         </Button>
       </div>
+
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleting(null);
+        }}
+        title={`Delete ${deleting?.name}?`}
+        description="The schedule stops firing immediately. This cannot be undone."
+        confirmLabel="Delete schedule"
+        pendingLabel="Deleting…"
+        pending={del.isPending}
+        error={del.error != null ? errorText(del.error) : undefined}
+        onConfirm={() => {
+          if (!deleting) return;
+          del.mutate(deleting.scheduleId, { onSuccess: () => setDeleting(null) });
+        }}
+      />
     </section>
   );
 }

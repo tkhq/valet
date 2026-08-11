@@ -23,13 +23,8 @@ import type { SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
-import { useTeams } from "~/api/settings";
+import { OWNER_SELF, OwnerPicker } from "~/components/owner-picker";
 import { errorText } from "~/lib/error-text";
-
-/** Owner of a new skill: the caller, or a team the caller belongs to. The
- * value is the `teamId` the create route takes, and "" means the caller. A
- * stored skill does not change owner, so the field is create-only. */
-const OWNER_SELF = "";
 
 export function SkillEditor({
   skill,
@@ -44,7 +39,6 @@ export function SkillEditor({
   const editing = skill !== undefined;
   const create = useCreateSkill();
   const update = useUpdateSkill();
-  const teams = useTeams();
 
   const [name, setName] = useState(skill?.name ?? "");
   const [description, setDescription] = useState(skill?.description ?? "");
@@ -92,24 +86,13 @@ export function SkillEditor({
           </p>
         </div>
 
-        {!editing && (teams.data?.teams.length ?? 0) > 0 && (
-          <div className="space-y-1.5">
-            <Label htmlFor="skill-owner">Owner</Label>
-            <select
-              id="skill-owner"
-              value={teamId}
-              onChange={(e) => setTeamId(e.target.value)}
-              className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
-            >
-              <option value={OWNER_SELF}>You</option>
-              {teams.data?.teams.map((team) => (
-                <option key={team.id} value={team.id}>
-                  {team.name}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted">A team skill reaches every member's sessions.</p>
-          </div>
+        {!editing && (
+          <OwnerPicker
+            id="skill-owner"
+            value={teamId}
+            onChange={setTeamId}
+            help="A team skill reaches every member's sessions."
+          />
         )}
       </div>
 

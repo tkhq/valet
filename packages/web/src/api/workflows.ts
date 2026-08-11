@@ -215,7 +215,11 @@ export function useMintWorkflowWebhook(id: string) {
   const qc = useQueryClient();
   return useMutation<WorkflowWebhookResponse, Error, void>({
     mutationFn: () => api.mintWorkflowWebhook(id),
-    onSuccess: () => {
+    onSuccess: (webhook) => {
+      // Seed the cache from the response before the refetch lands: after a
+      // rotate, the old URL is revoked the moment the POST returns, so the
+      // screen must not keep showing it while a refetch round-trips.
+      qc.setQueryData(qkWorkflows.webhook(id), webhook);
       void qc.invalidateQueries({ queryKey: qkWorkflows.webhook(id) });
     },
   });
@@ -225,7 +229,9 @@ export function useDeleteWorkflowWebhook(id: string) {
   const qc = useQueryClient();
   return useMutation<{ deleted: boolean }, Error, void>({
     mutationFn: () => api.deleteWorkflowWebhook(id),
-    onSuccess: () => {
+    // onSettled, not onSuccess: a failed delete (e.g. already gone) must
+    // also reconcile the cached row with the server.
+    onSettled: () => {
       void qc.invalidateQueries({ queryKey: qkWorkflows.webhook(id) });
     },
   });
@@ -252,7 +258,9 @@ export function useDeleteWorkflowSchedule(id: string) {
   const qc = useQueryClient();
   return useMutation<{ deleted: boolean }, Error, string>({
     mutationFn: (scheduleId) => api.deleteWorkflowSchedule(id, scheduleId),
-    onSuccess: () => {
+    // onSettled, not onSuccess: a failed delete (e.g. a row another tab
+    // already removed) must also reconcile the stale list.
+    onSettled: () => {
       void qc.invalidateQueries({ queryKey: qkWorkflows.schedules(id) });
     },
   });

@@ -13,8 +13,9 @@ const deleteWebhookMutate = vi.fn();
 const createScheduleMutate = vi.fn();
 const deleteScheduleMutate = vi.fn();
 
-let webhookData: { workflowId: string; hookId: string; createdAt: number; updatedAt: number } | null =
-  null;
+let webhookData:
+  | { workflowId: string; hookId: string; url: string; createdAt: number; updatedAt: number }
+  | null = null;
 
 const schedulesData = {
   schedules: [
@@ -58,7 +59,13 @@ describe("TriggersPanel — webhook", () => {
   });
 
   it("shows the full hook URL when one exists", () => {
-    webhookData = { workflowId: "wf_1", hookId: "hook-secret-abc", createdAt: 1, updatedAt: 1 };
+    webhookData = {
+      workflowId: "wf_1",
+      hookId: "hook-secret-abc",
+      url: "https://valet.example/api/hooks/workflows/wf_1/hook-secret-abc",
+      createdAt: 1,
+      updatedAt: 1,
+    };
     render(<TriggersPanel workflowId="wf_1" />);
     expect(screen.getByText(/\/api\/hooks\/workflows\/wf_1\/hook-secret-abc/)).toBeTruthy();
   });
@@ -87,9 +94,10 @@ describe("TriggersPanel — schedules", () => {
     );
   });
 
-  it("deletes a schedule", () => {
+  it("deletes a schedule after the confirm dialog", () => {
     render(<TriggersPanel workflowId="wf_1" />);
     fireEvent.click(screen.getByRole("button", { name: "Delete schedule Nightly" }));
-    expect(deleteScheduleMutate).toHaveBeenCalledWith("sched_1");
+    fireEvent.click(screen.getByRole("button", { name: "Delete schedule" }));
+    expect(deleteScheduleMutate).toHaveBeenCalledWith("sched_1", expect.anything());
   });
 });
