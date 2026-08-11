@@ -35,6 +35,18 @@ import type {
 
 export const eventsRouter = new Hono<AppEnv>();
 
+/**
+ * A subscription is mutable by whoever can act on its owner: any member for
+ * an org-owned one, or only the creator for a personal (`user`-owned) one.
+ * Everyone in the org can still SEE every subscription in the list (shared
+ * visibility into what automations exist) — this gate is mutation-only, so
+ * an org member cannot toggle or delete a colleague's personal automation
+ * even though they can see it exists.
+ */
+function canMutateSubscription(row: { ownerType: "user" | "org"; ownerId: string }, userId: string): boolean {
+  return row.ownerType === "org" || row.ownerId === userId;
+}
+
 const FILTER_OPS = ["eq", "in", "prefix", "contains"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
@@ -344,7 +356,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "subscription not found" }, 404);
+  // A personal subscription owned by someone else answers the same 404 as
+  // a missing one — same "cross-owner access is indistinguishable from
+  // not-found" convention as workflows/teams routes.
+  if (!row || !canMutateSubscription(row, user.id)) {
+    return c.json({ error: "subscription not found" }, 404);
+  }
 
   let body: PatchEventSubscriptionRequest;
   try {
@@ -388,12 +405,17 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const deleted = await db
-    .delete(eventSubscriptions)
+  const rows = await db
+    .select({ ownerType: eventSubscriptions.ownerType, ownerId: eventSubscriptions.ownerId })
+    .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
-    .returning({ id: eventSubscriptions.id });
-  if (deleted.length === 0) return c.json({ error: "subscription not found" }, 404);
+    .limit(1);
+  const row = rows[0];
+  if (!row || !canMutateSubscription(row, user.id)) {
+    return c.json({ error: "subscription not found" }, 404);
+  }
 
+  await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, id));
   return c.body(null, 204);
 });
 

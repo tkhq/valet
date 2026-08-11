@@ -410,6 +410,41 @@ describe("PATCH /api/event-subscriptions/:id", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("404s a colleague's personal subscription in the SAME org, row unchanged", async () => {
+    const a = await boot();
+    // seedSubscriptionRow's row is ownerType "user"/ownerId "someone" —
+    // neither the default caller ("local-user") nor "test-member" below.
+    await seedSubscriptionRow(a, "sub_colleague", "local-org");
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_colleague`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(404);
+
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, "sub_colleague"));
+    expect(rows[0].enabled).toBe(true);
+  });
+
+  it("an org-owned subscription is mutable by any org member", async () => {
+    const a = await boot();
+    const created = (await (
+      await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "org" } })
+    ).json()) as CreateEventSubscriptionResponse;
+    expect(created.ownerType).toBe("org");
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("DELETE /api/event-subscriptions/:id", () => {
@@ -432,6 +467,23 @@ describe("DELETE /api/event-subscriptions/:id", () => {
     expect(res.status).toBe(404);
 
     const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_foreign"));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("404s a colleague's personal subscription in the SAME org, row survives", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_colleague", "local-org");
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_colleague`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, "sub_colleague"));
     expect(rows).toHaveLength(1);
   });
 });
