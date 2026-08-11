@@ -163,4 +163,13 @@ const hookRun = await poll("webhook-triggered run to settle", async () => {
 });
 console.log(`ok: webhook-triggered run ${hookRun.runId} settled`);
 
+// ── 5. clean up the artifacts this run created ─────────────────────────────
+// The two smoke events stay in the feed: there is no delete-event API
+// (retention is a deferred follow-up in the event-system spec).
+const delSub = await req("DELETE", `/api/event-subscriptions/${sub.id}`);
+if (delSub.status !== 204) fail(`cleanup subscription: ${delSub.status}`);
+const delWf = await req("DELETE", `/api/workflows/${workflow.id}`);
+if (!delWf.ok) fail(`cleanup workflow: ${delWf.status}`);
+console.log("ok: cleaned up the smoke subscription and workflow");
+
 console.log("\nPASS: webhook -> event -> subscription -> workflow run, and direct workflow webhook trigger.");
