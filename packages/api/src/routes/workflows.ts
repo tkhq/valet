@@ -32,6 +32,7 @@ import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
+  workflowWebhookUrl,
 } from "../workflows/webhook-service.js";
 import {
   createWorkflowSchedule,
@@ -231,7 +232,10 @@ workflowsRouter.post("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await mintOrRotateWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, 404);
-  const resp: WorkflowWebhookResponse = result.webhook;
+  const resp: WorkflowWebhookResponse = {
+    ...result.webhook,
+    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  };
   return c.json(resp);
 });
 
@@ -240,7 +244,10 @@ workflowsRouter.get("/:id/webhook", async (c) => {
   const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: "workflow not found" }, 404);
   if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
-  const resp: WorkflowWebhookResponse = result.webhook;
+  const resp: WorkflowWebhookResponse = {
+    ...result.webhook,
+    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  };
   return c.json(resp);
 });
 
@@ -296,7 +303,8 @@ workflowsRouter.post("/:id/schedules", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!body.name || typeof body.name !== "string") {
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
     return c.json({ error: "name must be a non-empty string" }, 400);
   }
   if (!body.cron || typeof body.cron !== "string") {
@@ -305,11 +313,17 @@ workflowsRouter.post("/:id/schedules", async (c) => {
   if (body.timezone !== undefined && typeof body.timezone !== "string") {
     return c.json({ error: "timezone must be an IANA timezone string" }, 400);
   }
+  if (
+    body.input !== undefined &&
+    (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))
+  ) {
+    return c.json({ error: "input must be a JSON object" }, 400);
+  }
 
   const result = await createWorkflowSchedule(
     deps.db,
     { id: owner.userId, orgId: owner.orgId },
-    { workflowId: id, name: body.name, cron: body.cron, timezone: body.timezone, input: body.input },
+    { workflowId: id, name, cron: body.cron, timezone: body.timezone, input: body.input },
   );
   if (!result.ok) return c.json({ error: result.error }, 400);
   const resp: CreateWorkflowScheduleResponse = toScheduleWire(result.schedule, id);
@@ -322,14 +336,9 @@ workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
   const scheduleId = c.req.param("scheduleId");
   const summary = await getWorkflowDefinition(deps, owner, id);
   if (!summary) return c.json({ error: "workflow not found" }, 404);
-  // The service delete is org-scoped; require the schedule to belong to
-  // THIS workflow so one workflow's surface cannot delete another's rows.
-  const schedules = await listWorkflowSchedules(deps.db, owner.orgId, id);
-  if (!schedules.some((s) => s.scheduleId === scheduleId)) {
-    return c.json({ error: "schedule not found" }, 404);
-  }
-  const result = await deleteWorkflowSchedule(deps.db, owner.orgId, scheduleId);
-  const resp: DeleteWorkflowScheduleResponse = { deleted: result === "ok" };
+  const result = await deleteWorkflowSchedule(deps.db, owner.orgId, scheduleId, id);
+  if (result === "not_found") return c.json({ error: "schedule not found" }, 404);
+  const resp: DeleteWorkflowScheduleResponse = { deleted: true };
   return c.json(resp);
 });
 

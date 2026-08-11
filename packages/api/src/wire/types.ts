@@ -800,6 +800,10 @@ export interface CancelWorkflowRunResponse {
 export interface WorkflowWebhookResponse {
   workflowId: string;
   hookId: string;
+  /** The full trigger URL, built server-side (see `workflowWebhookUrl`) —
+   * the client renders it verbatim rather than reconstructing it, since
+   * the public origin can differ from the browser's own origin. */
+  url: string;
   createdAt: number;
   updatedAt: number;
 }

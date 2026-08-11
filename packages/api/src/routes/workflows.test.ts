@@ -7,9 +7,11 @@
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
+import { workflowSchedules } from "../schema/index.js";
 import type {
   CreateWorkflowResponse,
   CreateWorkflowScheduleResponse,
@@ -641,6 +643,70 @@ describe("GET/POST/DELETE /api/workflows/:id/schedules", () => {
     const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
     const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
     expect(bodyA.schedules).toEqual([]);
+  });
+
+  it("400s a whitespace-only name and trims a valid one", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const blank = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "   ", cron: "0 9 * * *" }),
+    });
+    expect(blank.status).toBe(400);
+
+    const padded = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "  nightly  ", cron: "0 9 * * *" }),
+    });
+    expect(padded.status).toBe(201);
+    const schedule = (await padded.json()) as CreateWorkflowScheduleResponse;
+    expect(schedule.name).toBe("nightly");
+  });
+
+  it("400s a non-object input (a schedule fires it into every run's trigger payload)", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    for (const badInput of ["a string", 42, ["array"]]) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "nightly", cron: "0 9 * * *", input: badInput }),
+      });
+      expect(res.status).toBe(400);
+    }
+
+    const ok = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *", input: { key: "value" } }),
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  it("deleting the workflow deletes its schedules too", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+
+    const del = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+
+    // The workflow is gone, so the schedules route 404s — assert against
+    // the store directly to prove the row itself was deleted, not just
+    // made unreachable through the now-404ing management route.
+    const rows = await api.providers.db
+      .select()
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.workflowId, created.id));
+    expect(rows).toEqual([]);
   });
 });
 

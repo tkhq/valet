@@ -17,7 +17,13 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
+import {
+  workflowDefinitions,
+  workflowRuns,
+  workflowSchedules,
+  workflowVersions,
+  workflowWebhooks,
+} from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import type {
@@ -373,6 +379,11 @@ export async function deleteWorkflowDefinition(
   // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
   // which is now gone) but never actually removed.
   await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
+  // Same reasoning as webhooks: workflow_schedules.workflow_id is a plain
+  // text column with no cascade, and the scheduler sweeps ALL enabled rows
+  // regardless of owner reachability — an orphan keeps firing forever
+  // against a workflow that no longer exists.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
   return "deleted";
 }
 

@@ -150,11 +150,18 @@ export async function deleteWorkflowSchedule(
   db: AppDb,
   orgId: string,
   scheduleId: string,
+  /** Scopes the delete to a schedule owned by THIS workflow when passed —
+   * the HTTP management routes are mounted under `/:id/schedules`, and
+   * without this a caller who owns any schedule in the org could delete
+   * a different workflow's row through the wrong path. */
+  workflowId?: string,
 ): Promise<"ok" | "not_found"> {
+  const conditions = [eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)];
+  if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
   const rows = await db
     .select({ id: workflowSchedules.id })
     .from(workflowSchedules)
-    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+    .where(and(...conditions))
     .limit(1);
   if (rows.length === 0) return "not_found";
   await db.delete(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
