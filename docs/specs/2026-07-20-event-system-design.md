@@ -307,6 +307,12 @@ and the create dialog does not build filters yet.
   fakes.
 - E2e: create subscription → POST signed webhook → workflow run started with
   the event payload.
+- Local, against a live dev stack: `packages/api/scripts/dev-seed-linear.ts`
+  seeds a fake Linear installation + webhook secret (run with the api
+  stopped), then `packages/api/scripts/dev-events-smoke.ts` drives the whole
+  pipeline — signed webhook → feed → subscription → delivered → settled run,
+  plus the direct workflow webhook trigger. Each file's header has the exact
+  commands.
 
 ## Out of scope
 
