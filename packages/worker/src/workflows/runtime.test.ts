@@ -74,6 +74,28 @@ function makeStepWithFailingCleanup(): WorkflowStep {
   return step;
 }
 
+/**
+ * Step mock that moves the execution row into `status` immediately before
+ * the runtime's terminal write runs. Reproduces a run that finishes while
+ * the row is still parked in a waiting_* state — an approval whose resume
+ * never restored 'running', for instance.
+ */
+function makeStepStrandingRowIn(status: string, executionId: string): WorkflowStep {
+  const step = makeStep();
+  step.do = async <T>(name: string, configOrFn: WorkflowStepConfig | (() => Promise<T>), maybeFn?: () => Promise<T>): Promise<T> => {
+    if (name === `execution-status:${executionId}:terminal`) {
+      db.update(workflowExecutions)
+        .set({ status })
+        .where(eq(workflowExecutions.id, executionId))
+        .run();
+    }
+    const fn = typeof configOrFn === 'function' ? configOrFn : maybeFn;
+    if (!fn) throw new Error(`Missing step callback for ${name}`);
+    return fn();
+  };
+  return step;
+}
+
 function makeTraceWriter(): { writer: TraceWriter; rows: TraceTransition[] } {
   const rows: TraceTransition[] = [];
   return {
@@ -478,5 +500,63 @@ describe('runDag — wave loop fundamentals', () => {
     const { writer } = makeTraceWriter();
     await runDag(stubEnv, makeParams(def), wrappedStep, writer);
     expect(peakActive).toBeGreaterThan(1);
+  });
+});
+
+// ─── Terminal write must reclaim the concurrency slot ───────────────────────
+// The runtime's terminal CAS originally allowed only 'running' as a prior
+// status. A run that reached the end while its row was parked in waiting_*
+// therefore no-op'd its own terminal write and left the row in a status the
+// per-user concurrency cap counts — permanently, since nothing else finalizes
+// an execution.
+
+describe('runDag — terminal status lands from any active status', () => {
+  it.each(['waiting_approval', 'waiting_time'])(
+    'finalizes a completed run whose row was stranded in %s',
+    async (stranded) => {
+      seedWorkflowExecution('exec-stranded');
+      const def: WorkflowDefinition = {
+        version: 'dag/v1',
+        nodes: [{ id: 'done', type: 'stop' }],
+        edges: [],
+      };
+      const { writer } = makeTraceWriter();
+      const result = await runDag(
+        dbEnv,
+        makeParams(def, { executionId: 'exec-stranded' }),
+        makeStepStrandingRowIn(stranded, 'exec-stranded'),
+        writer,
+      );
+
+      expect(result.status).toBe('completed');
+      const row = await db.select().from(workflowExecutions)
+        .where(eq(workflowExecutions.id, 'exec-stranded'))
+        .get();
+      expect(row?.status).toBe('completed');
+      expect(row?.completedAt).toBeTruthy();
+    },
+  );
+
+  // Cancel intent still wins. A row the cancel API already moved must not be
+  // overwritten by a runtime that finished a moment later.
+  it.each(['cancelling', 'cancelled'])('does not overwrite a %s row', async (cancelStatus) => {
+    seedWorkflowExecution('exec-cancel-race');
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 'done', type: 'stop' }],
+      edges: [],
+    };
+    const { writer } = makeTraceWriter();
+    await runDag(
+      dbEnv,
+      makeParams(def, { executionId: 'exec-cancel-race' }),
+      makeStepStrandingRowIn(cancelStatus, 'exec-cancel-race'),
+      writer,
+    );
+
+    const row = await db.select().from(workflowExecutions)
+      .where(eq(workflowExecutions.id, 'exec-cancel-race'))
+      .get();
+    expect(row?.status).toBe(cancelStatus);
   });
 });

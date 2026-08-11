@@ -285,7 +285,7 @@ app.notFound((c) => {
 function sweepItemCount(result: unknown): number | null {
   if (typeof result !== 'object' || result === null) return null;
   const r = result as Record<string, unknown>;
-  for (const key of ['swept', 'retried', 'deleted', 'count'] as const) {
+  for (const key of ['swept', 'retried', 'deleted', 'count', 'reclaimed'] as const) {
     if (typeof r[key] === 'number') return r[key];
   }
   return null;
@@ -361,6 +361,21 @@ const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) 
     const { sweepStuckApprovals } = await import('./workflows/cancel-cleanup.js');
     const result = await sweepStuckApprovals(env);
     if (result.retried > 0) console.log(`[approval-resume-sweep] retried ${result.retried} stuck approvals`);
+    return result;
+  });
+
+  // Reclaim concurrency slots held by executions whose Cloudflare Workflow
+  // instance is gone or terminal but whose row never reached a terminal
+  // status. Runs after approval_resume so a recoverable approval gets its
+  // chance to un-park first. Consults the instance rather than elapsed
+  // time, so long-running runs are never touched.
+  await runSweep(env, 'stale_executions', async () => {
+    const { sweepStaleExecutions } = await import('./workflows/stale-execution-sweep.js');
+    const result = await sweepStaleExecutions(env);
+    // Logged unconditionally. A sweep that reclaims nothing is either
+    // healthy or completely broken, and those must not look identical —
+    // silence is what let the original leak run unnoticed.
+    console.log(`[stale-execution-sweep] examined=${result.examined} reclaimed=${result.reclaimed} skipped=${result.skipped}`);
     return result;
   });
 

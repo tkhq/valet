@@ -87,6 +87,65 @@ export async function setExecutionStatus(input: SetStatusInput): Promise<boolean
 }
 
 /**
+ * Drives an execution the runtime can no longer finalize to a terminal
+ * 'failed'. Used by two callers that share the same problem — the row is
+ * still in a status the concurrency cap counts, and the code that would
+ * normally finish it is never going to run again:
+ *
+ *   1. The interpreter's catch, when a throw escapes the wave loop and
+ *      Cloudflare is about to error the instance.
+ *   2. The stale-execution sweep, when the instance is already gone.
+ *
+ * Deliberately does NOT go through `step.do`. Caller (1) runs while an
+ * exception is unwinding and caller (2) has no WorkflowStep at all, so
+ * the replay caching `setExecutionStatus` relies on is both unavailable
+ * and pointless — the instance is terminal either way.
+ *
+ * The CAS covers every status the cap counts, which is the fix for rows
+ * stranded in waiting_approval/waiting_time: the runtime's own terminal
+ * write only transitions from 'running', so those rows had no path to a
+ * terminal state and held a concurrency slot permanently.
+ *
+ * 'cancelling' and 'cancelled' are excluded so a user's cancel intent
+ * wins the race and the cancel pipeline keeps ownership of those rows.
+ * Already-terminal rows are excluded so a real outcome is never
+ * overwritten with a synthetic failure.
+ *
+ * Returns true when the CAS landed.
+ */
+export async function finalizeAbandonedExecution(
+  env: Env,
+  executionId: string,
+  outcome: { status: 'completed' | 'failed' | 'cancelled'; error?: string },
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const db = getDb(env.DB);
+  // Written and then read back as the CAS receipt. D1's `.run()` doesn't
+  // report row counts portably across the driver / better-sqlite3
+  // boundary, and comparing the status alone would report success when
+  // the row had already reached that same status by another path. The
+  // timestamp is unique to this call, so it identifies our write.
+  const completedAt = new Date().toISOString();
+  await db.update(workflowExecutions)
+    .set({
+      status: outcome.status,
+      completedAt,
+      ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+    })
+    .where(and(
+      eq(workflowExecutions.id, executionId),
+      inArray(workflowExecutions.status, [...ACTIVE_EXECUTION_STATUSES]),
+    ))
+    .run();
+  const after = await db
+    .select({ completedAt: workflowExecutions.completedAt })
+    .from(workflowExecutions)
+    .where(eq(workflowExecutions.id, executionId))
+    .get();
+  return after?.completedAt === completedAt;
+}
+
+/**
  * Mid-loop cancel probe used by the wave loop between iterations.
  * Returns true if a parallel cancel API call (or the cron sweep) has
  * moved the row to `cancelling` or `cancelled` while the wave loop was
