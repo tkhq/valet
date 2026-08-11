@@ -13,4 +13,5 @@ export * from "./scroll-area.js";
 export * from "./switch.js";
 export * from "./confirm-dialog.js";
 export * from "./query-state.js";
+export * from "./select-menu.js";
 export * from "./tab-bar.js";
