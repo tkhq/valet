@@ -21,6 +21,7 @@ import {
   useAddTeamMember,
   useCreateTeam,
   useDeleteTeam,
+  useMe,
   useRemoveTeamMember,
   useSetTeamMemberRole,
   useTeamMembers,
@@ -45,7 +46,11 @@ function formatDate(ts: number): string {
  */
 export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
   const teamsQ = useTeams();
+  const meQ = useMe();
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Mirrors the API's canMutateTeam gate: team admin of that team, or org
+  // admin. The API still enforces; this only hides controls that would 404.
+  const orgAdmin = meQ.data?.orgRole === "admin";
 
   return (
     <div className="space-y-4">
@@ -69,6 +74,7 @@ export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
               key={team.id}
               team={team}
               orgMembers={orgMembers}
+              canMutate={orgAdmin || team.callerRole === "admin"}
               open={expanded === team.id}
               onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
             />
@@ -131,11 +137,13 @@ function CreateTeamRow() {
 function TeamRow({
   team,
   orgMembers,
+  canMutate,
   open,
   onToggle,
 }: {
   team: TeamSummary;
   orgMembers: OrgMemberWire[];
+  canMutate: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -164,29 +172,31 @@ function TeamRow({
         <span className="hidden shrink-0 text-xs text-muted sm:block">
           Created {formatDate(team.createdAt)}
         </span>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={`${team.name} actions`}
-            >
-              <MoreHorizontal className="h-4 w-4" aria-hidden />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              className="text-danger-500"
-              onSelect={() => setConfirmDelete(true)}
-            >
-              Delete team
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {canMutate && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={`${team.name} actions`}
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                className="text-danger-500"
+                onSelect={() => setConfirmDelete(true)}
+              >
+                Delete team
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
 
-      {open && <TeamMembers teamId={team.id} teamName={team.name} orgMembers={orgMembers} />}
+      {open && <TeamMembers teamId={team.id} teamName={team.name} orgMembers={orgMembers} canMutate={canMutate} />}
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent
@@ -221,10 +231,12 @@ function TeamMembers({
   teamId,
   teamName,
   orgMembers,
+  canMutate,
 }: {
   teamId: string;
   teamName: string;
   orgMembers: OrgMemberWire[];
+  canMutate: boolean;
 }) {
   const membersQ = useTeamMembers(teamId);
   const setRole = useSetTeamMemberRole();
@@ -259,45 +271,53 @@ function TeamMembers({
             <span className="min-w-0 flex-1 truncate text-sm text-ink">
               {identity?.name ?? identity?.email ?? member.userId}
             </span>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="secondary" size="sm">
-                  <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
-                    {member.role === "admin" ? "Admin" : "Member"}
-                  </Badge>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onSelect={() =>
-                    setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
-                  }
-                >
-                  Admin
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
-                  }
-                >
-                  Member
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
-              onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
-            >
-              <X className="h-3.5 w-3.5" aria-hidden />
-            </Button>
+            {canMutate ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="secondary" size="sm">
+                    <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
+                      {member.role === "admin" ? "Admin" : "Member"}
+                    </Badge>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
+                    }
+                  >
+                    Admin
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
+                    }
+                  >
+                    Member
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Badge variant={member.role === "admin" ? "accent" : "neutral"}>
+                {member.role === "admin" ? "Admin" : "Member"}
+              </Badge>
+            )}
+            {canMutate && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
+                onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
+              >
+                <X className="h-3.5 w-3.5" aria-hidden />
+              </Button>
+            )}
           </div>
         );
       })}
 
-      {addable.length > 0 && (
+      {canMutate && addable.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button type="button" variant="ghost" size="sm" className="gap-1.5">

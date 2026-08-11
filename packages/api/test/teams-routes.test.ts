@@ -353,3 +353,29 @@ describe("teams routes", () => {
     });
   });
 });
+
+describe("GET /api/teams callerRole", () => {
+  it("reports the caller's own role, and null for an org admin who is not a member", async () => {
+    api = await bootTestApi();
+    const res = await createTeam(api.baseUrl, "Roles");
+    expect(res.status).toBe(201);
+    const { team } = (await res.json()) as CreateTeamResponse;
+    expect(team.callerRole).toBe("admin");
+
+    const add = await fetch(`${api.baseUrl}/api/teams/${team.id}/members`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ userId: "test-member", role: "member" }),
+    });
+    expect(add.status).toBe(201);
+
+    const asMember = await fetch(`${api.baseUrl}/api/teams`, { headers: MEMBER_HEADERS });
+    const memberList = (await asMember.json()) as ListTeamsResponse;
+    expect(memberList.teams.find((t) => t.id === team.id)?.callerRole).toBe("member");
+
+    const asAdmin = await fetch(`${api.baseUrl}/api/teams`, { headers: ADMIN_HEADERS });
+    const adminList = (await asAdmin.json()) as ListTeamsResponse;
+    expect(adminList.teams.find((t) => t.id === team.id)?.callerRole).toBe(null);
+  });
+});
+

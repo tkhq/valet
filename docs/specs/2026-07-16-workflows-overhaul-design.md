@@ -59,3 +59,26 @@ In chat: "make a workflow that runs every morning at 8, checks <something> with 
 - Version-history UI and run-detail graph overlay on the workflow pages (chat gets the graph first; the run page keeps its checkpoint list).
 - Workflow marketplace/templates, import/export.
 - Editing workflows from Telegram/CLI (they get gate approve/deny like everything else; authoring UX is chat + editor).
+
+## 2026-08-10 addendum: triggers + team-owner surface in the web UI
+
+The editor page gains a Triggers drawer (`packages/web/src/components/
+workflows/triggers-drawer.tsx`) — the first UI over two trigger APIs that
+were HTTP/agent-only before:
+
+- **Webhook:** mint, copy, rotate, and delete the arbitrary-URL trigger
+  (decision 5). Rotate and delete confirm before acting because the URL
+  carries the bearer secret.
+- **Schedules:** new routes `GET/POST /api/workflows/:id/schedules` and
+  `DELETE /api/workflows/:id/schedules/:scheduleId` over the existing
+  `schedule-service.ts`. The routes resolve the workflow through
+  `getWorkflowDefinition` first (own-rows 404 convention), and a delete
+  requires the schedule to belong to that workflow. The service also
+  carries orchestrator-prompt schedules; this surface manages only the
+  workflow-scoped kind.
+
+The New-workflow dialog gains an owner picker (personal, or a team the
+caller belongs to — `CreateWorkflowRequest.teamId` existed on the wire but
+had no UI), and the workflows list badges team-owned rows with the team
+name. `TeamSummary` gains `callerRole` so the teams settings panel can
+hide mutation controls the API's `canMutateTeam` gate would 404 anyway.

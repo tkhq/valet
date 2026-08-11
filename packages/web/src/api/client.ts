@@ -10,6 +10,12 @@ import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
   CancelWorkflowRunResponse,
+  CreateWorkflowScheduleRequest,
+  CreateWorkflowScheduleResponse,
+  DeleteWorkflowScheduleResponse,
+  DeleteWorkflowWebhookResponse,
+  ListWorkflowSchedulesResponse,
+  WorkflowWebhookResponse,
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
@@ -374,6 +380,27 @@ export const api = {
     request<CancelWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
+    ),
+
+  // workflow triggers: webhook URL management + cron schedules
+  getWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+  mintWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
+  deleteWorkflowWebhook: (id: string) =>
+    request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
+  listWorkflowSchedules: (id: string) =>
+    request<ListWorkflowSchedulesResponse>("GET", `/workflows/${encodeURIComponent(id)}/schedules`),
+  createWorkflowSchedule: (id: string, body: CreateWorkflowScheduleRequest) =>
+    request<CreateWorkflowScheduleResponse>(
+      "POST",
+      `/workflows/${encodeURIComponent(id)}/schedules`,
+      body,
+    ),
+  deleteWorkflowSchedule: (id: string, scheduleId: string) =>
+    request<DeleteWorkflowScheduleResponse>(
+      "DELETE",
+      `/workflows/${encodeURIComponent(id)}/schedules/${encodeURIComponent(scheduleId)}`,
     ),
 
   // settings shell (split-settings design): per-user profile, org, models

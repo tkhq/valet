@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
 import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
+import { useTeams } from "~/api/settings";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
-import { Button, Spinner } from "~/components/primitives";
+import { Badge, Button, Spinner } from "~/components/primitives";
 
 /**
  * `/workflows` — the definitions list (plan decision 11). Each row's name
@@ -21,9 +22,14 @@ export const Route = createFileRoute("/workflows/")({
 
 export function WorkflowsIndexPage() {
   const { data, isLoading, error } = useWorkflows();
+  const teamsQ = useTeams();
   const [newOpen, setNewOpen] = useState(false);
 
   const workflows = data?.workflows ?? [];
+  const teamNames = useMemo(
+    () => new Map((teamsQ.data?.teams ?? []).map((t) => [t.id, t.name])),
+    [teamsQ.data],
+  );
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -62,7 +68,7 @@ export function WorkflowsIndexPage() {
         {!isLoading && workflows.length > 0 && (
           <ul className="space-y-2">
             {workflows.map((wf) => (
-              <DefinitionRow key={wf.id} workflow={wf} />
+              <DefinitionRow key={wf.id} workflow={wf} teamNames={teamNames} />
             ))}
           </ul>
         )}
@@ -71,7 +77,13 @@ export function WorkflowsIndexPage() {
   );
 }
 
-function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
+function DefinitionRow({
+  workflow,
+  teamNames,
+}: {
+  workflow: WorkflowDefinitionSummary;
+  teamNames: Map<string, string>;
+}) {
   const startRun = useStartRun(workflow.id);
   const runsQ = useWorkflowRuns(workflow.id);
   const del = useDeleteWorkflow();
@@ -103,6 +115,11 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
         className="min-w-0 text-sm font-medium text-ink hover:underline"
       >
         {workflow.name}
+        {workflow.ownerType === "team" && (
+          <Badge variant="accent" className="ml-2 align-middle">
+            {teamNames.get(workflow.ownerId) ?? "Team"}
+          </Badge>
+        )}
         {runCount !== undefined && (
           <span className="ml-2 text-xs text-muted font-normal">
             {runCount} run{runCount === 1 ? "" : "s"}

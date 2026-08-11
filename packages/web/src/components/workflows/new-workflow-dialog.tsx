@@ -10,8 +10,14 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
 import { useCreateWorkflow } from "~/api/workflows";
+import { useTeams } from "~/api/settings";
 
 const DEFAULT_NAME = "Untitled workflow";
+
+/** Owner of a new workflow: the caller, or a team the caller belongs to.
+ * The value is the `teamId` the create route takes, and "" means the
+ * caller. Same convention as the skill editor's owner picker. */
+const OWNER_SELF = "";
 
 /** A brand-new definition's starting shape — the minimal valid `dag/v1`
  * graph (trigger straight into stop). "New workflow" creates one of these
@@ -37,13 +43,19 @@ export function NewWorkflowDialog({
 }) {
   const navigate = useNavigate();
   const create = useCreateWorkflow();
+  const teams = useTeams();
   const [name, setName] = useState(DEFAULT_NAME);
+  const [teamId, setTeamId] = useState(OWNER_SELF);
 
   async function submit() {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      const created = await create.mutateAsync({ name: trimmed, definition: blankDefinition() });
+      const created = await create.mutateAsync({
+        name: trimmed,
+        definition: blankDefinition(),
+        ...(teamId === OWNER_SELF ? {} : { teamId }),
+      });
       onOpenChange(false);
       setName(DEFAULT_NAME);
       void navigate({ to: "/workflows/$workflowId", params: { workflowId: created.id } });
@@ -71,6 +83,28 @@ export function NewWorkflowDialog({
             }}
           />
         </div>
+
+        {(teams.data?.teams.length ?? 0) > 0 && (
+          <div className="grid gap-1">
+            <Label htmlFor="workflow-owner">Owner</Label>
+            <select
+              id="workflow-owner"
+              value={teamId}
+              onChange={(e) => setTeamId(e.target.value)}
+              className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
+            >
+              <option value={OWNER_SELF}>You</option>
+              {teams.data?.teams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted">
+              Every member of the owning team can see, edit, and run it.
+            </p>
+          </div>
+        )}
 
         {create.error && (
           <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">

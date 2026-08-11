@@ -13,6 +13,7 @@ import {
 } from "~/api/workflows";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { Editor } from "~/components/workflows/editor/editor";
+import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
@@ -98,10 +99,10 @@ function WorkflowEditorPane({
   };
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  // Right-side drawer: runs list / version history. Header buttons toggle
-  // it — the old bottom collapsible was invisible under a full-height
-  // canvas ("no way to view the list of runs").
-  const [drawer, setDrawer] = useState<"runs" | "history" | null>(null);
+  // Right-side drawer: runs list / version history / triggers. Header
+  // buttons toggle it — the old bottom collapsible was invisible under a
+  // full-height canvas ("no way to view the list of runs").
+  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether
   // the name is dirty (`externalDirty`) so a rename rides the same
@@ -157,6 +158,13 @@ function WorkflowEditorPane({
           >
             History
           </Button>
+          <Button
+            size="sm"
+            variant={drawer === "triggers" ? "secondary" : "ghost"}
+            onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
+          >
+            Triggers
+          </Button>
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
@@ -172,6 +180,11 @@ function WorkflowEditorPane({
           onCancelExternal={handleCancelName}
         />
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
+        {drawer === "triggers" && (
+          <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
+            <TriggersPanel workflowId={workflowId} />
+          </DrawerShell>
+        )}
         {drawer === "history" && (
           <HistoryDrawer
             workflowId={workflowId}
