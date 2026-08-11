@@ -1,12 +1,30 @@
 /**
- * Calm-companion theme tokens (assistant-centered web UI, decision 9).
+ * Brand theme tokens (2026-08-11 brand refresh, superseding the
+ * "calm-companion" palette from 2026-07-13 — decision record:
+ * docs/specs/2026-08-11-brand-refresh-design.md).
  *
- * Single source of truth for the token palette — values are VERBATIM from
- * the design spec (docs/specs/2026-07-13-assistant-centered-web-ui-design.md
- * § Visual Language). Consumed by Tailwind via `tailwind.config.ts` colors
- * (`paper`, `ink`, `muted`, `line`, `moss`, `amber`) and directly by legacy
- * `--bg`/`--fg`/`--border`/`--muted` aliases in `styles/globals.css` so
- * existing surfaces pick up the palette without a full restyle.
+ * `--ink`/`--paper`/`--muted`/`--line` now point at the SAME cool-neutral
+ * OKLCH scale `tailwind.config.ts` already defines as `neutral` (hue 247),
+ * instead of a separate warm off-white palette — one neutral system, not
+ * two. `--moss` (kept as the CSS variable name — see below) now points at
+ * the `accent` blue scale, whose hue (264) is sampled from the mascot
+ * illustration's uniform (docs/valet.png): this IS the brand color, not a
+ * generic pick. `--amber` is untouched — it's a narrow semantic ("thinking
+ * / pending") marker, not part of the brand identity.
+ *
+ * The variable name `--moss` (and the Tailwind `moss` color it backs) is
+ * NOT renamed here. It has 47 call sites across the web package; renaming
+ * is a large, purely mechanical, high-blast-radius diff that touches
+ * nothing about how the app looks or behaves — a token-value change (this
+ * commit) already re-brands every one of those call sites for free. Rename
+ * it if a future change touches those files anyway; don't do it solely for
+ * the name.
+ *
+ * Single source of truth for the token palette. Consumed by Tailwind via
+ * `tailwind.config.ts` colors (`paper`, `ink`, `muted`, `line`, `moss`,
+ * `amber`) and directly by legacy `--bg`/`--fg`/`--border`/`--muted`
+ * aliases in `styles/globals.css` so existing surfaces pick up the palette
+ * without a full restyle.
  *
  * Both light and dark are supported from day one via two independent
  * mechanisms that must both "win" appropriately:
@@ -22,15 +40,21 @@
  * OPACITY-MODIFIER TRAP: Tailwind's `bg-ink/10` slash-opacity syntax only
  * works when a theme color is registered as a function that receives an
  * `<alpha-value>` placeholder (e.g. `rgb(var(--x) / <alpha-value>)`). Our
- * tokens (`ink`, `paper`, `moss`, …) are plain hex strings pointing at CSS
+ * tokens (`ink`, `paper`, `moss`, …) are plain color strings pointing at CSS
  * variables (`var(--ink)` etc, see `tailwind.config.ts`), so `bg-ink/10`,
  * `hover:bg-moss/20`, and friends silently no-op — Tailwind can't inject an
- * alpha channel into an opaque hex custom property. This is why earlier
+ * alpha channel into an opaque custom property. This is why earlier
  * surfaces reached for hardcoded `hover:bg-neutral-100 dark:hover:bg-neutral-900`
  * stopgaps instead of a token-based wash. Don't repeat that: use these
- * pre-mixed `rgba()` wash variables (exposed as the `ink-wash` / `moss-wash`
+ * pre-mixed wash variables (exposed as the `ink-wash` / `moss-wash`
  * Tailwind colors below) for hover/press states instead of opacity
  * modifiers on `ink`/`moss`/`paper`.
+ *
+ * Built with native `oklch(... / <alpha>)` syntax at the SAME lightness/
+ * chroma/hue as the base token they wash, rather than a separately
+ * maintained rgba hex — the earlier rgba washes were hand-converted from
+ * the base hex and could drift from it silently. These can't drift: change
+ * the base token's L/C/H and the wash follows.
  */
 /**
  * Shared layout metric: the fixed top-nav height. Consumed by the nav
@@ -45,17 +69,17 @@
 :root {
   color-scheme: light;
 
-  --paper: #faf9f7;
-  --ink: #1f1d1a;
-  --muted: #6e6a63;
-  --line: #e7e4de;
-  --moss: #3e6b4f;
+  --paper: oklch(98.5% 0.002 247);
+  --ink: oklch(20.5% 0.006 247);
+  --muted: oklch(55.4% 0.015 247);
+  --line: oklch(92.9% 0.005 247);
+  --moss: oklch(53.5% 0.190 264);
   --amber: #b98a2f;
 
-  --ink-wash: rgba(31, 29, 26, 0.06);
-  --ink-wash-strong: rgba(31, 29, 26, 0.1);
-  --moss-wash: rgba(62, 107, 79, 0.1);
-  --moss-wash-strong: rgba(62, 107, 79, 0.18);
+  --ink-wash: oklch(20.5% 0.006 247 / 0.06);
+  --ink-wash-strong: oklch(20.5% 0.006 247 / 0.1);
+  --moss-wash: oklch(53.5% 0.190 264 / 0.1);
+  --moss-wash-strong: oklch(53.5% 0.190 264 / 0.18);
 }
 
 /* OS-level dark preference — only applies when there's no explicit
@@ -64,15 +88,15 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --paper: #171614;
-    --ink: #ece9e4;
-    --moss: #7fae8f;
-    --line: #2a2825;
+    --paper: oklch(13.0% 0.005 247);
+    --ink: oklch(98.5% 0.002 247);
+    --moss: oklch(69.0% 0.150 264);
+    --line: oklch(27.8% 0.008 247);
 
-    --ink-wash: rgba(236, 233, 228, 0.08);
-    --ink-wash-strong: rgba(236, 233, 228, 0.14);
-    --moss-wash: rgba(127, 174, 143, 0.14);
-    --moss-wash-strong: rgba(127, 174, 143, 0.22);
+    --ink-wash: oklch(98.5% 0.002 247 / 0.08);
+    --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
+    --moss-wash: oklch(69.0% 0.150 264 / 0.14);
+    --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
   }
 }
 
@@ -80,39 +104,40 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --paper: #171614;
-  --ink: #ece9e4;
-  --moss: #7fae8f;
-  --line: #2a2825;
+  --paper: oklch(13.0% 0.005 247);
+  --ink: oklch(98.5% 0.002 247);
+  --moss: oklch(69.0% 0.150 264);
+  --line: oklch(27.8% 0.008 247);
 
-  --ink-wash: rgba(236, 233, 228, 0.08);
-  --ink-wash-strong: rgba(236, 233, 228, 0.14);
-  --moss-wash: rgba(127, 174, 143, 0.14);
-  --moss-wash-strong: rgba(127, 174, 143, 0.22);
+  --ink-wash: oklch(98.5% 0.002 247 / 0.08);
+  --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
+  --moss-wash: oklch(69.0% 0.150 264 / 0.14);
+  --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --paper: #faf9f7;
-  --ink: #1f1d1a;
-  --moss: #3e6b4f;
-  --line: #e7e4de;
+  --paper: oklch(98.5% 0.002 247);
+  --ink: oklch(20.5% 0.006 247);
+  --moss: oklch(53.5% 0.190 264);
+  --line: oklch(92.9% 0.005 247);
 
-  --ink-wash: rgba(31, 29, 26, 0.06);
-  --ink-wash-strong: rgba(31, 29, 26, 0.1);
-  --moss-wash: rgba(62, 107, 79, 0.1);
-  --moss-wash-strong: rgba(62, 107, 79, 0.18);
+  --ink-wash: oklch(20.5% 0.006 247 / 0.06);
+  --ink-wash-strong: oklch(20.5% 0.006 247 / 0.1);
+  --moss-wash: oklch(53.5% 0.190 264 / 0.1);
+  --moss-wash-strong: oklch(53.5% 0.190 264 / 0.18);
 }
 
 /**
  * Presence mark (decision 10) — the single place this theme spends
- * boldness. Idle breathes slowly in moss, thinking breathes quicker in
- * amber (the palette's "waiting" color), working is steady. Reduced
- * motion collapses all three to a static dot, enforced twice: the JS
- * component adds `presence-dot--static` (see presence-mark.tsx), and this
- * `@media` block is a CSS-only backstop in case a consumer renders the dot
- * without going through the component.
+ * boldness. Idle breathes slowly in the brand blue (`--moss`, see the
+ * top-of-file note on why the variable keeps its old name), thinking
+ * breathes quicker in amber (the palette's "waiting" color), working is
+ * steady. Reduced motion collapses all three to a static dot, enforced
+ * twice: the JS component adds `presence-dot--static` (see
+ * presence-mark.tsx), and this `@media` block is a CSS-only backstop in
+ * case a consumer renders the dot without going through the component.
  */
 .presence-dot {
   display: inline-block;

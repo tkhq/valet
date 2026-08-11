@@ -40,12 +40,22 @@ export default {
           900: "oklch(20.5% 0.006 247)",
           950: "oklch(13.0% 0.005 247)",
         },
+        // Brand blue — hue 264 is the OKLCH hue of the mascot uniform's
+        // royal blue (docs/valet.png), so this scale IS the brand color,
+        // not a generic "primary" pick. Full ramp so dark-mode text/icon
+        // contrast and hover washes have real stops to reach for, not just
+        // the original 3-shade button palette.
         accent: {
           50:  "oklch(97.0% 0.025 264)",
           100: "oklch(93.2% 0.045 264)",
+          200: "oklch(86.0% 0.070 264)",
+          300: "oklch(78.0% 0.110 264)",
+          400: "oklch(69.0% 0.150 264)",
           500: "oklch(60.5% 0.180 264)",
           600: "oklch(53.5% 0.190 264)",
           700: "oklch(46.5% 0.180 264)",
+          800: "oklch(39.5% 0.165 264)",
+          900: "oklch(32.0% 0.140 264)",
         },
         danger: {
           500: "oklch(60.0% 0.220 27)",
@@ -94,9 +104,19 @@ export default {
           "Consolas",
           "monospace",
         ],
-        // The assistant's voice — presence header, dashboard section
-        // headings, memory document rendering (decision 9).
-        display: ["Newsreader", "ui-serif", "Georgia", "serif"],
+        // Headings share the body sans (2026-08-11 brand refresh — the
+        // prior serif `display` face was never actually loaded, so this
+        // changes nothing about what renders today, only the fallback
+        // intent). See docs/specs/2026-08-11-brand-refresh-design.md.
+        display: [
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "Inter",
+          "Segoe UI",
+          "sans-serif",
+        ],
       },
       borderRadius: {
         sm: "0.25rem",
