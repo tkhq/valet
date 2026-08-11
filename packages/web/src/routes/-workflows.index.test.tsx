@@ -15,8 +15,14 @@ import type { ReactNode } from "react";
 
 const workflowsData = {
   workflows: [
-    { id: "wf_1", name: "Deploy pipeline", definition: {}, createdAt: 1, updatedAt: 1 },
-    { id: "wf_2", name: "Nightly digest", definition: {}, createdAt: 2, updatedAt: 2 },
+    { id: "wf_1", name: "Deploy pipeline", definition: {}, createdAt: 1, updatedAt: 1, ownerType: "user" as const, ownerId: "u1" },
+    { id: "wf_2", name: "Nightly digest", definition: {}, createdAt: 2, updatedAt: 2, ownerType: "team" as const, ownerId: "team_1" },
+  ],
+};
+
+const teamsData = {
+  teams: [
+    { id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "admin" as const },
   ],
 };
 
@@ -36,6 +42,10 @@ vi.mock("@tanstack/react-router", () => ({
   ),
   useNavigate: () => navigate,
   createFileRoute: () => (config: unknown) => config,
+}));
+
+vi.mock("~/api/settings", () => ({
+  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
 }));
 
 vi.mock("~/api/workflows", () => ({
@@ -96,3 +106,23 @@ describe("WorkflowsIndexPage", () => {
     );
   });
 });
+
+describe("WorkflowsIndexPage — team ownership", () => {
+  it("badges a team-owned workflow with its team name", () => {
+    render(<WorkflowsIndexPage />);
+    expect(screen.getByText("Platform")).toBeTruthy();
+  });
+
+  it("posts teamId when a team owner is picked in the New workflow dialog", async () => {
+    render(<WorkflowsIndexPage />);
+    fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
+
+    fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "team_1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
+    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string };
+    expect(call.teamId).toBe("team_1");
+  });
+});
+

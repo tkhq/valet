@@ -67,7 +67,7 @@ let orgMembersData: {
 };
 
 let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number }> } = {
-  teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
+  teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
 };
 
 let teamMembersData: { members: Array<{ userId: string; role: "admin" | "member" }> } = {
@@ -106,6 +106,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
     useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
     useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useMe: () => ({ data: { orgRole: "admin" }, isLoading: false, error: null }),
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
     useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
@@ -141,7 +142,7 @@ beforeEach(() => {
     ],
   };
   teamsData = {
-    teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
+    teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
   invitesData = { invites: [] };

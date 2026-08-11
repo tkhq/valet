@@ -33,12 +33,23 @@ import {
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
 } from "../workflows/webhook-service.js";
+import {
+  createWorkflowSchedule,
+  deleteWorkflowSchedule,
+  listWorkflowSchedules,
+  type WorkflowScheduleSummary,
+} from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  CreateWorkflowScheduleRequest,
+  CreateWorkflowScheduleResponse,
+  DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
+  ListWorkflowSchedulesResponse,
+  WorkflowScheduleWire,
   GetWorkflowResponse,
   GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
@@ -238,6 +249,87 @@ workflowsRouter.delete("/:id/webhook", async (c) => {
   const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
   const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
+  return c.json(resp);
+});
+
+// ── Schedules (cron triggers) ─────────────────────────────────────────────
+// Owner-scoped like the webhook routes above: every route resolves the
+// workflow through `getWorkflowDefinition` first, so an unowned workflow
+// 404s identically to a missing one. The schedule service also carries
+// orchestrator-prompt schedules; this surface manages only the
+// workflow-scoped kind, so every row it returns has a `workflowId`.
+
+function toScheduleWire(s: WorkflowScheduleSummary, workflowId: string): WorkflowScheduleWire {
+  return {
+    scheduleId: s.scheduleId,
+    workflowId: s.workflowId ?? workflowId,
+    name: s.name,
+    cron: s.cron,
+    timezone: s.timezone,
+    enabled: s.enabled,
+    lastFiredAt: s.lastFiredAt,
+    nextFireAt: s.nextFireAt,
+  };
+}
+
+workflowsRouter.get("/:id/schedules", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  const schedules = await listWorkflowSchedules(deps.db, owner.orgId, id);
+  const resp: ListWorkflowSchedulesResponse = {
+    schedules: schedules.map((s) => toScheduleWire(s, id)),
+  };
+  return c.json(resp);
+});
+
+workflowsRouter.post("/:id/schedules", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+
+  let body: CreateWorkflowScheduleRequest;
+  try {
+    body = (await c.req.json()) as CreateWorkflowScheduleRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (!body.name || typeof body.name !== "string") {
+    return c.json({ error: "name must be a non-empty string" }, 400);
+  }
+  if (!body.cron || typeof body.cron !== "string") {
+    return c.json({ error: "cron must be a 5-field cron expression string" }, 400);
+  }
+  if (body.timezone !== undefined && typeof body.timezone !== "string") {
+    return c.json({ error: "timezone must be an IANA timezone string" }, 400);
+  }
+
+  const result = await createWorkflowSchedule(
+    deps.db,
+    { id: owner.userId, orgId: owner.orgId },
+    { workflowId: id, name: body.name, cron: body.cron, timezone: body.timezone, input: body.input },
+  );
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  const resp: CreateWorkflowScheduleResponse = toScheduleWire(result.schedule, id);
+  return c.json(resp, 201);
+});
+
+workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const scheduleId = c.req.param("scheduleId");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  // The service delete is org-scoped; require the schedule to belong to
+  // THIS workflow so one workflow's surface cannot delete another's rows.
+  const schedules = await listWorkflowSchedules(deps.db, owner.orgId, id);
+  if (!schedules.some((s) => s.scheduleId === scheduleId)) {
+    return c.json({ error: "schedule not found" }, 404);
+  }
+  const result = await deleteWorkflowSchedule(deps.db, owner.orgId, scheduleId);
+  const resp: DeleteWorkflowScheduleResponse = { deleted: result === "ok" };
   return c.json(resp);
 });
 

@@ -12,6 +12,8 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
 import type {
   CreateWorkflowResponse,
+  CreateWorkflowScheduleResponse,
+  ListWorkflowSchedulesResponse,
   DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
@@ -553,3 +555,92 @@ describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
     expect(body.deleted).toBe(false);
   });
 });
+
+describe("GET/POST/DELETE /api/workflows/:id/schedules", () => {
+  it("creates a schedule and lists it for that workflow only", async () => {
+    api = await bootTestApi();
+    const a = await createWorkflow(api.baseUrl, "with-schedule");
+    const b = await createWorkflow(api.baseUrl, "without-schedule");
+
+    const created = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+    expect(created.status).toBe(201);
+    const schedule = (await created.json()) as CreateWorkflowScheduleResponse;
+    expect(schedule.workflowId).toBe(a.id);
+    expect(schedule.enabled).toBe(true);
+    expect(schedule.timezone).toBe("UTC");
+    expect(schedule.nextFireAt).toBeGreaterThan(Date.now());
+
+    const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
+    const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyA.schedules.map((s) => s.scheduleId)).toEqual([schedule.scheduleId]);
+
+    const listB = await fetch(`${api.baseUrl}/api/workflows/${b.id}/schedules`);
+    const bodyB = (await listB.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyB.schedules).toEqual([]);
+  });
+
+  it("400s an invalid cron with the corrective error text", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "bad", cron: "every day at nine" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("cron");
+  });
+
+  it("404s schedule routes on another owner's workflow", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const asOther = { "x-valet-test-user-id": "test-member" };
+
+    const list = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      headers: asOther,
+    });
+    expect(list.status).toBe(404);
+
+    const post = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...asOther },
+      body: JSON.stringify({ name: "sneaky", cron: "0 9 * * *" }),
+    });
+    expect(post.status).toBe(404);
+  });
+
+  it("DELETE removes only a schedule that belongs to that workflow", async () => {
+    api = await bootTestApi();
+    const a = await createWorkflow(api.baseUrl, "schedule-owner");
+    const b = await createWorkflow(api.baseUrl, "other-workflow");
+
+    const created = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+    const schedule = (await created.json()) as CreateWorkflowScheduleResponse;
+
+    // Through the WRONG workflow's path: 404, row survives.
+    const cross = await fetch(
+      `${api.baseUrl}/api/workflows/${b.id}/schedules/${schedule.scheduleId}`,
+      { method: "DELETE" },
+    );
+    expect(cross.status).toBe(404);
+
+    const del = await fetch(
+      `${api.baseUrl}/api/workflows/${a.id}/schedules/${schedule.scheduleId}`,
+      { method: "DELETE" },
+    );
+    expect(del.status).toBe(200);
+    const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
+    const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyA.schedules).toEqual([]);
+  });
+});
+

@@ -575,6 +575,10 @@ export interface TeamSummary {
   name: string;
   createdAt: number;
   memberCount: number;
+  /** The caller's role on this team; null when the caller is not a member
+   * (org admins see every team in the org). The UI gates admin-only
+   * controls on this plus the caller's org role. */
+  callerRole: "admin" | "member" | null;
 }
 
 export interface TeamMemberSummary {
@@ -801,6 +805,40 @@ export interface WorkflowWebhookResponse {
 }
 
 export interface DeleteWorkflowWebhookResponse {
+  deleted: boolean;
+}
+
+// Workflow schedules (cron triggers). `schedule-service.ts` also supports
+// orchestrator-prompt schedules; this surface manages only the
+// workflow-scoped kind, so `workflowId` is always set.
+export interface WorkflowScheduleWire {
+  scheduleId: string;
+  workflowId: string;
+  name: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  lastFiredAt: number | null;
+  nextFireAt: number;
+}
+
+export interface ListWorkflowSchedulesResponse {
+  schedules: WorkflowScheduleWire[];
+}
+
+export interface CreateWorkflowScheduleRequest {
+  name: string;
+  /** 5-field cron expression (minute hour day-of-month month day-of-week). */
+  cron: string;
+  /** IANA timezone name; defaults to UTC. */
+  timezone?: string;
+  /** Run input passed to the workflow's trigger node on each fire. */
+  input?: Record<string, unknown>;
+}
+
+export type CreateWorkflowScheduleResponse = WorkflowScheduleWire;
+
+export interface DeleteWorkflowScheduleResponse {
   deleted: boolean;
 }
 

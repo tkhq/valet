@@ -56,9 +56,19 @@ export const teamsRouter = new Hono<AppEnv>();
 async function rowToSummary(
   db: AppEnv["Variables"]["providers"]["db"],
   row: TeamRow,
+  callerUserId: string,
 ): Promise<TeamSummary> {
-  const memberCount = (await listTeamMembers(db, row.id)).length;
-  return { id: row.id, orgId: row.orgId, name: row.name, createdAt: row.createdAt, memberCount };
+  const members = await listTeamMembers(db, row.id);
+  const mine = members.find((m) => m.userId === callerUserId);
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    name: row.name,
+    createdAt: row.createdAt,
+    memberCount: members.length,
+    // null = the caller is not on this team (they see it as an org admin).
+    callerRole: mine?.role ?? null,
+  };
 }
 
 function isTeamRole(v: unknown): v is TeamRole {
@@ -145,7 +155,7 @@ teamsRouter.get("/", async (c) => {
     : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
 
   const body: ListTeamsResponse = {
-    teams: await Promise.all(rows.map((r) => rowToSummary(db, r))),
+    teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
   };
   return c.json(body);
 });
@@ -184,7 +194,7 @@ teamsRouter.post("/", async (c) => {
 
   try {
     const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
-    const resp: CreateTeamResponse = { team: await rowToSummary(db, team) };
+    const resp: CreateTeamResponse = { team: await rowToSummary(db, team, user.id) };
     return c.json(resp, 201);
   } catch (err) {
     const mapped = handleServiceError(err);
