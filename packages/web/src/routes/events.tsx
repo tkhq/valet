@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { cn } from "~/lib/cn";
+import { TabBar } from "~/components/primitives";
 import { EventFeed } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
 
@@ -38,24 +38,8 @@ export function EventsPage() {
           What your connected integrations report, and what runs in response.
         </p>
 
-        <div role="tablist" aria-label="Events sections" className="mt-6 flex gap-1 border-b border-line">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === t.id}
-              onClick={() => setTab(t.id)}
-              className={cn(
-                "-mb-px border-b-2 px-3 py-2 text-sm transition-colors",
-                tab === t.id
-                  ? "border-ink font-medium text-ink"
-                  : "border-transparent text-muted hover:text-ink",
-              )}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="mt-6">
+          <TabBar tabs={TABS} active={tab} onSelect={setTab} label="Events sections" />
         </div>
 
         <div className="mt-6">{tab === "activity" ? <EventFeed /> : <SubscriptionsPanel />}</div>

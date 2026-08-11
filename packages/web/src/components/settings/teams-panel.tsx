@@ -6,17 +6,19 @@ import {
   AvatarFallback,
   Badge,
   Button,
-  Dialog,
-  DialogContent,
-  DialogFooter,
+  ConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  EmptyRow,
+  ErrorRow,
   Input,
+  LoadingRow,
   Spinner,
 } from "~/components/primitives";
 import { ApiError } from "~/api/client";
+import { formatDate } from "~/lib/format-when";
 import {
   useAddTeamMember,
   useCreateTeam,
@@ -27,14 +29,6 @@ import {
   useTeamMembers,
   useTeams,
 } from "~/api/settings";
-
-function formatDate(ts: number): string {
-  return new Date(ts).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
 
 /**
  * Organization · Teams — the first-ever teams management UI over the
@@ -56,15 +50,11 @@ export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
     <div className="space-y-4">
       <CreateTeamRow />
 
-      {teamsQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {teamsQ.error && <p className="py-4 text-sm text-danger-500">Failed to load teams.</p>}
+      {teamsQ.isLoading && <LoadingRow />}
+      {teamsQ.error != null && <ErrorRow>Failed to load teams.</ErrorRow>}
 
       {teamsQ.data && teamsQ.data.teams.length === 0 && (
-        <p className="py-4 text-sm text-muted">No teams yet. Create one above.</p>
+        <EmptyRow>No teams yet. Create one above.</EmptyRow>
       )}
 
       {teamsQ.data && teamsQ.data.teams.length > 0 && (
@@ -198,31 +188,17 @@ function TeamRow({
 
       {open && <TeamMembers teamId={team.id} teamName={team.name} orgMembers={orgMembers} canMutate={canMutate} />}
 
-      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <DialogContent
-          title={`Delete ${team.name}?`}
-          description="This removes the team and its membership. Org members themselves are not affected."
-        >
-          <DialogFooter>
-            <Button type="button" variant="secondary" onClick={() => setConfirmDelete(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="danger"
-              disabled={deleteTeam.isPending}
-              onClick={() => {
-                deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) });
-              }}
-            >
-              {deleteTeam.isPending ? "Deleting…" : "Delete team"}
-            </Button>
-          </DialogFooter>
-          {deleteTeam.error && (
-            <p className="text-xs text-danger-500">{deleteTeam.error.message}</p>
-          )}
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete ${team.name}?`}
+        description="This removes the team and its membership. Org members themselves are not affected."
+        confirmLabel="Delete team"
+        pendingLabel="Deleting…"
+        pending={deleteTeam.isPending}
+        error={deleteTeam.error?.message}
+        onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
+      />
     </div>
   );
 }
@@ -250,13 +226,9 @@ function TeamMembers({
 
   return (
     <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
-      {membersQ.isLoading && (
-        <div className="flex items-center gap-2 py-2 text-xs text-muted">
-          <Spinner size={12} /> Loading members…
-        </div>
-      )}
-      {membersQ.error && (
-        <p className="py-2 text-xs text-danger-500">Failed to load {teamName}'s members.</p>
+      {membersQ.isLoading && <LoadingRow label="Loading members…" className="py-2 text-xs" />}
+      {membersQ.error != null && (
+        <ErrorRow className="py-2 text-xs">Failed to load {teamName}'s members.</ErrorRow>
       )}
 
       {memberRows.map((member) => {

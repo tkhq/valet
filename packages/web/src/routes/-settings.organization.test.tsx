@@ -66,7 +66,7 @@ let orgMembersData: {
   ],
 };
 
-let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number }> } = {
+let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number; callerRole: "admin" | "member" | null }> } = {
   teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
 };
 

@@ -48,9 +48,9 @@ vi.mock("~/api/settings", () => ({
 import { TeamsPanel } from "./teams-panel";
 
 const orgMembers: OrgMemberWire[] = [
-  { userId: "u1", name: "One", email: "one@dev", role: "member" },
-  { userId: "u2", name: "Two", email: "two@dev", role: "member" },
-  { userId: "u3", name: "Three", email: "three@dev", role: "member" },
+  { userId: "u1", name: "One", email: "one@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+  { userId: "u2", name: "Two", email: "two@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+  { userId: "u3", name: "Three", email: "three@dev", role: "member", avatarUrl: null, joinedAt: 1 },
 ];
 
 function openTeam() {
