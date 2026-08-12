@@ -33,6 +33,7 @@ import type {
 } from "../wire/types.js";
 import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import type { Providers } from "../providers/types.js";
 import { canViewSession } from "../services/session-access.js";
 
 export const messagesRouter = new Hono<AppEnv>();
@@ -251,11 +252,41 @@ messagesRouter.get("/:id/messages", async (c) => {
 
 // ── Messages: send prompt ─────────────────────────────────────────────────
 
+/**
+ * Queue one user prompt on a session's thread and touch the session row so
+ * list ordering reflects recency. This is the whole submit path: the route
+ * below wraps it in authorization and HTTP, and `POST /api/sessions` calls it
+ * to honour `CreateSessionRequest.initialPrompt`.
+ *
+ * Returns null when `threadId` names no thread of this session. The caller
+ * must have authorized the session already — this function does not.
+ */
+export async function submitSessionPrompt(
+  providers: Pick<Providers, "db" | "engineHost">,
+  row: typeof agentSessions.$inferSelect,
+  text: string,
+  threadId?: string,
+): Promise<SendPromptResponse | null> {
+  const { db, engineHost } = providers;
+  const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+
+  await engineSession.ensureDefaultThread();
+  const thread = resolveThread(engineSession, threadId);
+  if (!thread) return null;
+
+  const receipt = await thread.submitPrompt(text, {});
+
+  await db
+    .update(agentSessions)
+    .set({ updatedAt: Date.now() })
+    .where(eq(agentSessions.id, row.id));
+
+  return { messageId: receipt.queueItemId, threadId: thread.id };
+}
+
 messagesRouter.post("/:id/messages", async (c) => {
-  const result = await loadEngineSession(c);
-  if ("error" in result) return result.error;
-  const { session, engineSession } = result;
-  const { db } = c.var.providers;
+  const row = await loadOwnedSession(c);
+  if (!row) return c.json({ error: "session not found" }, 404);
 
   let body: SendPromptRequest;
   try {
@@ -267,22 +298,8 @@ messagesRouter.post("/:id/messages", async (c) => {
     return c.json({ error: "text is required" }, 400);
   }
 
-  await engineSession.ensureDefaultThread();
-  const thread = resolveThread(engineSession, body.threadId);
-  if (!thread) return c.json({ error: "thread not found" }, 404);
-
-  const receipt = await thread.submitPrompt(body.text, {});
-
-  // Touch the session row so list ordering reflects recency.
-  await db
-    .update(agentSessions)
-    .set({ updatedAt: Date.now() })
-    .where(eq(agentSessions.id, session.id));
-
-  const resp: SendPromptResponse = {
-    messageId: receipt.queueItemId,
-    threadId: thread.id,
-  };
+  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId);
+  if (!resp) return c.json({ error: "thread not found" }, 404);
   return c.json(resp, 202);
 });
 

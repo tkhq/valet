@@ -6,7 +6,14 @@ import { parseOrchestratorSessionId } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
+import { submitSessionPrompt } from "./messages.js";
 import { autoTitle } from "../sessions/auto-title.js";
+import {
+  deriveRunFields,
+  groupSubmissionsBySession,
+  type RunStateRow,
+  type SessionRunFields,
+} from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -92,15 +99,26 @@ async function getSessionRepos(db: AppDb, sessionId: string): Promise<RepoBindin
   }));
 }
 
-function rowToSummary(row: typeof agentSessions.$inferSelect): SessionSummary {
+// Pure: everything it needs is the row plus the already-derived run fields
+// (`sessions/run-state.ts` owns that derivation, and the queries that feed
+// it). Keeping the mapper query-free is what lets the list route derive for
+// every row from ONE cross-session read.
+function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFields): SessionSummary {
   return {
     id: row.id,
     workspace: row.workspace,
     status: row.status as SessionStatus,
+    runState: run.runState,
     title: row.title ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    lastActivityAt: run.lastActivityAt,
   };
+}
+
+/** The row fields `deriveRunFields` reads, narrowed from a full session row. */
+function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
+  return { status: row.status as SessionStatus, updatedAt: row.updatedAt };
 }
 
 // ── List ──────────────────────────────────────────────────────────────────
@@ -130,19 +148,32 @@ export async function listStandaloneSessions(db: AppDb, userId: string) {
 }
 
 sessionsRouter.get("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineStore } = c.var.providers;
   const userId = c.var.user.id;
 
-  const standalone = await listStandaloneSessions(db, userId);
+  // Three round trips, whatever the number of sessions: the two
+  // `listStandaloneSessions` makes, plus ONE cross-session read of every
+  // unsettled submission (the same call the admin submissions route uses).
+  // `groupSubmissionsBySession` then indexes it by session id. A per-row
+  // query here would make an ordinary list cost one query per session.
+  const [standalone, unsettled] = await Promise.all([
+    listStandaloneSessions(db, userId),
+    engineStore.listAllUnsettledSubmissions(),
+  ]);
+  const bySession = groupSubmissionsBySession(unsettled);
 
-  const body: ListSessionsResponse = { sessions: standalone.map(rowToSummary) };
+  const body: ListSessionsResponse = {
+    sessions: standalone.map((row) =>
+      rowToSummary(row, deriveRunFields(runStateRow(row), bySession.get(row.id) ?? [])),
+    ),
+  };
   return c.json(body);
 });
 
 // ── Create ────────────────────────────────────────────────────────────────
 
 sessionsRouter.post("/", async (c) => {
-  const { db, prebuildService } = c.var.providers;
+  const { db, engineStore, prebuildService } = c.var.providers;
   const user = c.var.user;
   let body: CreateSessionRequest;
   try {
@@ -160,6 +191,11 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "profile must be 'headless' or 'full'" }, 400);
   }
   const profile = body.profile ?? "headless";
+  // Rejected here, before anything is written: a mistyped `initialPrompt` is
+  // a bad request, not a failed enqueue.
+  if (body.initialPrompt !== undefined && typeof body.initialPrompt !== "string") {
+    return c.json({ error: "initialPrompt must be a string. Send the prompt text, or omit the field." }, 400);
+  }
 
   const parsedRepos = parseRepoBindings(body);
   if ("error" in parsedRepos) {
@@ -190,8 +226,9 @@ sessionsRouter.post("/", async (c) => {
   // Session row + repo bindings must land atomically — a failure between
   // the two statements would otherwise leave an orphaned agentSessions row
   // with no bindings (review finding on commit d0de1af3).
+  let created: typeof agentSessions.$inferSelect | undefined;
   await db.transaction(async (tx) => {
-    await tx
+    const inserted = await tx
       .insert(agentSessions)
       .values({
         id,
@@ -205,7 +242,11 @@ sessionsRouter.post("/", async (c) => {
         profile,
         createdAt: now,
         updatedAt: now,
-      });
+      })
+      // Returned rather than re-read: the `initialPrompt` submit below needs
+      // the full row to assemble the session meta.
+      .returning();
+    created = inserted[0];
 
     if (repos.length > 0) {
       // Compute target dirs once at bind time (spec decision 15): each binding
@@ -240,10 +281,33 @@ sessionsRouter.post("/", async (c) => {
     });
   }
 
+  // `initialPrompt` (wire `CreateSessionRequest`): queue the first turn once
+  // the row and its repo bindings are durable, through the same submit path
+  // `POST /api/sessions/:id/messages` uses. The prompt goes to the session's
+  // default thread — a session one statement old has no other.
+  //
+  // An enqueue failure does NOT fail the create. The session row exists and
+  // the response carries its id, so answering 500 here would leave the caller
+  // believing nothing was created while an orphan row stayed behind. The
+  // caller sees `runState: "idle"` instead of "working" and can send the
+  // prompt again through the messages route; the server logs the cause.
+  let queuedPrompt = false;
+  if (body.initialPrompt && created) {
+    try {
+      queuedPrompt = (await submitSessionPrompt(c.var.providers, created, body.initialPrompt)) !== null;
+    } catch (err) {
+      console.error(`session ${id}: initialPrompt enqueue failed:`, err);
+    }
+  }
+  // A session this new has no queue history, so the only submission it can
+  // hold is the one just enqueued.
+  const unsettled = queuedPrompt ? await engineStore.listUnsettledSubmissions(id) : [];
+
   const detail: CreateSessionResponse = {
     id,
     workspace: body.workspace,
     status: "active",
+    ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
     title: body.title,
     createdAt: now,
     updatedAt: now,
@@ -257,7 +321,7 @@ sessionsRouter.post("/", async (c) => {
 // ── Get ───────────────────────────────────────────────────────────────────
 
 sessionsRouter.get("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineStore } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
@@ -286,9 +350,11 @@ sessionsRouter.get("/:id", async (c) => {
   }
 
   const repos = await getSessionRepos(db, id);
+  // One session, so one submission read — the same derivation the list uses.
+  const unsettled = await engineStore.listUnsettledSubmissions(id);
 
   const detail: GetSessionResponse = {
-    ...rowToSummary(row),
+    ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
     messageCount: Number(n ?? 0),
     model,
     profile: row.profile,
@@ -300,7 +366,7 @@ sessionsRouter.get("/:id", async (c) => {
 // ── Patch (currently only `model`) ────────────────────────────────────────
 
 sessionsRouter.patch("/:id", async (c) => {
-  const { db, engineHost } = c.var.providers;
+  const { db, engineHost, engineStore } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
@@ -334,8 +400,9 @@ sessionsRouter.patch("/:id", async (c) => {
     .select({ n: count() })
     .from(messagesTable)
     .where(eq(messagesTable.sessionId, id));
+  const unsettled = await engineStore.listUnsettledSubmissions(id);
   const detail: GetSessionResponse = {
-    ...rowToSummary(row),
+    ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
     messageCount: Number(n ?? 0),
     model: engineSession.options.modelSpec ?? engineSession.options.model.id,
     profile: row.profile,

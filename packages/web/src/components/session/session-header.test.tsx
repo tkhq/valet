@@ -61,9 +61,11 @@ function baseSession(): SessionDetail {
     id: "sess-1",
     workspace: "acme/repo",
     status: "active",
+    runState: "idle",
     title: "Fix the bug",
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    lastActivityAt: Date.now(),
     messageCount: 3,
     profile: "headless",
   };

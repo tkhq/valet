@@ -50,13 +50,39 @@ export type SessionStatus = "active" | "hibernated" | "archived" | "deleted";
  * interactive sessions may request "full". */
 export type SandboxProfile = "headless" | "full";
 
+/**
+ * What a session is DOING right now. `SessionStatus` is the lifecycle of the
+ * row; this is the run state the Sessions surface reads at a glance.
+ *
+ * Exactly one value applies. When several are true at once, the highest of
+ * this order wins:
+ *
+ *   1. `needs_you` — a decision gate is pending. The session is blocked on a
+ *      person and stays blocked until somebody answers.
+ *   2. `working`   — a submission is in flight (queued, collecting, or running).
+ *   3. `failed`    — the last turn settled with an error.
+ *   4. `sleeping`  — the row status is `hibernated`.
+ *   5. `idle`      — nothing is queued and nothing needs a person.
+ *
+ * See `sessions/run-state.ts` for the derivation and for which signals the
+ * server can read without a per-session query.
+ */
+export type SessionRunState = "needs_you" | "working" | "failed" | "sleeping" | "idle";
+
 export interface SessionSummary {
   id: string;
   workspace: string;
   status: SessionStatus;
+  /** What the session is doing. See `SessionRunState` for the precedence. */
+  runState: SessionRunState;
   title?: string;
   createdAt: number;
   updatedAt: number;
+  /** Epoch ms of the last event in this session: the later of the row's
+   * `updatedAt` and the newest unsettled submission's `updatedAt`. Queue
+   * work does not touch the session row, so `updatedAt` alone reads stale
+   * during a long turn. */
+  lastActivityAt: number;
 }
 
 /** A single repo bound to a session (GitHub/repo integration plan, Task 2).

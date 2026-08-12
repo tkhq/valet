@@ -17,7 +17,12 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
 import { agentSessions, sessionRepos, imageSources, bakes } from "../schema/index.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
-import type { CreateSessionResponse, GetSessionResponse } from "../wire/types.js";
+import type {
+  CreateSessionResponse,
+  GetSessionResponse,
+  ListSessionsResponse,
+  ListThreadsResponse,
+} from "../wire/types.js";
 
 // Minimal fake builder for zero-config source tests.
 class FakeImageBuilder implements ImageBuilder {
@@ -318,6 +323,91 @@ describe("POST /api/sessions: repo bindings", () => {
           auth: "bogus",
         },
       }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ── initialPrompt (wire `CreateSessionRequest`) ──────────────────────────────
+//
+// `initialPrompt` says "the server enqueues immediately after creation": the
+// create handler runs the same `ensureDefaultThread()` + `submitPrompt()`
+// sequence `POST /api/sessions/:id/messages` uses. No LLM key is needed to
+// assert it — the submission is durable at admission, and with no
+// ANTHROPIC_API_KEY the claim loop releases the turn back to `queued` instead
+// of burning it on a keyless model call.
+
+describe("POST /api/sessions: initialPrompt", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  /** Every submission of the session, settled or not — so the assertion does
+   * not race a turn that a locally-configured API key let run to completion. */
+  async function submissionsFor(testApi: TestApi, sessionId: string) {
+    const { engineStore } = testApi.providers;
+    const [unsettled, settled] = await Promise.all([
+      engineStore.listUnsettledSubmissions(sessionId),
+      engineStore.listSettledSubmissionsBefore(sessionId, Date.now() + 1),
+    ]);
+    return [...unsettled, ...settled];
+  }
+
+  it("queues the prompt on the new session's default thread", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-initial-prompt-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, initialPrompt: "List the files in this repo" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+
+    const submissions = await submissionsFor(api, body.id);
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]?.content).toBe("List the files in this repo");
+
+    // The prompt landed on the session's default thread, not a stray one.
+    const threadsRes = await fetch(`${api.baseUrl}/api/sessions/${body.id}/threads`);
+    const threads = (await threadsRes.json()) as ListThreadsResponse;
+    expect(threads.threads.map((t) => t.id)).toContain(submissions[0]?.threadId);
+
+    // A queued turn reads `working`, both in the create response and the list.
+    expect(body.runState).toBe("working");
+    const listRes = await fetch(`${api.baseUrl}/api/sessions`);
+    const list = (await listRes.json()) as ListSessionsResponse;
+    expect(list.sessions.find((s) => s.id === body.id)?.runState).toBe("working");
+  });
+
+  it("queues nothing when initialPrompt is omitted", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-no-initial-prompt-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+
+    expect(await submissionsFor(api, body.id)).toHaveLength(0);
+    expect(body.runState).toBe("idle");
+  });
+
+  it("400s on a non-string initialPrompt", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-bad-initial-prompt-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, initialPrompt: 42 }),
     });
     expect(res.status).toBe(400);
   });

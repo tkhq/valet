@@ -8,9 +8,11 @@ const SUMMARY: SessionSummary = {
   id: "sess_1",
   workspace: "/work/one",
   status: "active",
+  runState: "idle",
   title: "First",
   createdAt: 1,
   updatedAt: 2,
+  lastActivityAt: 2,
 };
 
 const DETAIL: GetSessionResponse = {
