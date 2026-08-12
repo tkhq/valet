@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
 import type { OrgMemberWire, TeamSummary } from "@valet/api/wire";
 import {
@@ -24,7 +24,6 @@ import {
   useAddTeamMember,
   useCreateTeam,
   useDeleteTeam,
-  useEnsureTeamOrchestrator,
   useMe,
   useRemoveTeamMember,
   useSetTeamMemberRole,
@@ -141,16 +140,6 @@ function TeamRow({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteTeam = useDeleteTeam();
-  const ensureOrchestrator = useEnsureTeamOrchestrator();
-  const navigate = useNavigate();
-
-  function openOrchestrator() {
-    ensureOrchestrator.mutate(team.id, {
-      onSuccess: ({ sessionId }) => {
-        void navigate({ to: "/sessions/$sessionId", params: { sessionId } });
-      },
-    });
-  }
 
   return (
     <div className="py-3">
@@ -174,16 +163,14 @@ function TeamRow({
         <span className="hidden shrink-0 text-xs text-muted sm:block">
           Created {formatDate(team.createdAt)}
         </span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="shrink-0 gap-1.5"
-          disabled={ensureOrchestrator.isPending}
-          onClick={openOrchestrator}
-        >
-          <Bot className="h-3.5 w-3.5" aria-hidden />
-          {ensureOrchestrator.isPending ? "Opening…" : "Assistant"}
+        {/* A cross-link to the working surface, not a second door: `/chat`
+            owns the get-or-create, so this creates nothing and needs no
+            pending or error state of its own. */}
+        <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
+          <Link to="/chat" search={{ team: team.id }}>
+            <Bot className="h-3.5 w-3.5" aria-hidden />
+            Assistant
+          </Link>
         </Button>
         {canMutate && (
           <DropdownMenu>
@@ -209,17 +196,13 @@ function TeamRow({
         )}
       </div>
 
-      {ensureOrchestrator.error != null && (
-        <p className="mt-1 text-xs text-danger-500">{errorText(ensureOrchestrator.error)}</p>
-      )}
-
       {open && <TeamMembers teamId={team.id} teamName={team.name} orgMembers={orgMembers} canMutate={canMutate} />}
 
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
         title={`Delete ${team.name}?`}
-        description="This removes the team and its membership. Org members themselves are not affected."
+        description="This deletes the team, its membership, and its skills and skill sources. If the team still owns workflows, the delete fails — move or delete those first. Org members themselves are not affected."
         confirmLabel="Delete team"
         pendingLabel="Deleting…"
         pending={deleteTeam.isPending}

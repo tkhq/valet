@@ -4,7 +4,8 @@ import { Check, ClipboardCopy, Moon, Trash2 } from "lucide-react";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
 import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
-import { useMe, useOrg } from "~/api/settings";
+import { useMe, useOrg, useTeams } from "~/api/settings";
+import { parseTeamOrchestratorId } from "~/lib/orchestrator-id";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
@@ -66,11 +67,18 @@ export function SessionHeader({
   const me = useMe();
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
+  const teams = useTeams();
   const [pauseError, setPauseError] = useState<string | null>(null);
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
 
   async function destroy() {
-    if (!confirm(`Delete session and tear down its sandbox?`)) return;
+    // A team's assistant is shared, so the prompt names what everyone else
+    // loses rather than describing a private session.
+    const prompt =
+      teamId !== null
+        ? `Delete ${team?.name ?? "this team"}'s assistant? Everyone on the team loses this conversation and its threads.`
+        : "Delete session and tear down its sandbox?";
+    if (!confirm(prompt)) return;
     try {
       await del.mutateAsync(session.id);
       navigate({ to: "/" });
@@ -121,9 +129,26 @@ export function SessionHeader({
   // The orchestrator's title card carries the orchestrator's chosen name
   // (e.g. "Aurora") — the top-nav logo stays "Valet", so this is where
   // the assistant's identity lives.
-  const isOrchestrator = session.id.startsWith("orchestrator:");
+  // A team's assistant is titled with the TEAM's name. Narrowing this
+  // matters: `orchInfo` is the viewer's OWN assistant, so a bare
+  // `startsWith("orchestrator:")` test titled every team assistant with
+  // the viewer's personal assistant name — wrong for everyone but the
+  // one member whose name it borrowed.
+  const teamId = parseTeamOrchestratorId(session.id);
+  const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
+  const isOwnOrchestrator = teamId === null && session.id.startsWith("orchestrator:");
   const title =
-    (isOrchestrator ? orchInfo.data?.name : undefined) || session.title || "Untitled session";
+    (teamId !== null ? team?.name : undefined) ||
+    (isOwnOrchestrator ? orchInfo.data?.name : undefined) ||
+    session.title ||
+    "Untitled session";
+
+  // Lifecycle controls (model, pause, delete) act on a session the whole
+  // team shares, so they are a team-admin power — the API enforces the
+  // same rule; this only hides controls that would 404. Personal sessions
+  // are unaffected.
+  const canAdminister =
+    teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   return (
     <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
@@ -132,6 +157,17 @@ export function SessionHeader({
           <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
             {title}
           </span>
+          {/* Deliberately NOT `OwnerBadge`. That badge names the owning team
+              and links to its assistant; here the title already IS the team
+              name, and its assistant is the page you are on — so it would
+              render "Platform [Platform]" pointing at itself. This badge
+              answers a different question: whether the conversation you are
+              reading is shared. */}
+          {teamId !== null && (
+            <Badge variant="accent" className="shrink-0">
+              Team
+            </Badge>
+          )}
           {/* No `uppercase` on the badge — workspace names are
               case-sensitive paths; shouting them in caps misrepresents
               them. */}
@@ -144,15 +180,17 @@ export function SessionHeader({
       </Tooltip>
       <div className="ml-auto flex items-center gap-1.5">
         {pauseError && <span className="text-xs text-danger-500">{pauseError}</span>}
-        <Tooltip content="Session-default model. Threads inherit unless overridden.">
-          <span>
-            <ModelPicker
-              currentId={session.model}
-              onSelect={(id) => setModel.mutate(id)}
-              disabled={setModel.isPending}
-            />
-          </span>
-        </Tooltip>
+        {canAdminister && (
+          <Tooltip content="Session-default model. Threads inherit unless overridden.">
+            <span>
+              <ModelPicker
+                currentId={session.model}
+                onSelect={(id) => setModel.mutate(id)}
+                disabled={setModel.isPending}
+              />
+            </span>
+          </Tooltip>
+        )}
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
         <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} />
@@ -170,28 +208,34 @@ export function SessionHeader({
             )}
           </Button>
         </Tooltip>
-        <Tooltip content="Pause session — sandbox sleeps until the next message">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={pauseSession}
-            disabled={sandbox?.state !== "ready" || pause.isPending}
-            aria-label="Pause session"
-          >
-            {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
-          </Button>
-        </Tooltip>
-        <Tooltip content="Delete session">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={destroy}
-            disabled={del.isPending}
-            aria-label="Delete session"
-          >
-            {del.isPending ? <Spinner size={14} /> : <Trash2 className="h-4 w-4" />}
-          </Button>
-        </Tooltip>
+        {canAdminister && (
+          <>
+            <Tooltip content="Pause session — sandbox sleeps until the next message">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={pauseSession}
+                disabled={sandbox?.state !== "ready" || pause.isPending}
+                aria-label="Pause session"
+              >
+                {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
+              </Button>
+            </Tooltip>
+            <Tooltip
+              content={teamId !== null ? "Delete this team's assistant" : "Delete session"}
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={destroy}
+                disabled={del.isPending}
+                aria-label="Delete session"
+              >
+                {del.isPending ? <Spinner size={14} /> : <Trash2 className="h-4 w-4" />}
+              </Button>
+            </Tooltip>
+          </>
+        )}
       </div>
     </header>
   );

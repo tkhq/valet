@@ -11,7 +11,7 @@
  * Task 11 extends the Members describe block with the invite dialog + the
  * pending-invites list, mocking `~/api/invites` the same way.
  */
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -36,6 +36,30 @@ const ensureOrchestratorMutate = vi.fn();
 
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
+
+/** Renders a real anchor so `getByRole("link")` and href assertions work
+ * without mounting a router. */
+function RouterLinkStub({
+  to,
+  search,
+  children,
+  className,
+}: {
+  to: string;
+  search?: Record<string, string | undefined>;
+  children: ReactNode;
+  className?: string;
+}) {
+  const params = Object.entries(search ?? {}).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined,
+  );
+  const qs = params.length > 0 ? `?${new URLSearchParams(params).toString()}` : "";
+  return (
+    <a href={`${to}${qs}`} className={className}>
+      {children}
+    </a>
+  );
+}
 
 let orgData: {
   id: string;
@@ -89,6 +113,7 @@ let invitesData: {
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
+  Link: RouterLinkStub,
 }));
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for

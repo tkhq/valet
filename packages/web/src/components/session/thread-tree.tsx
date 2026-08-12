@@ -32,6 +32,10 @@ function loadStoredBucket(): ThreadOriginBucket {
 const CHILDREN_POLL_MS = 30_000;
 const CHILDREN_INVALIDATE_DEBOUNCE_MS = 500;
 
+/** Stable no-op so the live-update effect doesn't re-subscribe each render
+ * when children are turned off. */
+const NO_REFETCH = () => {};
+
 /** Pure: groups children by the thread that spawned them. */
 export function groupChildrenByThread(
   children: OrchestratorChildSummary[],
@@ -63,9 +67,11 @@ export function childStatusDotClassName(status: OrchestratorChildSummary["status
  * treatment (moss left rail + soft ink wash), and the full title is
  * recoverable via hover tooltip when truncated.
  */
-export function ThreadTree() {
+export function ThreadTree({ sessionId: override, showChildren = true }: ThreadTreeProps = {}) {
   const info = useOrchestratorInfo();
-  const sessionId = info.data?.sessionId;
+  // No `override` means the caller's own assistant — the original and still
+  // the default behavior.
+  const sessionId = override ?? info.data?.sessionId;
 
   if (!sessionId) {
     return (
@@ -75,13 +81,31 @@ export function ThreadTree() {
     );
   }
 
-  return <ThreadTreeInner sessionId={sessionId} />;
+  return <ThreadTreeInner sessionId={sessionId} showChildren={showChildren} />;
 }
 
-function ThreadTreeInner({ sessionId }: { sessionId: string }) {
+export interface ThreadTreeProps {
+  /** Whose threads to show. Defaults to the caller's own assistant. */
+  sessionId?: string;
+  /**
+   * Nest child sessions under the thread that spawned them. Must be false
+   * for any session other than the caller's own assistant:
+   * `GET /api/orchestrator/children` resolves the CALLER's orchestrator
+   * rather than `sessionId`, so leaving it on would nest the viewer's
+   * personal children under someone else's threads.
+   */
+  showChildren?: boolean;
+}
+
+function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
   const threadsQ = useThreads(sessionId);
-  const childrenQ = useOrchestratorChildren({ refetchInterval: CHILDREN_POLL_MS });
-  useInvalidateChildrenOnQueueState(sessionId, childrenQ.refetch);
+  const childrenQ = useOrchestratorChildren({
+    refetchInterval: CHILDREN_POLL_MS,
+    enabled: showChildren,
+  });
+  // `refetch()` fires even on a disabled query, so gate the live-update
+  // hook too rather than relying on `enabled` alone.
+  useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
   const createThread = useCreateThread(sessionId);
   const navigate = useNavigate({ from: "/chat" });
 
@@ -92,7 +116,7 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
     [threadsQ.data],
   );
   const activeThreadId = search.thread ?? threads[0]?.id;
-  const grouped = groupChildrenByThread(childrenQ.data?.children ?? []);
+  const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
 
   const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
   const [query, setQuery] = useState("");

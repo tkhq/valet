@@ -8,6 +8,7 @@ import { IdentityHeader } from "~/components/assistant/identity-header";
 import { IdentityStep } from "~/components/assistant/identity-step";
 import { MemoryCard } from "~/components/assistant/memory-card";
 import { UsageCard } from "~/components/assistant/usage-card";
+import { TeamsCard } from "~/components/assistant/teams-card";
 import { Spinner } from "~/components/primitives";
 
 /**
@@ -76,6 +77,7 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
           </div>
           <MemoryCard />
           <UsageCard />
+          <TeamsCard />
         </div>
 
         <ActivityStrip

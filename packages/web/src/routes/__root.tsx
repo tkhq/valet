@@ -3,7 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
-import { ThreadTree } from "~/components/session/thread-tree";
+import { AssistantRail } from "~/components/session/assistant-rail";
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -53,7 +53,7 @@ function NotFound() {
  *   used to cover this "everything else" bucket is dead — deleted.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/chat") return <ThreadTree />;
+  if (pathname === "/chat") return <AssistantRail />;
   return null;
 }
 
