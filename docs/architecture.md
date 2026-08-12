@@ -346,8 +346,10 @@ Each user's orchestrator is a full engine session — same threads, queue, and
 gates — with a persona, memory tools (`mem_*` over the `memory_files` tree),
 a daily journal, and a `childSpawner` for launching child coding sessions
 (depth-limited to 1). It runs sandbox-less. An **attention router** turns
-stuck submissions and child decision gates into notifications, delivered
-in-app and DM'd over linked channels.
+stuck submissions and pending decision gates into notifications, delivered
+in-app and DM'd over linked channels. A gate goes to the owner who can answer
+it: the parent's owner for a child session, the session's own owner for every
+other session.
 
 ## Workflows
 
