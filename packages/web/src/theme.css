@@ -80,6 +80,17 @@
   --ink-wash-strong: oklch(20.5% 0.006 247 / 0.1);
   --moss-wash: oklch(53.5% 0.190 264 / 0.1);
   --moss-wash-strong: oklch(53.5% 0.190 264 / 0.18);
+
+  /* Status washes. These exist for the same reason as the washes above,
+     and they were added because the trap caught us: `badge.tsx` shipped
+     `bg-success-500/15` and `bg-danger-500/15`, whose base scales are raw
+     `oklch(...)` strings in the Tailwind config. Tailwind emitted NO rule
+     for either class, so both badges rendered as bare coloured text with
+     no pill at all. Alpha belongs in the token, never in a slash modifier. */
+  --success-wash: oklch(65.0% 0.150 145 / 0.15);
+  --danger-wash: oklch(60.0% 0.220 27 / 0.15);
+  --warning-wash: oklch(70.0% 0.140 75 / 0.18);
+  --warning-fg: oklch(45.0% 0.110 75);
 }
 
 /* OS-level dark preference — only applies when there's no explicit
@@ -97,6 +108,11 @@
     --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
     --moss-wash: oklch(69.0% 0.150 264 / 0.14);
     --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
+
+    --success-wash: oklch(72.0% 0.150 145 / 0.20);
+    --danger-wash: oklch(68.0% 0.200 27 / 0.20);
+    --warning-wash: oklch(80.0% 0.130 75 / 0.20);
+    --warning-fg: oklch(85.0% 0.110 75);
   }
 }
 
@@ -113,6 +129,11 @@
   --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
   --moss-wash: oklch(69.0% 0.150 264 / 0.14);
   --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
+
+  --success-wash: oklch(72.0% 0.150 145 / 0.20);
+  --danger-wash: oklch(68.0% 0.200 27 / 0.20);
+  --warning-wash: oklch(80.0% 0.130 75 / 0.20);
+  --warning-fg: oklch(85.0% 0.110 75);
 }
 
 :root[data-theme="light"] {
@@ -127,6 +148,11 @@
   --ink-wash-strong: oklch(20.5% 0.006 247 / 0.1);
   --moss-wash: oklch(53.5% 0.190 264 / 0.1);
   --moss-wash-strong: oklch(53.5% 0.190 264 / 0.18);
+
+  --success-wash: oklch(65.0% 0.150 145 / 0.15);
+  --danger-wash: oklch(60.0% 0.220 27 / 0.15);
+  --warning-wash: oklch(70.0% 0.140 75 / 0.18);
+  --warning-fg: oklch(45.0% 0.110 75);
 }
 
 /**

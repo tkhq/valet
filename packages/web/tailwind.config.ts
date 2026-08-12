@@ -85,6 +85,13 @@ export default {
         "ink-wash-strong": "var(--ink-wash-strong)",
         "moss-wash": "var(--moss-wash)",
         "moss-wash-strong": "var(--moss-wash-strong)",
+        // Status washes. `success`/`danger` above are raw `oklch(...)`
+        // strings, so `bg-success-500/15` emitted no rule at all and those
+        // badges rendered with no background. Alpha lives in the token.
+        "success-wash": "var(--success-wash)",
+        "danger-wash": "var(--danger-wash)",
+        "warning-wash": "var(--warning-wash)",
+        "warning-fg": "var(--warning-fg)",
       },
       fontFamily: {
         sans: [
