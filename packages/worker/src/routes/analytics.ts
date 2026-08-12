@@ -340,6 +340,7 @@ const EXPECTED_INTERVAL_MS: Record<string, number> = {
   cancel_cleanup: 60_000,
   spawned_session_cleanup: 60_000,
   approval_resume: 60_000,
+  stale_executions: 60_000,
   github_reconcile: 60_000,
   orchestrator_reconcile: 60_000,
   credential_refresh: 300_000,

@@ -24,6 +24,10 @@ const emitWorkflowRunSpansMock = vi.fn();
 vi.mock('../lib/workflow-tracing.js', () => ({
   emitWorkflowRunSpans: (...args: unknown[]) => emitWorkflowRunSpansMock(...args),
 }));
+const finalizeAbandonedExecutionMock = vi.fn();
+vi.mock('./execution-status.js', () => ({
+  finalizeAbandonedExecution: (...args: unknown[]) => finalizeAbandonedExecutionMock(...args),
+}));
 
 import { ValetWorkflowInterpreter } from './interpreter.js';
 import type { Env } from '../env.js';
@@ -67,6 +71,7 @@ describe('ValetWorkflowInterpreter.run', () => {
   beforeEach(() => {
     runWorkflowDagMock.mockReset().mockResolvedValue(RESULT);
     emitWorkflowRunSpansMock.mockReset().mockResolvedValue(1);
+    finalizeAbandonedExecutionMock.mockReset().mockResolvedValue(true);
   });
 
   function make(env: Partial<Env>): ValetWorkflowInterpreter {
@@ -97,5 +102,50 @@ describe('ValetWorkflowInterpreter.run', () => {
     const { step } = makeStep();
     const result = await make({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector' }).run(makeEvent() as never, step as never);
     expect(result).toBe(RESULT);
+  });
+
+  // ── Abandoned-execution finalization ──────────────────────────────────
+  // A throw escaping the wave loop errors the Cloudflare Workflow instance,
+  // and nothing else ever writes a terminal status for the row. Left alone
+  // it sits in an ACTIVE status forever, holding one of the user's ten
+  // concurrency slots for good.
+
+  it('finalizes the execution row when the wave loop throws', async () => {
+    const boom = new Error('step exhausted its retries');
+    runWorkflowDagMock.mockRejectedValue(boom);
+    const { step } = makeStep();
+    await expect(make({ DB: {} } as never).run(makeEvent() as never, step as never)).rejects.toThrow(boom);
+    expect(finalizeAbandonedExecutionMock).toHaveBeenCalledOnce();
+    const [, executionId, outcome] = finalizeAbandonedExecutionMock.mock.calls[0]!;
+    expect(executionId).toBe('exec-42');
+    expect(outcome).toMatchObject({ status: 'failed' });
+    expect(String((outcome as { error?: string }).error)).toContain('step exhausted its retries');
+  });
+
+  it('rethrows the original error even when finalization fails', async () => {
+    const boom = new Error('the real failure');
+    runWorkflowDagMock.mockRejectedValue(boom);
+    // If D1 is the thing that's broken, the finalize write fails too. The
+    // sweep is the backstop; what must not happen is the recovery path
+    // masking the original error and making the run undiagnosable.
+    finalizeAbandonedExecutionMock.mockRejectedValue(new Error('d1 unavailable'));
+    const { step } = makeStep();
+    await expect(make({ DB: {} } as never).run(makeEvent() as never, step as never)).rejects.toThrow('the real failure');
+  });
+
+  it('does not finalize when the run completes normally', async () => {
+    const { step } = makeStep();
+    await make({ DB: {} } as never).run(makeEvent() as never, step as never);
+    expect(finalizeAbandonedExecutionMock).not.toHaveBeenCalled();
+  });
+
+  // The runtime returns a result rather than throwing for ordinary node
+  // failures — those already persist their own terminal status, so
+  // finalizing here would overwrite a real outcome.
+  it('does not finalize when the run returns a failed result', async () => {
+    runWorkflowDagMock.mockResolvedValue({ ...RESULT, status: 'failed' });
+    const { step } = makeStep();
+    await make({ DB: {} } as never).run(makeEvent() as never, step as never);
+    expect(finalizeAbandonedExecutionMock).not.toHaveBeenCalled();
   });
 });

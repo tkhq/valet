@@ -57,7 +57,7 @@ export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Pro
     step: args.step,
     executionId: args.params.executionId,
     status: 'waiting_approval',
-    stepKey: `node:${args.node.id}:enter:waiting_approval`,
+    stepKey: `node:${args.node.id}${iSuffix}:enter:waiting_approval`,
     allowedPrior: ['running'],
   });
 
@@ -109,7 +109,7 @@ export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Pro
       step: args.step,
       executionId: args.params.executionId,
       status: 'running',
-      stepKey: `node:${args.node.id}:exit:running`,
+      stepKey: `node:${args.node.id}${iSuffix}:exit:running`,
       allowedPrior: ['waiting_approval'],
     });
     return { approved: true, respondedAt: waitStartedAt };
@@ -121,7 +121,7 @@ export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Pro
       step: args.step,
       executionId: args.params.executionId,
       status: 'running',
-      stepKey: `node:${args.node.id}:exit:running`,
+      stepKey: `node:${args.node.id}${iSuffix}:exit:running`,
       allowedPrior: ['waiting_approval'],
     });
     const onDeny = args.node.onDeny ?? 'fail';
@@ -130,9 +130,12 @@ export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Pro
   }
 
   // try/finally guarantees the exit transition fires even if the wait
-  // throws (timeout error, denial throw, sendEvent race). Without this,
-  // a thrown approval would leave the execution row stuck in
-  // waiting_approval and the runtime's terminal write would no-op.
+  // throws (timeout error, denial throw, sendEvent race), so the row
+  // reports 'running' again rather than lingering in waiting_approval.
+  // The runtime's terminal write now accepts any active prior status, so
+  // a missed exit no longer strands the row — this keeps the status
+  // accurate while it runs, rather than being the only thing standing
+  // between a thrown approval and a leaked concurrency slot.
   let outcome: Awaited<ReturnType<typeof waitForApprovalEvent>>;
   try {
     outcome = await waitForApprovalEvent({
@@ -149,7 +152,7 @@ export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Pro
       step: args.step,
       executionId: args.params.executionId,
       status: 'running',
-      stepKey: `node:${args.node.id}:exit:running`,
+      stepKey: `node:${args.node.id}${iSuffix}:exit:running`,
       allowedPrior: ['waiting_approval'],
     });
   }

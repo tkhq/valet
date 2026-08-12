@@ -24,6 +24,7 @@ import type {
   WorkflowNodeOutput,
 } from '@valet/shared';
 import type { Env } from '../env.js';
+import { ACTIVE_EXECUTION_STATUSES } from '../lib/db/constants.js';
 import {
   parseExpression,
   evaluateExpression,
@@ -229,13 +230,23 @@ export async function runDag(
     // node produced non-deterministic output. The CAS guard provides
     // idempotency regardless.
     stepKey: 'terminal',
-    // 'cancelled' final status is allowed to transition from
-    // 'cancelling' too (a concurrent cancel API call may have already
-    // moved the row before the wave loop noticed). 'completed' and
-    // 'failed' only land from 'running' — if the row is in waiting_*
-    // or cancelling, a competing cancel won the race and we should not
-    // overwrite that intent.
-    allowedPrior: finalStatus === 'cancelled' ? ['running', 'cancelling'] : ['running'],
+    // Any status the concurrency cap counts is a valid prior here. The
+    // run is over; the row must reach a terminal state or it holds one
+    // of the user's execution slots forever, and nothing else in the
+    // system finalizes an execution.
+    //
+    // This deliberately includes waiting_approval/waiting_time. Being
+    // parked is not a cancel signal — the cancel path writes
+    // 'cancelling' — so restricting this to 'running' silently dropped
+    // the terminal write for any run that reached the end while its row
+    // was still parked, e.g. an approval whose resume never restored
+    // 'running'. Those rows then leaked a slot permanently.
+    //
+    // 'cancelling'/'cancelled' stay excluded so a competing cancel wins,
+    // except when we ourselves finished as 'cancelled'.
+    allowedPrior: finalStatus === 'cancelled'
+      ? [...ACTIVE_EXECUTION_STATUSES, 'cancelling']
+      : [...ACTIVE_EXECUTION_STATUSES],
     outputs: stopOutputs,
     ...(failures.length > 0 ? { error: failures[0]!.message } : {}),
   });

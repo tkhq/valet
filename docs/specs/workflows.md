@@ -241,9 +241,25 @@ RUNNING ──────────────> COMPLETED          (all node
 WAITING_APPROVAL ─────> RUNNING            (approve/deny → sendEvent → executor try/finally exits to RUNNING)
 WAITING_TIME     ─────> RUNNING            (step.sleep elapsed)
 RUNNING          ─────> CANCELLING ──────> CANCELLED   (cancel API → instance.terminate → cleanup)
+
+<any active>     ─────> FAILED             (throw escapes the wave loop → interpreter finalizes, then rethrows)
+                 ─────> COMPLETED / FAILED / CANCELLED  (stale-execution sweep, mirroring the dead instance's own state)
 ```
 
+The terminal write accepts **any** active status as its prior, not just `running`. A run that reaches the end while its row is parked in `waiting_approval` or `waiting_time` must still finalize — being parked is not a cancel signal, and a terminal write that no-ops leaves the row holding a concurrency slot with nothing left to release it.
+
 Terminal states: `completed`, `failed`, `cancelled`. The `cleanupCompletedAt` column on the execution row marks the cancel pipeline as fully done — see [Cancellation](#cancellation).
+
+### Slot Reclamation
+
+Only two places write a terminal status during normal operation: the runtime, from inside the live Cloudflare Workflow instance, and the cancel pipeline. Neither can act once the instance is gone — evicted, killed by a redeploy mid-run, or errored while D1 was unreachable — so two mechanisms cover the gap:
+
+1. **The interpreter's catch.** A throw escaping the wave loop errors the instance permanently, so `run()` finalizes the row as `failed` before rethrowing. The original error is always rethrown unchanged; a failure to finalize is logged rather than raised, so a broken D1 cannot mask the real error.
+2. **The `stale_executions` cron sweep** (`workflows/stale-execution-sweep.ts`), the backstop for instances that never get to run code again. It selects active rows older than a 10-minute floor — long enough to clear the window between the row insert and `WORKFLOW_INTERPRETER.create` — oldest first, and asks the Workflows binding for each instance's state.
+
+   The sweep **fails closed**. It finalizes only on a terminal instance state (`complete` → `completed`, `terminated` → `cancelled`, `errored` → `failed`) or an error that positively identifies the instance as missing (`code 1001`). Any other probe failure leaves the row for the next tick and logs the message verbatim. Elapsed time only bounds the query; the instance decides. This matters because a wrong verdict is unrecoverable — the row would read terminal while the instance kept running, its own terminal write would no-op against the CAS, and the spawned-session sweep would tear down its sandboxes.
+
+   This is also the only mechanism that can reclaim an execution whose workflow row was deleted: `workflow_id` is `ON DELETE SET NULL` and the cancel endpoint resolves through it, so those rows 404 for users and operators alike.
 
 **Parallel-sibling note:** when multiple waiting nodes (e.g. several approval gates) run concurrently under one execution, the row's `status` only reflects the most-recent transition. Per-node status is the source of truth (see `workflow_execution_nodes` trace rows and the `workflow_approvals` table). The stuck-approval sweep filters on `executions.status IN active_statuses` so a parallel race can't hide a missing `sendEvent`.
 
@@ -255,6 +271,8 @@ Active executions (`pending`, `running`, `waiting_approval`, `waiting_time`) are
 - **Global limit:** 50 (`GLOBAL_EXECUTION_CONCURRENCY_CAP`)
 
 `cancelling` is intentionally excluded from the active set so a user who just cancelled can immediately start new work — the cron sweep finalizes asynchronously.
+
+The count is per user across **all** their workflows and is not scoped to one workflow, one trigger type, or production runs: draft test runs and executions started by schedules and webhook triggers the user owns all consume the same allowance. `GET /api/executions` filters by a single status and a single `workflowId`, so a per-workflow view of the executions page routinely shows fewer active runs than the cap is counting.
 
 ## API Contract
 
@@ -330,7 +348,7 @@ The executions tab is a read-only execution inspector modeled after n8n's execut
 3. Service inserts an execution row in `pending` with `definitionSnapshot` set to the published definition.
 4. `env.WORKFLOW_INTERPRETER.create({ id: executionId, params })` spawns the Cloudflare Workflow instance.
 5. The interpreter's `run()` enters the wave loop: `setExecutionStatus('running')` → repeat `pickRunnable` → execute → settle → write trace rows.
-6. Terminal status (`completed` / `failed` / `cancelled`) is written by the runtime with an `allowedPrior` CAS so a concurrent cancel doesn't get overwritten.
+6. Terminal status (`completed` / `failed` / `cancelled`) is written by the runtime with an `allowedPrior` CAS covering every active status, so the row finalizes even if it was parked in `waiting_*`, while a concurrent cancel still wins. If a throw escapes the wave loop instead, the interpreter finalizes the row as `failed` and rethrows; the `stale_executions` sweep covers instances that die without running either path.
 7. For `completed` and `failed` executions whose terminal CAS lands, the runtime best-effort terminates sessions recorded in `workflow_spawned_sessions` with reason `workflow_completed` or `workflow_failed` and deletes rows for successful terminations. Cleanup failures are logged and do not change the workflow result; remaining rows are retried by the scheduled terminal-session sweep.
 
 ### Webhook Trigger (forward-facing path)
@@ -486,6 +504,7 @@ The path-based `/webhooks/:path` endpoint constant-time-compares against `config
 - dag/v1 runtime on Cloudflare Workflows with the full node-type set (llm / tool / set / if / wait / approval / foreach / orchestrator / session / stop)
 - Approval gates via `workflow_approvals` + `step.waitForEvent`; flat and nested approve/deny endpoints
 - Cancellation pipeline with `cleanup_completed_at` gate, cron sweeps for stuck `cancelling` rows and stuck approvals
+- Concurrency-slot reclamation: interpreter-side finalization on an escaping throw plus the fail-closed `stale_executions` sweep
 - Per-execution trace rows in `workflow_execution_nodes` with retention TTL
 - Client UI: workflow detail with executions + pending approvals, executions list with inline approval action, trigger CRUD with one-shot token reveal
 
