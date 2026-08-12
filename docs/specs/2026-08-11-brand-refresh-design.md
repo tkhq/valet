@@ -51,10 +51,18 @@ mascot illustration and wordmark, restyle everything else around it.
   pending" — the presence dot, a couple of status badges), not part of the
   brand identity, and stays that way.
 - The `display` font family (headings) drops the serif `Newsreader` stack
-  for the same sans stack as body text. This changes nothing about what
-  actually renders today — `Newsreader` was never loaded via `@font-face`
-  or a stylesheet link, so headings were already silently falling back to
-  a generic system serif. The config now says what was already true.
+  for the same sans stack as body text. **Correction (2026-08-12): this
+  section originally claimed Newsreader was never loaded and the change was
+  a no-op — that was wrong.** It WAS loaded, via `@import "@fontsource/..."`
+  in `styles/globals.css` (missed because the verification grep ran from
+  the wrong working directory and silently matched nothing). Every
+  `font-display` heading across ~25 files — page titles, section headers,
+  the presence mark, memory docs — actually rendered in Newsreader serif,
+  and this change genuinely flattened all of them to sans. It was verified
+  live afterward (screenshots across Events/Workflows/Teams all show clean
+  sans headings, no regressions), so the *result* stands, but the original
+  claim about impact was inaccurate. The now-unused `@fontsource/newsreader`
+  import and dependency were removed in the same follow-up pass.
 - Hover/press "wash" colors (`--ink-wash`, `--moss-wash` and their
   `-strong` variants) are rebuilt with native `oklch(L C H / alpha)` syntax
   at the exact L/C/H of the token they wash, instead of a hand-converted

@@ -1,6 +1,25 @@
+import { isValidElement, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "~/lib/cn";
+import { CodeBlock } from "./code-block";
+
+/** react-markdown wraps a fenced block's highlighted `code` in `pre`, with
+ * the language on the inner element's `className` as `language-xxx`
+ * (remark's standard convention) — pull both out to hand off to
+ * `CodeBlock`. Inline code (no fence) never reaches this override; it stays
+ * a bare `<code>`, styled by the `[&_:not(pre)>code]` rules below. */
+function codeText(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(codeText).join("");
+  if (isValidElement<{ children?: ReactNode }>(children)) return codeText(children.props.children);
+  return "";
+}
+
+function languageFromClassName(className: unknown): string | undefined {
+  if (typeof className !== "string") return undefined;
+  return /language-(\S+)/.exec(className)?.[1];
+}
 
 /**
  * Markdown rendering for chat message text. Wraps `react-markdown` + GFM
@@ -31,16 +50,10 @@ export function Markdown({ children, className }: { children: string; className?
         "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5",
         "[&_:not(pre)>code]:text-[0.85em] [&_:not(pre)>code]:font-normal",
         "prose-code:before:content-none prose-code:after:content-none",
-        // Code blocks — outlined card; horizontal scroll for long lines.
-        // `prose-pre:text-ink` (+ dark variant) — without an explicit color
-        // prose defaults `pre code` to `--tw-prose-pre-code` which is a very
-        // light grey on `bg-neutral-100`, i.e. invisible in light mode.
-        "prose-pre:bg-neutral-100 dark:prose-pre:bg-neutral-900",
-        "prose-pre:text-ink dark:prose-pre:text-ink",
-        "[&_pre_code]:!text-ink [&_pre_code]:!bg-transparent",
-        "prose-pre:border prose-pre:border-[--border]",
-        "prose-pre:rounded-md prose-pre:px-3 prose-pre:py-2",
-        "prose-pre:text-xs prose-pre:my-2",
+        // Fenced code blocks render through `CodeBlock` (see the `pre`
+        // component override below), which owns its own styling in
+        // `styles/code-block.css` — no `prose-pre:*` utilities needed here.
+        "[&_.code-block]:my-2",
         // Links — accent color; underline only on hover. Open in new tab.
         "prose-a:text-accent-600 dark:prose-a:text-accent-100",
         "prose-a:no-underline hover:prose-a:underline",
@@ -68,6 +81,21 @@ export function Markdown({ children, className }: { children: string; className?
               {children}
             </a>
           ),
+          // A fenced block always arrives as `pre > code`; `children` here
+          // is that inner `code` element (react-markdown's default code
+          // renderer output — not separately overridden), carrying the
+          // fence's language on its className and the source as its text.
+          pre: ({ children }) => {
+            const codeEl = isValidElement<{ className?: string; children?: ReactNode }>(children)
+              ? children
+              : null;
+            return (
+              <CodeBlock
+                code={codeText(codeEl?.props.children ?? children)}
+                language={languageFromClassName(codeEl?.props.className)}
+              />
+            );
+          },
         }}
       >
         {children}
