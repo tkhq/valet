@@ -108,3 +108,150 @@ describe("GET /api/sessions/:id — team view access", () => {
     expect(res.status).toBe(404);
   });
 });
+
+/**
+ * The lifecycle routes on a team-owned session: `PATCH /api/sessions/:id`
+ * (model), `POST /api/sessions/:id/pause`, `DELETE /api/sessions/:id`. They
+ * follow team authority (`canAdministerSession`), not the `user_id` that
+ * `ensureOrchestratorSession` stamped from the first member to open the
+ * team's assistant.
+ *
+ * Two identities do the work, both seeded by `bootTestApi`: the default
+ * `local-user` is an org admin, and `test-member` is a plain org member
+ * selected with the `x-valet-test-user-id` impersonation header.
+ *
+ * `pause` gets no further than the hibernation-capability check here — the
+ * harness runs a `VirtualSandboxProvider`, whose `capabilities().hibernation`
+ * is false. A 409 from it therefore means the caller passed authorization,
+ * which is what these tests measure. `PATCH` with an empty body reads the
+ * same way: 400 `model is required` is the guard directly after the
+ * authorization check.
+ */
+describe("team-owned session lifecycle routes", () => {
+  const MEMBER_HEADERS = { "x-valet-test-user-id": "test-member" };
+
+  /** Creates `team_1` in the local org and puts `test-member` on it. */
+  async function seedTeam(target: TestApi, memberRole: "admin" | "member"): Promise<void> {
+    await target.providers.db
+      .insert(teams)
+      .values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await target.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: memberRole });
+  }
+
+  /** Opens the team's assistant as `headers`' identity. That call stamps
+   * `agent_sessions.userId` with the caller — the first-opener effect. */
+  async function openTeamAssistant(target: TestApi, headers: Record<string, string>): Promise<string> {
+    const res = await fetch(`${target.baseUrl}/api/teams/team_1/orchestrator`, { method: "POST", headers });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EnsureOrchestratorResponse;
+    return body.sessionId;
+  }
+
+  async function statusOf(target: TestApi, sessionId: string): Promise<string | undefined> {
+    const rows = await target.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
+    return rows[0]?.status;
+  }
+
+  it("refuses a plain member the pause, even the member whose own first visit stamped the row", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "member");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+    const rows = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
+    expect(rows[0]?.userId).toBe("test-member");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(404);
+    expect(await statusOf(api, sessionId)).toBe("active");
+  });
+
+  it("refuses a plain member the delete of an agent the whole team shares", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "member");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, { method: "DELETE", headers: MEMBER_HEADERS });
+    expect(res.status).toBe(404);
+    expect(await statusOf(api, sessionId)).toBe("active");
+  });
+
+  it("refuses a plain member the model change", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "member");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { ...MEMBER_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "anthropic/claude-haiku-4-5" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("lets a team admin reach the pause of a session another member's visit stamped", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "admin");
+    // The org admin opens it first, so the row carries `local-user`.
+    const sessionId = await openTeamAssistant(api, {});
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body).toEqual({ error: "provider does not support hibernation" });
+  });
+
+  it("lets an org admin reach the model picker of a session stamped with another member's id", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "member");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body).toEqual({ error: "model is required" });
+  });
+
+  it("lets an org admin delete a session stamped with another member's id", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "member");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await statusOf(api, sessionId)).toBe("deleted");
+  });
+
+  it("leaves user-owned sessions direct-owner-only", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess_mine",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+    // `test-member` is on no team here; org membership alone never reaches
+    // another user's own session.
+    const denied = await fetch(`${api.baseUrl}/api/sessions/sess_mine`, { method: "DELETE", headers: MEMBER_HEADERS });
+    expect(denied.status).toBe(404);
+    expect(await statusOf(api, "sess_mine")).toBe("active");
+
+    const allowed = await fetch(`${api.baseUrl}/api/sessions/sess_mine`, { method: "DELETE" });
+    expect(allowed.status).toBe(200);
+    expect(await statusOf(api, "sess_mine")).toBe("deleted");
+  });
+});

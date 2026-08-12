@@ -7,7 +7,7 @@ import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { autoTitle } from "../sessions/auto-title.js";
-import { canViewSession } from "../services/session-access.js";
+import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -304,13 +304,14 @@ sessionsRouter.patch("/:id", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  // Administer access, not direct ownership: on a team-owned session the
+  // team's admins choose the model, not whichever member opened the
+  // assistant first (see `services/session-access.ts`). The row loads
+  // without an ownership filter so the check can run in application code;
+  // an unauthorized caller still gets the same 404 a missing id gets.
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   let body: { model?: string };
   try {
@@ -363,15 +364,17 @@ sessionsRouter.post("/:id/auto-title", async (c) => {
   // The persistent `messages` table isn't the source of truth today — the
   // engine owns entries. Route the loader through the same engine session
   // the messages GET endpoint uses so we see what the UI sees.
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const sessionRow = rows[0];
   // Session-not-found is handled inside `autoTitle` too, but bail early
   // here so we don't pay the cost of a sessionFor call on a bad id.
   if (!sessionRow) return c.json({ error: "session not found" }, 404);
+  // Titling a thread is part of prompting, not administering — anyone who
+  // can read and reply may title what they said. Gating this on ownership
+  // left a team member's threads permanently untitled.
+  if (!(await canViewSession(db, sessionRow, userId))) {
+    return c.json({ error: "session not found" }, 404);
+  }
 
   const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, sessionRow));
   const defaultThread = await engineSession.ensureDefaultThread();
@@ -391,7 +394,7 @@ sessionsRouter.post("/:id/auto-title", async (c) => {
         return out;
       },
     },
-    { sessionId: id, threadId, userId },
+    { sessionId: id, threadId },
   );
   if (!result.ok) {
     if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
@@ -428,9 +431,9 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
 
 // Sandbox hibernation plan, Task 4: suspends the session's sandbox on
 // demand (as opposed to the idle sweep's automatic suspend) and stamps the
-// row `"hibernated"`. Owner-gated like every other `/api/sessions/:id`
-// route — unknown or not-owned ids 404. Refuses (409) when a turn is
-// currently running/gated (nothing to safely suspend mid-turn) or when the
+// row `"hibernated"`. Administer-gated (`canAdministerSession`) — unknown
+// ids, and ids the caller may not administer, both 404. Refuses (409) when
+// a turn is running/gated (nothing to safely suspend mid-turn) or when the
 // sandbox provider doesn't support hibernation at all. There is no explicit
 // resume route (spec decision 4) — the next submission, a gateway touch, or
 // a future wake all resume it and clear the status back to `"active"`
@@ -441,17 +444,20 @@ sessionsRouter.post("/:id/pause", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  // Status guard #1: the ownership lookup itself requires `active` — an
+  // Status guard #1: the lookup itself requires `active` — an
   // archived/deleted session 404s exactly like a missing one, rather than
-  // passing the id+userId check and getting resurrected by the status write
-  // below (`listStandaloneSessions` treats `hibernated` as visible).
+  // passing the authorization check and getting resurrected by the status
+  // write below (`listStandaloneSessions` treats `hibernated` as visible).
+  // Ownership is NOT in this query: `canAdministerSession` answers it in
+  // application code, because a team-owned session's `user_id` names the
+  // member who opened it first, not the members who may pause it.
   const rows = await db
     .select()
     .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   if (!sandboxProvider.capabilities().hibernation) {
     return c.json({ error: "provider does not support hibernation" }, 409);
@@ -489,18 +495,17 @@ sessionsRouter.post("/:id/pause", async (c) => {
 
 // ── Delete ────────────────────────────────────────────────────────────────
 
+// Administer-gated (`canAdministerSession`): a team-owned session is
+// deleted by the team's admins, not by whichever member opened it first.
+// Unknown ids, and ids the caller may not administer, both 404.
 sessionsRouter.delete("/:id", async (c) => {
   const { db, engineHost } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
   await engineHost.destroy(id).catch((err) => {

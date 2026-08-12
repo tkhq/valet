@@ -60,13 +60,32 @@ describe("autoTitle", () => {
     return row?.title ?? null;
   }
 
-  it("404s when the session isn't owned", async () => {
-    await seedSession(null, "s1", "someone-else");
+  it("reports session_not_found for an id that does not exist", async () => {
     const result = await autoTitle(
       { db, loadMessages: async () => [], namer: async () => "Unused" },
-      { sessionId: "s1", userId: "u1" },
+      { sessionId: "no-such-session" },
     );
     expect(result).toEqual({ ok: false, reason: "session_not_found" });
+  });
+
+  it("titles a session it does not directly own — authorization is the route's job", async () => {
+    // The ownership filter used to live in this query, which made a
+    // team-owned session titleable only by whichever member opened it
+    // first. `POST /:id/auto-title` now applies `canViewSession` instead.
+    await seedSession(null, "s1", "someone-else");
+    const result = await autoTitle(
+      {
+        db,
+        loadMessages: async () => [{ role: "user", content: "Fix the deploy script" }],
+        namer: async () => "Fix deploy script",
+      },
+      { sessionId: "s1" },
+    );
+    expect(result).toEqual({
+      ok: true,
+      sessionTitle: "Fix deploy script",
+      threadTitle: null,
+    });
   });
 
   it("returns already_titled when session has a meaningful title and no thread was asked", async () => {
@@ -74,7 +93,7 @@ describe("autoTitle", () => {
     const namer = vi.fn();
     const result = await autoTitle(
       { db, loadMessages: async () => [], namer },
-      { sessionId: "s1", userId: "u1" },
+      { sessionId: "s1" },
     );
     expect(result).toEqual({ ok: false, reason: "already_titled" });
     expect(namer).not.toHaveBeenCalled();
@@ -94,7 +113,7 @@ describe("autoTitle", () => {
           namer: async () => "Fix the CI",
           now: () => 42,
         },
-        { sessionId: "s1", userId: "u1" },
+        { sessionId: "s1" },
       );
       expect(result).toEqual({ ok: true, sessionTitle: "Fix the CI", threadTitle: null });
       expect(await sessionTitle()).toBe("Fix the CI");
@@ -105,7 +124,7 @@ describe("autoTitle", () => {
     await seedSession(null);
     const result = await autoTitle(
       { db, loadMessages: async () => [], namer: vi.fn() },
-      { sessionId: "s1", userId: "u1" },
+      { sessionId: "s1" },
     );
     expect(result).toEqual({ ok: false, reason: "no_messages" });
   });
@@ -120,7 +139,7 @@ describe("autoTitle", () => {
         namer: async () => "Greeting demo",
         now: () => 1,
       },
-      { sessionId: "s1", userId: "u1", threadId: "th1" },
+      { sessionId: "s1", threadId: "th1" },
     );
     expect(result).toEqual({ ok: true, sessionTitle: "Greeting demo", threadTitle: "Greeting demo" });
     expect(await threadTitle("th1")).toBe("Greeting demo");
@@ -141,7 +160,7 @@ describe("autoTitle", () => {
         namer: async () => "Something else",
         now: () => 1,
       },
-      { sessionId: "s1", userId: "u1", threadId: "th1" },
+      { sessionId: "s1", threadId: "th1" },
     );
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.threadTitle).toBeNull();

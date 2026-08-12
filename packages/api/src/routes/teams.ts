@@ -16,9 +16,11 @@
  * Mutation-gated: DELETE /:id and the three /members routes additionally
  * require the caller to be a team admin of *that* team, or an org admin
  * (a deliberate recovery path so org admins can always untangle a team even
- * if they're not on it). A caller who fails that check gets 404, same as a
- * caller outside the org — existence-hiding applies to authz, not just org
- * membership.
+ * if they're not on it). That rule lives in `canAdministerTeam`
+ * (`services/teams.ts`), which also gates administration of the resources a
+ * team owns — one definition, no forks. A caller who fails the check gets
+ * 404, same as a caller outside the org — existence-hiding applies to
+ * authz, not just org membership.
  */
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
@@ -30,6 +32,7 @@ import { isOrgAdmin } from "../services/org.js";
 import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
 import {
   addMember,
+  canAdministerTeam,
   createTeam,
   deleteTeam,
   LastAdminError,
@@ -104,31 +107,9 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
 }
 
 /**
- * Gates the four mutation routes (delete team, add/set-role/remove member):
- * the caller must be a team admin of `teamId`, or an org admin (per
- * `org_members.role`, not the global `users.role` operator flag). Org admin
- * is a deliberate recovery path (e.g. the team's last admin left the org) —
- * not a general-purpose bypass, so keep it narrow and don't extend it to
- * plain org membership.
- */
-async function canMutateTeam(
-  db: AppEnv["Variables"]["providers"]["db"],
-  teamId: string,
-  user: AuthUser,
-): Promise<boolean> {
-  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
-  const members = await db
-    .select()
-    .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
-    .limit(1);
-  return members[0]?.role === "admin";
-}
-
-/**
  * Gates read access to a team's member roster: any member of the team, or
  * any org admin (admins manage the whole org's teams, not just ones they're
- * on) — looser than `canMutateTeam`, which requires *team*-admin.
+ * on) — looser than `canAdministerTeam`, which requires *team*-admin.
  */
 async function canViewTeam(
   db: AppEnv["Variables"]["providers"]["db"],
@@ -252,7 +233,7 @@ teamsRouter.delete("/:id", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
   try {
     await deleteTeam(db, { teamId: id });
@@ -273,7 +254,7 @@ teamsRouter.post("/:id/members", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
   let body: AddTeamMemberRequest;
   try {
@@ -308,7 +289,7 @@ teamsRouter.patch("/:id/members/:userId", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
   let body: SetTeamMemberRoleRequest;
   try {
@@ -340,7 +321,7 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
   try {
     await removeMember(db, { teamId: id, userId: targetUserId });

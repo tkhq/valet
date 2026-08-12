@@ -36,8 +36,6 @@ const NAMING_SYSTEM = [
 export interface AutoTitleInput {
   sessionId: string;
   threadId?: string;
-  /** Owner-scope check — the caller resolves this from `c.var.user`. */
-  userId: string;
 }
 
 export type AutoTitleResult =
@@ -137,10 +135,14 @@ export async function autoTitle(
   const namer = deps.namer ?? defaultNamer;
   const now = deps.now ?? Date.now;
 
+  // Authorization is the CALLER's job — the route holds the request
+  // context and applies `canViewSession`. This used to filter on
+  // `userId` as well, which silently made a team-owned session titleable
+  // only by whichever member opened it first.
   const [session] = await deps.db
     .select()
     .from(agentSessions)
-    .where(and(eq(agentSessions.id, input.sessionId), eq(agentSessions.userId, input.userId)))
+    .where(eq(agentSessions.id, input.sessionId))
     .limit(1);
   if (!session) return { ok: false, reason: "session_not_found" };
 

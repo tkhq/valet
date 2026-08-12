@@ -81,4 +81,4 @@ The New-workflow dialog gains an owner picker (personal, or a team the
 caller belongs to — `CreateWorkflowRequest.teamId` existed on the wire but
 had no UI), and the workflows list badges team-owned rows with the team
 name. `TeamSummary` gains `callerRole` so the teams settings panel can
-hide mutation controls the API's `canMutateTeam` gate would 404 anyway.
+hide mutation controls the API's `canAdministerTeam` gate would 404 anyway.

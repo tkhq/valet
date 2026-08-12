@@ -208,7 +208,7 @@ Team-owned sessions resolve credentials by **reference, not copy**: a team crede
 
 Membership is the only access path to team-owned resources — no creator shortcut, no participant grants, no org-visible fallback:
 
-- **Team sessions**: current membership grants `collaborator` (view + prompt); team `admin` grants `owner` (hibernate/delete/restart/bindings). Non-members receive not-found, indistinguishable from a nonexistent session.
+- **Team sessions**: current membership grants `collaborator` (view + prompt); team `admin` grants `owner` (hibernate/delete/restart/bindings). Non-members receive not-found, indistinguishable from a nonexistent session. The `user_id` stamped on a team session's row records the member who opened it first; it is actor provenance, and it grants that member nothing. One narrow exception to the no-org-fallback rule above: an org admin holds the same owner-level authority on a team session. This is the recovery path the team mutation routes already give them, so a team whose last admin left the org is never stranded.
 - **Eligibility is re-checked at action time**, not delivery time: a decision-gate resolution or prompt from a forwarded card is validated against *current* membership at click. Removal from a team breaks the member's sourced credentials and evicts them from live team-session connections immediately.
 - **User orchestrators** are visible and steerable only by their owner. **Org orchestrators** are readable by members, steerable by admins.
 - Decision gates route to actors authorized to resolve them: child-session gates to the parent's audience (team members for team-owned parents, the owner for personal), org-orchestrator gates to admins or an automation rule's designated approvers.
