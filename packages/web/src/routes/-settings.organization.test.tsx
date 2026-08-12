@@ -184,7 +184,7 @@ describe("OrganizationGeneralPage", () => {
     expect(patchOrgMutate).toHaveBeenCalledWith({ name: "Acme Corp" });
   });
 
-  it("shows read-only id and created rows", () => {
+  it("shows the read-only id row", () => {
     render(<OrganizationGeneralPage />);
     expect(screen.getByLabelText("Organization ID")).toHaveProperty("value", "org_1");
   });

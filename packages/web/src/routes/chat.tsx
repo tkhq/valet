@@ -21,8 +21,7 @@ interface ChatSearch {
 
 /**
  * `/chat` — the assistant conversation (assistant-centered web UI,
- * decision 1/12/13). Mounts the shared `SessionView` with `variant="full"`;
- * the sidebar (`AssistantRail`: every assistant you can reach, then the
+ * decision 1/12/13). Mounts the shared `SessionView`; the sidebar (`AssistantRail`: every assistant you can reach, then the
  * active one's threads) is swapped in by the root layout for this route
  * (see `__root.tsx`), not rendered here.
  *
@@ -142,7 +141,6 @@ function ChatPage() {
         )}
         <SessionView
           sessionId={sessionId}
-          variant="full"
           activeThreadId={thread}
           onOpenChild={openChild}
         />

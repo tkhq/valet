@@ -87,8 +87,11 @@ export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetai
           {run.runId}
         </h1>
         <div className="flex items-center gap-2">
-          <span className="text-sm text-muted">{run.status}</span>
-          {run.outcome && <Badge variant={OUTCOME_VARIANT[run.outcome]}>{run.outcome}</Badge>}
+          {/* A settled run always carries an outcome, so the outcome
+              replaces the status rather than repeating beside it. */}
+          <Badge variant={run.outcome ? OUTCOME_VARIANT[run.outcome] : "neutral"}>
+            {run.outcome ?? run.status}
+          </Badge>
           {nonTerminal && (
             <Button size="sm" variant="danger" onClick={onCancel} disabled={cancelPending}>
               Cancel run

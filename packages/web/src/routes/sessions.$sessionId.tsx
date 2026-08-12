@@ -54,13 +54,12 @@ function SessionPage() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {child && <ChildBreadcrumb name={info.data?.name ?? "your assistant"} />}
-      {/* Standalone variant (decision 14): no thread sidebar, full header —
+      {/* Standalone page (decision 14): no thread sidebar, full header —
           the root layout hides the sidebar for this route (see
           `__root.tsx`). Children opened full-page render the same way, with
           the breadcrumb above as their only visual distinction. */}
       <SessionView
         sessionId={sessionId}
-        variant="standalone"
         activeThreadId={thread}
         activeTab={tab ?? "chat"}
         onTabChange={(next) => navigate({ search: (prev) => ({ ...prev, tab: next }) })}

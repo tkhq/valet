@@ -80,7 +80,6 @@ export function ToolShell({
 }: ToolShellProps) {
   const initial = defaultExpanded ?? (status !== "completed");
   const [expanded, setExpanded] = useState(initial);
-  const stripCls = STATUS_DOT[status];
   const isError = status === "error";
 
   return (

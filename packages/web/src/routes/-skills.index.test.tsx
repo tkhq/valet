@@ -107,11 +107,6 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText("github")).toBeTruthy();
   });
 
-  it("counts the skills, the plugins that ship them, and the caller's own", () => {
-    render(<SkillsIndexPage />);
-    expect(screen.getByText("4 skills · 3 plugins · 0 yours")).toBeTruthy();
-  });
-
   it("links each card to its detail route", () => {
     const { container } = render(<SkillsIndexPage />);
     // The card's link covers the card instead of wrapping it — the owner

@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
-import { formatDate } from "~/lib/format-when";
 import {
   Button,
   Dialog,
@@ -15,7 +14,7 @@ import { useOrg, usePatchOrg } from "~/api/settings";
 
 /**
  * `/settings/organization` (index) — Organization · General. Org name +
- * Save (dirty-gated); read-only id/created rows; the disable-gate control,
+ * Save (dirty-gated); the read-only id row; the disable-gate control,
  * which confirms before flipping `features.organizations` off (spec: the
  * confirm copy must state that nothing is deleted — teams and members stay
  * dormant, not removed) and then returns the caller to their own settings.
@@ -70,14 +69,6 @@ export function OrganizationGeneralPage() {
           </FieldRow>
           <FieldRow label="Organization ID">
             <Input value={orgQ.data.id} readOnly disabled aria-label="Organization ID" />
-          </FieldRow>
-          <FieldRow label="Created">
-            <Input
-              value={formatDate(orgQ.data.createdAt)}
-              readOnly
-              disabled
-              aria-label="Created"
-            />
           </FieldRow>
 
           <div className="flex items-center gap-3 py-4">

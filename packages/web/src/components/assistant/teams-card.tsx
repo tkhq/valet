@@ -43,11 +43,8 @@ export function TeamsCard() {
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
-      <header className="px-4 py-3 border-b border-line flex items-center justify-between">
+      <header className="px-4 py-3 border-b border-line">
         <h2 className="font-display text-base text-ink">Your teams</h2>
-        <span className="text-xs text-muted">
-          {teams.length} {teams.length === 1 ? "team" : "teams"}
-        </span>
       </header>
 
       <ul className="flex-1 overflow-y-auto max-h-64 divide-y divide-line">
@@ -67,10 +64,6 @@ export function TeamsCard() {
           </li>
         ))}
       </ul>
-
-      <p className="border-t border-line px-4 py-2 text-xs text-muted">
-        Open a team to talk to its shared assistant.
-      </p>
     </section>
   );
 }

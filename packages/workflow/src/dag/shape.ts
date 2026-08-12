@@ -24,7 +24,6 @@ export interface WorkflowEditorState {
     string,
     {
       position: { x: number; y: number };
-      collapsed?: boolean;
     }
   >;
   viewport?: { x: number; y: number; zoom: number };

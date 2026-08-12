@@ -124,9 +124,6 @@ export default {
         md: "0.5rem",
         lg: "0.75rem",
       },
-      animation: {
-        "spin-slow": "spin 1.6s linear infinite",
-      },
     },
   },
   plugins: [typography],

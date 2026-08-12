@@ -302,7 +302,7 @@ export function ModelPicker({
             </div>
           ))}
         </div>
-        <div className="sticky bottom-0 bg-paper border-t border-line px-3 py-1.5 flex items-center justify-between text-[10px] text-muted">
+        <div className="sticky bottom-0 bg-paper border-t border-line px-3 py-1.5 text-[10px] text-muted">
           <span>
             {flat.length} of {models.length} models
             {hiddenCount > 0 && !showAll && !query && (
@@ -338,7 +338,6 @@ export function ModelPicker({
               </>
             )}
           </span>
-          <span className="font-mono">↑↓ · ⏎</span>
         </div>
         {onClear && (
           <>

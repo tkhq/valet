@@ -17,7 +17,6 @@ import { Editor } from "~/components/workflows/editor/editor";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import {
-  Badge,
   Button,
   DropdownMenu,
   DropdownMenuContent,

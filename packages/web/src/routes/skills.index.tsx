@@ -38,27 +38,15 @@ export function SkillsIndexPage() {
   const { data, isLoading, error } = useSkills();
   const skills = data?.skills ?? [];
   const sorted = sortByName(skills);
-  const pluginCount = new Set(
-    skills.flatMap((s) => (s.origin === "plugin" ? [s.plugin] : [])),
-  ).size;
-  const storedCount = skills.filter((s) => s.origin !== "plugin").length;
 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-6 py-10">
         <div className="flex items-end justify-between gap-4">
           <h1 className="font-display text-2xl text-ink">Skills</h1>
-          <div className="flex shrink-0 items-center gap-4">
-            {!isLoading && !error && skills.length > 0 && (
-              <span className="font-mono text-xs text-muted">
-                {skills.length} skill{skills.length === 1 ? "" : "s"} · {pluginCount} plugin
-                {pluginCount === 1 ? "" : "s"} · {storedCount} yours
-              </span>
-            )}
-            <Button size="sm" asChild>
-              <Link to="/skills/new">New skill</Link>
-            </Button>
-          </div>
+          <Button size="sm" className="shrink-0" asChild>
+            <Link to="/skills/new">New skill</Link>
+          </Button>
         </div>
 
         <div className="mt-8">

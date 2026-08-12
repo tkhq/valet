@@ -761,13 +761,6 @@ export interface WorkflowRunCheckpoint {
   createdAt: number;
 }
 
-export interface WorkflowRunSignal {
-  signalId: string;
-  signalType: string;
-  payload?: unknown;
-  createdAt: number;
-}
-
 export interface WorkflowRunDetail {
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
@@ -775,7 +768,6 @@ export interface WorkflowRunDetail {
     params: unknown;
   };
   checkpoints: WorkflowRunCheckpoint[];
-  signals: WorkflowRunSignal[];
 }
 
 export type GetWorkflowRunResponse = WorkflowRunDetail;
@@ -1554,8 +1546,6 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 // read — deliberately narrow (see `GetPrebuildForRepoResponse`).
 //
 // SourceSummary mirrors the `image_sources` row; BakeSummary mirrors `bakes`.
-// The legacy types below (ImageCatalogEntryWire, PrebuildConfigWire, etc.)
-// are kept while web components migrate in Task 18.
 
 // ── New unified types (/api/org/sources) ────────────────────────────────────
 
@@ -1616,119 +1606,7 @@ export interface TriggerBakeResponse {
   bake: BakeSummary;
 }
 
-// ── Legacy types kept for web-component backward compatibility (Task 18 migrates) ──
-
-// `image_sources` row (kind='external') — replaces the old image_catalog
-// entry. `externalRef` is the image URI that was previously `ref`.
-export interface ImageCatalogEntryWire {
-  id: string;
-  orgId: string;
-  kind: "external";
-  name: string;
-  externalRef: string | null;
-  pullSecretName: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ListImageCatalogResponse {
-  images: ImageCatalogEntryWire[];
-}
-
-export interface CreateImageCatalogRequest {
-  name: string;
-  ref: string;
-  pullSecretName?: string;
-}
-
-export interface CreateImageCatalogResponse {
-  image: ImageCatalogEntryWire;
-}
-
-export type PrebuildScheduleWire = "nightly" | "off";
-
-// `image_sources` row (kind='repo') — replaces the old prebuild_configs entry.
-// `parentId` is the linked base/external source id (previously `baseImageId`).
-export interface PrebuildConfigWire {
-  id: string;
-  orgId: string;
-  kind: "repo";
-  parentId: string | null;
-  name: string;
-  repoHost: string | null;
-  repoFullName: string | null;
-  cloneUrl: string | null;
-  schedule: PrebuildScheduleWire;
-  enabled: boolean;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ListPrebuildConfigsResponse {
-  configs: PrebuildConfigWire[];
-}
-
-export interface CreatePrebuildConfigRequest {
-  repoFullName: string;
-  cloneUrl: string;
-  repoHost?: string;
-  /** Linked base/external source id. Previously `baseImageId`. */
-  baseImageId?: string | null;
-  schedule?: PrebuildScheduleWire;
-  enabled?: boolean;
-}
-
-export interface CreatePrebuildConfigResponse {
-  config: PrebuildConfigWire;
-}
-
-export interface PatchPrebuildConfigRequest {
-  cloneUrl?: string;
-  /** Linked base/external source id. Previously `baseImageId`. */
-  baseImageId?: string | null;
-  schedule?: PrebuildScheduleWire;
-  enabled?: boolean;
-}
-
-export interface PatchPrebuildConfigResponse {
-  config: PrebuildConfigWire;
-}
-
-export type PrebuildStatusWire = "queued" | "building" | "pushed" | "failed";
-
-// `bakes` row — replaces the old prebuilds entry.
-// `sourceId` is the linked image_sources id (previously `configId`).
-export interface PrebuildWire {
-  id: string;
-  sourceId: string;
-  identityHash: string;
-  commitSha: string | null;
-  imageRef: string;
-  status: PrebuildStatusWire;
-  builderBackend: string | null;
-  error: string | null;
-  logTail: string | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-  createdAt: number;
-}
-
-export interface RebuildPrebuildResponse {
-  prebuild: PrebuildWire;
-}
-
-export interface ListPrebuildBuildsResponse {
-  builds: PrebuildWire[];
-}
-
-export interface GetPrebuildsMetaResponse {
-  /** `null` when no `ImageBuilder` is wired for this deployment — the
-   * settings page shows the "unavailable on this deployment" banner but
-   * keeps the image catalog usable regardless. */
-  builder: string | null;
-}
-
-/** `GET /api/prebuilds/for-repo?fullName=owner/repo` — any authed org
+/** `GET /api/sources/for-repo?fullName=owner/repo` — any authed org
  * member. The newest `pushed` build for the caller's org + repo, or
  * `null`. Deliberately narrow (no `imageRef`/`error`/`logTail`) — this is
  * the one prebuild read a non-admin member can hit. */

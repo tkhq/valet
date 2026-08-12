@@ -356,7 +356,6 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(detail.run.runId).toBe(runId);
     expect(detail.run.workflowId).toBe(created.id);
     expect(detail.checkpoints).toEqual([]);
-    expect(detail.signals).toEqual([]);
 
     const approveRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/approvals/some-node`, {
       method: "POST",

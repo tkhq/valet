@@ -29,7 +29,6 @@ function baseRun(overrides: Partial<WorkflowRunDetail["run"]> = {}): WorkflowRun
       ...overrides,
     },
     checkpoints: [],
-    signals: [],
   };
 }
 

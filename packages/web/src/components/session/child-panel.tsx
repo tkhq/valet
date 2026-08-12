@@ -5,7 +5,7 @@ import { SessionView } from "./session-view";
  * Right-hand slide-over (assistant-centered web UI, decision 13): a child
  * session opened "in place" over the chat's right side — its own live
  * transcript, gates resolvable there, an "open full page" affordance.
- * Implemented by mounting `SessionView` with `variant="panel"`; the panel
+ * Implemented by mounting `SessionView` with `panel`; the panel
  * itself owns the fixed-position chrome (~480px, full-height, hairline
  * border). Closing returns to the assistant with no navigation.
  *
@@ -71,7 +71,7 @@ export function ChildPanel({
       tabIndex={-1}
       className="fixed top-[--nav-height] bottom-0 right-0 z-40 flex w-full sm:w-[480px] flex-col border-l border-line bg-paper shadow-lg outline-none"
     >
-      <SessionView sessionId={childId} variant="panel" onClose={onClose} />
+      <SessionView sessionId={childId} panel onClose={onClose} />
     </div>
   );
 }

@@ -519,5 +519,3 @@ sessionsRouter.delete("/:id", async (c) => {
 
   return c.json({ ok: true });
 });
-
-export type SessionsRouter = typeof sessionsRouter;

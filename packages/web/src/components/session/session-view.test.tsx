@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * `SessionView` variant chrome (decisions 13/14): "full" and "standalone"
- * get the existing `SessionHeader` (model picker, delete, etc.); "panel"
- * gets a compact header (title + open-full-page + ✕ close) instead. The
+ * `SessionView` header chrome (decisions 13/14): by default the view gets
+ * the existing `SessionHeader` (model picker, delete, etc.); with `panel`
+ * it gets a compact header (title + open-full-page + ✕ close) instead. The
  * threads/thread-tree *sidebar* is deliberately NOT part of this
  * component (it's a root-layout concern — see `__root.tsx`), so this test
  * only covers header chrome, not sidebar visibility.
@@ -16,7 +16,6 @@ import {
   RouterProvider,
   createMemoryHistory,
   createRootRoute,
-  createRoute,
   createRouter,
 } from "@tanstack/react-router";
 import { SessionView } from "./session-view";
@@ -56,9 +55,9 @@ vi.mock("./message-list", () => ({ MessageList: () => <div data-testid="message-
 vi.mock("./composer", () => ({ Composer: () => <div data-testid="composer" /> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
-function renderInRouter(sessionId: string, variant: "full" | "panel" | "standalone", onClose?: () => void) {
+function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void) {
   const rootRoute = createRootRoute({
-    component: () => <SessionView sessionId={sessionId} variant={variant} onClose={onClose} />,
+    component: () => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} />,
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([]),
@@ -74,22 +73,16 @@ function renderInRouter(sessionId: string, variant: "full" | "panel" | "standalo
   );
 }
 
-describe("SessionView variants", () => {
-  it("full: renders the standard SessionHeader", async () => {
-    renderInRouter("sess-1", "full");
-    expect(await screen.findByTestId("full-header")).toBeTruthy();
-    expect(screen.queryByLabelText("Close panel")).toBeNull();
-  });
-
-  it("standalone: renders the standard SessionHeader too (full header, decision 14)", async () => {
-    renderInRouter("sess-1", "standalone");
+describe("SessionView header chrome", () => {
+  it("without panel: renders the standard SessionHeader", async () => {
+    renderInRouter("sess-1", false);
     expect(await screen.findByTestId("full-header")).toBeTruthy();
     expect(screen.queryByLabelText("Close panel")).toBeNull();
   });
 
   it("panel: renders a compact header with title + close button, not SessionHeader", async () => {
     const onClose = vi.fn();
-    renderInRouter("sess-1", "panel", onClose);
+    renderInRouter("sess-1", true, onClose);
     expect(await screen.findByText("fix-auth")).toBeTruthy();
     expect(screen.queryByTestId("full-header")).toBeNull();
     const closeBtn = screen.getByLabelText("Close panel");
@@ -97,8 +90,8 @@ describe("SessionView variants", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("all variants render the transcript and composer", async () => {
-    renderInRouter("sess-1", "panel");
+  it("renders the transcript and composer either way", async () => {
+    renderInRouter("sess-1", true);
     expect(await screen.findByTestId("message-list")).toBeTruthy();
     expect(screen.getByTestId("composer")).toBeTruthy();
   });

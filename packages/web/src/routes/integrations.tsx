@@ -46,20 +46,11 @@ export function IntegrationsPage() {
   const builtIn = plugins
     .filter((p) => !isService(p))
     .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
-  const connectedCount = services.filter((p) => p.services.some((s) => s.connected)).length;
-  const connectableCount = services.filter((p) => p.services.length > 0).length;
 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-6 py-10">
-        <div className="flex items-end justify-between gap-4">
-          <h1 className="font-display text-2xl text-ink">Integrations</h1>
-          {!isLoading && !error && connectableCount > 0 && (
-            <span className="shrink-0 font-mono text-xs text-muted">
-              {connectedCount} of {connectableCount} connected
-            </span>
-          )}
-        </div>
+        <h1 className="font-display text-2xl text-ink">Integrations</h1>
 
         {connectResult?.kind === "connected" && (
           <div

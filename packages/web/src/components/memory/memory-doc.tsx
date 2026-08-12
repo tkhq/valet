@@ -136,7 +136,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
       <header className="mb-8 space-y-3 border-b border-line pb-6">
         <div className="flex items-start justify-between gap-4">
           <h1 className="font-display text-3xl leading-tight text-ink">
-            {file.pinned === 1 && <span aria-hidden="true">📌 </span>}
+            {file.pinned && <span aria-hidden="true">📌 </span>}
             {file.title || path}
           </h1>
           {!editing && (

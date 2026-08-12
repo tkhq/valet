@@ -21,7 +21,11 @@ export interface GetMemoryDocResponse {
     title: string;
     content: string;
     type: string;
-    pinned: number;
+    /** Boolean on the wire — `memory_files.pinned` is a Postgres boolean and
+     * the service passes `row.pinned` straight through. This projection said
+     * `number`, so the reader's `=== 1` test never matched and a pinned file
+     * showed its pin in the tree and none on the page. */
+    pinned: boolean;
     updatedAt: number;
   };
 }

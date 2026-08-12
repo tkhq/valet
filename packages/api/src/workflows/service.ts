@@ -509,10 +509,7 @@ export async function getWorkflowRunDetail(
     return null;
   }
 
-  const [checkpoints, signals] = await Promise.all([
-    deps.workflowStore.getCheckpoints(runId),
-    deps.workflowStore.listSignals(runId, { unconsumed: true }),
-  ]);
+  const checkpoints = await deps.workflowStore.getCheckpoints(runId);
 
   return {
     run: {
@@ -533,12 +530,6 @@ export async function getWorkflowRunDetail(
       result: cp.result,
       error: cp.error,
       createdAt: cp.createdAt,
-    })),
-    signals: signals.map((s) => ({
-      signalId: s.signalId,
-      signalType: s.signalType,
-      payload: s.payload,
-      createdAt: s.createdAt,
     })),
   };
 }

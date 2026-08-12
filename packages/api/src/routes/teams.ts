@@ -332,5 +332,3 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
     throw err;
   }
 });
-
-export type TeamsRouter = typeof teamsRouter;

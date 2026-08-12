@@ -9,7 +9,7 @@
  */
 import type { ReactElement } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { LlmProviderSummary, ModelInfo } from "@valet/api/wire";

@@ -418,5 +418,3 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
   await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, id));
   return c.body(null, 204);
 });
-
-export type EventsRouter = typeof eventsRouter;

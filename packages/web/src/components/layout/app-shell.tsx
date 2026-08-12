@@ -1,23 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useState, type ReactNode, type MouseEvent } from "react";
 import { Menu, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { cn } from "~/lib/cn";
 
-const WIDTH_KEY = "valet:sidebar-width";
 const COLLAPSED_KEY = "valet:sidebar-collapsed";
-const MIN_WIDTH = 200;
-const MAX_WIDTH = 520;
-const DEFAULT_WIDTH = 280;
-
-function loadStoredWidth(): number {
-  try {
-    const raw = window.localStorage.getItem(WIDTH_KEY);
-    const n = raw ? Number.parseInt(raw, 10) : NaN;
-    if (Number.isFinite(n)) return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, n));
-  } catch {
-    // localStorage unavailable (private mode) — fall through to default.
-  }
-  return DEFAULT_WIDTH;
-}
 
 function loadStoredCollapsed(): boolean {
   try {
@@ -32,12 +17,12 @@ function loadStoredCollapsed(): boolean {
  * outlet.
  *
  * Desktop (`md`+): the sidebar sizes to its content (widest thread title)
- * up to a user-set MAXIMUM — the drag handle on its right edge adjusts
- * that max (persisted to localStorage, clamped 200–520px), so a list of
- * short titles doesn't waste horizontal space while long titles get room
- * until the cap, then truncate. Collapsible via the panel toggle at the
- * sidebar's top-right corner; when collapsed, a matching expand button
- * floats at the top-left of the content area.
+ * between a 200px floor and a 320px cap, so a list of short titles doesn't
+ * waste horizontal space and a long title truncates instead of pushing
+ * `<main>` off-screen. Collapsible via the panel toggle at the sidebar's
+ * top-right corner; when collapsed, a matching expand button floats at the
+ * top-left of the content area. The collapsed state persists to
+ * localStorage.
  *
  * Mobile: collapses out of the flow and is reachable via a small toggle
  * button that opens it as a full-height overlay drawer (paper bg, hairline
@@ -63,11 +48,7 @@ export function AppShell({
   className?: string;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [width, setWidth] = useState<number>(() => loadStoredWidth());
   const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
-  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
-  const asideRef = useRef<HTMLElement | null>(null);
-  const [dragging, setDragging] = useState(false);
 
   // Closes the drawer when a link inside it is clicked (thread/child
   // selection) without requiring `ThreadTree` to know about the drawer.
@@ -85,62 +66,14 @@ export function AppShell({
     }
   }, []);
 
-  function onHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    e.preventDefault();
-    // Start from the aside's RENDERED width, not the stored max — when the
-    // content-sized sidebar is narrower than the max, the handle sits at
-    // the actual edge, and the drag should track the cursor from there.
-    const rendered = asideRef.current?.offsetWidth ?? width;
-    dragRef.current = { startX: e.clientX, startWidth: rendered };
-    setDragging(true);
-  }
-
-  useEffect(() => {
-    if (!dragging) return;
-    function onMove(e: PointerEvent) {
-      const drag = dragRef.current;
-      if (!drag) return;
-      const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, drag.startWidth + (e.clientX - drag.startX)));
-      setWidth(next);
-    }
-    function onUp() {
-      setDragging(false);
-      dragRef.current = null;
-      setWidth((w) => {
-        try {
-          window.localStorage.setItem(WIDTH_KEY, String(w));
-        } catch {
-          // Best-effort persistence only.
-        }
-        return w;
-      });
-    }
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-  }, [dragging]);
-
   return (
-    <div
-      className={cn(
-        "h-screen w-screen flex flex-col bg-[--bg] text-[--fg]",
-        dragging && "select-none cursor-col-resize",
-        className,
-      )}
-    >
+    <div className={cn("h-screen w-screen flex flex-col bg-[--bg] text-[--fg]", className)}>
       {topNav}
       <div className="flex-1 flex min-h-0 relative">
         {sidebar != null && (
           <>
             {!collapsed && (
-              <aside
-                ref={asideRef}
-                className="hidden md:flex shrink-0 flex-col relative w-max min-w-[200px]"
-                style={{ maxWidth: width }}
-              >
+              <aside className="hidden md:flex shrink-0 flex-col relative w-max min-w-[200px] max-w-[320px] border-r border-line">
                 <button
                   type="button"
                   aria-label="Collapse sidebar"
@@ -150,20 +83,6 @@ export function AppShell({
                   <PanelLeftClose className="h-4 w-4" />
                 </button>
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
-                {/* Resize handle — 6px hit area straddling the border.
-                    Adjusts the MAX width; actual width is content-driven
-                    below the max (`w-max` + inline maxWidth above). */}
-                <div
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize sidebar"
-                  onPointerDown={onHandlePointerDown}
-                  className={cn(
-                    "absolute top-0 right-[-3px] h-full w-[6px] cursor-col-resize z-10",
-                    "after:absolute after:top-0 after:left-[2px] after:h-full after:w-px after:bg-[--border]",
-                    dragging ? "after:bg-moss" : "hover:after:bg-moss",
-                  )}
-                />
               </aside>
             )}
             {collapsed && (

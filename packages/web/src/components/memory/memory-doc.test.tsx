@@ -46,7 +46,7 @@ function renderedDoc(rendered: string) {
       title: "Writing style",
       content: "body",
       type: "preference",
-      pinned: 1,
+      pinned: true,
       updatedAt: Date.now() - 60_000,
     },
   };
@@ -85,6 +85,39 @@ describe("MemoryDoc", () => {
     expect(screen.getByText("Keep it warm and direct.")).toBeTruthy();
     expect(screen.queryByText(/timestamp:/)).toBeNull();
     expect(screen.queryByText(/valet:/)).toBeNull();
+  });
+
+  /**
+   * `pinned` is a boolean on the wire (`memory_files.pinned` is a Postgres
+   * boolean). The reader tested `=== 1` against it, so the pin never
+   * rendered — and this suite's own fixture said `pinned: 1`, which is why
+   * the bug survived. These two cases pin the real contract.
+   */
+  it("marks a pinned file in the heading", () => {
+    docMock.mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: renderedDoc("body"),
+      refetch: vi.fn(),
+    });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: /Writing style/ }).textContent).toContain("\ud83d\udccc");
+  });
+
+  it("leaves an unpinned file's heading unmarked", () => {
+    const doc = renderedDoc("body");
+    docMock.mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: { ...doc, file: { ...doc.file, pinned: false } },
+      refetch: vi.fn(),
+    });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: /Writing style/ }).textContent).not.toContain("\ud83d\udccc");
   });
 
   it("omits the sensitivity/origin badges when absent from frontmatter", () => {
