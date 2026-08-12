@@ -45,6 +45,14 @@ export type AgentStatus =
  */
 export interface StreamMessage extends Message {
   settledOutcome?: SettledOutcome;
+  /**
+   * Reason for a non-clean `settledOutcome`, taken from the wire event's
+   * `error` field. The engine states why a turn failed; without this field
+   * the store dropped that text and the UI could only show a bare "failed"
+   * chip. Undefined when the outcome carries no reason (an abort, or a
+   * clean completion).
+   */
+  settledError?: string;
   queueItemId?: string;
 }
 
@@ -387,9 +395,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       })();
       if (idx < 0) return next;
       const m = slice.messages[idx];
+      // A clean run needs no badge and no reason. Every other outcome keeps
+      // the engine's `error` text next to the outcome, so a consumer can
+      // render why the turn ended instead of a bare grey chip.
       const settledOutcome: SettledOutcome | undefined =
         ev.outcome === "completed" ? undefined : ev.outcome;
-      const updated: StreamMessage = { ...m, settledOutcome };
+      const settledError = ev.outcome === "completed" ? undefined : ev.error;
+      const updated: StreamMessage = { ...m, settledOutcome, settledError };
       next.messages = replaceAt(slice.messages, idx, updated);
       return next;
     }
