@@ -100,6 +100,16 @@ export async function createWorkflowSchedule(
     };
   }
 
+  // The schedule row's own `ownerType`/`ownerId` (below) is unrelated to run
+  // billing for a workflow target — `scheduler.ts`'s `fire()` bills
+  // `def.ownerType`/`ownerId` (the workflow's real owner) directly, by
+  // design, never these fields. They matter only for an orchestrator-prompt
+  // target, which `deliverToOrchestrator` reads.
+  let scheduleOwner: { ownerType: "user" | "org"; ownerId: string } = {
+    ownerType: "user",
+    ownerId: user.id,
+  };
+
   if (hasWorkflow) {
     // Owner-scoped, not just org-scoped: checking only `orgId` let any org
     // member wire a schedule onto a workflow they don't own — and because
@@ -109,6 +119,16 @@ export async function createWorkflowSchedule(
     // `fire()` for the matching run-ownership fix.
     const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
     if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+    // Follow the workflow's own owner where this table's `owner_type`
+    // enum (`user`/`org` only, no `team`) can represent it — a team-owned
+    // workflow's schedule maps to the org rather than silently attributing
+    // to whichever member happened to create it.
+    scheduleOwner =
+      owned.ownerType === "org"
+        ? { ownerType: "org", ownerId: owned.ownerId }
+        : owned.ownerType === "team"
+          ? { ownerType: "org", ownerId: user.orgId }
+          : { ownerType: "user", ownerId: owned.ownerId };
   }
 
   const inserted = await db
@@ -116,8 +136,8 @@ export async function createWorkflowSchedule(
     .values({
       id: randomUUID(),
       orgId: user.orgId,
-      ownerType: "user",
-      ownerId: user.id,
+      ownerType: scheduleOwner.ownerType,
+      ownerId: scheduleOwner.ownerId,
       targetKind: hasWorkflow ? "workflow" : "orchestrator",
       workflowId: hasWorkflow ? input.workflowId! : null,
       prompt: hasPrompt ? input.prompt! : null,
