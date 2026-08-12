@@ -61,6 +61,10 @@ vi.mock("~/api/skill-sources", () => ({
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
+vi.mock("~/api/settings", () => ({
+  useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+}));
+
 import { SkillsIndexPage } from "./skills.index";
 
 describe("SkillsIndexPage", () => {

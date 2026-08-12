@@ -33,12 +33,17 @@ const add = vi.fn();
 const sync = vi.fn();
 const remove = vi.fn();
 let addState = { isPending: false, error: null as Error | null };
+let teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" as const }] };
 
 vi.mock("~/api/skill-sources", () => ({
   useSkillSources: () => ({ data: currentData, ...currentState }),
   useAddSkillSource: () => ({ mutate: add, ...addState }),
   useSyncSkillSource: () => ({ mutate: sync, isPending: false }),
   useRemoveSkillSource: () => ({ mutate: remove, isPending: false }),
+}));
+
+vi.mock("~/api/settings", () => ({
+  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
 }));
 
 import { SkillSourcesPanel } from "./skill-sources-panel";
@@ -70,7 +75,34 @@ describe("SkillSourcesPanel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(add).toHaveBeenCalledWith({ repo: "https://github.com/tkhq/skills" });
+    expect(add).toHaveBeenCalledWith({ repo: "https://github.com/tkhq/skills" }, expect.anything());
+  });
+
+  it("includes the selected team when importing for a team, not just yourself", () => {
+    render(<SkillSourcesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/skills" },
+    });
+    fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "team_1" } });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", teamId: "team_1" }, expect.anything());
+  });
+
+  it("shows the owning team's name on a team-tracked repository", () => {
+    currentData = { sources: [source({ ownerType: "team", ownerId: "team_1" })] };
+    render(<SkillSourcesPanel />);
+
+    expect(screen.getByText("Platform")).toBeTruthy();
+  });
+
+  it("shows no ownership badge on a personal repository", () => {
+    currentData = { sources: [source({ ownerType: "user", ownerId: "u1" })] };
+    render(<SkillSourcesPanel />);
+
+    expect(screen.queryByText("Platform")).toBeNull();
   });
 
   it("shows what the server said about a repository it refused", () => {

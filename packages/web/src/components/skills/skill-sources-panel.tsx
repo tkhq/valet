@@ -14,8 +14,10 @@
  * "Remove" and not "Disable".
  */
 import { useState, type FormEvent } from "react";
-import { Button, Input, Spinner } from "~/components/primitives";
+import { Badge, Button, Input, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
+import { OWNER_SELF, OwnerPicker } from "~/components/owner-picker";
+import { useTeams } from "~/api/settings";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -26,16 +28,23 @@ import {
 
 export function SkillSourcesPanel() {
   const { data, isLoading, error } = useSkillSources();
+  const teams = useTeams();
   const sources = data?.sources ?? [];
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
+  const [teamId, setTeamId] = useState(OWNER_SELF);
   const add = useAddSkillSource();
+
+  const teamName = new Map((teams.data?.teams ?? []).map((t) => [t.id, t.name]));
 
   function submit(e: FormEvent) {
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
-    add.mutate({ repo: value });
+    add.mutate(
+      { repo: value, ...(teamId === OWNER_SELF ? {} : { teamId }) },
+      { onSuccess: () => setTeamId(OWNER_SELF) },
+    );
     setRepo("");
   }
 
@@ -66,6 +75,14 @@ export function SkillSourcesPanel() {
               {add.isPending ? <Spinner size={14} /> : "Import"}
             </Button>
           </div>
+          <div className="mt-2">
+            <OwnerPicker
+              id="skill-source-owner"
+              value={teamId}
+              onChange={setTeamId}
+              help="A team repository syncs skills for every member's sessions."
+            />
+          </div>
           <p className="mt-2 text-xs text-muted">Public repositories only.</p>
           {add.error && <p className="mt-1 text-xs text-danger-500">{add.error.message}</p>}
         </form>
@@ -88,13 +105,19 @@ export function SkillSourcesPanel() {
       )}
 
       {sources.map((source) => (
-        <SourceRow key={source.id} source={source} />
+        <SourceRow key={source.id} source={source} teamName={teamName} />
       ))}
     </section>
   );
 }
 
-function SourceRow({ source }: { source: SkillSourceSummary }) {
+function SourceRow({
+  source,
+  teamName,
+}: {
+  source: SkillSourceSummary;
+  teamName: Map<string, string>;
+}) {
   const sync = useSyncSkillSource();
   const remove = useRemoveSkillSource();
   const pinned = [source.ref, source.subpath].filter((part) => part.length > 0).join(" · ");
@@ -106,6 +129,11 @@ function SourceRow({ source }: { source: SkillSourceSummary }) {
           <span className="truncate font-mono text-sm text-ink">{source.repo}</span>
           {pinned.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">{pinned}</span>
+          )}
+          {source.ownerType === "team" && (
+            <Badge variant="accent" className="shrink-0">
+              {teamName.get(source.ownerId) ?? "Team"}
+            </Badge>
           )}
         </div>
         <p className="mt-0.5 text-xs text-muted">
