@@ -113,8 +113,11 @@ describe("SkillsIndexPage", () => {
   });
 
   it("links each card to its detail route", () => {
-    render(<SkillsIndexPage />);
-    const link = screen.getByText("Slack tools").closest("a");
+    const { container } = render(<SkillsIndexPage />);
+    // The card's link covers the card instead of wrapping it — the owner
+    // badge in the title row is a link of its own — so it is addressed by
+    // the name it carries for a reader, not through the title text.
+    const link = container.querySelector('a[aria-label="Read Slack tools"]');
     expect(link?.getAttribute("to")).toBe("/skills/$skillName");
   });
 

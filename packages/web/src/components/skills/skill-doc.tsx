@@ -19,6 +19,7 @@
 import { useState } from "react";
 import { useDeleteSkill, useStoredSkill } from "~/api/skills";
 import { displayName } from "~/components/integrations/display-name";
+import { OwnerBadge } from "~/components/owner-badge";
 import { originLabel, shadowNote } from "~/components/skills/skill-card";
 import { SkillDocument } from "~/components/skills/skill-document";
 import { SkillEditor } from "~/components/skills/skill-editor";
@@ -65,7 +66,14 @@ export function SkillDoc({
     <SkillDocument
       title={creating ? "New skill" : skill ? displayName(skill.name) : "Skill"}
       description={creating ? "A playbook the assistant can pull into a turn." : skill?.description}
-      meta={skill && originLabel(skill)}
+      meta={
+        skill && (
+          <span className="inline-flex items-center gap-2">
+            {originLabel(skill)}
+            <OwnerBadge ownerType={skill.ownerType} ownerId={skill.ownerId} />
+          </span>
+        )
+      }
       notice={notice}
       actions={
         writable && !editing ? (

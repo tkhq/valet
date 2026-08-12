@@ -14,10 +14,10 @@
  * "Remove" and not "Disable".
  */
 import { useState, type FormEvent } from "react";
-import { Badge, Button, Input, Spinner } from "~/components/primitives";
+import { Button, Input, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
+import { OwnerBadge } from "~/components/owner-badge";
 import { OWNER_SELF, OwnerPicker } from "~/components/owner-picker";
-import { useTeams } from "~/api/settings";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -28,14 +28,11 @@ import {
 
 export function SkillSourcesPanel() {
   const { data, isLoading, error } = useSkillSources();
-  const teams = useTeams();
   const sources = data?.sources ?? [];
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
   const [teamId, setTeamId] = useState(OWNER_SELF);
   const add = useAddSkillSource();
-
-  const teamName = new Map((teams.data?.teams ?? []).map((t) => [t.id, t.name]));
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -105,19 +102,13 @@ export function SkillSourcesPanel() {
       )}
 
       {sources.map((source) => (
-        <SourceRow key={source.id} source={source} teamName={teamName} />
+        <SourceRow key={source.id} source={source} />
       ))}
     </section>
   );
 }
 
-function SourceRow({
-  source,
-  teamName,
-}: {
-  source: SkillSourceSummary;
-  teamName: Map<string, string>;
-}) {
+function SourceRow({ source }: { source: SkillSourceSummary }) {
   const sync = useSyncSkillSource();
   const remove = useRemoveSkillSource();
   const pinned = [source.ref, source.subpath].filter((part) => part.length > 0).join(" · ");
@@ -130,11 +121,7 @@ function SourceRow({
           {pinned.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">{pinned}</span>
           )}
-          {source.ownerType === "team" && (
-            <Badge variant="accent" className="shrink-0">
-              {teamName.get(source.ownerId) ?? "Team"}
-            </Badge>
-          )}
+          <OwnerBadge ownerType={source.ownerType} ownerId={source.ownerId} />
         </div>
         <p className="mt-0.5 text-xs text-muted">
           {source.skillCount} skill{source.skillCount === 1 ? "" : "s"} ·{" "}

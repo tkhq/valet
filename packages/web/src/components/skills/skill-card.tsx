@@ -18,10 +18,13 @@
  * Every card opens the skill's page. A plugin skill goes to the name route.
  * A stored skill goes to the row-id route instead: a shadowed skill shares
  * its name with the skill shadowing it, so the name route cannot reach it.
+ * That link covers the card instead of wrapping it, because the owner badge
+ * in the title row is a link too and an anchor cannot hold another anchor.
  */
 import { Link } from "@tanstack/react-router";
 import type { SkillSummary, StoredSkillSummary } from "@valet/api/wire";
 import { Badge } from "~/components/primitives";
+import { OwnerBadge } from "~/components/owner-badge";
 import { brandHex } from "~/components/integrations/integration-row";
 import { displayName } from "~/components/integrations/display-name";
 import { cn } from "~/lib/cn";
@@ -40,11 +43,15 @@ export function shadowNote(skill: StoredSkillSummary): string {
   return `Shadowed by another skill of the same name. ${fix}`;
 }
 
-/** Where the markdown lives, in the words a reader needs. */
+/**
+ * Where the markdown lives, in the words a reader needs. Who owns it is a
+ * second axis — `OwnerBadge` names the owning team, so this label never
+ * speaks for ownership.
+ */
 export function originLabel(skill: SkillSummary): string {
   if (skill.origin === "plugin") return "Plugin";
   if (skill.origin === "repo") return "Repo";
-  return skill.ownerType === "team" ? "Team" : "Yours";
+  return "Yours";
 }
 
 export function SkillCard({ skill }: { skill: SkillSummary }) {
@@ -71,6 +78,9 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
             <Badge variant={skill.origin === "plugin" ? "neutral" : "accent"}>
               {originLabel(skill)}
             </Badge>
+            {skill.origin !== "plugin" && (
+              <OwnerBadge ownerType={skill.ownerType} ownerId={skill.ownerId} />
+            )}
           </div>
           {skill.description && (
             <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
@@ -96,19 +106,31 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
     </>
   );
 
-  const shell = "group flex flex-col rounded-lg border border-line bg-paper p-4 text-left transition-shadow hover:shadow-sm";
-
-  if (skill.origin === "plugin") {
-    return (
-      <Link to="/skills/$skillName" params={{ skillName: skill.name }} className={shell}>
-        {body}
-      </Link>
-    );
-  }
+  const shell =
+    "group relative flex flex-col rounded-lg border border-line bg-paper p-4 text-left transition-shadow hover:shadow-sm";
+  // The card's own link, stretched over the card. It carries the name a
+  // reader hears, because it holds no text of its own.
+  const cover = "absolute inset-0 rounded-lg";
+  const label = `Read ${title}`;
 
   return (
-    <Link to="/skills/stored/$skillId" params={{ skillId: skill.id }} className={shell}>
+    <div className={shell}>
+      {skill.origin === "plugin" ? (
+        <Link
+          to="/skills/$skillName"
+          params={{ skillName: skill.name }}
+          className={cover}
+          aria-label={label}
+        />
+      ) : (
+        <Link
+          to="/skills/stored/$skillId"
+          params={{ skillId: skill.id }}
+          className={cover}
+          aria-label={label}
+        />
+      )}
       {body}
-    </Link>
+    </div>
   );
 }

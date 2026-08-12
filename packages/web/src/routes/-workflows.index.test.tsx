@@ -8,10 +8,15 @@
  * router context — mocked the same way `thread-tree-new-thread.test.tsx`
  * does, since this suite only cares that navigation was requested, not
  * that the router actually resolved it.
+ *
+ * The team row's `OwnerBadge` carries a tooltip, which Radix refuses to
+ * render outside a provider, so the page renders inside one here — the same
+ * wrapper `session-header.test.tsx` uses.
  */
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { TooltipProvider } from "~/components/primitives";
 
 const workflowsData = {
   workflows: [
@@ -58,16 +63,24 @@ vi.mock("~/api/workflows", () => ({
 
 import { WorkflowsIndexPage } from "./workflows.index";
 
+function renderPage() {
+  return render(
+    <TooltipProvider>
+      <WorkflowsIndexPage />
+    </TooltipProvider>,
+  );
+}
+
 describe("WorkflowsIndexPage", () => {
   it("renders each workflow definition's name as a link to its editor page", () => {
-    render(<WorkflowsIndexPage />);
+    renderPage();
     const link = screen.getByText("Deploy pipeline").closest("a");
     expect(link?.getAttribute("href") ?? link?.getAttribute("to")).toBeTruthy();
     expect(screen.getByText("Nightly digest")).toBeTruthy();
   });
 
   it("starts a run and navigates to the run detail page when Run is clicked", async () => {
-    render(<WorkflowsIndexPage />);
+    renderPage();
     const runButtons = screen.getAllByRole("button", { name: "Run" });
     fireEvent.click(runButtons[0]);
 
@@ -81,7 +94,7 @@ describe("WorkflowsIndexPage", () => {
   });
 
   it("opens the New workflow dialog, defaults the name field, and posts the entered name on Create", async () => {
-    render(<WorkflowsIndexPage />);
+    renderPage();
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
 
     const nameInput = screen.getByLabelText("Name") as HTMLInputElement;
@@ -108,13 +121,14 @@ describe("WorkflowsIndexPage", () => {
 });
 
 describe("WorkflowsIndexPage — team ownership", () => {
-  it("badges a team-owned workflow with its team name", () => {
-    render(<WorkflowsIndexPage />);
-    expect(screen.getByText("Platform")).toBeTruthy();
+  it("badges a team-owned workflow with its team name, linked to that team's assistant", () => {
+    renderPage();
+    const badge = screen.getByText("Platform");
+    expect(badge.closest("a")?.getAttribute("to")).toBe("/chat");
   });
 
   it("posts teamId when a team owner is picked in the New workflow dialog", async () => {
-    render(<WorkflowsIndexPage />);
+    renderPage();
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
 
     fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "team_1" } });

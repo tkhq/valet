@@ -14,6 +14,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import type { ListSkillsResponse, ListTeamsResponse, SkillResponse } from "@valet/api/wire";
+import { TooltipProvider } from "~/components/primitives";
 
 const data: ListSkillsResponse = {
   skills: [
@@ -62,7 +63,7 @@ const stored: SkillResponse = {
   content: "Ship the service from main.\n",
 };
 
-const teams: ListTeamsResponse = { teams: [] };
+let teamsData: ListTeamsResponse = { teams: [] };
 
 let currentData: ListSkillsResponse = data;
 let currentState = { isLoading: false, error: null as Error | null };
@@ -88,7 +89,7 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
-  useTeams: () => ({ data: teams, isLoading: false, error: null }),
+  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
 }));
 
 // The repositories panel has its own suite; here it only has to render.
@@ -106,6 +107,7 @@ describe("SkillsIndexPage with stored skills", () => {
   beforeEach(() => {
     currentData = data;
     currentState = { isLoading: false, error: null };
+    teamsData = { teams: [] };
   });
 
   it("badges each skill with where it came from", () => {
@@ -121,9 +123,50 @@ describe("SkillsIndexPage with stored skills", () => {
   });
 
   it("links a stored skill to its row-id page, not to the name route", () => {
-    render(<SkillsIndexPage />);
-    const link = screen.getByText("Deploy").closest("a");
+    const { container } = render(<SkillsIndexPage />);
+    // The card's link covers the card instead of wrapping it — the owner
+    // badge in the title row is a link of its own — so it is addressed by
+    // the name it carries for a reader, not through the title text.
+    const link = container.querySelector('a[aria-label="Read Deploy"]');
     expect(link?.getAttribute("to")).toBe("/skills/stored/$skillId");
+  });
+
+  it("names the team that owns a skill, instead of the bare word Team", () => {
+    teamsData = {
+      teams: [
+        {
+          id: "team_1",
+          orgId: "org_1",
+          name: "Platform",
+          createdAt: 1,
+          memberCount: 2,
+          callerRole: "member",
+        },
+      ],
+    };
+    currentData = {
+      skills: [
+        {
+          name: "release",
+          description: "How the team ships.",
+          origin: "local",
+          id: "skill_3",
+          ownerType: "team",
+          ownerId: "team_1",
+          shadowed: false,
+          takesArgs: false,
+          updatedAt: 1_700_000_000_000,
+        },
+      ],
+    };
+    render(
+      <TooltipProvider>
+        <SkillsIndexPage />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.queryByText("Team")).toBeNull();
   });
 
   it("points at both ways to write one when the catalog is empty", () => {
