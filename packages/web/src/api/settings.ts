@@ -18,6 +18,7 @@ import type {
   CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  EnsureOrchestratorResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
@@ -302,6 +303,15 @@ export function useDeleteTeam() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
     },
+  });
+}
+
+/** Get-or-create the team's orchestrator session and return its id — the
+ * caller navigates to `/sessions/$sessionId` with it, same page every
+ * other session (including your own orchestrator) already renders on. */
+export function useEnsureTeamOrchestrator() {
+  return useMutation<EnsureOrchestratorResponse, Error, string>({
+    mutationFn: (teamId) => api.ensureTeamOrchestrator(teamId),
   });
 }
 

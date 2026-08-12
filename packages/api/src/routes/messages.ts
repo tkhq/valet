@@ -12,7 +12,7 @@
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
 import { Hono, type Context } from "hono";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -33,19 +33,26 @@ import type {
 } from "../wire/types.js";
 import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { canViewSession } from "../services/session-access.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
+/**
+ * Every route in this file (threads, messages, decisions) shares this one
+ * check — view access, not just direct ownership, so a team's orchestrator
+ * session works the same way here as `GET /api/sessions/:id` does (see
+ * `services/session-access.ts`). Session lifecycle routes (delete, pause,
+ * model change — in `routes/sessions.ts`) are NOT widened by this; talking
+ * to a team's orchestrator is not the same decision as reconfiguring it.
+ */
 async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
-  return rows[0] ?? null;
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
+  const row = rows[0];
+  if (!row || !(await canViewSession(db, row, userId))) return null;
+  return row;
 }
 
 function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {

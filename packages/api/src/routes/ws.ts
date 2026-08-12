@@ -17,11 +17,12 @@
  */
 import type { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { canViewSession } from "../services/session-access.js";
 import type { ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
 
@@ -68,14 +69,16 @@ export function registerWsRoutes(
           // process, killing every other live session. We instead emit an
           // error frame and close the socket gracefully.
           try {
-            // Verify session ownership before subscribing.
+            // Verify view access before subscribing — direct ownership, or
+            // team membership for a team's orchestrator session (see
+            // `services/session-access.ts`).
             const rows = await providers.db
               .select()
               .from(agentSessions)
-              .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.userId, userId)))
+              .where(eq(agentSessions.id, sessionId))
               .limit(1);
             const row = rows[0];
-            if (!row) {
+            if (!row || !(await canViewSession(providers.db, row, userId))) {
               ws.close(4040, "session not found");
               return;
             }

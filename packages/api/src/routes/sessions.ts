@@ -7,6 +7,7 @@ import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { autoTitle } from "../sessions/auto-title.js";
+import { canViewSession } from "../services/session-access.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -260,13 +261,12 @@ sessionsRouter.get("/:id", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  // View access, not just direct ownership — a team's orchestrator session
+  // is readable by any member (see `services/session-access.ts`); every
+  // other session route in this file stays direct-owner-only.
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canViewSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   const [{ n }] = await db
     .select({ n: count() })

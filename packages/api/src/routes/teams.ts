@@ -7,6 +7,7 @@
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
+ *   POST   /api/teams/:id/orchestrator      → get-or-create the team's orchestrator session
  *
  * Org-membership-gated: every route requires the team to belong to the
  * caller's org (`c.var.user.orgId`) — cross-org teams 404 rather than 403,
@@ -26,6 +27,7 @@ import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { teamMembers, teams, type TeamRow } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
+import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
 import {
   addMember,
   createTeam,
@@ -44,6 +46,7 @@ import type {
   AddTeamMemberRequest,
   CreateTeamRequest,
   CreateTeamResponse,
+  EnsureOrchestratorResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   SetTeamMemberRoleRequest,
@@ -157,6 +160,43 @@ teamsRouter.get("/", async (c) => {
   const body: ListTeamsResponse = {
     teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
   };
+  return c.json(body);
+});
+
+// ── Orchestrator (get-or-create) ────────────────────────────────────────────
+
+/**
+ * The team's own orchestrator session — same "assistant" concept as a
+ * user's, scoped to the team instead. Mirrors `POST /api/orchestrator`
+ * (`routes/orchestrator.ts`), which explicitly documents team/org
+ * orchestrators as "created via other paths" — this is that path. Any
+ * team member can reach it, same gate as `GET /:id/members`; there's no
+ * team-admin-only tier for talking to the team's own assistant.
+ *
+ * `ensureOrchestratorSession` is idempotent and safe to call from every
+ * member: the underlying engine session may already exist (a team-owned
+ * workflow's `orchestrator` node can wake one before any human ever views
+ * it — see `workflows/engine-deps.ts`'s `promptOrchestrator`), in which
+ * case this only backfills the `agent_sessions` app row the viewing routes
+ * (`GET /api/sessions/:id`, messages, the WS) need, rather than creating a
+ * second session.
+ */
+teamsRouter.post("/:id/orchestrator", async (c) => {
+  const { db, engineHost } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+
+  const { sessionId } = await ensureOrchestratorSession(
+    { db, engineHost },
+    { type: "team", id },
+    { actorUserId: user.id, orgId: user.orgId },
+  );
+
+  const body: EnsureOrchestratorResponse = { sessionId };
   return c.json(body);
 });
 

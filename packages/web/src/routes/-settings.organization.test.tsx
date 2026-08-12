@@ -32,6 +32,7 @@ const deleteTeamMutate = vi.fn();
 const addTeamMemberMutate = vi.fn();
 const setTeamMemberRoleMutate = vi.fn();
 const removeTeamMemberMutate = vi.fn();
+const ensureOrchestratorMutate = vi.fn();
 
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
@@ -110,6 +111,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
     useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
+    useEnsureTeamOrchestrator: () => ({ mutate: ensureOrchestratorMutate, isPending: false, error: null }),
     useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
     useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
     useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
