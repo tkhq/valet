@@ -894,6 +894,30 @@ export interface PluginServiceSummary {
    * declarations report "manual" when their client env vars are unset so
    * the UI never renders a Connect button that would 503. */
   connect: "oauth" | "manual";
+  /** Stable slug the client maps to a brand mark, e.g. "github", "gmail".
+   * Absent when the plugin declares none — the UI falls back to initials.
+   * A slug, not an image: the mark ships with the client so a service icon
+   * costs no request and cannot break when a vendor moves its asset. */
+  iconSlug?: string;
+  /**
+   * Whether the stored credential still works, for the CONNECTED case.
+   * `connected` alone is set membership in the credential store, so a
+   * revoked or expired token reads as connected while the agent silently
+   * drops the service from its tool list. These say otherwise.
+   */
+  health?: {
+    /** Epoch ms the access token expires, when the grant reports one. */
+    expiresAt?: number;
+    /** The connected account, e.g. an email or login handle. Shown so a
+     * user with two accounts knows which one is wired up. */
+    login?: string;
+    /** The last refresh attempt failed — the connection needs re-auth and
+     * will not recover on its own. */
+    refreshFailed?: boolean;
+    /** The grant carries identity only, with none of the scopes the
+     * service's actions need. */
+    identityOnly?: boolean;
+  };
 }
 
 export interface PluginSummary {
@@ -1731,6 +1755,24 @@ export interface EventDeliveryWire {
   attempts: number;
   lastError: string | null;
   deliveredAt: number | null;
+  /** Epoch ms of the next scheduled retry, while one is still coming. The
+   * column is already selected server-side; without it on the wire a
+   * failing delivery and a dead one look identical, and "retries in 8
+   * minutes" is the sentence that stops someone escalating. */
+  nextAttemptAt?: number | null;
+  /** The subscription's display name, so a delivery row can say what it
+   * was trying to reach without a second request. */
+  subscriptionName?: string;
+}
+
+/** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event
+ * whose earlier attempts failed or were given up on. Always writes NEW
+ * delivery rows: the workflow dispatcher derives a run id from the delivery
+ * id and returns early when that run exists, so reusing an id would report
+ * success and start nothing. */
+export interface RedeliverEventResponse {
+  /** Delivery rows created, one per currently-enabled matching subscription. */
+  created: number;
 }
 
 export interface GetEventResponse {
