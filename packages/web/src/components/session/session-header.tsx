@@ -12,6 +12,7 @@ import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
 import { useCopyToClipboard } from "~/lib/use-copy";
+import { formatElapsed, useElapsedSeconds } from "~/lib/use-elapsed";
 
 /** Collapse a workspace path down to a header-friendly badge: any
  * multi-segment path shows only its LAST segment ("ws-19",
@@ -43,6 +44,7 @@ function extractPauseError(err: unknown): string {
 export function SessionHeader({
   session,
   agentStatus,
+  turnStartedAt,
   conn,
   sandbox,
   threadId,
@@ -50,6 +52,8 @@ export function SessionHeader({
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
+  /** Wire timestamp the current turn began; undefined while idle. */
+  turnStartedAt?: number;
   conn: ConnectionStatus;
   sandbox?: { state: string; epoch: number };
   threadId?: string;
@@ -151,7 +155,7 @@ export function SessionHeader({
         </Tooltip>
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
-        <AgentStatusBadge status={agentStatus} />
+        <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} />
         <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
           <Button
             variant="ghost"
@@ -233,16 +237,18 @@ export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: num
   );
 }
 
-function AgentStatusBadge({ status }: { status: AgentStatus }) {
+function AgentStatusBadge({ status, turnStartedAt }: { status: AgentStatus; turnStartedAt?: number }) {
+  const elapsed = useElapsedSeconds(status === "idle" ? undefined : turnStartedAt);
   if (status === "idle") return <Badge variant="neutral">idle</Badge>;
   const variant =
     status === "error" ? "danger" : status === "thinking" || status === "tool_calling" ? "accent" : "neutral";
   return (
-    <Badge variant={variant} className={cn("inline-flex items-center gap-1.5")}>
+    <Badge variant={variant} className={cn("inline-flex items-center gap-1.5 tabular-nums")}>
       {status !== "queued" && (
         <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
       )}
       {status.replace("_", " ")}
+      {elapsed !== undefined && <span className="text-current/70">{formatElapsed(elapsed)}</span>}
     </Badge>
   );
 }

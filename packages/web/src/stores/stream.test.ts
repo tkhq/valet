@@ -516,6 +516,42 @@ describe("turn error visibility", () => {
   });
 });
 
+describe("turnStartedAt", () => {
+  beforeEach(reset);
+
+  function statusEvent(status: "queued" | "thinking" | "idle", ts: number): WireEvent {
+    return { seq: ts, ts, type: "status", threadId: THREAD, status } as WireEvent;
+  }
+
+  it("stamps turnStartedAt on the first non-idle status after idle", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(1000);
+  });
+
+  it("does not re-stamp on a later non-idle status within the same turn", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, statusEvent("thinking", 2000));
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(1000);
+  });
+
+  it("clears turnStartedAt on turn_end", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBeUndefined();
+  });
+
+  it("stamps again on the next turn after idle", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
+    ingest(SESSION, statusEvent("queued", 3000));
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(3000);
+  });
+});
+
 describe("store default slice", () => {
   beforeEach(reset);
 

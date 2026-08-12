@@ -62,6 +62,15 @@ export interface SessionStreamState {
   lastOffset: string;
   /** Engine-reported agent status; mirrors the wire `status` event. */
   agentStatus: AgentStatus;
+  /**
+   * Wire timestamp (`WireEvent.ts`) of the first non-idle `status` event in
+   * the current turn — server-stamped, not `Date.now()`, so it isn't thrown
+   * off by client clock skew. `undefined` while idle. Drives the elapsed-
+   * time counter on `AgentStatusBadge`; does not reset on an idle→non-idle
+   * status change WITHIN a turn (thinking → tool_calling → streaming), only
+   * on idle → non-idle.
+   */
+  turnStartedAt?: number;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
   messages: StreamMessage[];
   /**
@@ -193,6 +202,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // on the wire.
       next.error = undefined;
       next.agentStatus = "idle";
+      next.turnStartedAt = undefined;
       return next;
     }
 
@@ -291,12 +301,14 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "status": {
+      if (slice.agentStatus === "idle" && ev.status !== "idle") next.turnStartedAt = ev.ts;
       next.agentStatus = ev.status;
       return next;
     }
 
     case "turn_end": {
       next.agentStatus = "idle";
+      next.turnStartedAt = undefined;
       // Deliberately KEEP `slice.error`: on a failed turn the engine emits
       // `error` then `turn_end` within the same tick, so clearing here made
       // the error banner flash for milliseconds and vanish — a failing turn
