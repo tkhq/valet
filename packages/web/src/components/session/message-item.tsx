@@ -4,6 +4,7 @@ import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
 import { pickRenderer, ToolShell } from "./tool-renderers";
+import { Thinking } from "./tool-renderers/thinking";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
@@ -72,8 +73,14 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
 }
 
 function PartView({ part }: { part: MessagePart }) {
-  if (part.kind === "text") return <TextBlock text={part.text} />;
-  return <ToolCallBlock part={part} />;
+  switch (part.kind) {
+    case "text":
+      return <TextBlock text={part.text} />;
+    case "thinking":
+      return <Thinking text={part.text} />;
+    case "tool_call":
+      return <ToolCallBlock part={part} />;
+  }
 }
 
 function TextBlock({ text }: { text: string }) {

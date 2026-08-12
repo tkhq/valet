@@ -224,9 +224,9 @@ export type MessageRole = "user" | "assistant" | "tool" | "system";
 
 /**
  * Discriminated union for message parts. Mirrors the engine's MessagePart
- * one-to-one for `text` and `tool_call` so the bridge is mechanical.
- * `thinking` and `attachment` parts from the engine are dropped on the wire
- * (the UI doesn't render them in the agent loop).
+ * one-to-one for `text`, `tool_call`, and `thinking` so the bridge is
+ * mechanical. `attachment` and `error` parts from the engine are still
+ * dropped on the wire (the UI doesn't render them in the agent loop).
  */
 export type MessagePart =
   | { kind: "text"; text: string }
@@ -238,7 +238,8 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
-    };
+    }
+  | { kind: "thinking"; text: string };
 
 /**
  * Trimmed projection of engine `MessageEntry.signal` (plan decision 2).

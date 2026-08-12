@@ -47,8 +47,8 @@ export function engineResolutionToWire(r: EngineDecisionResolution): WireDecisio
 /**
  * Translate engine MessagePart → wire MessagePart.
  *
- * Engine has more variants than the wire (thinking, attachment, error). The
- * agent-loop UI only renders text and tool_call; the rest are dropped.
+ * Engine has more variants than the wire (attachment, error — still
+ * dropped; the UI doesn't render them). `thinking` is forwarded as-is.
  */
 export function engineToWireParts(parts?: EngineMessagePart[]): WireMessagePart[] {
   if (!parts) return [];
@@ -69,8 +69,10 @@ export function engineToWireParts(parts?: EngineMessagePart[]): WireMessagePart[
           error: p.error,
         });
         break;
-      // thinking, attachment, error parts: dropped on the wire (UI ignores).
       case "thinking":
+        out.push({ kind: "thinking", text: p.text });
+        break;
+      // attachment, error parts: dropped on the wire (UI ignores).
       case "attachment":
       case "error":
         break;
