@@ -15,7 +15,8 @@ CREATE TABLE "user" (
 	"created_at" timestamp DEFAULT now() NOT NULL,
 	"updated_at" timestamp DEFAULT now() NOT NULL,
 	"role" text DEFAULT 'member' NOT NULL,
-	"default_model" text
+	"default_model" text,
+	"bare_skill_commands" boolean NOT NULL DEFAULT false
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_email_unique" ON "user" ("email");
@@ -715,3 +716,15 @@ CREATE TABLE "linear_installations" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "linear_installations_org_workspace" ON "linear_installations" ("org_id","workspace_id");
+--> statement-breakpoint
+CREATE TABLE "user_prompt_templates" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"name" text NOT NULL,
+	"description" text,
+	"content" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "user_prompt_templates_user_name" ON "user_prompt_templates" ("user_id","name");

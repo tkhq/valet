@@ -33,6 +33,7 @@ import { credentialsRouter } from "./routes/credentials.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
+import { promptTemplatesRouter } from "./routes/prompt-templates.js";
 import { modelsRouter } from "./routes/models.js";
 import { usageRouter } from "./routes/usage.js";
 import { orgRouter } from "./routes/org.js";
@@ -213,6 +214,7 @@ export function createApp(
   // identityLinksRouter above.
   app.route("/api/me/github", githubConnectRouter);
   app.route("/api/me", meRouter);
+  app.route("/api/prompt-templates", promptTemplatesRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/org", orgRouter);

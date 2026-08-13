@@ -897,6 +897,7 @@ export interface MeResponse {
   orgId: string;
   orgRole: "admin" | "member";
   defaultModel: string | null;
+  bareSkillCommands: boolean;
 }
 
 /** Whitelisted fields only — unknown keys 400. `defaultModel: null` clears the override. */
@@ -904,9 +905,27 @@ export interface PatchMeRequest {
   name?: string;
   avatarUrl?: string;
   defaultModel?: string | null;
+  bareSkillCommands?: boolean;
 }
 
 export type PatchMeResponse = MeResponse;
+
+export interface UserPromptTemplate {
+  name: string;
+  description?: string;
+  content: string;
+}
+
+export interface ListPromptTemplatesResponse {
+  templates: UserPromptTemplate[];
+}
+
+export interface PutPromptTemplateRequest {
+  description?: string;
+  content: string;
+}
+
+export type PutPromptTemplateResponse = UserPromptTemplate;
 
 /** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
  * back-compat) — see `services/model-catalog.ts`. `active: false` marks a

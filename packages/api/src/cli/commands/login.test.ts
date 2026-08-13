@@ -17,6 +17,7 @@ const ME: MeResponse = {
   orgId: "o1",
   orgRole: "admin",
   defaultModel: null,
+  bareSkillCommands: false,
 };
 
 let dir: string;
