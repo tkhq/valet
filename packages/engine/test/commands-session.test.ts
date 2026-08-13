@@ -118,3 +118,51 @@ describe("Session.prompt command interception", () => {
     expect(receipt.queueItemId).not.toBe("");
   });
 });
+
+describe("Session.commandRegistry — workspace skills provider", () => {
+  it("workspace prompt skills join the registry after refresh and lose ties", async () => {
+    const faux = registerFauxProvider({ provider: "s-wsp" });
+    cleanups.push(() => faux.unregister());
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+      skills: [
+        {
+          name: "standup",
+          description: "user copy",
+          content: "USER $1",
+          invocation: "prompt",
+          source: "db",
+        },
+      ],
+      workspaceSkillsProvider: async () => [
+        {
+          name: "standup",
+          description: "repo copy",
+          content: "REPO $1",
+          invocation: "prompt",
+          source: "repo",
+        },
+        {
+          name: "deploy-notes",
+          description: "repo only",
+          content: "Notes $1",
+          invocation: "prompt",
+          source: "repo",
+        },
+      ],
+    });
+    await session.refreshCommandRegistry();
+    const reg = session.commandRegistry();
+    const standup = reg.resolve("skill:standup");
+    // DB/plugin skill beats workspace skill of same name.
+    expect(standup?.source === "skill" && standup.skill.content).toBe("USER $1");
+    // Workspace-only skill is present.
+    expect(reg.resolve("skill:deploy-notes")).toBeDefined();
+  });
+});

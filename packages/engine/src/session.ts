@@ -895,7 +895,7 @@ export class Session {
   commandRegistry(): CommandRegistry {
     if (this.commandRegistryCache) return this.commandRegistryCache;
     const registry = buildCommandRegistry({
-      skills: [...this.skills.values(), ...(this.workspaceSkillsCache ?? [])],
+      skills: [...(this.workspaceSkillsCache ?? []), ...this.skills.values()],
       pluginCommands: this.options.pluginCommands ?? [],
       bareSkillNames: this.options.bareSkillNames ?? false,
     });
