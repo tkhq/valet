@@ -932,6 +932,18 @@ export interface StoredSkillSummary extends SkillSummaryBase {
    */
   shadowed: boolean;
   updatedAt: number;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Absent when the skill uses the `"context"` default.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Present only on prompt-invocation skills that declare one.
+   */
+  argHint?: string;
 }
 
 export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
@@ -959,10 +971,41 @@ export interface CreateSkillRequest {
    * caller. A non-member or unknown id 404s, same as any other cross-owner
    * access. */
   teamId?: string;
+  /** Create the skill for the org instead of for the caller.
+   * Requires the caller to be an org admin; a non-admin gets 403. */
+  ownerType?: "user" | "team" | "org";
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Must be `"context"` or `"prompt"` when present.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
 }
 
 /** Every field is optional; an absent field keeps its stored value. */
-export type UpdateSkillRequest = Partial<Omit<CreateSkillRequest, "teamId">>;
+export interface UpdateSkillRequest {
+  name?: string;
+  description?: string;
+  content?: string;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Must be `"context"` or `"prompt"` when present.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
+}
 
 export interface DeleteSkillResponse {
   ok: true;
