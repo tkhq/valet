@@ -116,11 +116,39 @@ vi.mock("~/api/api-keys", () => ({
   useRevokeApiKey: () => ({ mutate: revokeApiKeyMutate, isPending: false, error: null }),
 }));
 
+const addSourceMutate = vi.fn();
+const syncSourceMutate = vi.fn();
+const removeSourceMutate = vi.fn();
+let sourcesData: {
+  sources: Array<{
+    id: string;
+    repo: string;
+    ref: string;
+    subpath: string;
+    ownerType: "user" | "team" | "org";
+    ownerId: string;
+    enabled: boolean;
+    status: "pending" | "ok" | "warning" | "error";
+    skillCount: number;
+    lastSyncedAt: number | null;
+    lastSha: string | null;
+    lastMessage: string | null;
+  }>;
+} = { sources: [] };
+
+vi.mock("~/api/skill-sources", () => ({
+  useSkillSources: () => ({ data: sourcesData, isLoading: false, error: null }),
+  useAddSkillSource: () => ({ mutate: addSourceMutate, isPending: false, error: null }),
+  useSyncSkillSource: () => ({ mutate: syncSourceMutate, isPending: false }),
+  useRemoveSkillSource: () => ({ mutate: removeSourceMutate, isPending: false }),
+}));
+
 import { ProfilePage } from "./settings.profile";
 import { AssistantPage } from "./settings.assistant";
 import { AppearancePage } from "./settings.appearance";
 import { NotificationsPage } from "./settings.notifications";
 import { ApiKeysPage } from "./settings.api-keys";
+import { LibrarySourcesPage } from "./settings.library-sources";
 
 describe("ProfilePage", () => {
   beforeEach(() => {
@@ -365,5 +393,50 @@ describe("ApiKeysPage", () => {
       "key_1",
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
+  });
+});
+
+describe("LibrarySourcesPage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sourcesData = { sources: [] };
+  });
+
+  it("renders the Library sources section title", () => {
+    render(<LibrarySourcesPage />);
+    expect(screen.getByText("Library sources")).toBeTruthy();
+  });
+
+  it("adds a personal source with no org scope", () => {
+    render(<LibrarySourcesPage />);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+    expect(addSourceMutate).toHaveBeenCalledWith({ repo: "tkhq/skills" });
+  });
+
+  it("hides org sources from the personal panel", () => {
+    sourcesData = {
+      sources: [
+        {
+          id: "s_org",
+          repo: "tkhq/org-skills",
+          ref: "",
+          subpath: "",
+          ownerType: "org",
+          ownerId: "org_1",
+          enabled: true,
+          status: "ok",
+          skillCount: 1,
+          lastSyncedAt: null,
+          lastSha: null,
+          lastMessage: null,
+        },
+      ],
+    };
+    render(<LibrarySourcesPage />);
+    expect(screen.queryByText("tkhq/org-skills")).toBeNull();
   });
 });

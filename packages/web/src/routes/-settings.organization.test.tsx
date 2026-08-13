@@ -121,9 +121,53 @@ vi.mock("~/api/invites", () => ({
   useRevokeInvite: () => ({ mutate: revokeInviteMutate, isPending: false, error: null }),
 }));
 
+const addSourceMutate = vi.fn();
+let orgSourcesData: {
+  sources: Array<{
+    id: string;
+    repo: string;
+    ref: string;
+    subpath: string;
+    ownerType: "user" | "team" | "org";
+    ownerId: string;
+    enabled: boolean;
+    status: "pending" | "ok" | "warning" | "error";
+    skillCount: number;
+    lastSyncedAt: number | null;
+    lastSha: string | null;
+    lastMessage: string | null;
+  }>;
+} = { sources: [] };
+
+vi.mock("~/api/skill-sources", () => ({
+  useSkillSources: () => ({ data: orgSourcesData, isLoading: false, error: null }),
+  useAddSkillSource: () => ({ mutate: addSourceMutate, isPending: false, error: null }),
+  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
 import { OrganizationGeneralPage } from "./settings.organization.index";
 import { OrganizationMembersPage } from "./settings.organization.members";
 import { OrganizationTeamsPage } from "./settings.organization.teams";
+import { OrganizationLibraryPage } from "./settings.organization.library";
+
+function orgSource(over: Record<string, unknown> = {}) {
+  return {
+    id: "s_org",
+    repo: "tkhq/org-skills",
+    ref: "",
+    subpath: "",
+    ownerType: "org" as const,
+    ownerId: "org_1",
+    enabled: true,
+    status: "ok" as const,
+    skillCount: 2,
+    lastSyncedAt: null,
+    lastSha: null,
+    lastMessage: null,
+    ...over,
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -145,6 +189,7 @@ beforeEach(() => {
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
   invitesData = { invites: [] };
+  orgSourcesData = { sources: [] };
 });
 
 describe("OrganizationGeneralPage", () => {
@@ -349,5 +394,42 @@ describe("OrganizationTeamsPage", () => {
     expect(deleteTeamMutate).toHaveBeenCalledWith("team_1", expect.objectContaining({
       onSuccess: expect.any(Function),
     }));
+  });
+});
+
+describe("OrganizationLibraryPage", () => {
+  it("shows only org sources with a scope badge", () => {
+    orgSourcesData = {
+      sources: [
+        orgSource(),
+        {
+          ...orgSource({ id: "s_personal", repo: "me/mine", ownerType: "user", ownerId: "u1" }),
+        },
+      ],
+    };
+    render(<OrganizationLibraryPage />);
+    expect(screen.getByText("tkhq/org-skills")).toBeTruthy();
+    expect(screen.queryByText("me/mine")).toBeNull();
+    expect(screen.getByText("Org")).toBeTruthy();
+  });
+
+  it("an admin adds an org-scoped source", () => {
+    render(<OrganizationLibraryPage />);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/org-skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+    expect(addSourceMutate).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org" });
+  });
+
+  it("a member sees status but no Sync, Remove, or import controls", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    orgSourcesData = { sources: [orgSource()] };
+    render(<OrganizationLibraryPage />);
+    expect(screen.getByText("tkhq/org-skills")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^sync$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /import/i })).toBeNull();
   });
 });
