@@ -22,6 +22,7 @@ function renderPopup(
   query: string,
   selectedIndex = 0,
   onSelect = vi.fn(),
+  onHover = vi.fn(),
 ) {
   return render(
     <CommandPopup
@@ -29,6 +30,7 @@ function renderPopup(
       query={query}
       selectedIndex={selectedIndex}
       onSelect={onSelect}
+      onHover={onHover}
     />,
   );
 }
@@ -71,6 +73,18 @@ describe("CommandPopup — selection", () => {
     const options = screen.getAllByRole("option");
     expect(options[0].getAttribute("aria-selected")).toBe("false");
     expect(options[1].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("fires onHover with the row's flat index on pointer move", () => {
+    const onHover = vi.fn();
+    renderPopup(FIXTURE, "", 0, vi.fn(), onHover);
+    const options = screen.getAllByRole("option");
+    fireEvent.mouseMove(options[1]);
+    expect(onHover).toHaveBeenCalledWith(1);
+    // Moving over the already-selected row does not re-fire.
+    onHover.mockClear();
+    fireEvent.mouseMove(options[0]);
+    expect(onHover).not.toHaveBeenCalled();
   });
 });
 

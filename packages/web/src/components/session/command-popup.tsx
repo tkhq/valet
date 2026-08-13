@@ -30,6 +30,8 @@ export interface CommandPopupProps {
   selectedIndex: number;
   /** Called with the command name (no leading slash) when the user confirms a row. */
   onSelect: (name: string) => void;
+  /** Called with a row's flat index when the pointer moves over it. */
+  onHover: (index: number) => void;
 }
 
 export function CommandPopup({
@@ -37,6 +39,7 @@ export function CommandPopup({
   query,
   selectedIndex,
   onSelect,
+  onHover,
 }: CommandPopupProps) {
   if (commands.length === 0) return null;
 
@@ -81,12 +84,22 @@ export function CommandPopup({
                     }
                   }}
                   className={`flex items-start gap-2 px-3 py-1.5 cursor-pointer text-sm ${
-                    isSelected ? "bg-[--accent] text-[--accent-fg]" : "hover:bg-[--hover]"
+                    // bg-ink-wash-strong is the app's press/selected wash.
+                    // (An invented var like --accent silently paints nothing —
+                    // that bug shipped once; see theme.css's wash comment.)
+                    isSelected ? "bg-ink-wash-strong" : ""
                   }`}
                   onMouseDown={(e) => {
                     // Prevent textarea blur before we can call onSelect.
                     e.preventDefault();
                     onSelect(cmd.name);
+                  }}
+                  onMouseMove={() => {
+                    // Pointer and keyboard share ONE highlight. mousemove, not
+                    // mouseenter: arrow-driven scrollIntoView shifts rows under
+                    // a stationary cursor, and a spurious mouseenter would
+                    // yank the selection back to wherever the pointer sits.
+                    if (!isSelected) onHover(flatIndex);
                   }}
                 >
                   <span className="font-mono font-medium shrink-0">/{cmd.name}</span>

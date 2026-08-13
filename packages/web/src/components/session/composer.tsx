@@ -175,6 +175,7 @@ export function Composer({
             query={commandQuery ?? ""}
             selectedIndex={selectedIndex}
             onSelect={insertCommand}
+            onHover={setSelectedIndex}
           />
         )}
         <Textarea
