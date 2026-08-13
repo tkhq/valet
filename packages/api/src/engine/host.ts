@@ -32,10 +32,10 @@ import {
   type CommandDef,
   type PluginCatalog,
   type Sandbox,
-  type TemplateProvider,
+  type SkillSource,
 } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
-import { makeCommandContext, makeTemplateProvider } from "./command-providers.js";
+import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
@@ -446,7 +446,7 @@ export class EngineHost {
         // under `/workspace/.valet/prompts` are only readable once workspace
         // prep has run, which happens by the time the attachment reaches
         // `ready`. Refresh the command registry so those templates land. A
-        // no-op when the session has no `templateProvider`. Best-effort — a
+        // no-op when the session has no `workspaceSkillsProvider`. Best-effort — a
         // refresh failure never breaks the ready transition.
         Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
           console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
@@ -845,7 +845,7 @@ export class EngineHost {
 
   /**
    * Assembles the slash-command options for a session build (slash-commands
-   * plan, Task 10): `templateProvider`, `commandContext`, `bareSkillNames`,
+   * plan, Task 10): `workspaceSkillsProvider`, `commandContext`, `bareSkillNames`,
    * and the plugin-command pair (`pluginCommands` + `pluginCatalog`).
    *
    * `getSession` returns the built `Session` once it exists (parked in a local
@@ -886,7 +886,7 @@ export class EngineHost {
     getSession: () => Session | undefined,
   ): Promise<
     | {
-        templateProvider: TemplateProvider;
+        workspaceSkillsProvider: () => Promise<SkillSource[]>;
         commandContext: CommandContext;
         bareSkillNames: boolean;
         pluginCommands: Array<{ pluginName: string; def: CommandDef }>;
@@ -906,10 +906,10 @@ export class EngineHost {
       : [];
     const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
 
-    const templateProvider = makeTemplateProvider(db, userId, () => {
+    const workspaceSkillsProvider = makeWorkspaceSkillsProvider(db, userId, () => {
       const session = getSession();
       // Only reach for the sandbox once it is provisioned — listing commands
-      // must never trigger a cold start just to read repo templates.
+      // must never trigger a cold start just to read repo prompts.
       if (!session || session.attachment.state !== "ready") return undefined;
       return session.sandbox as Sandbox;
     });
@@ -922,7 +922,7 @@ export class EngineHost {
     const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
     const pluginCatalog = buildPluginCatalog(actionPlugins);
 
-    return { templateProvider, commandContext, bareSkillNames, pluginCommands, pluginCatalog };
+    return { workspaceSkillsProvider, commandContext, bareSkillNames, pluginCommands, pluginCatalog };
   }
 
   /**

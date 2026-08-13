@@ -3,9 +3,11 @@
  * Task 10). These adapt app data (Drizzle, the org model catalog, child-session
  * links) into the engine's injection contracts:
  *
- *  - `makeTemplateProvider` — `TemplateProvider`, merging the user's saved
- *    prompt templates (Drizzle `user_prompt_templates`) with repo templates
- *    read from the session's sandbox (`/workspace/.valet/prompts/*.md`).
+ *  - `makeWorkspaceSkillsProvider` — a `() => Promise<SkillSource[]>` provider,
+ *    merging the user's saved prompt templates (Drizzle `user_prompt_templates`)
+ *    with repo prompts read from the session's sandbox
+ *    (`/workspace/.valet/prompts/*.md`). Both become `invocation: "prompt"`
+ *    skills. Tasks 3-4 rework this over the `skills`/`skill_sources` model.
  *  - `makeCommandContext` — `CommandContext`, backing `/model` (the org model
  *    catalog) and `/sessions` (this session's children).
  *
@@ -15,9 +17,8 @@
 import { desc, eq } from "drizzle-orm";
 import type {
   CommandContext,
-  PromptTemplate,
   Sandbox,
-  TemplateProvider,
+  SkillSource,
 } from "@valet/engine";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
@@ -47,7 +48,7 @@ const REPO_TEMPLATE_EXEC = `sh -c 'for f in ${REPO_PROMPTS_GLOB}; do [ -f "$f" ]
  * `name` is the filename without its `.md` suffix. `description` is read from a
  * leading `description:` frontmatter line when present.
  */
-export async function readRepoTemplates(sandbox: Sandbox | undefined): Promise<PromptTemplate[]> {
+export async function readRepoTemplates(sandbox: Sandbox | undefined): Promise<SkillSource[]> {
   if (!sandbox) return [];
   let stdout: string;
   try {
@@ -62,9 +63,9 @@ export async function readRepoTemplates(sandbox: Sandbox | undefined): Promise<P
   return parseRepoTemplates(stdout);
 }
 
-/** Parses the delimited stdout of `REPO_TEMPLATE_EXEC` into templates. */
-function parseRepoTemplates(stdout: string): PromptTemplate[] {
-  const templates: PromptTemplate[] = [];
+/** Parses the delimited stdout of `REPO_TEMPLATE_EXEC` into prompt skills. */
+function parseRepoTemplates(stdout: string): SkillSource[] {
+  const templates: SkillSource[] = [];
   // Split on the delimiter; the first chunk is whatever preceded the first
   // marker (empty for well-formed output) and is skipped.
   const chunks = stdout.split(TMPL_DELIM);
@@ -81,7 +82,8 @@ function parseRepoTemplates(stdout: string): PromptTemplate[] {
       name,
       description: readFrontmatterDescription(content),
       content,
-      origin: "repo",
+      source: "repo",
+      invocation: "prompt",
     });
   }
   return templates;
@@ -106,38 +108,40 @@ function readFrontmatterDescription(content: string): string | undefined {
 }
 
 /**
- * Builds the `TemplateProvider` for a session. Repo templates come first so a
- * user template of the same name shadows the repo one (registry precedence:
- * the later entry wins on a name collision).
+ * Builds the workspace-skills provider for a session. Repo prompts come first
+ * so a user prompt of the same name shadows the repo one (registry precedence:
+ * the later entry wins on a name collision). Both origins are
+ * `invocation: "prompt"` skills.
  *
  * `sandbox()` resolves the session's sandbox handle lazily and returns
  * `undefined` when no prepared sandbox is available — the host guards it so a
- * `GET /commands` call never provisions a sandbox just to list templates.
+ * `GET /commands` call never provisions a sandbox just to list prompts.
+ *
+ * Tasks 3-4 replace this with the `skills`/`skill_sources` model.
  */
-export function makeTemplateProvider(
+export function makeWorkspaceSkillsProvider(
   db: AppDb,
   userId: string | undefined,
   sandbox: () => Sandbox | undefined,
-): TemplateProvider {
-  return {
-    async listTemplates(): Promise<PromptTemplate[]> {
-      // No personal user (team/org orchestrator): repo templates only. A
-      // shared session must not surface whichever actor's templates woke it.
-      const rows = userId
-        ? await db
-            .select()
-            .from(userPromptTemplates)
-            .where(eq(userPromptTemplates.userId, userId))
-        : [];
-      const user: PromptTemplate[] = rows.map((r) => ({
-        name: r.name,
-        description: r.description ?? undefined,
-        content: r.content,
-        origin: "user" as const,
-      }));
-      const repo = await readRepoTemplates(sandbox());
-      return [...repo, ...user];
-    },
+): () => Promise<SkillSource[]> {
+  return async (): Promise<SkillSource[]> => {
+    // No personal user (team/org orchestrator): repo prompts only. A shared
+    // session must not surface whichever actor's prompts woke it.
+    const rows = userId
+      ? await db
+          .select()
+          .from(userPromptTemplates)
+          .where(eq(userPromptTemplates.userId, userId))
+      : [];
+    const user: SkillSource[] = rows.map((r) => ({
+      name: r.name,
+      description: r.description ?? undefined,
+      content: r.content,
+      source: "user" as const,
+      invocation: "prompt" as const,
+    }));
+    const repo = await readRepoTemplates(sandbox());
+    return [...repo, ...user];
   };
 }
 

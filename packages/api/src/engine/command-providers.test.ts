@@ -2,13 +2,13 @@
  * Unit tests for the slash-command host providers (Task 10):
  * `readRepoTemplates` parsing + no-sandbox / non-zero-exit fallbacks.
  *
- * The DB-backed pieces (`makeTemplateProvider` merge, `makeCommandContext`) are
- * exercised end to end through the route in `command-route.test.ts`.
+ * The DB-backed pieces (`makeWorkspaceSkillsProvider` merge, `makeCommandContext`)
+ * are exercised end to end through the route in `command-route.test.ts`.
  */
 import { describe, expect, it } from "vitest";
 import type { ExecOpts, ExecResult, Sandbox } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { makeTemplateProvider, readRepoTemplates } from "./command-providers.js";
+import { makeWorkspaceSkillsProvider, readRepoTemplates } from "./command-providers.js";
 
 /** Minimal `Sandbox` whose `exec` returns a canned result. Only `exec` is
  * called by `readRepoTemplates`; the rest throw if ever touched. */
@@ -52,7 +52,8 @@ describe("readRepoTemplates", () => {
     expect(templates[0]).toMatchObject({
       name: "standup",
       description: "Daily standup",
-      origin: "repo",
+      source: "repo",
+      invocation: "prompt",
     });
     expect(templates[0]?.content).toContain("Summarize $1");
   });
@@ -71,7 +72,7 @@ describe("readRepoTemplates", () => {
   });
 });
 
-describe("makeTemplateProvider", () => {
+describe("makeWorkspaceSkillsProvider", () => {
   it("skips user templates when no personal user applies (shared session)", async () => {
     // A team/org orchestrator passes userId=undefined: the provider must not
     // touch the DB at all. AppDb is a large Drizzle type; a throwing proxy is
@@ -84,7 +85,7 @@ describe("makeTemplateProvider", () => {
         },
       },
     ) as AppDb;
-    const provider = makeTemplateProvider(db, undefined, () => undefined);
-    expect(await provider.listTemplates()).toEqual([]);
+    const provider = makeWorkspaceSkillsProvider(db, undefined, () => undefined);
+    expect(await provider()).toEqual([]);
   });
 });

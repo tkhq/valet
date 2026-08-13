@@ -22,14 +22,12 @@ export interface PopupItem {
 const SOURCE_ORDER: WireCommandInfo["source"][] = [
   "builtin",
   "skill",
-  "template",
   "plugin",
 ];
 
 const SOURCE_LABEL: Record<WireCommandInfo["source"], string> = {
   builtin: "Built-in",
   skill: "Skill",
-  template: "Template",
   plugin: "Plugin",
 };
 
