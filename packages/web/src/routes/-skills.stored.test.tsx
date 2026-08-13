@@ -60,6 +60,7 @@ const stored: SkillResponse = {
   takesArgs: false,
   updatedAt: 1_700_000_000_000,
   content: "Ship the service from main.\n",
+  editable: true,
 };
 
 const teams: ListTeamsResponse = { teams: [] };
@@ -89,6 +90,7 @@ vi.mock("~/api/skills", () => ({
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teams, isLoading: false, error: null }),
+  useOrg: () => ({ data: { callerRole: "member" }, isLoading: false, error: null }),
 }));
 
 // The repositories panel has its own suite; here it only has to render.
@@ -201,6 +203,18 @@ describe("SkillDoc", () => {
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
     expect(screen.getByText(/Edit it where it came from/)).toBeTruthy();
+  });
+
+  it("shows an org skill read-only to a member and names who manages it", () => {
+    currentStored = { ...stored, ownerType: "org", editable: false };
+    open();
+    // The body still reads.
+    expect(screen.getByText("Ship the service from main.")).toBeTruthy();
+    // No write actions, and no editor field.
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByText(/Org skills are managed by org admins/)).toBeTruthy();
   });
 
   it("writes a new skill from an empty form", async () => {
