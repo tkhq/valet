@@ -99,9 +99,14 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary'],
+  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
+
+/** Typed as `ReadonlySet<string>` on purpose: the runtime input is
+ * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
+ * cannot hold. */
+const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
 
 const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
@@ -430,6 +435,12 @@ function validateNodeFields(
       if (node.summary !== undefined && typeof node.summary === 'string') {
         checkTemplate(label, 'summary', node.summary, refCtx, errors);
       }
+      if (node.credential !== undefined && !TOOL_CREDENTIAL_MODES.has(node.credential)) {
+        errors.push(
+          `${label}: tool.credential must be "auto", "app" or "user", got ${JSON.stringify(node.credential)} — ` +
+            `"app" makes the action run as the installed application, "user" as the workflow owner`,
+        );
+      }
       break;
     case 'foreach':
       // Field checks live in validateForeachNode (needs nodesById).
@@ -536,7 +547,23 @@ function validateForeachNode(
     validateNodeFields(node.body, bodyLabel, refCtx, env, errors);
   }
 
-  if (typeof node.body.id === 'string' && nodesById.has(node.body.id)) {
+  // A body node is not in `definition.nodes`, so the per-node loop in
+  // `validateWorkflowDefinition` never applies `NODE_ID_PATTERN` to its id.
+  // Apply it here. At runtime the body id becomes one part of the session id
+  // `wf:{runId}:{nodeId}[:{iteration}]` and one segment of that session's
+  // workspace path, so an id with a colon makes an unparseable session id,
+  // and an id with a slash or a dot segment escapes the workspace root.
+  if (typeof node.body.id !== 'string' || node.body.id.length === 0) {
+    errors.push(
+      `${label}: foreach.body is missing its "id" — give the body an id, ` +
+        `because its checkpoints and session ids are keyed by it`,
+    );
+  } else if (!NODE_ID_PATTERN.test(node.body.id)) {
+    errors.push(
+      `${label}: foreach.body id ${JSON.stringify(node.body.id)} must match ${NODE_ID_PATTERN} — ` +
+        `start it with a letter or a digit, then use only letters, digits, "-", and "_"`,
+    );
+  } else if (nodesById.has(node.body.id)) {
     errors.push(`${label}: foreach.body id ${JSON.stringify(node.body.id)} collides with a definition node id`);
   }
 

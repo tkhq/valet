@@ -66,6 +66,18 @@ existence for API groups it does not own.
   ```sh
   kubectl --context rancher-desktop -n valet delete pvc -l app.kubernetes.io/instance=valet
   ```
+- **A rotated key rolls the api pod.** The api reads its config and
+  secrets through `envFrom`/`secretKeyRef`, and Kubernetes injects those
+  once, at pod start. The api pod template therefore carries
+  `checksum/secret` and `checksum/config` annotations, so `helm upgrade`
+  replaces the pod when the material behind them changes. `checksum/secret`
+  digests the supplied values — `api.secrets.*`, `externalDatabase.url`,
+  and `postgres.*` — rather than the rendered Secret. The retained values
+  are generated fresh on any render that cannot `lookup` them, so a digest
+  over the rendered Secret would change when nothing changed. Secrets and
+  ConfigMaps referenced through `api.extraEnvFrom` are outside the chart
+  and outside both digests; rotate one of those with
+  `kubectl rollout restart deployment/<release>-api`.
 - No secrets are committed to `values.yaml` — only empty placeholders.
   Supply real values via `--set`, a gitignored local `values-local.yaml`,
   or `--set-file`. Or leave them blank to let the chart generate and

@@ -12,8 +12,8 @@
  * interface (which would ripple into the already-shipped `session` node
  * executor and its tests), this builder resolves the missing context itself
  * by parsing the session id: every workflow session id is
- * `wf:{runId}:{nodeId}` (see `nodes/session.ts`), so `runId` is always
- * recoverable. From `runId` it loads the `WorkflowRun` row (for
+ * `wf:{runId}:{nodeId}[:{iteration}]` (see `nodes/session.ts`), so `runId`
+ * is always recoverable. From `runId` it loads the `WorkflowRun` row (for
  * `owner`/`params.workflowId`) and then the parent `workflow_definitions`
  * row (for `orgId` — `workflow_runs` doesn't carry its own `orgId` column,
  * decision 17). `actorUserId` has no natural value for a team/org-owned
@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model, Usage } from "@mariozechner/pi-ai";
 import {
   parseOrchestratorSessionId,
   parsePrincipal,
@@ -54,6 +54,7 @@ import type {
   WorkflowInvokeActionResult,
   WorkflowLlmCompleteRequest,
   WorkflowLlmCompleteResult,
+  WorkflowLlmUsage,
   WorkflowPromptOptions,
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,
@@ -90,12 +91,62 @@ export interface WorkflowEngineDepsOpts {
   githubTokenDeps?: ActionInvokerOpts["githubTokenDeps"];
 }
 
-function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string } {
+/**
+ * Inverse of the `session` node's id convention: `wf:{runId}:{nodeId}` at
+ * iteration 0, `wf:{runId}:{nodeId}:{iteration}` after it. A `SessionNode`
+ * is a legal `foreach` body, and a body runs at one iteration per item, so
+ * the 4-part form is as ordinary as the 3-part one — see `iterationSuffix`
+ * in `@valet/workflow`'s `nodes/index.ts`. Run ids and node ids are
+ * colon-free (the definition validator's `NODE_ID_PATTERN`), so the part
+ * count identifies the form without ambiguity.
+ *
+ * `resolveRunContext` reads `runId` alone. `workspaceFor` reads all three
+ * parts — each one becomes a separate segment of the session's workspace
+ * path — so the parser checks the format of each part. A malformed id fails
+ * here instead of resolving to the wrong run, or to a path outside the
+ * workflows root.
+ */
+interface WorkflowSessionIdParts {
+  runId: string;
+  nodeId: string;
+  iteration?: number;
+}
+
+/**
+ * Both id parts that `workspaceFor` turns into a path segment must be a
+ * plain name. Every minted run id is already one (`wfrun_{base36}`,
+ * `wfrun_sch_{hex}_{ms}`, `wfrun_hook_{hex}`, `wfrun_evt_{uuid}`), and so is
+ * every node id the definition validator admits (`NODE_ID_PATTERN`). The
+ * check is the barrier against a `.`, a `..`, or a `/` reaching `join`.
+ */
+const ID_PART_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdParts {
   const parts = sessionId.split(":");
-  if (parts.length !== 3 || parts[0] !== "wf") {
-    throw new Error(`workflow engine-deps: not a workflow session id: ${sessionId}`);
+  if (parts[0] !== "wf" || (parts.length !== 3 && parts.length !== 4)) {
+    throw new Error(
+      `workflow engine-deps: not a workflow session id: ${sessionId}. ` +
+        `Use the wf:{runId}:{nodeId}[:{iteration}] form that the session node mints.`,
+    );
   }
-  return { runId: parts[1], nodeId: parts[2] };
+  const runId = parts[1];
+  const nodeId = parts[2];
+  if (!ID_PART_PATTERN.test(runId) || !ID_PART_PATTERN.test(nodeId)) {
+    throw new Error(
+      `workflow engine-deps: workflow session id ${sessionId} has an unusable run id or node id. ` +
+        `Use letters, digits, "-", and "_" only — each part becomes one workspace path segment.`,
+    );
+  }
+  if (parts.length === 3) return { runId, nodeId };
+
+  const iteration = Number(parts[3]);
+  if (!Number.isInteger(iteration) || iteration < 1) {
+    throw new Error(
+      `workflow engine-deps: workflow session id ${sessionId} has an invalid iteration suffix. ` +
+        `Use a whole number of 1 or more, or remove the suffix for iteration 0.`,
+    );
+  }
+  return { runId, nodeId, iteration };
 }
 
 interface RunContext {
@@ -142,10 +193,28 @@ function actorUserIdFor(principal: Principal): string {
   return principal.type === "user" ? principal.id : `${principal.type}:${principal.id}`;
 }
 
-function workspaceFor(sessionId: string): string {
-  // Colons are valid path-segment characters on POSIX, but avoided here for
-  // portability/readability — `wf:{runId}:{nodeId}` -> `wf_{runId}_{nodeId}`.
-  return join(homedir(), ".valet", "workflows", sessionId.replace(/:/g, "_"));
+/**
+ * The host directory one workflow session works in:
+ * `~/.valet/workflows/{runId}/{nodeId}/{iteration}`, built from the PARSED
+ * id parts.
+ *
+ * The invariant is that two different session ids never give one directory.
+ * A separate path segment for each part is what holds it: no part can run
+ * into the next one, because none of them accepts `/` (`ID_PART_PATTERN`).
+ * A flat name built by substitution cannot hold it — node ids accept `_`,
+ * so `wf:{runId}:x:1` (foreach body `x`, iteration 1) and `wf:{runId}:x_1`
+ * (a sibling node) both map to `wf_{runId}_x_1`.
+ *
+ * Iteration 0 writes an explicit `0` segment. Without it, iteration 1 is a
+ * child of iteration 0's own directory.
+ *
+ * The shape of this path changed with the collision fix. A run that is
+ * in-flight across the deploy gets a new, empty directory for each of its
+ * sessions. A workflow session lives for one run, so no long-lived work
+ * moves.
+ */
+function workspaceFor(parts: WorkflowSessionIdParts): string {
+  return join(homedir(), ".valet", "workflows", parts.runId, parts.nodeId, String(parts.iteration ?? 0));
 }
 
 /**
@@ -166,10 +235,10 @@ export async function ensureWorkflowSession(
 }
 
 async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, title?: string) {
-  // Two session kinds reach this seam: `wf:{runId}:{nodeId}` sessions the
-  // `session` node spawns, and the owner's ORCHESTRATOR session that the
-  // `orchestrator` node's receipt points back at (its wake path calls
-  // `awaitResult`/`abort` with `receipt.sessionId`). Each must wake through
+  // Two session kinds reach this seam: `wf:{runId}:{nodeId}[:{iteration}]`
+  // sessions the `session` node spawns, and the owner's ORCHESTRATOR session
+  // that the `orchestrator` node's receipt points back at (its wake path
+  // calls `awaitResult`/`abort` with `receipt.sessionId`). Each must wake through
   // its own chokepoint — an orchestrator id fed to `workflowSessionFor`
   // would rebuild it without persona/memory (the Phase 4 cache-poisoning
   // class), and a `wf:` id has no orchestrator identity.
@@ -177,9 +246,9 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   if (principal) {
     return ensureOrchestratorSession(opts, sessionId, principal);
   }
-  const { runId } = parseWorkflowSessionId(sessionId);
-  const ctx = await resolveRunContext(opts, runId);
-  const workspace = workspaceFor(sessionId);
+  const parts = parseWorkflowSessionId(sessionId);
+  const ctx = await resolveRunContext(opts, parts.runId);
+  const workspace = workspaceFor(parts);
   await mkdir(workspace, { recursive: true });
   return opts.host.workflowSessionFor(sessionId, {
     actorUserId: ctx.actorUserId,
@@ -292,7 +361,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         .filter((b): b is { type: "text"; text: string } => b.type === "text")
         .map((b) => b.text)
         .join("");
-      return { text };
+      return { text, usage: mapPiAiUsage(result.usage) };
     },
 
     /**
@@ -375,6 +444,21 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
  * from `llmComplete` as a node failure, so an unknown model surfaces as a
  * readable per-node error instead of a generic crash.
  */
+
+/** Pure so it's unit-testable without a live completion — the network
+ * boundary this maps across (pi-ai's `completeSimple`) isn't itself worth
+ * mocking, but the mapping logic is. Exported for that test. */
+export function mapPiAiUsage(usage: Usage): WorkflowLlmUsage {
+  return {
+    inputTokens: usage.input,
+    outputTokens: usage.output,
+    cacheReadTokens: usage.cacheRead,
+    cacheWriteTokens: usage.cacheWrite,
+    totalTokens: usage.totalTokens,
+    costUsd: usage.cost.total,
+  };
+}
+
 function resolveWorkflowModel(spec: string): PiModel {
   const slash = spec.indexOf("/");
   if (slash > 0) {

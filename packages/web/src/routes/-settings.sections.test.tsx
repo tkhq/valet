@@ -72,13 +72,19 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigateMock,
 }));
 
-vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: meData, isLoading: false, error: null }),
-  useOrg: () => ({ data: orgData, isLoading: false, error: null }),
-  useModels: () => ({ data: modelsData, isLoading: false, error: null }),
-  usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
-  usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useMe: () => ({ data: meData, isLoading: false, error: null }),
+    useOrg: () => ({ data: orgData, isLoading: false, error: null }),
+    useModels: () => ({ data: modelsData, isLoading: false, error: null }),
+    usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
+    usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
+  };
+});
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({
@@ -89,14 +95,20 @@ vi.mock("~/api/orchestrator", () => ({
   useSaveIdentity: () => ({ mutateAsync: saveIdentityMutateAsync, isPending: false, error: null }),
 }));
 
-vi.mock("~/api/queries", () => ({
-  useNotificationPreferences: () => ({
-    data: { preferences: [{ kind: "notification", web: true }] },
-    isLoading: false,
-    error: null,
-  }),
-  useSetNotificationPreference: () => ({ mutate: setPrefMutate }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useNotificationPreferences: () => ({
+      data: { preferences: [{ kind: "notification", web: true }] },
+      isLoading: false,
+      error: null,
+    }),
+    useSetNotificationPreference: () => ({ mutate: setPrefMutate }),
+  };
+});
 
 vi.mock("~/api/api-keys", () => ({
   useApiKeys: () => ({ data: apiKeysData, isLoading: false, error: null }),

@@ -704,11 +704,17 @@ export interface WorkflowDefinitionSummary {
   definition: unknown;
   createdAt: number;
   updatedAt: number;
+  ownerType: "user" | "team";
+  ownerId: string;
 }
 
 export interface CreateWorkflowRequest {
   name: string;
   definition: unknown;
+  /** Create as a team-owned workflow instead of personal. Caller must be a
+   * current member of the team; a non-member or unknown id 404s, same as
+   * any other cross-owner access (decision 18's own-rows convention). */
+  teamId?: string;
 }
 
 export interface ValidationErrorResponse {
@@ -811,6 +817,22 @@ export interface CancelWorkflowRunResponse {
   ok: true;
 }
 
+// Arbitrary-URL webhook triggers (overhaul design decision 5). `hookId` is
+// the bearer secret in `POST /api/hooks/workflows/:workflowId/:hookId` —
+// minting/rotating returns it once; `GetWorkflowWebhookResponse` also
+// returns it since the management surface is owner-scoped and re-showing
+// the URL (not just "a hook exists") is the point of a status check.
+export interface WorkflowWebhookResponse {
+  workflowId: string;
+  hookId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DeleteWorkflowWebhookResponse {
+  deleted: boolean;
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }
@@ -862,6 +884,148 @@ export interface PluginSummary {
 
 export interface ListPluginsResponse {
   plugins: PluginSummary[];
+}
+
+// ── REST: skills ─────────────────────────────────────────────────────────
+
+/**
+ * A skill — a markdown playbook the agent can pull into a turn through the
+ * `skill` tool. Skills come from two places, and `origin` says which:
+ *
+ *   - `plugin` — shipped inside a plugin package. Everyone sees the same set.
+ *   - `local`  — written in the product, stored in the `skills` table.
+ *   - `repo`   — synced from a repository into the same table.
+ *
+ * The two stored origins carry a row id and owner; a plugin skill carries
+ * its plugin's name. Narrow on `origin` to read either group.
+ */
+interface SkillSummaryBase {
+  /** The identifier the agent passes to the `skill` tool. */
+  name: string;
+  description?: string;
+  /** True when the skill declares an `argsSchema`, so the caller must supply
+   * values for the `{{placeholder}}` names in its body. Plugin skills only —
+   * a stored skill takes no arguments. */
+  takesArgs: boolean;
+}
+
+export interface PluginSkillSummary extends SkillSummaryBase {
+  origin: "plugin";
+  /** Name of the plugin that ships this skill. */
+  plugin: string;
+}
+
+export interface StoredSkillSummary extends SkillSummaryBase {
+  origin: "local" | "repo";
+  /** Row id. The `/api/skills/stored/:id` routes take this. */
+  id: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  /**
+   * True when another skill already holds this name, so this one never
+   * reaches a session. A plugin skill always wins, and between two stored
+   * skills the personal one wins over the team one. Rename this skill to
+   * make it reachable.
+   */
+  shadowed: boolean;
+  updatedAt: number;
+}
+
+export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
+
+export interface ListSkillsResponse {
+  skills: SkillSummary[];
+}
+
+/** A skill plus its markdown body, with the frontmatter already removed.
+ * Placeholders stay unfilled — this route reads the skill, it does not
+ * invoke it. */
+export type GetSkillResponse = SkillSummary & { content: string };
+
+/** One stored skill, body included — what the create/read/update routes
+ * return. */
+export type SkillResponse = StoredSkillSummary & { content: string };
+
+export interface CreateSkillRequest {
+  name: string;
+  description: string;
+  /** The markdown body. Write it without frontmatter: `name` and
+   * `description` above are the frontmatter. */
+  content: string;
+  /** Create the skill for a team the caller belongs to instead of for the
+   * caller. A non-member or unknown id 404s, same as any other cross-owner
+   * access. */
+  teamId?: string;
+}
+
+/** Every field is optional; an absent field keeps its stored value. */
+export type UpdateSkillRequest = Partial<Omit<CreateSkillRequest, "teamId">>;
+
+export interface DeleteSkillResponse {
+  ok: true;
+}
+
+// ── REST: skill sources ──────────────────────────────────────────────────
+
+/**
+ * A tracked skill repository. Valet mirrors its `SKILL.md` files into the
+ * skill catalog as `repo`-origin skills, and keeps mirroring as the
+ * repository moves.
+ *
+ * Public repositories only. Nothing here carries a GitHub credential.
+ */
+export interface SkillSourceSummary {
+  id: string;
+  /** `owner/repo`. */
+  repo: string;
+  /** Branch, tag, or commit. Empty means the default branch. */
+  ref: string;
+  /** Directory that holds the skill directories. Empty means the root. */
+  subpath: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  enabled: boolean;
+  /** `pending` — never synced. `ok` — synced. `warning` — synced, but at
+   * least one skill was skipped. `error` — the last sync failed. */
+  status: "pending" | "ok" | "warning" | "error";
+  /** Skills this source currently mirrors. */
+  skillCount: number;
+  lastSyncedAt: number | null;
+  /** Commit the last sync read. */
+  lastSha: string | null;
+  /** What the last sync has to report: the failure for `error`, the skills
+   * it skipped for `warning`, null otherwise. */
+  lastMessage: string | null;
+}
+
+export interface ListSkillSourcesResponse {
+  sources: SkillSourceSummary[];
+}
+
+export interface CreateSkillSourceRequest {
+  /** `owner/repo`, or a GitHub URL. A `/tree/` URL also sets `ref` and
+   * `subpath`, unless the fields below give them explicitly. */
+  repo: string;
+  ref?: string;
+  subpath?: string;
+  /** Track the repository for a team the caller belongs to instead of for
+   * the caller. A non-member or unknown id 404s. */
+  teamId?: string;
+}
+
+/** What a sync did. Returned by the create route too, because adding a
+ * source imports it right away. */
+export interface SkillSourceSyncResponse {
+  source: SkillSourceSummary;
+  imported: number;
+  updated: number;
+  deleted: number;
+  /** One line per skill the sync skipped, each naming the fix. */
+  warnings: string[];
+}
+
+export interface DeleteSkillSourceResponse {
+  ok: true;
 }
 
 export interface CredentialSummary {
@@ -981,11 +1145,20 @@ export interface ListModelsResponse {
 export interface UsageWindow {
   inputTokens: number;
   outputTokens: number;
-  /** Estimated USD from the engine's per-turn cost records; 0 when the
-   * model was unpriced. */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Every token the window billed: input + output + cache read + cache
+   * write. On a cache-heavy model, input + output is a small part of this. */
+  totalTokens: number;
+  /** Estimated USD, summed over PRICED turns only. Turns on an unpriced
+   * model (custom/OpenRouter providers, dev fakes) contribute nothing — read
+   * `unpricedTurns` before you present this as the full spend. */
   costUsd: number;
   /** Assistant turns that reported usage in the window. */
   turns: number;
+  /** Turns of `turns` whose model reported no price. `costUsd` excludes
+   * them; it is a floor, not a total, whenever this is above 0. */
+  unpricedTurns: number;
 }
 
 export interface UsageMemberSummary extends UsageWindow {

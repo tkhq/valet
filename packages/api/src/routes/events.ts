@@ -15,8 +15,9 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { catalogForService } from "../events/ingest.js";
+import { ownedDefinitionRow } from "../workflows/service.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -273,16 +274,17 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   const error = validateSubscription(plugins, { ...body, filters });
   if (error) return c.json({ error }, 400);
 
-  // Workflow targets must reference a definition in the caller's org — a
-  // foreign or missing id fails validation the same way (never reveals
+  // Workflow targets must be OWNED by the caller, not just exist in their
+  // org — this is the same event_subscriptions row shape (and the same
+  // ownership requirement) createWorkflowTrigger (workflows/trigger-
+  // service.ts) enforces; this route is a second, parallel write path into
+  // the same table and previously checked only orgId, letting any org
+  // member wire event-driven automation onto a workflow they don't own. A
+  // foreign, unowned, or missing id all fail identically (never reveals
   // whether the id exists at all).
   if (body.target.kind === "workflow") {
-    const wfRows = await db
-      .select({ id: workflowDefinitions.id })
-      .from(workflowDefinitions)
-      .where(and(eq(workflowDefinitions.id, body.target.workflowId), eq(workflowDefinitions.orgId, user.orgId)))
-      .limit(1);
-    if (wfRows.length === 0) {
+    const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
+    if (!owned) {
       return c.json({ error: `unknown workflow: ${body.target.workflowId}` }, 400);
     }
   }

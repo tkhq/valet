@@ -41,7 +41,23 @@ import {
   deleteWorkflowSchedule,
   listWorkflowSchedules,
 } from "./schedule-service.js";
+import {
+  deleteWorkflowWebhook,
+  getWorkflowWebhook,
+  mintOrRotateWorkflowWebhook,
+} from "./webhook-service.js";
+import { publicUrlFromEnv } from "../channels/host.js";
 import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
+
+/** `POST /api/hooks/workflows/:workflowId/:hookId`'s path, absolute when a
+ * public origin is configured (same `VALET_PUBLIC_URL`/`BETTER_AUTH_URL`
+ * resolution `ChannelHost` uses), else path-only so the agent can still
+ * report to the user with an "attach your deployment's origin" caveat. */
+function webhookUrl(workflowId: string, hookId: string): string {
+  const path = `/api/hooks/workflows/${workflowId}/${hookId}`;
+  const origin = publicUrlFromEnv(process.env);
+  return origin ? `${origin}${path}` : path;
+}
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
  * emit dozens of errors on a badly-shaped definition; the first ~20 are
@@ -634,6 +650,64 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const createWebhook = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.create_webhook",
+    name: "Create or rotate workflow webhook",
+    description:
+      "Mint an arbitrary-URL trigger for a workflow: POST any JSON to the returned URL and a run " +
+      "starts, no Valet auth required — the URL itself is the credential. Calling this again on the " +
+      "same workflow ROTATES the secret: the old URL stops working immediately. Returns { workflowId, " +
+      "hookId, url }.",
+    // high, not medium: this mints a bearer secret that is the ENTIRE auth
+    // for triggering a run — equivalent in blast radius to granting a new
+    // credential, which the plugin catalog's default policy (medium ==
+    // auto-allow) would otherwise let the agent do with no human in the
+    // loop, the same reasoning that keeps resolve_approval at "high".
+    riskLevel: "high",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await mintOrRotateWorkflowWebhook(getDeps().db, owner, workflow_id);
+      if (!result.ok) return { success: false, error: result.error };
+      return {
+        success: true,
+        data: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) },
+      };
+    },
+  });
+
+  const getWebhook = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.get_webhook",
+    name: "Get workflow webhook",
+    description: "Look up the current webhook URL for a workflow, or null if none has been minted.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await getWorkflowWebhook(getDeps().db, owner, workflow_id);
+      if (!result.ok) return { success: false, error: result.error };
+      if (!result.webhook) return { success: true, data: { webhook: null } };
+      return {
+        success: true,
+        data: { webhook: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) } },
+      };
+    },
+  });
+
+  const deleteWebhook = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.delete_webhook",
+    name: "Delete workflow webhook",
+    description: "Remove a workflow's webhook trigger, if any. The URL 404s afterward.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await deleteWorkflowWebhook(getDeps().db, owner, workflow_id);
+      if (result === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: workflow_id, deleted: result === "deleted" } };
+    },
+  });
+
   return {
     service: "workflows",
     description:
@@ -657,6 +731,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       createSchedule,
       listSchedules,
       deleteSchedule,
+      createWebhook,
+      getWebhook,
+      deleteWebhook,
     ],
   };
 }

@@ -3,18 +3,22 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
-import { tracedSessionStore } from "../observability/traced-store.js";
+import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader,
+  buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
+import { skillsActionPlugin } from "../services/skills-actions.js";
+import { SkillSyncService } from "../services/skill-sync.js";
+import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -24,6 +28,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
+import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
@@ -243,6 +248,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       }),
     ],
   };
+  // Skills are the other host-defined action surface. They need only the
+  // app Drizzle handle, which already exists here, so they take no deferred
+  // getter. This is the in-product authoring path for a skill; the web tab
+  // reads only (docs/specs/2026-08-05-agent-skills-design.md).
+  const skillsActions: ValetPlugin = {
+    name: "skills-actions",
+    version: "0.1.0",
+    description: "Agent-facing skill authoring actions.",
+    actions: [skillsActionPlugin(db)],
+  };
   const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
@@ -255,7 +270,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
             denylist,
           })
         ).plugins,
-        [workflowsActions],
+        [workflowsActions, skillsActions],
       ]);
 
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
@@ -276,6 +291,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `engineHost` exists, before any orchestrator session can actually wake
   // and try to call `task`.
   let spawnerRef: ChildSpawner | undefined;
+  let readerRef: ChildReader | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -300,10 +316,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
     },
+    childReader: (req, ctx) => {
+      if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
+      return readerRef(req, ctx);
+    },
   });
 
   const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
   spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
+  readerRef = buildChildReader({ db, engineHost, engineStore });
 
   const channelHost = new ChannelHost({
     db,
@@ -320,7 +341,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
   // by the same connection source as everything else.
-  const workflowStore = new PgWorkflowStore(pgdb);
+  // Traced under the same condition as the engine store: `workflow-store.*`
+  // spans nest inside the interpreter's `workflow.drive`/`workflow.node.*`.
+  const rawWorkflowStore = new PgWorkflowStore(pgdb);
+  const workflowStore = telemetryEnabled ? tracedWorkflowStore(rawWorkflowStore) : rawWorkflowStore;
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
@@ -379,6 +403,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const deliverToOrchestrator = buildOrchestratorTarget({ db, engineHost });
   const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
 
+  // Coarse per-workflow cap for the public webhook-trigger route — bounds
+  // what an unauthenticated caller holding a leaked/guessed URL can force
+  // us to start, without needing a shared rate-limit store.
+  const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
+
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
@@ -393,6 +422,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
   // `start()`/`stop()` are called from `main.ts`.
+  // Skill-repository sync (agent-skills design). Reads PUBLIC repositories
+  // only, so the reader takes no credential deps — see
+  // `services/skill-repo-reader.ts` for why an authenticated importer is
+  // deliberately not wired in yet. `start()`/`stop()` are called from
+  // `main.ts` alongside the other loops.
+  const skillSync = new SkillSyncService({ db, reader: new PublicSkillRepoReader() });
+
   const prebuildService = new SourceService({
     db,
     builder: imageBuilder,
@@ -414,7 +450,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    webhookRateLimiter,
     eventDispatcher,
+    skillSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

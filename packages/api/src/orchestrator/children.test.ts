@@ -13,11 +13,14 @@ import { eq, and } from "drizzle-orm";
 import type { QueueItem, SignalContent } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
+  buildChildReader,
   buildChildSpawner,
   ChildWatcher,
   ChildLimitError,
   classifyWatcherError,
   type ChildrenDeps,
+  resultBody,
+  CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, childWatches, eventDropLog } from "../schema/index.js";
@@ -233,6 +236,165 @@ describe("buildChildSpawner", () => {
       .from(eventDropLog)
       .where(and(eq(eventDropLog.orgId, "org-ceiling-test"), eq(eventDropLog.reason, "org_ceiling")));
     expect(drops).toHaveLength(1);
+  });
+
+  it("releases a settled child's org-ceiling slot: an org full of finished children can spawn again", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-release", {
+      userId: "local-user",
+      orgId: "org-release-test",
+      workspace: "/tmp",
+    });
+
+    // Fill the org to the ceiling entirely with SETTLED children. Each child
+    // keeps its agent_sessions row after settlement (spawn inserts it; nothing
+    // deletes it) — finished work must not consume capacity forever.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `child_done_${i}`,
+        userId: "local-user",
+        orgId: "org-release-test",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await api.providers.db.insert(childWatches).values({
+        childSessionId: `child_done_${i}`,
+        queueItemId: `qi-done-${i}`,
+        parentSessionId: "parent-other",
+        parentThreadId: "th-r",
+        actorUserId: "local-user",
+        orgId: "org-release-test",
+        settled: true,
+        createdAt: now,
+      });
+    }
+
+    const result = await spawner(
+      { prompt: "after the batch settles" },
+      {
+        parentSessionId: "parent-release",
+        parentThreadId: "th-r",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    expect(result.childSessionId).toBeTruthy();
+  });
+
+  it("counts a running child once toward the ceiling, not twice", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-single-count", {
+      userId: "local-user",
+      orgId: "org-single-count",
+      workspace: "/tmp",
+    });
+
+    // Ceiling - 1 RUNNING children under a different parent: each one has
+    // both an agent_sessions row and an unsettled watch. Double-counting
+    // would read this as 2*(ceiling-1) and reject; the true load leaves
+    // exactly one free slot.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING - 1; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `child_run_${i}`,
+        userId: "local-user",
+        orgId: "org-single-count",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await api.providers.db.insert(childWatches).values({
+        childSessionId: `child_run_${i}`,
+        queueItemId: `qi-run-${i}`,
+        parentSessionId: "parent-other",
+        parentThreadId: "th-s",
+        actorUserId: "local-user",
+        orgId: "org-single-count",
+        settled: false,
+        createdAt: now,
+      });
+    }
+
+    const result = await spawner(
+      { prompt: "fits in the last slot" },
+      {
+        parentSessionId: "parent-single-count",
+        parentThreadId: "th-s",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    expect(result.childSessionId).toBeTruthy();
+  });
+
+  it("ignores another org's watch rows when counting live sessions", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-cross-org", {
+      userId: "local-user",
+      orgId: "org-cross-watch",
+      workspace: "/tmp",
+    });
+
+    // Fill the org to the ceiling with plain live sessions, then point a
+    // DIFFERENT org's watch row at one of them. Session ids are globally
+    // unique today, but the count must not lean on that: a foreign watch
+    // must not release this org's slot.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `s_cross_${i}`,
+        userId: "local-user",
+        orgId: "org-cross-watch",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    await api.providers.db.insert(childWatches).values({
+      childSessionId: "s_cross_0",
+      queueItemId: "qi-foreign",
+      parentSessionId: "parent-foreign",
+      parentThreadId: "th-f",
+      actorUserId: "other-user",
+      orgId: "org-somewhere-else",
+      settled: true,
+      createdAt: now,
+    });
+
+    const attempt = spawner(
+      { prompt: "over the ceiling despite the foreign watch" },
+      {
+        parentSessionId: "parent-cross-org",
+        parentThreadId: "th-f",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    const err = await attempt.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChildLimitError);
+    if (err instanceof ChildLimitError) {
+      expect(err.code).toBe("org_ceiling");
+    }
   });
 });
 
@@ -536,5 +698,290 @@ describe("classifyWatcherError", () => {
       kind: "permanent",
       alreadyLogged: false,
     });
+  });
+});
+
+// A 2026-08-06 incident report: a child produced a >100KB final message and
+// the whole thing is what the parent would carry. The signal body is the only
+// channel from a child to its parent, and it lands in the parent's context on
+// every later turn, so it needs a ceiling. The ceiling is only safe because
+// `child_read` can fetch the rest — do not lower one without the other.
+describe("resultBody", () => {
+  const childId = "sess_child_abc";
+
+  it("passes a short result through untouched", () => {
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "all done" }, childId);
+    expect(body).toBe("all done");
+  });
+
+  it("bounds a result that is over the ceiling", () => {
+    const huge = "x".repeat(CHILD_RESULT_MAX_CHARS + 50_000);
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId);
+    expect(body.length).toBeLessThan(huge.length);
+    expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
+  });
+
+  it("keeps the start of an over-long result", () => {
+    const huge = "HEAD-MARKER" + "x".repeat(CHILD_RESULT_MAX_CHARS + 1_000);
+    expect(resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId)).toContain("HEAD-MARKER");
+  });
+
+  it("names how many characters were dropped and how to read them", () => {
+    const huge = "x".repeat(CHILD_RESULT_MAX_CHARS + 1_234);
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId);
+    expect(body).toContain("1234");
+    expect(body).toContain("child_read");
+    // The corrective action is only actionable with the id to act on.
+    expect(body).toContain(childId);
+  });
+
+  it("bounds a failure result too, so a huge error cannot flood the parent", () => {
+    const huge = "e".repeat(CHILD_RESULT_MAX_CHARS + 10_000);
+    const body = resultBody({ queueItemId: "q1", outcome: "failed", error: huge }, childId);
+    expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
+    expect(body).toContain("child_read");
+  });
+
+  it("points a completed-but-textless result at child_read instead of an empty body", () => {
+    // `text` is undefined when the terminal entry is gone at read time
+    // (e.g. compacted away between settlement and the read).
+    const body = resultBody({ queueItemId: "q1", outcome: "completed" }, childId);
+    expect(body).not.toBe("");
+    expect(body).toContain("child_read");
+    expect(body).toContain(childId);
+  });
+
+  it("passes a genuinely empty terminal text through unchanged", () => {
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "" }, childId);
+    expect(body).toBe("");
+  });
+});
+
+// The reader is the other half of bounding the settled body: a parent that
+// gets a truncated result has no other way to reach the rest, because
+// `thread_read` stays inside one session.
+describe("buildChildReader", () => {
+  it("returns the child's messages to the parent that spawned it", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-read", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "count the incidents" },
+      {
+        parentSessionId: "parent-read",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // The spawn prompt is still queued, not yet a persisted entry, so seed
+    // the report the child would have written. This is the content a parent
+    // comes back for after a truncated child.settled.
+    const childSession = await api.providers.engineHost.sessionFor(spawned.childSessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const childThread = childSession.thread();
+    await api.providers.engineStore.appendEntries(spawned.childSessionId, childThread.id, [
+      {
+        id: "e-child-report",
+        sessionId: spawned.childSessionId,
+        threadId: childThread.id,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "the tail of the report that the signal truncated",
+        createdAt: Date.now(),
+      },
+    ]);
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-read" },
+    );
+    expect(entries).not.toBeNull();
+    const text = (entries ?? [])
+      .map((e) => (e.type === "message" ? e.content : ""))
+      .join("\n");
+    expect(text).toContain("the tail of the report that the signal truncated");
+  });
+
+  it("returns null for a session the caller did not spawn", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-owner", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "secret work" },
+      {
+        parentSessionId: "parent-owner",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // A different orchestrator naming a real child id it does not own.
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-stranger" },
+    );
+    expect(entries).toBeNull();
+  });
+
+  it("returns null for a session id that does not exist, same as for one it cannot see", async () => {
+    api = await bootTestApi();
+    const reader = buildChildReader(childrenDeps(api));
+    const entries = await reader(
+      { childSessionId: "child_does-not-exist" },
+      { parentSessionId: "parent-read" },
+    );
+    expect(entries).toBeNull();
+  });
+
+  it("still reads a child after it has settled, which is when the parent needs it", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-settled", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "long report" },
+      {
+        parentSessionId: "parent-settled",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    // `markSettled` updates the row rather than deleting it; if that ever
+    // changes to a delete, the parent loses the truncated remainder forever.
+    await api.providers.db
+      .update(childWatches)
+      .set({ settled: true })
+      .where(eq(childWatches.childSessionId, spawned.childSessionId));
+
+    // Seed the report so the assertion proves CONTENT survives settlement,
+    // not merely that the authz edge does.
+    const childSession = await api.providers.engineHost.sessionFor(spawned.childSessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const childThread = childSession.thread();
+    await api.providers.engineStore.appendEntries(spawned.childSessionId, childThread.id, [
+      {
+        id: "e-settled-report",
+        sessionId: spawned.childSessionId,
+        threadId: childThread.id,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "settled report body the parent came back for",
+        createdAt: Date.now(),
+      },
+    ]);
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-settled" },
+    );
+    expect(entries).not.toBeNull();
+    const text = (entries ?? []).map((e) => (e.type === "message" ? e.content : "")).join("\n");
+    expect(text).toContain("settled report body the parent came back for");
+  });
+
+  it("returns null for a soft-deleted child, same as for one that never existed", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-del", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "to be deleted" },
+      {
+        parentSessionId: "parent-del",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // The DELETE route soft-deletes; the watch edge survives. Deletion must
+    // close the transcript to the parent all the same.
+    await api.providers.db
+      .update(agentSessions)
+      .set({ status: "deleted" })
+      .where(eq(agentSessions.id, spawned.childSessionId));
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-del" },
+    );
+    expect(entries).toBeNull();
+  });
+
+  it("is a pure read: purged engine rows answer null and are NOT re-created", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const reader = buildChildReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-purged", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "short lived" },
+      {
+        parentSessionId: "parent-purged",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // A delete-while-cached purges the engine rows (session.destroy) while
+    // the watch and agent_sessions rows remain. A read must answer null —
+    // waking through the engine host here used to re-CREATE a live engine
+    // session under the deleted id.
+    await api.providers.engineHost.destroy(spawned.childSessionId);
+    await api.providers.engineStore.deleteSession(spawned.childSessionId);
+
+    const entries = await reader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-purged" },
+    );
+    expect(entries).toBeNull();
+    expect(await api.providers.engineStore.getSession(spawned.childSessionId)).toBeNull();
   });
 });

@@ -78,6 +78,8 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/workflow-engine-deps.test.ts",
   "src/integration/orchestrator-info.test.ts",
   "src/integration/github-repo.e2e.test.ts",
+  "src/integration/workflow-github-credential.e2e.test.ts",
+  "src/integration/usage-summary.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [
@@ -88,6 +90,7 @@ const INTEGRATION_AGENT_FILES = [
   "src/integration/cross-thread.test.ts",
   "src/integration/plugins.e2e.test.ts",
   "src/integration/workflow-run.e2e.test.ts",
+  "src/integration/workflow-foreach-session.test.ts",
 ];
 
 /** Integration files owned by dedicated rows (see lists above). */

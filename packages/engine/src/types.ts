@@ -1308,12 +1308,33 @@ export interface RoleSpec {
   source?: "session" | "thread" | "prompt" | "plugin" | "sandbox";
 }
 
+/**
+ * One skill, in the Agent Skills format
+ * (https://agentskills.io/specification). `name`, `description`, and the
+ * markdown body come from a `SKILL.md`; `license`, `compatibility`,
+ * `metadata`, and `allowedTools` are the spec's optional fields.
+ *
+ * `argsSchema` and the `{{placeholder}}` rendering it validates are a
+ * Valet extension, NOT part of the spec. An imported skill will not use
+ * them. See `docs/specs/2026-08-05-agent-skills-design.md`.
+ */
 export interface SkillSource {
   name: string;
   description?: string;
   content: string;
   argsSchema?: TSchema;
   source?: "plugin" | "sandbox" | "repo" | "user";
+  /** Spec field. License name, or the name of a bundled license file. */
+  license?: string;
+  /** Spec field. Environment requirements, at most 500 characters. */
+  compatibility?: string;
+  /** Spec field. A map of text keys to text values, for properties the
+   * spec itself does not define. */
+  metadata?: Record<string, string>;
+  /** Spec field `allowed-tools`, in camelCase: a space-separated list of
+   * pre-approved tools. Experimental in the spec, and Valet does not act
+   * on it yet. */
+  allowedTools?: string;
 }
 
 export interface SkillInvokeOptions {
@@ -1614,6 +1635,23 @@ export type ChildSpawner = (
   req: SpawnChildRequest,
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
 ) => Promise<SpawnChildResult>;
+
+/**
+ * Reads the messages of a child session on behalf of its parent.
+ *
+ * A `child.settled` signal carries a bounded copy of the child's result, so
+ * a parent that needs the whole thing has to come back for it. This is the
+ * only way it can: `thread_read` reaches threads inside one session, and a
+ * child is a separate session.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`.
+ * A caller cannot tell "not yours" from "does not exist", which keeps the
+ * ids of other people's sessions unguessable.
+ */
+export type ChildReader = (
+  req: { childSessionId: string; limit?: number },
+  ctx: { parentSessionId: string },
+) => Promise<SessionEntry[] | null>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,

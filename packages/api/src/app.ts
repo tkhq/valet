@@ -29,6 +29,7 @@ import { orchestratorRouter } from "./routes/orchestrator.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
@@ -49,6 +50,7 @@ import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
@@ -138,6 +140,15 @@ export function createApp(
   // the raw bytes) inside the router itself, not the auth gate below.
   app.route("/webhooks/events", eventWebhooksRouter);
 
+  // PUBLIC arbitrary-URL workflow trigger ingress (overhaul design decision
+  // 5) — same reasoning as the mounts above: the hookId in the URL IS the
+  // credential (no logged-in Valet user), verified constant-time inside the
+  // router itself (`workflow-hooks.ts`), not the auth gate below. This IS
+  // under `/api/*`, so mounting it here, before `buildAuthMiddleware`'s
+  // `/api/*` registration, is what keeps it public — do not move it below
+  // that line.
+  app.route("/api/hooks", workflowHooksRouter);
+
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
@@ -203,6 +214,7 @@ export function createApp(
   app.route("/api/notifications", notificationsRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
+  app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
   // Mounted BEFORE /api/me — defensive ordering only: meRouter today

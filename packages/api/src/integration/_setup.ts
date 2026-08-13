@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import {
   VirtualSandboxProvider,
+  type ChildReader,
   type ChildSpawner,
   type SandboxProvider,
   type ValetPlugin,
@@ -24,10 +25,12 @@ import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/w
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
+import { SkillSyncService } from "../services/skill-sync.js";
+import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -38,6 +41,7 @@ import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { ImageBuilder } from "../prebuilds/builder.js";
@@ -69,6 +73,9 @@ export interface BootTestApiOpts {
    * the poll/sweep loops.
    */
   workflowRunHost?: RunHost;
+  /** Overrides the default 30-per-60s `webhookRateLimiter` — rate-limit
+   * tests set a tiny limit so they don't have to race a wall-clock window. */
+  webhookRateLimit?: WorkflowWebhookRateLimiterOptions;
   /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
    * — tests never scan node_modules; default `[]`. */
   plugins?: ValetPlugin[];
@@ -116,21 +123,25 @@ export interface BootTestApiOpts {
   /** Forwarded to `EngineHostOpts.idleSweepTestHooks` — test-only race
    * injection for the idle sweep's re-check. */
   idleSweepTestHooks?: EngineHostOpts["idleSweepTestHooks"];
-  /** Forwarded to `EngineHostOpts.githubTokenDeps` — wires the session
-   * `credentialResolver` seam (GH-T10 fix) so a real `sessionFor(...)` build
-   * resolves `github` credentials through the token service instead of a raw
-   * store read. Unset by default, matching every other route test (no
-   * resolver at all) — only tests exercising the action-invoke-level
-   * session-credential seam (GitHub/repo integration plan, Task 12's e2e)
-   * need this wired through a full API boot. */
+  /** Overrides the GitHub token deps given to BOTH `EngineHost` (the
+   * session `credentialResolver` seam, GH-T10 fix) and the workflow action
+   * invoker — the same pair `providers/node.ts` derives from one key at real
+   * boot. Point `apiUrl`/`githubUrl` at `startGithubFixture()`'s `url` to
+   * keep resolution off the network.
+   *
+   * When unset, `EngineHost` gets no resolver (sessions read credentials
+   * straight from the store, matching every other route test) but the
+   * workflow invoker still gets the default test key, because production
+   * always wires it and a `github` tool node is otherwise untestable. */
   githubTokenDeps?: EngineHostOpts["githubTokenDeps"];
   /** Wires `Providers.prebuildService`'s `builder` — unset/`null` (the
    * default) means "prebuilds unavailable", same as a `local` sandbox
    * backend boot. Prebuild route tests supply a fake `ImageBuilder`. */
   imageBuilder?: ImageBuilder | null;
-  /** Overrides the `apiUrl`/`githubUrl` the constructed `PrebuildService`
-   * resolves GitHub credentials/contents through — point this at
-   * `startGithubFixture()`'s `url`. Ignored when `imageBuilder` is unset. */
+  /** Overrides the GitHub API base URL two constructed services read
+   * through: the `PrebuildService`'s credential/contents resolution (ignored
+   * when `imageBuilder` is unset), and the skill-sync reader. Point it at
+   * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
 }
 
@@ -240,10 +251,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
 
   // Same circular-construction indirection as providers/node.ts — see its
-  // comment. Test callers that want to unit-test the spawner/watcher
+  // comment. Test callers that want to unit-test the spawner/watcher/reader
   // directly still can (they're plain exported functions/classes); this
-  // wiring only matters for exercising `task` through a real orchestrator.
+  // wiring only matters for exercising `task` and `child_read` through a
+  // real orchestrator.
   let spawnerRef: ChildSpawner | undefined;
+  let readerRef: ChildReader | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -270,12 +283,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
     },
+    childReader: (req, ctx) => {
+      if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
+      return readerRef(req, ctx);
+    },
   });
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
   const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(blobsRoot, "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
+  readerRef = buildChildReader(childrenDeps);
 
   const channelHost = new ChannelHost({
     db,
@@ -299,6 +317,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineStore,
     actionPluginByService,
     credentials: engineCredentials,
+    // Same key BOTH consumers get at real boot (`providers/node.ts` derives
+    // one key for `EngineHost` and the workflow action invoker). Without
+    // this, a `github` tool node inside a workflow threw a wiring error and
+    // the whole path was untestable.
+    githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
   });
   const realWorkflowRunHost = new LocalRunHost({
     store: workflowStore,
@@ -331,6 +354,16 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
   });
 
+  const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
+
+  // Skill-repository sync. Constructed with the same real deps
+  // `buildNodeProviders` uses, but NEVER started on its timer — tests drive
+  // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
+  const skillSync = new SkillSyncService({
+    db,
+    reader: new PublicSkillRepoReader({ apiUrl: opts.githubApiUrl }),
+  });
+
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here); routes must treat this as
   // "unavailable", same as a `local` sandbox-backend boot.
@@ -361,7 +394,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    webhookRateLimiter,
     eventDispatcher,
+    skillSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

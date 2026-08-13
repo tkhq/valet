@@ -5,7 +5,7 @@ import type { SubmissionResult } from '@valet/engine';
 import type { ForeachNode, LlmNode, SessionNode, SetNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
 import { validateWorkflowDefinition } from '../dag/validate.js';
-import type { WorkflowEngineDeps } from '../engine-deps.js';
+import type { WorkflowEngineDeps, WorkflowLlmUsage } from '../engine-deps.js';
 import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
@@ -64,6 +64,18 @@ function unusedEngine(): WorkflowEngineDeps {
   };
 }
 
+/** None of these tests inspect usage values (they cover onItemError
+ * fail/skip/collect and per-item concurrency, not cost tracking — that's
+ * `llm.test.ts`'s job), so responses omit `usage` and get a zero fixture. */
+const ZERO_USAGE: WorkflowLlmUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  totalTokens: 0,
+  costUsd: 0,
+};
+
 interface LlmScript {
   responses: Array<{ text: string } | Error>;
 }
@@ -79,7 +91,7 @@ function makeLlmEngine(script: LlmScript): { engine: WorkflowEngineDeps; calls: 
       const next = queue.shift();
       if (next === undefined) throw new Error('scripted llmComplete queue exhausted');
       if (next instanceof Error) throw next;
-      return next;
+      return { text: next.text, usage: ZERO_USAGE };
     },
   };
   return { engine, calls };
@@ -385,7 +397,7 @@ describe('executeForeach: onItemError "skip"', () => {
       skippedCount: number;
       failedCount: number;
     };
-    expect(result.items[0]).toEqual({ status: 'completed', data: { text: 'fine' } });
+    expect(result.items[0]).toEqual({ status: 'completed', data: { text: 'fine', usage: ZERO_USAGE } });
     expect(result.items[1]?.status).toBe('skipped');
     expect(result.items[1]?.data).toBeUndefined();
     expect(result.items[1]?.error).toBe('model exploded');

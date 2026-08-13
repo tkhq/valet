@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [main, dev-v2]
+  # Deliberately unfiltered. A pull_request branches filter matches the PR's
+  # base, so pinning it to main/dev-v2 skipped every stacked PR that targets
+  # another feature branch, and those PRs showed no CI at all until they were
+  # retargeted. The trigger only fires for open PRs, so leaving it open runs
+  # each PR once against whatever branch it currently targets.
   pull_request:
-    branches: [main, dev-v2]
 
 jobs:
   ci:

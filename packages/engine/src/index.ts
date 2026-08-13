@@ -18,7 +18,14 @@ export {
   renderTemplate,
   loadRoleFromMarkdown,
   loadSkillFromMarkdown,
+  validateSkillFrontmatter,
+  isLoadable,
+  type FrontmatterValue,
   type ParsedArtifact,
+  type SkillSpecField,
+  type SkillSpecOptions,
+  type SkillSpecViolation,
+  type SkillSpecSeverity,
 } from "./roles-skills/index.js";
 export {
   deriveQueueState,

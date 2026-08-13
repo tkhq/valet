@@ -1,9 +1,10 @@
 /**
- * Friendly labels for plugin/service ids on `/integrations`. Raw manifest
- * names are lowercase package-ish ids (`google-workspace`, `deepwiki`);
- * people recognize product names. Unknown ids fall back to title-cased
- * words so a dropped-in third-party plugin still reads like a name, not
- * an identifier.
+ * Friendly labels for plugin, service, and skill ids on `/integrations`
+ * and `/skills`. Raw manifest names are lowercase package-ish ids
+ * (`google-workspace`, `deepwiki`, `sandbox-tunnels`); people recognize
+ * product names. Unknown ids fall back to title-cased words so a
+ * dropped-in third-party plugin or skill still reads like a name, not an
+ * identifier.
  */
 const DISPLAY_NAMES: Record<string, string> = {
   github: "GitHub",

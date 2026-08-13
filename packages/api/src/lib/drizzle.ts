@@ -19,7 +19,7 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { drizzle as drizzleNodePg } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
-import { pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
+import { applyEngineMigrations, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
 import * as schema from "../schema/index.js";
 
@@ -84,8 +84,17 @@ const migrationSql: Record<(typeof APP_MIGRATION_FILES)[number], () => string> =
  * Tracks applied migrations in `__valet_app_migrations` (filename + timestamp)
  * so re-runs across server restarts are no-ops. Each migration runs in a
  * transaction — partial application leaves the tracker untouched.
+ *
+ * The app schema now spans both migration sets: the `cost_entries` view reads
+ * `engine_entries` (engine schema) alongside `agent_sessions`/`workflow_runs`/
+ * `workflow_definitions`. So this function applies the engine schema FIRST.
+ * `applyEngineMigrations` is idempotent and tracks itself separately, so a
+ * caller that also applies it explicitly (`providers/node.ts`) is unaffected.
+ * The dependency only runs this way: the engine schema never reads app tables.
  */
 export async function applyAppMigrations(db: PgDb): Promise<void> {
+  await applyEngineMigrations(db);
+
   await db.query(`
     CREATE TABLE IF NOT EXISTS __valet_app_migrations (
       filename text PRIMARY KEY,

@@ -11,6 +11,7 @@
   "exports": {
     "./actions": "./src/actions/index.ts",
     "./repo": "./src/repo.ts",
+    "./repo-contents": "./src/actions/repo-directory.ts",
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
@@ -30,6 +31,9 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@hono/node-server": "^1.13.0",
+    "@types/node": "^22.0.0",
+    "hono": "^4.3.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }

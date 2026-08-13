@@ -4,7 +4,7 @@ import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { googleCalendarPlugin } from "./actions/actions.js";
 
 const skillMd = readFileSync(
-  fileURLToPath(new URL("../skills/google-calendar.md", import.meta.url)),
+  fileURLToPath(new URL("../skills/google-calendar/SKILL.md", import.meta.url)),
   "utf8",
 );
 

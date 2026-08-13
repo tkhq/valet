@@ -28,6 +28,9 @@
  *      newly-runnable work; otherwise loop again
  */
 
+import { markSpanError, withSpan } from '@valet/engine';
+import type { Span } from '@opentelemetry/api';
+
 import {
   evaluateExpression,
   parseExpression,
@@ -40,6 +43,7 @@ import type { WorkflowDefinition, WorkflowEdge } from './dag/shape.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import {
   createDefaultNodeExecutors,
+  llmUsageSpanAttributes,
   type NodeExecuteResult,
   type NodeExecutorArgs,
   type NodeExecutorRegistry,
@@ -80,13 +84,54 @@ export interface InterpreterDeps {
  */
 const ITERATION = 0;
 
+/**
+ * Tracing seam (same contract as the engine's): spans go through
+ * `@valet/engine`'s `withSpan`, which is a no-op until a host registers an
+ * OTel SDK. One `workflow.drive` span covers a full drive segment (claim →
+ * park/settle); each executed node nests a `workflow.node.{type}` child.
+ * Because the node span is the active context when a submission node calls
+ * `engine.prompt`, the engine's admission-traceparent stamp links the
+ * spawned session's turn back to this workflow node automatically.
+ */
 export async function driveUntilPark(runId: string, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
+  return await withSpan(
+    'workflow.drive',
+    { 'valet.workflow.run.id': runId, 'valet.workflow.run.attempt': attempt },
+    async (span) => {
+      const park = await driveLoop(runId, attempt, deps, span);
+      span.setAttribute('valet.workflow.run.status', park.status);
+      if (park.outcome !== undefined) span.setAttribute('valet.workflow.run.outcome', park.outcome);
+      const waitingKinds = [...new Set(park.waitingOn.map((w) => w.kind))];
+      if (waitingKinds.length > 0) span.setAttribute('valet.workflow.run.waiting', waitingKinds);
+      return park;
+    },
+  );
+}
+
+async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, span: Span): Promise<RunParkState> {
   const { store, engine, clock, onApprovalPending, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
+
+  // `valet.workflow.id` is fixed for a run's whole lifetime (written once by
+  // `createRun`), so it only needs setting once — as soon as the first
+  // successful `store.getRun` makes it knowable — not on every pass of the
+  // loop below (the loop itself must still re-fetch `run` every pass; see
+  // its own comment). This flag guards that single `setAttribute` call.
+  // If `store.getRun` throws or returns `null` on every pass (the run
+  // genuinely doesn't exist, or a store-level fault), the span never gets
+  // `valet.workflow.id` — there is no way to know it without a successful
+  // fetch. This is an accepted gap: `valet.workflow.run.id`/`.attempt`,
+  // set at span creation before any store call, remain available to
+  // correlate the error.
+  let workflowIdKnown = false;
 
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
+    if (!workflowIdKnown) {
+      span.setAttribute('valet.workflow.id', run.params.workflowId);
+      workflowIdKnown = true;
+    }
 
     // A reclaimed `terminalizing` run (crash between `beginTerminalize` and
     // `settleRun`) MUST resume settlement directly, never re-enter the wave
@@ -152,7 +197,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
         engine,
         onApprovalPending,
       };
-      const outcome = await invokeExecutor(node, executors, argsBase);
+      const outcome = await invokeExecutorTraced(node, executors, argsBase);
 
       if (outcome.status === 'failed') sawFailure = true;
 
@@ -312,6 +357,52 @@ function earliestTimerWake(waitingOn: RunWaitCondition[]): number | undefined {
 }
 
 // ─── Executor dispatch ───────────────────────────────────────────────────────
+
+/**
+ * Wraps one executor invocation in a `workflow.node.{type}` span. The span
+ * records the node's terminal disposition for this wave (`completed` /
+ * `failed` / `parked`); a `failed` outcome marks the span ERROR with the
+ * executor's error message. Executor throws (fence errors, contract
+ * violations) propagate — `withSpan` records them as ERROR and rethrows.
+ *
+ * A completed `llm` node also gets its usage/cost attached as span
+ * attributes, so per-node cost is visible in traces without a DB join.
+ * Usage on a *failed* llm node (a repair round that billed a real call
+ * before validation failed it) isn't mirrored here — it's persisted in
+ * the node's checkpoint `effects` for cost reconciliation, but the
+ * `NodeExecuteResult` the trace wrapper sees on failure carries no usage
+ * (see `llm.ts`'s `fail()`), and giving the shared, node-type-agnostic
+ * result type an llm-specific field isn't worth it for that one path.
+ */
+async function invokeExecutorTraced(
+  node: WorkflowNode,
+  executors: NodeExecutorRegistry,
+  argsBase: Omit<NodeExecutorArgs, 'node'>,
+): Promise<NodeExecuteResult> {
+  return await withSpan(
+    `workflow.node.${node.type}`,
+    {
+      'valet.workflow.id': argsBase.run.params.workflowId,
+      'valet.workflow.run.id': argsBase.run.runId,
+      'valet.workflow.run.attempt': argsBase.attempt,
+      'valet.workflow.node.id': node.id,
+      'valet.workflow.node.type': node.type,
+      'valet.workflow.node.iteration': argsBase.iteration,
+    },
+    async (span) => {
+      const outcome = await invokeExecutor(node, executors, argsBase);
+      span.setAttribute('valet.workflow.node.status', outcome.status);
+      if (outcome.status === 'failed') markSpanError(span, outcome.error);
+      if (node.type === 'llm' && outcome.status === 'completed') {
+        const usageAttrs = llmUsageSpanAttributes(outcome.result);
+        if (usageAttrs) {
+          for (const [key, value] of Object.entries(usageAttrs)) span.setAttribute(key, value);
+        }
+      }
+      return outcome;
+    },
+  );
+}
 
 /**
  * Switches on `node.type` so each branch narrows `node` via the

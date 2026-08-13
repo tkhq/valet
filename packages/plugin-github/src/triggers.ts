@@ -3,6 +3,9 @@ import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } fr
 const GITHUB_EVENT_TYPES = [
   "push",
   "pull_request",
+  "pull_request_review",
+  "pull_request_review_comment",
+  "pull_request_review_thread",
   "issues",
   "issue_comment",
   "create",
@@ -115,6 +118,9 @@ function makeVerify(eventFamily: string): TriggerDef["verify"] {
  * not listed here (push, create, delete, status, ping) have no `action`. */
 const EVENT_ACTIONS: Record<string, string[]> = {
   pull_request: ["opened", "closed", "reopened", "synchronize", "edited", "ready_for_review", "labeled", "unlabeled"],
+  pull_request_review: ["submitted", "edited", "dismissed"],
+  pull_request_review_comment: ["created", "edited", "deleted"],
+  pull_request_review_thread: ["resolved", "unresolved"],
   issues: ["opened", "closed", "reopened", "edited", "labeled", "unlabeled", "assigned", "unassigned"],
   issue_comment: ["created", "edited", "deleted"],
   release: ["published", "created", "edited", "deleted"],
@@ -128,19 +134,61 @@ const COMMON_FILTERS: EventCatalogEntry["filters"] = [
   { field: "sender", path: "sender.login", description: "GitHub login of the actor" },
 ];
 
+const PR_NUMBER_FILTER = {
+  field: "pr_number",
+  path: "pull_request.number",
+  description: "Pull request number",
+};
+
+/**
+ * Per-family filters, appended to COMMON_FILTERS. The subscription matcher
+ * (`filtersMatch` in packages/api/src/events/match.ts) rejects any filter whose
+ * field is not declared here, and it coerces the resolved value with a
+ * string-or-number check. So a `path` must reach a scalar, and a field that is
+ * useful but undeclared makes the subscription silently match nothing.
+ */
+const EXTRA_FILTERS: Record<string, EventCatalogEntry["filters"]> = {
+  pull_request_review: [
+    PR_NUMBER_FILTER,
+    {
+      field: "review_state",
+      path: "review.state",
+      // The webhook payload uses lowercase here. The REST API returns the same
+      // states in uppercase, so a filter value copied from an API response
+      // matches nothing.
+      description: 'Review state, lowercase: "approved", "changes_requested", "commented", "dismissed"',
+    },
+  ],
+  pull_request_review_comment: [
+    PR_NUMBER_FILTER,
+    {
+      field: "path",
+      path: "comment.path",
+      description: "File path the review comment is attached to. Use the prefix operator to scope to a folder.",
+    },
+  ],
+  pull_request_review_thread: [PR_NUMBER_FILTER],
+};
+
+function filtersForEvent(eventType: string): EventCatalogEntry["filters"] {
+  const extra = EXTRA_FILTERS[eventType];
+  return extra ? [...COMMON_FILTERS, ...extra] : COMMON_FILTERS;
+}
+
 function catalogFor(eventType: string): EventCatalogEntry[] {
   // ping is the webhook-setup handshake, not a subscribable event; its payload
   // has no `repository` so the repo filter would be non-functional anyway.
   if (eventType === "ping") return [];
 
+  const filters = filtersForEvent(eventType);
   const actions = EVENT_ACTIONS[eventType];
   if (!actions) {
-    return [{ key: `github.${eventType}`, description: `GitHub ${eventType} event`, filters: COMMON_FILTERS }];
+    return [{ key: `github.${eventType}`, description: `GitHub ${eventType} event`, filters }];
   }
   return actions.map((action) => ({
     key: `github.${eventType}.${action}`,
     description: `GitHub ${eventType} ${action}`,
-    filters: COMMON_FILTERS,
+    filters,
   }));
 }
 

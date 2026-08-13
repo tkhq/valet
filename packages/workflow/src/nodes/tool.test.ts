@@ -155,6 +155,34 @@ describe('executeTool: params rendered structurally', () => {
   });
 });
 
+// ─── 1b. Credential selection passes through to invokeAction ────────────────
+
+describe('executeTool: credential selection', () => {
+  it('forwards an explicit credential selection to invokeAction', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine([{ ok: true, result: { done: true } }]);
+
+    await store.createRun('run-cred', runParams(), toolDefinition({ credential: 'app' }), 'v1');
+    const attempt = await claimAttempt(store, 'run-cred');
+    await driveUntilPark('run-cred', attempt, { store, engine, clock: clock.now });
+
+    expect(calls[0]?.req.credential).toBe('app');
+  });
+
+  it('omits credential when the node does not select one (back-compat)', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine([{ ok: true, result: { done: true } }]);
+
+    await store.createRun('run-nocred', runParams(), toolDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-nocred');
+    await driveUntilPark('run-nocred', attempt, { store, engine, clock: clock.now });
+
+    expect(calls[0]?.req.credential).toBeUndefined();
+  });
+});
+
 // ─── 2. Deterministic invocationId at iteration 0 (no suffix) ────────────────
 
 describe('executeTool: invocationId at iteration 0', () => {

@@ -9,12 +9,15 @@
 import { describe, it, expect, afterEach } from "vitest";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { addMember, createTeam } from "../services/teams.js";
 import type {
   CreateWorkflowResponse,
+  DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   StartWorkflowRunResponse,
+  WorkflowWebhookResponse,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -124,6 +127,130 @@ describe("GET /api/workflows + /:id", () => {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("team-owned workflows", () => {
+  it("creates a team-owned workflow when the caller is a member", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateWorkflowResponse;
+    expect(body.ownerType).toBe("team");
+    expect(body.ownerId).toBe(team.id);
+  });
+
+  it("404s creating a workflow under a team the caller isn't a member of", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "test-member" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("404s creating a workflow under an unknown teamId", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: "team_nonexistent" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("lists a team-owned workflow to every team member, not just its creator", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["team-wf"]);
+  });
+
+  it("404s listing/fetching a team-owned workflow for a non-member in the SAME org", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    }).then((r) => r.json() as Promise<CreateWorkflowResponse>);
+
+    const listRes = await fetch(`${api.baseUrl}/api/workflows`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const { workflows } = (await listRes.json()) as ListWorkflowsResponse;
+    expect(workflows).toEqual([]);
+
+    const getRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(getRes.status).toBe(404);
+  });
+
+  it("404s for a member who has since left the team — membership is re-checked live, not cached", async () => {
+    const { removeMember } = await import("../services/teams.js");
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    }).then((r) => r.json() as Promise<CreateWorkflowResponse>);
+
+    await removeMember(api.providers.db, { teamId: team.id, userId: "test-member" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("creating a workflow with teamId: null falls through to a personal workflow instead of 404ing", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "personal-wf", definition: VALID_DEFINITION, teamId: null }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateWorkflowResponse;
+    expect(body.ownerType).toBe("user");
+    expect(body.ownerId).toBe("local-user");
+  });
+
+  it("409s deleting a team that still owns a workflow", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/teams/${team.id}`, { method: "DELETE" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code?: string };
+    expect(body.code).toBe("team_owns_workflows");
   });
 });
 
@@ -266,6 +393,68 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
     expect(res.status).toBe(404);
   });
+
+  it("a team member manages a run started against a team-owned workflow (get/approve/cancel), matching a schedule/trigger fire's owner shape", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    }).then((r) => r.json() as Promise<CreateWorkflowResponse>);
+
+    const runId = "wfrun_team_owned";
+    // Mirrors what scheduler.ts / events/dispatcher.ts pass to
+    // workflowRunHost.start: the fired run's owner is the WORKFLOW's own
+    // owner, copied verbatim — not the schedule/trigger creator.
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      VALID_DEFINITION,
+      "v1",
+      { ownerType: "team", ownerId: team.id },
+    );
+
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+    const getRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`, { headers: memberHeaders });
+    expect(getRes.status).toBe(200);
+
+    const approveRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/approvals/some-node`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...memberHeaders },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(approveRes.status).toBe(200);
+    expect(stub.woken).toContain(runId);
+
+    const cancelRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: memberHeaders,
+    });
+    expect(cancelRes.status).toBe(200);
+    expect(stub.terminated).toContain(runId);
+  });
+
+  it("404s a team-owned run for a non-member in the SAME org", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const runId = "wfrun_team_outsider";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: "wf_whatever", definitionVersionId: "v1" },
+      VALID_DEFINITION,
+      "v1",
+      { ownerType: "team", ownerId: team.id },
+    );
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("GET /api/workflows/:id/runs", () => {
@@ -286,5 +475,81 @@ describe("GET /api/workflows/:id/runs", () => {
     expect(res.status).toBe(200);
     const { runs } = (await res.json()) as ListWorkflowRunsResponse;
     expect(runs.map((r) => r.runId)).toEqual([runId]);
+  });
+});
+
+describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
+  it("mints a hookId, then reads it back via GET", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const minted = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    expect(minted.status).toBe(200);
+    const mintedBody = (await minted.json()) as WorkflowWebhookResponse;
+    expect(mintedBody.workflowId).toBe(created.id);
+    expect(mintedBody.hookId).toMatch(/^[0-9a-f]{64}$/);
+
+    const fetched = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(fetched.status).toBe(200);
+    const fetchedBody = (await fetched.json()) as WorkflowWebhookResponse;
+    expect(fetchedBody.hookId).toBe(mintedBody.hookId);
+  });
+
+  it("GET 404s when the workflow has no webhook yet", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(res.status).toBe(404);
+  });
+
+  it("POST/GET/DELETE all 404 against another owner's workflow", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const headers = { "x-valet-test-user-id": "test-member" };
+
+    const post = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST", headers });
+    expect(post.status).toBe(404);
+
+    const get = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { headers });
+    expect(get.status).toBe(404);
+
+    const del = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE", headers });
+    expect(del.status).toBe(404);
+  });
+
+  it("rotating changes the hookId", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const first = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    const firstBody = (await first.json()) as WorkflowWebhookResponse;
+    const second = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    const secondBody = (await second.json()) as WorkflowWebhookResponse;
+    expect(secondBody.hookId).not.toBe(firstBody.hookId);
+  });
+
+  it("DELETE removes an existing hook and returns deleted:true", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeleteWorkflowWebhookResponse;
+    expect(body.deleted).toBe(true);
+
+    const afterDelete = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(afterDelete.status).toBe(404);
+  });
+
+  it("DELETE on an owned workflow with no hook returns deleted:false (not a 404 — the workflow itself is fine)", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeleteWorkflowWebhookResponse;
+    expect(body.deleted).toBe(false);
   });
 });

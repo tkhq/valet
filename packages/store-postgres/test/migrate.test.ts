@@ -44,6 +44,16 @@ describe("applyEngineMigrations", () => {
     }
   });
 
+  it("creates the partial created_at index cost attribution scans", async () => {
+    const result = await db.query(
+      "SELECT indexdef FROM pg_indexes WHERE tablename = 'engine_entries' AND indexname = $1",
+      ["engine_entries_usage_window"],
+    );
+    expect(result.rows).toHaveLength(1);
+    // Partial: only entries that carry usage, which is one per assistant turn.
+    expect(String(result.rows[0]?.indexdef)).toMatch(/WHERE \(?usage IS NOT NULL\)?/);
+  });
+
   it("seeds the engine_meta schema_version row", async () => {
     const result = await db.query("SELECT value FROM engine_meta WHERE key = 'schema_version'");
     expect(result.rows[0]?.value).toBe(ENGINE_SCHEMA_VERSION);

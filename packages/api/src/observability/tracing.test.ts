@@ -14,7 +14,7 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { activeTraceparent } from "@valet/engine";
 import { traceRequests } from "./http-middleware.js";
-import { tracedSessionStore } from "./traced-store.js";
+import { tracedSessionStore, tracedWorkflowStore } from "./traced-store.js";
 
 let exporter: InMemorySpanExporter;
 let provider: BasicTracerProvider;
@@ -97,6 +97,56 @@ describe("tracedSessionStore", () => {
     await expect(traced.saveSession()).rejects.toThrow("pg down");
     const spans = exporter.getFinishedSpans();
     expect(spans[0].name).toBe("store.saveSession");
+    expect(spans[0].status.code).toBe(2);
+  });
+});
+
+describe("tracedWorkflowStore", () => {
+  it("wraps store methods in workflow-store.* spans with the run id attribute", async () => {
+    const fake = {
+      getRun: async (runId: string) => ({ runId }),
+    };
+    const traced = tracedWorkflowStore(fake);
+    const result = await traced.getRun("wfrun_1");
+    expect(result).toEqual({ runId: "wfrun_1" });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name)).toEqual(["workflow-store.getRun"]);
+    expect(spans[0].attributes["valet.workflow.run.id"]).toBe("wfrun_1");
+  });
+
+  it("stamps consumeSignalAndCheckpoint's first argument as the signal id, not the run id", async () => {
+    const fake = {
+      consumeSignalAndCheckpoint: async (signalId: string) => signalId,
+    };
+    const traced = tracedWorkflowStore(fake);
+    await traced.consumeSignalAndCheckpoint("approval:n1:resolution");
+    const spans = exporter.getFinishedSpans();
+    expect(spans[0].name).toBe("workflow-store.consumeSignalAndCheckpoint");
+    expect(spans[0].attributes["valet.workflow.signal.id"]).toBe("approval:n1:resolution");
+    expect(spans[0].attributes["valet.workflow.run.id"]).toBeUndefined();
+  });
+
+  it("omits the run id attribute when the first argument is not a string", async () => {
+    const fake = {
+      listRunnable: async (now: number, limit: number) => [{ now, limit }],
+    };
+    const traced = tracedWorkflowStore(fake);
+    await traced.listRunnable(1_000, 5);
+    const spans = exporter.getFinishedSpans();
+    expect(spans[0].name).toBe("workflow-store.listRunnable");
+    expect(spans[0].attributes["valet.workflow.run.id"]).toBeUndefined();
+  });
+
+  it("records thrown store errors on the span and rethrows", async () => {
+    const fake = {
+      claimRun: async (): Promise<never> => {
+        throw new Error("pg down");
+      },
+    };
+    const traced = tracedWorkflowStore(fake);
+    await expect(traced.claimRun()).rejects.toThrow("pg down");
+    const spans = exporter.getFinishedSpans();
+    expect(spans[0].name).toBe("workflow-store.claimRun");
     expect(spans[0].status.code).toBe(2);
   });
 });

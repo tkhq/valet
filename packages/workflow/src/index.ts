@@ -22,6 +22,7 @@ export type {
   LlmNode,
   OrchestratorNode,
   ToolNode,
+  ToolCredentialMode,
 } from './dag/nodes.js';
 
 export {
@@ -64,6 +65,7 @@ export type {
   WorkflowInvokeActionResult,
   WorkflowLlmCompleteRequest,
   WorkflowLlmCompleteResult,
+  WorkflowLlmUsage,
   WorkflowPromptOptions,
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,

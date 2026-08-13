@@ -8,9 +8,11 @@
  * the agent-facing workflows action plugin); this file is HTTP plumbing.
  */
 import { Hono } from "hono";
+import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { ValidateEnvironment } from "@valet/workflow";
 import {
+  cancelWorkflowRun,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
@@ -19,17 +21,24 @@ import {
   listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowVersions,
+  resolveWorkflowApproval,
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
+import {
+  deleteWorkflowWebhook,
+  getWorkflowWebhook,
+  mintOrRotateWorkflowWebhook,
+} from "../workflows/webhook-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  DeleteWorkflowWebhookResponse,
   GetWorkflowResponse,
   GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
@@ -41,6 +50,7 @@ import type {
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
+  WorkflowWebhookResponse,
 } from "../wire/types.js";
 
 export const workflowsRouter = new Hono<AppEnv>();
@@ -79,10 +89,19 @@ workflowsRouter.post("/", async (c) => {
     return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
   }
 
-  const created = await createWorkflowDefinition(deps, owner, {
-    name: body.name,
-    definition: body.definition,
-  });
+  let created;
+  try {
+    created = await createWorkflowDefinition(deps, owner, {
+      name: body.name,
+      definition: body.definition,
+      teamId: body.teamId,
+    });
+  } catch (err) {
+    // Same "cross-owner 404, never 403" convention as the rest of this
+    // file — a non-member's teamId looks identical to an unknown one.
+    if (err instanceof NotFoundError) return c.json({ error: err.message }, 404);
+    throw err;
+  }
   const resp: CreateWorkflowResponse = created;
   return c.json(resp, 201);
 });
@@ -191,6 +210,37 @@ workflowsRouter.get("/:id/versions/:version", async (c) => {
   return c.json(resp);
 });
 
+// ── Webhook trigger (overhaul design decision 5) ────────────────────────────
+// The bearer secret itself is minted/rotated/revoked here, owner-scoped like
+// every other route in this file. The secret is CONSUMED at
+// `POST /api/hooks/workflows/:workflowId/:hookId` (`routes/workflow-hooks.ts`),
+// an intentionally unauthenticated route mounted before `buildAuthMiddleware`.
+
+workflowsRouter.post("/:id/webhook", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await mintOrRotateWorkflowWebhook(deps.db, owner, c.req.param("id"));
+  if (!result.ok) return c.json({ error: result.error }, 404);
+  const resp: WorkflowWebhookResponse = result.webhook;
+  return c.json(resp);
+});
+
+workflowsRouter.get("/:id/webhook", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
+  if (!result.ok) return c.json({ error: "workflow not found" }, 404);
+  if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
+  const resp: WorkflowWebhookResponse = result.webhook;
+  return c.json(resp);
+});
+
+workflowsRouter.delete("/:id/webhook", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
+  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
+  return c.json(resp);
+});
+
 workflowsRouter.get("/runs/:runId", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const resp = await getWorkflowRunDetail(deps, owner, c.req.param("runId"));
@@ -199,15 +249,9 @@ workflowsRouter.get("/runs/:runId", async (c) => {
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
-  const { workflowStore, workflowRunHost } = c.var.providers;
-  const user = c.var.user;
+  const { deps, owner } = serviceCtx(c);
   const runId = c.req.param("runId");
   const nodeId = c.req.param("nodeId");
-
-  const run = await workflowStore.getRun(runId);
-  if (!run || !run.owner || run.owner.ownerType !== "user" || run.owner.ownerId !== user.id) {
-    return c.json({ error: "run not found" }, 404);
-  }
 
   let body: ResolveWorkflowApprovalRequest;
   try {
@@ -219,30 +263,24 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
     return c.json({ error: "approved is required" }, 400);
   }
 
-  await workflowStore.insertSignal({
+  const result = await resolveWorkflowApproval(deps, owner, {
     runId,
-    signalId: `approval:${nodeId}:resolution`,
-    signalType: `approval:${nodeId}`,
-    payload: { approved: body.approved, resolvedBy: user.id, note: body.note },
-    createdAt: Date.now(),
+    nodeId,
+    approved: body.approved,
+    note: body.note,
   });
-  await workflowRunHost.wake(runId);
+  if (result === "not_found") return c.json({ error: "run not found" }, 404);
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);
 });
 
 workflowsRouter.post("/runs/:runId/cancel", async (c) => {
-  const { workflowStore, workflowRunHost } = c.var.providers;
-  const user = c.var.user;
+  const { deps, owner } = serviceCtx(c);
   const runId = c.req.param("runId");
 
-  const run = await workflowStore.getRun(runId);
-  if (!run || !run.owner || run.owner.ownerType !== "user" || run.owner.ownerId !== user.id) {
-    return c.json({ error: "run not found" }, 404);
-  }
-
-  await workflowRunHost.terminate(runId);
+  const result = await cancelWorkflowRun(deps, owner, runId);
+  if (result === "not_found") return c.json({ error: "run not found" }, 404);
 
   const resp: CancelWorkflowRunResponse = { ok: true };
   return c.json(resp);

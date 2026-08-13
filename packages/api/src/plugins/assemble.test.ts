@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
-import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
-import { assemblePlugins, pluginSessionExtras } from "./assemble.js";
+import type { ActionPlugin, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
+import { assemblePlugins, partitionByName, pluginSessionExtras } from "./assemble.js";
 
 function makeAction(id: string): PluginAction {
   return {
@@ -68,9 +68,16 @@ describe("assemblePlugins", () => {
 });
 
 describe("pluginSessionExtras", () => {
-  it("returns no tools when there are zero action plugins", () => {
+  it("returns no catalog tools when there are zero action plugins", () => {
     const plugins = [makePlugin("skills-only", { skills: [{ name: "s", content: "c" }] })];
     const { tools } = pluginSessionExtras(plugins);
+    // The `skill` tool still ships — a skills-only plugin set has something
+    // to reach — but neither catalog tool does.
+    expect(tools.map((t) => t.name)).toEqual(["skill"]);
+  });
+
+  it("returns no tools at all for a plugin set with neither actions nor skills", () => {
+    const { tools } = pluginSessionExtras([makePlugin("inert")]);
     expect(tools).toEqual([]);
   });
 
@@ -96,11 +103,151 @@ describe("pluginSessionExtras", () => {
     expect(roles.map((r) => r.name)).toEqual(["role-a", "role-b"]);
   });
 
+  it("throws when two plugins ship a skill with the same name", () => {
+    const plugins = [
+      makePlugin("plugin-a", { skills: [{ name: "github", content: "a" }] }),
+      makePlugin("plugin-b", { skills: [{ name: "github", content: "b" }] }),
+    ];
+
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/plugin-a/);
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/plugin-b/);
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/github/);
+  });
+
+  it("throws when one plugin ships two skills with the same name", () => {
+    const plugins = [
+      makePlugin("plugin-a", {
+        skills: [
+          { name: "github", content: "a" },
+          { name: "github", content: "b" },
+        ],
+      }),
+    ];
+
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/github/);
+  });
+
+  it("adds a protected `skill` tool naming every skill the plugin set ships", () => {
+    const plugins = [
+      makePlugin("plugin-a", { skills: [{ name: "github", description: "Use GitHub.", content: "a" }] }),
+      makePlugin("plugin-b", { skills: [{ name: "workflows", content: "b" }] }),
+    ];
+
+    const { tools } = pluginSessionExtras(plugins);
+    const skillTool = tools.find((t) => t.name === "skill");
+
+    expect(skillTool).toBeDefined();
+    expect(skillTool?.protectedFromPruning).toBe(true);
+    expect(skillTool?.description).toContain("github");
+    expect(skillTool?.description).toContain("Use GitHub.");
+    expect(skillTool?.description).toContain("workflows");
+  });
+
+  it("adds no `skill` tool when no plugin ships a skill", () => {
+    const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
+    const { tools } = pluginSessionExtras(plugins);
+    expect(tools.map((t) => t.name)).not.toContain("skill");
+  });
+
   it("builds a fresh tools array on every call (no module-scope caching)", () => {
     const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
     const first = pluginSessionExtras(plugins);
     const second = pluginSessionExtras(plugins);
     expect(first.tools).not.toBe(second.tools);
     expect(first.tools[0]).not.toBe(second.tools[0]);
+  });
+});
+
+/**
+ * Stored skills join the same collection as plugin skills, but they are
+ * user-supplied, so a name clash must never throw — the four session
+ * builders in `engine/host.ts` have no try/catch, and a throw here would
+ * stop the owner from starting ANY session. A clash shadows instead.
+ */
+describe("pluginSessionExtras with stored skills", () => {
+  const stored = (name: string, content: string): SkillSource => ({
+    name,
+    content,
+    source: "user",
+  });
+
+  it("appends a stored skill whose name no plugin uses", () => {
+    const plugins = [makePlugin("plugin-a", { skills: [{ name: "github", content: "plugin" }] })];
+
+    const { skills } = pluginSessionExtras(plugins, [stored("deploy", "mine")]);
+
+    expect(skills.map((s) => s.name)).toEqual(["github", "deploy"]);
+  });
+
+  it("does not throw when a stored skill collides with a plugin skill", () => {
+    const plugins = [makePlugin("plugin-a", { skills: [{ name: "github", content: "plugin" }] })];
+
+    expect(() => pluginSessionExtras(plugins, [stored("github", "mine")])).not.toThrow();
+  });
+
+  it("keeps the plugin body and drops the shadowed stored skill", () => {
+    const plugins = [makePlugin("plugin-a", { skills: [{ name: "github", content: "plugin" }] })];
+
+    const { skills, shadowedSkills } = pluginSessionExtras(plugins, [stored("github", "mine")]);
+
+    expect(skills).toHaveLength(1);
+    expect(skills[0]?.content).toBe("plugin");
+    expect(shadowedSkills.map((s) => s.name)).toEqual(["github"]);
+  });
+
+  it("keeps the first of two stored skills that share a name", () => {
+    const plugins = [makePlugin("plugin-a", { skills: [{ name: "github", content: "plugin" }] })];
+
+    const { skills, shadowedSkills } = pluginSessionExtras(plugins, [
+      stored("deploy", "personal"),
+      stored("deploy", "team"),
+    ]);
+
+    expect(skills.filter((s) => s.name === "deploy").map((s) => s.content)).toEqual(["personal"]);
+    expect(shadowedSkills.map((s) => s.content)).toEqual(["team"]);
+  });
+
+  it("still throws when two plugins ship one skill name, extras or not", () => {
+    const plugins = [
+      makePlugin("plugin-a", { skills: [{ name: "github", content: "a" }] }),
+      makePlugin("plugin-b", { skills: [{ name: "github", content: "b" }] }),
+    ];
+
+    expect(() => pluginSessionExtras(plugins, [stored("deploy", "mine")])).toThrowError(/github/);
+  });
+
+  it("names a stored skill in the `skill` tool description", () => {
+    const { tools } = pluginSessionExtras([], [stored("deploy", "mine")]);
+    const skillTool = tools.find((t) => t.name === "skill");
+
+    expect(skillTool).toBeDefined();
+    expect(skillTool?.description).toContain("deploy");
+  });
+
+  it("reports no shadowing when nothing collides", () => {
+    const { shadowedSkills } = pluginSessionExtras([], [stored("deploy", "mine")]);
+    expect(shadowedSkills).toEqual([]);
+  });
+});
+
+describe("partitionByName", () => {
+  it("splits candidates on the names already taken", () => {
+    const { kept, shadowed } = partitionByName(["github"], [
+      { name: "github", id: "1" },
+      { name: "deploy", id: "2" },
+    ]);
+
+    expect(kept.map((c) => c.id)).toEqual(["2"]);
+    expect(shadowed.map((c) => c.id)).toEqual(["1"]);
+  });
+
+  it("shadows the later of two candidates sharing one name", () => {
+    const { kept, shadowed } = partitionByName([], [
+      { name: "deploy", id: "1" },
+      { name: "deploy", id: "2" },
+    ]);
+
+    expect(kept.map((c) => c.id)).toEqual(["1"]);
+    expect(shadowed.map((c) => c.id)).toEqual(["2"]);
   });
 });

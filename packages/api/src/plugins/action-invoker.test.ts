@@ -365,8 +365,33 @@ describe("buildActionInvoker: github service resolution", () => {
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
+  /** Same credential consumption as `githubWhoamiAction`, but with the
+   * `owner`/`repo` parameters every real repo-scoped plugin-github action
+   * declares — the pair an `app`-credential node's installation lookup is
+   * derived from. */
+  function githubRepoAction(): PluginAction {
+    return {
+      id: "github.create_comment",
+      name: "create_comment",
+      description: "create a comment",
+      riskLevel: "low",
+      parameters: Type.Object({ owner: Type.String(), repo: Type.String() }),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        const token = cred?.accessToken;
+        if (!token) {
+          throw new Error("Missing GitHub access token. Connect the GitHub integration in Settings.");
+        }
+        return { success: true, data: { token } };
+      },
+    };
+  }
+
   function githubActionPluginByService(): Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }> {
-    return actionPluginByServiceOf("github", { service: "github", actions: [githubWhoamiAction()] });
+    return actionPluginByServiceOf("github", {
+      service: "github",
+      actions: [githubWhoamiAction(), githubRepoAction()],
+    });
   }
 
   it("user-connected: resolves the user's healthy github credential", async () => {
@@ -501,6 +526,190 @@ describe("buildActionInvoker: github service resolution", () => {
     });
   });
 
+  // ── credential: "app" — the bot identity, or a loud failure ───────────
+  //
+  // A user-owned review workflow must comment as the GitHub App, not as the
+  // person who saved it. `auto` + `api` tries the user's own credential
+  // first, so an `app` node MUST bypass that precedence, and MUST fail
+  // instead of falling back to a human identity.
+
+  /** App config + one installation on `acme`, plus a healthy user
+   * credential that an `app`-credential node must ignore. */
+  async function seedAppAndUser(appDb: AppDb, credentials: PgCredentialStore): Promise<void> {
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_222",
+      orgId,
+      installationId: 222,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+  }
+
+  it('credential "app": resolves the installation for the params owner, ignoring a healthy user credential', async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n1",
+        credential: "app",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-222" } });
+  });
+
+  it('credential "app": fails loudly when the App is not installed on the params owner', async () => {
+    const { appDb, credentials } = await harness();
+    // Installed on `acme` only; the action targets `other-org`.
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "other-org", repo: "widgets" },
+        invocationId: "workflow:r1:n2",
+        credential: "app",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    // No silent fallback to `user-tok` — the whole point of the strict tier.
+    expect(result).toEqual({
+      ok: false,
+      error: "the GitHub App is not installed on other-org",
+    });
+  });
+
+  it('credential "app": names the missing owner/repo parameters when the repo cannot be derived', async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n3", credential: "app" },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({
+      error: expect.stringContaining('Add "owner" and "repo"'),
+    });
+  });
+
+  it('credential "auto" keeps the default precedence: the user credential still wins', async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n4",
+        credential: "auto",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "user-tok" } });
+  });
+
+  it('credential "user": fails loudly when the user has no connected GitHub account', async () => {
+    const { appDb, credentials } = await harness();
+    // App + installation exist, but no user credential — `user` must not
+    // fall back to the installation.
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_333",
+      orgId,
+      installationId: 333,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n5",
+        credential: "user",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "no GitHub account is connected for this user",
+    });
+  });
+
   it("non-github service is untouched: no githubTokenDeps required, resolveGitHubToken never consulted", async () => {
     const store = new FakeCredentialStore();
     store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "secret-token" });
@@ -515,5 +724,24 @@ describe("buildActionInvoker: github service resolution", () => {
     );
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+  });
+
+  it("a non-github service refuses an app selection instead of ignoring it", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "secret-token" });
+    const fixture2 = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture2.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1", credential: "app" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ error: expect.stringContaining("Remove the credential field") });
+    // Refused before the action ran — an ignored selection would have let it
+    // execute under the workflow owner's own credential.
+    expect(fixture2.calls()).toBe(0);
   });
 });

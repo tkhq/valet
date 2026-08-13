@@ -17,10 +17,11 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { and, count, eq, ne } from "drizzle-orm";
+import { and, count, eq, ne, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
   ValidationError as EngineValidationError,
+  type ChildReader,
   type ChildSpawner,
   type Principal,
   type SessionStore,
@@ -97,10 +98,27 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
     .select({ n: count() })
     .from(childWatches)
     .where(and(eq(childWatches.orgId, orgId), eq(childWatches.settled, false)));
+  // Child sessions are counted through their watch rows above — a running
+  // child once (unsettled watch), a settled child zero. Their agent_sessions
+  // rows outlive settlement, so counting them here would double-count every
+  // running child and hold a settled child's slot forever.
   const [{ n: liveSessionsOrgWide }] = await db
     .select({ n: count() })
     .from(agentSessions)
-    .where(and(eq(agentSessions.orgId, orgId), ne(agentSessions.status, "deleted")));
+    .where(
+      and(
+        eq(agentSessions.orgId, orgId),
+        ne(agentSessions.status, "deleted"),
+        notExists(
+          db
+            .select({ one: sql`1` })
+            .from(childWatches)
+            .where(
+              and(eq(childWatches.orgId, orgId), eq(childWatches.childSessionId, agentSessions.id)),
+            ),
+        ),
+      ),
+    );
   const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
   if (total >= ORG_ACTIVE_SESSION_CEILING) {
     const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + live sessions), limit ${ORG_ACTIVE_SESSION_CEILING}`;
@@ -377,7 +395,7 @@ export class ChildWatcher {
       content: {
         kind: "signal",
         signalType: "child.settled",
-        body: resultBody(result),
+        body: resultBody(result, watch.childSessionId),
         attributes: {
           child_session_id: watch.childSessionId,
           outcome: result.outcome,
@@ -409,9 +427,117 @@ export class ChildWatcher {
   }
 }
 
-function resultBody(result: SubmissionResult): string {
-  if (result.outcome === "failed" || result.outcome === "aborted") {
-    return result.error ?? result.text ?? `child submission ${result.outcome}`;
+/** Messages `child_read` returns when the caller names no limit. */
+const CHILD_READ_DEFAULT_LIMIT = 30;
+
+/**
+ * Builds the `ChildReader` injected into every orchestrator's
+ * `toolConfig.childReader`, which is what the engine's `child_read` built-in
+ * calls.
+ *
+ * Authority comes from `child_watches`: a row exists only because this
+ * parent spawned this child, and `markSettled` updates the row instead of
+ * deleting it, so the edge outlives the child's run. A settled child stays
+ * readable, which is the point — the parent reads it after the truncated
+ * result arrives.
+ */
+export function buildChildReader(deps: ChildrenDeps): ChildReader {
+  return async (req, ctx) => {
+    const rows = await deps.db
+      .select({ childSessionId: childWatches.childSessionId })
+      .from(childWatches)
+      .where(
+        and(
+          eq(childWatches.childSessionId, req.childSessionId),
+          eq(childWatches.parentSessionId, ctx.parentSessionId),
+        ),
+      )
+      .limit(1);
+    // No row means the caller does not own this child, or it does not
+    // exist. Both answer `null`: telling them apart would confirm that
+    // somebody else's session id is real.
+    if (rows.length === 0) return null;
+
+    const childRows = await deps.db
+      .select({ status: agentSessions.status })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, req.childSessionId))
+      .limit(1);
+    const child = childRows[0];
+    // A deleted child answers the same null as a missing one — deletion
+    // must not leave the transcript readable through the watch edge.
+    if (!child || child.status === "deleted") return null;
+
+    // Read the store directly. Waking the child through the engine host
+    // would mint a sandbox token, run reconcile (resuming any unsettled
+    // work under the reader's timing), and re-create engine rows for a
+    // child deleted while cached — a read must do none of that.
+    const data = await deps.engineStore.getSession(req.childSessionId);
+    if (!data) return null;
+    const threads = await deps.engineStore.listThreads(req.childSessionId);
+    // The spawner prompts the child's default thread ("web:default").
+    const thread = threads.find((t) => t.key === "web:default") ?? threads[0];
+    if (!thread) return [];
+    return deps.engineStore.getEntries(req.childSessionId, thread.id, {
+      limit: req.limit ?? CHILD_READ_DEFAULT_LIMIT,
+      includeCompacted: true,
+    });
+  };
+}
+
+/**
+ * Ceiling on the child result carried inline in a `child.settled` signal.
+ *
+ * The signal lands in the parent's thread, so the parent pays for it in
+ * context on that turn and on every later turn until compaction. A child
+ * that writes a large report would otherwise take that whole report into
+ * its parent's context: a real child on 2026-08-06 produced over 100KB.
+ *
+ * For completed results this ceiling is safe because `child_read` can
+ * fetch what it cuts — the text is a persisted thread entry. A settlement
+ * ERROR is not a thread entry, so a truncated error's tail is gone; the
+ * failure notice below says so instead of promising recovery. Do NOT
+ * lower the ceiling, or truncate anywhere else, without keeping this
+ * distinction — the parent has no other channel to its child.
+ */
+export const CHILD_RESULT_MAX_CHARS = 16_000;
+
+/**
+ * The child's result as the parent receives it, bounded.
+ *
+ * `childSessionId` is part of the signature rather than read from the watch
+ * row because the truncation notice is useless without it: the parent needs
+ * the id to pass to `child_read`.
+ */
+export function resultBody(result: SubmissionResult, childSessionId: string): string {
+  const isFailure = result.outcome === "failed" || result.outcome === "aborted";
+  // `text` is undefined when no terminal entry matched at read time — e.g.
+  // the child's final message was compacted away between settlement and
+  // this read. An empty body would leave the parent no lead to follow.
+  if (!isFailure && result.text === undefined) {
+    return (
+      `[No result text was captured for this ${result.outcome} child submission. ` +
+      `Call child_read with child_session_id "${childSessionId}" to read the child's transcript.]`
+    );
   }
-  return result.text ?? "";
+  const full = isFailure
+    ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
+    : (result.text ?? "");
+  if (full.length <= CHILD_RESULT_MAX_CHARS) return full;
+  const dropped = full.length - CHILD_RESULT_MAX_CHARS;
+  if (isFailure) {
+    // The error string lives only in the settlement outcome, not in the
+    // child's transcript — child_read cannot return the dropped tail.
+    return (
+      full.slice(0, CHILD_RESULT_MAX_CHARS) +
+      `\n\n[Truncated. ${dropped} more characters of this error were dropped and ` +
+      `are not recoverable. Call child_read with child_session_id ` +
+      `"${childSessionId}" to inspect the child's transcript instead.]`
+    );
+  }
+  return (
+    full.slice(0, CHILD_RESULT_MAX_CHARS) +
+    `\n\n[Truncated. ${dropped} more characters follow this point. To read the ` +
+    `full result, call child_read with child_session_id "${childSessionId}".]`
+  );
 }
