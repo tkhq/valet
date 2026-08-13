@@ -11,16 +11,19 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
-import type { ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import type { ListAssistantsResponse, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
 
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setModelMutate = vi.fn();
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
-/** The header resolves a team orchestrator's title and its admin controls
- * from this list. Empty by default so the pause/delete cases below keep
- * exercising a plain personal session. */
+/** The header resolves a team assistant's title and its admin controls from
+ * these two lists: the assistant says who owns the session, the team says
+ * what that owner is called and what the caller may do. Both empty by
+ * default so the pause/delete cases below keep exercising a plain personal
+ * session. */
 let teamsData: ListTeamsResponse = { teams: [] };
+let assistantsData: ListAssistantsResponse = { assistants: [] };
 
 // importOriginal, not a bare replacement: vitest.config.ts sets
 // `isolate: false` to share the module registry across test files in a
@@ -49,6 +52,14 @@ vi.mock("~/api/settings", () => ({
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: undefined, isLoading: false, error: null }),
 }));
+
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({ data: assistantsData, isLoading: false, error: null }),
+  };
+});
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
@@ -85,6 +96,7 @@ beforeEach(() => {
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
   teamsData = { teams: [] };
+  assistantsData = { assistants: [] };
 });
 
 describe("SandboxChip — suspended state", () => {
@@ -130,16 +142,20 @@ describe("SessionHeader — pause control", () => {
 });
 
 /**
- * A team's orchestrator is a shared session. Two things must hold that did
- * not before: it is titled with the TEAM's name (the header used to fall
- * through to `useOrchestratorInfo`, i.e. the VIEWER's own assistant name,
- * for any id starting `orchestrator:`), and its lifecycle controls are
- * team-admin only — the API enforces the same rule, so showing them to a
- * plain member would only offer a 404.
+ * A team's assistant is a shared session. Two things must hold that did not
+ * before: it is titled with its own name, or failing that the TEAM's (the
+ * header used to fall through to `useOrchestratorInfo`, i.e. the VIEWER's
+ * own assistant name, for any id starting `orchestrator:`), and its
+ * lifecycle controls are team-admin only — the API enforces the same rule,
+ * so showing them to a plain member would only offer a 404.
+ *
+ * Ownership comes from the assistants list, not from parsing the session id.
+ * The id used to carry the owning principal, which addressed exactly one
+ * assistant per team and could not survive the second one.
  */
-describe("SessionHeader — team orchestrator", () => {
+describe("SessionHeader — team assistant", () => {
   function teamSession(): SessionDetail {
-    return { ...baseSession(), id: "orchestrator:team:team_1", title: "Assistant" };
+    return { ...baseSession(), id: "assistant:asst_team", title: "Assistant" };
   }
 
   function renderTeamHeader() {
@@ -150,7 +166,7 @@ describe("SessionHeader — team orchestrator", () => {
     );
   }
 
-  function withTeam(callerRole: "admin" | "member" | null) {
+  function withTeam(callerRole: "admin" | "member" | null, assistantName?: string) {
     teamsData = {
       teams: [
         {
@@ -163,13 +179,33 @@ describe("SessionHeader — team orchestrator", () => {
         },
       ],
     };
+    assistantsData = {
+      assistants: [
+        {
+          id: "asst_team",
+          owner: { type: "team", id: "team_1" },
+          ...(assistantName === undefined ? {} : { name: assistantName }),
+          sessionId: "assistant:asst_team",
+          isDefault: true,
+          createdAt: 1,
+        },
+      ],
+    };
   }
 
-  it("titles the session with the team's name, not the viewer's own assistant", () => {
+  it("titles an unnamed team assistant with the team's name, not the viewer's own", () => {
     withTeam("member");
     renderTeamHeader();
     expect(screen.getByText("Platform")).toBeTruthy();
     expect(screen.queryByText("Assistant")).toBeNull();
+  });
+
+  it("titles a named team assistant with its own name", () => {
+    // A team owns several, so the team's name no longer identifies which
+    // conversation you are reading.
+    withTeam("member", "Triage");
+    renderTeamHeader();
+    expect(screen.getByText("Triage")).toBeTruthy();
   });
 
   it("marks it as shared with a Team badge", () => {
@@ -180,7 +216,7 @@ describe("SessionHeader — team orchestrator", () => {
 
   /**
    * The workspace chip is a real filesystem path on a real session, but an
-   * orchestrator's is synthetic — `~/.valet/orchestrator/{type}-{id}` — and
+   * assistant's is synthetic — `~/.valet/orchestrator/{type}-{id}` — and
    * on a team it rendered as `team-team_99235d43-…`, the principal type
    * joined to an id that already carries it. An internal identifier, shown
    * to a user, for no reason. These two cases pin that it stays hidden.

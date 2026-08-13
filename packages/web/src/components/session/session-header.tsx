@@ -5,7 +5,7 @@ import type { Message, SessionDetail } from "@valet/api/wire";
 import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
 import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
 import { useMe, useOrg, useTeams } from "~/api/settings";
-import { parseTeamOrchestratorId } from "~/lib/orchestrator-id";
+import { useAssistants } from "~/api/assistants";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
@@ -68,6 +68,7 @@ export function SessionHeader({
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
   const teams = useTeams();
+  const assistants = useAssistants();
   const [pauseError, setPauseError] = useState<string | null>(null);
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
 
@@ -76,7 +77,7 @@ export function SessionHeader({
     // loses rather than describing a private session.
     const prompt =
       teamId !== null
-        ? `Delete ${team?.name ?? "this team"}'s assistant? Everyone on the team loses this conversation and its threads.`
+        ? `Delete ${title}? Everyone on ${team?.name ?? "the team"} loses this conversation and its threads.`
         : "Delete session and tear down its sandbox?";
     if (!confirm(prompt)) return;
     try {
@@ -129,15 +130,23 @@ export function SessionHeader({
   // The orchestrator's title card carries the orchestrator's chosen name
   // (e.g. "Aurora") — the top-nav logo stays "Valet", so this is where
   // the assistant's identity lives.
-  // A team's assistant is titled with the TEAM's name. Narrowing this
-  // matters: `orchInfo` is the viewer's OWN assistant, so a bare
-  // `startsWith("orchestrator:")` test titled every team assistant with
-  // the viewer's personal assistant name — wrong for everyone but the
-  // one member whose name it borrowed.
-  const teamId = parseTeamOrchestratorId(session.id);
+  // An assistant is titled with its own name, and a team's assistant falls
+  // back to the TEAM's name. Both come from the assistants list rather than
+  // from the session id: the id used to be parsed for the owning team, which
+  // worked only while a team had exactly one assistant. Narrowing still
+  // matters — `orchInfo` is the viewer's OWN assistant, so a bare
+  // `startsWith("orchestrator:")` test titled every team assistant with the
+  // viewer's personal assistant name.
+  const assistant = assistants.data?.assistants.find((a) => a.sessionId === session.id);
+  const teamId = assistant?.owner.type === "team" ? assistant.owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
-  const isOwnOrchestrator = teamId === null && session.id.startsWith("orchestrator:");
+  // Your own assistant is recognised without waiting on the list:
+  // `GET /orchestrator/info` answers with the very session id it names.
+  const isOwnOrchestrator =
+    assistant?.owner.type === "user" || orchInfo.data?.sessionId === session.id;
+  const isAssistantSession = assistant !== undefined || isOwnOrchestrator;
   const title =
+    assistant?.name ||
     (teamId !== null ? team?.name : undefined) ||
     (isOwnOrchestrator ? orchInfo.data?.name : undefined) ||
     session.title ||
@@ -180,7 +189,7 @@ export function SessionHeader({
               No `uppercase` on the chip when it does render — real
               workspace names are case-sensitive paths, and shouting them in
               caps misrepresents them. */}
-          {session.workspace && teamId === null && !isOwnOrchestrator && (
+          {session.workspace && !isAssistantSession && (
             <span className="text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>

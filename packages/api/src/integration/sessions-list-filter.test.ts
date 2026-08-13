@@ -6,17 +6,18 @@
  */
 import { describe, it, expect } from "vitest";
 import { bootTestApi } from "./_setup.js";
-import { orchestratorSessionId } from "@valet/engine";
+import { assistantSessionId } from "@valet/engine";
 import { agentSessions, childWatches } from "../schema/index.js";
 import type { ListSessionsResponse } from "../wire/types.js";
 
 describe("GET /api/sessions: standalone-only filter", () => {
-  it("excludes orchestrator and child session rows, keeps standalone rows", async () => {
+  it("excludes every assistant row and child rows, keeps standalone rows", async () => {
     const api = await bootTestApi();
     try {
       const { db } = api.providers;
       const now = Date.now();
-      const orchId = orchestratorSessionId({ type: "user", id: "local-user" });
+      const defaultAssistantId = assistantSessionId("asst_default");
+      const secondAssistantId = assistantSessionId("asst_second");
 
       await db
         .insert(agentSessions)
@@ -34,11 +35,23 @@ describe("GET /api/sessions: standalone-only filter", () => {
             updatedAt: now,
           },
           {
-            id: orchId,
+            id: defaultAssistantId,
             userId: "local-user",
             orgId: "local-org",
-            workspace: "/tmp/orch",
+            workspace: "/tmp/assistant-default",
             title: "Assistant",
+            status: "active",
+            ownerType: "user",
+            ownerId: "local-user",
+            createdAt: now,
+            updatedAt: now,
+          },
+          {
+            id: secondAssistantId,
+            userId: "local-user",
+            orgId: "local-org",
+            workspace: "/tmp/assistant-second",
+            title: "Research",
             status: "active",
             ownerType: "user",
             ownerId: "local-user",
@@ -64,7 +77,7 @@ describe("GET /api/sessions: standalone-only filter", () => {
         .values({
           childSessionId: "child-1",
           queueItemId: "qi-1",
-          parentSessionId: orchId,
+          parentSessionId: defaultAssistantId,
           parentThreadId: "th-1",
           actorUserId: "local-user",
           orgId: "local-org",

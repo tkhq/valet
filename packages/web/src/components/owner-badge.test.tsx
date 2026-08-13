@@ -10,17 +10,41 @@
  * wants a router this suite has no reason to mount. `search` is serialized
  * onto the stub so a test can read the query the badge would navigate with.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { ListTeamsResponse } from "@valet/api/wire";
+import type { ListAssistantsResponse, ListTeamsResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
 
 let teamsData: ListTeamsResponse = { teams: [] };
+/** The badge links by assistant id, so it needs the list that maps an owner
+ * to one. A team with no listed assistant has nothing to link to. */
+function teamAssistants(): ListAssistantsResponse {
+  return {
+    assistants: [
+      {
+        id: "asst_team_1",
+        owner: { type: "team", id: "team_1" },
+        sessionId: "assistant:asst_team_1",
+        isDefault: true,
+        createdAt: 1,
+      },
+    ],
+  };
+}
+let assistantsData: ListAssistantsResponse = teamAssistants();
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
 }));
+
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({ data: assistantsData, isLoading: false, error: null }),
+  };
+});
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -60,6 +84,11 @@ function show(ownerType: "user" | "team" | "org", ownerId: string) {
   );
 }
 
+beforeEach(() => {
+  teamsData = { teams: [] };
+  assistantsData = teamAssistants();
+});
+
 describe("OwnerBadge", () => {
   it("says nothing about a row the reader owns", () => {
     teamsData = { teams: [team()] };
@@ -89,13 +118,27 @@ describe("OwnerBadge", () => {
     expect(screen.queryByText("Design")).toBeNull();
   });
 
-  it("links to the owning team's assistant", () => {
+  it("links to the owning team's default assistant", () => {
+    // A team owns several assistants now, so an owner-shaped link has to
+    // pick one: the default, which is what every machine-driven path
+    // targets when nobody chose.
     teamsData = { teams: [team()] };
     const { container } = show("team", "team_1");
 
     const link = container.querySelector("a");
     expect(link?.getAttribute("to")).toBe("/chat");
-    expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({ team: "team_1" });
+    expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({
+      assistant: "asst_team_1",
+    });
+  });
+
+  it("still names the owner when the team has no assistant to link to", () => {
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [] };
+    const { container } = show("team", "team_1");
+
+    expect(screen.getByText("Design")).toBeTruthy();
+    expect(container.querySelector("a")).toBeNull();
   });
 
   it("names the destination on hover", () => {

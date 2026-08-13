@@ -1,21 +1,31 @@
 /**
- * Orchestrator lifecycle (Phase 4 decision 17/22).
+ * The caller's DEFAULT assistant (Phase 4 decision 17/22).
  *
- *   POST /api/orchestrator → ensure the caller's user-orchestrator exists
- *                             (instant sandbox-less wake) and return its id.
- *   GET  /api/orchestrator → probe only, never creates.
+ *   POST /api/orchestrator → ensure the caller's default assistant session
+ *                             exists (instant sandbox-less wake), return its id.
+ *   GET  /api/orchestrator → probe only, never creates anything.
  *
- * This phase mounts only the user-orchestrator entry point (web nav "Assistant"
- * per decision 22) — team/org orchestrators are created via other paths
- * (Task 8+) and aren't reachable through this route.
+ * A user owns any number of assistants. Every route here means the DEFAULT
+ * one — the target a caller that named only a principal can be asking for.
+ * `GET/POST/PATCH /api/assistants` (`routes/assistants.ts`) is where the
+ * others are listed, created and administered, and a team's assistant is
+ * reached through `POST /api/teams/:id/orchestrator`.
+ *
+ * `resolveDefaultAssistant` (`assistants/service.ts`) creates the default
+ * row on first use. That row is not the engine session: it is one insert,
+ * with no sandbox and no agent loop behind it. Routes below say which of
+ * the two they create.
  */
 import { Hono } from "hono";
 import { and, count, desc, eq } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
-import { orchestratorSessionId, type Principal } from "@valet/engine";
+import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions, childWatches, orchestratorIdentities } from "../schema/index.js";
-import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
+import { agentSessions, assistants, childWatches } from "../schema/index.js";
+import {
+  ensureDefaultAssistantSession,
+  findDefaultAssistant,
+  resolveDefaultAssistant,
+} from "../assistants/service.js";
 import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
 import type {
   EnsureOrchestratorResponse,
@@ -41,7 +51,7 @@ orchestratorRouter.post("/", async (c) => {
   const user = c.var.user;
   const principal = userPrincipal(user.id);
 
-  const { sessionId } = await ensureOrchestratorSession({ db, engineHost }, principal, {
+  const { sessionId } = await ensureDefaultAssistantSession({ db, engineHost }, principal, {
     actorUserId: user.id,
     orgId: user.orgId,
   });
@@ -52,25 +62,23 @@ orchestratorRouter.post("/", async (c) => {
 
 // ── Probe (no create) ───────────────────────────────────────────────────────
 
+/**
+ * Creates nothing — not the assistant row, not the engine session. A caller
+ * with no default assistant yet gets `exists: false` and a null
+ * `sessionId`, because there is no session to address until one exists. The
+ * id is no longer derivable from the caller: an assistant addresses its
+ * session by its own id, so only a lookup can supply one.
+ */
 orchestratorRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
-  const principal = userPrincipal(user.id);
-  const sessionId = orchestratorSessionId(principal);
 
-  const identityRows = await db
-    .select()
-    .from(orchestratorIdentities)
-    .where(
-      and(
-        eq(orchestratorIdentities.orgId, user.orgId),
-        eq(orchestratorIdentities.ownerType, principal.type),
-        eq(orchestratorIdentities.ownerId, principal.id),
-      ),
-    )
-    .limit(1);
+  const assistant = await findDefaultAssistant(db, user.orgId, userPrincipal(user.id));
 
-  const body: GetOrchestratorResponse = { sessionId, exists: identityRows[0] !== undefined };
+  const body: GetOrchestratorResponse = {
+    sessionId: assistant?.sessionId ?? null,
+    exists: assistant !== undefined,
+  };
   return c.json(body);
 });
 
@@ -78,11 +86,16 @@ orchestratorRouter.get("/", async (c) => {
 
 /**
  * GET /api/orchestrator/info — decision 4. Never creates the engine session
- * or the identity row; a first-visit caller sees `name: null`.
+ * or the `agent_sessions` row; a first-visit caller sees `name: null`.
+ *
+ * It DOES resolve (and therefore create) the caller's default assistant
+ * row, because the response carries that assistant's `sessionId` and the id
+ * is no longer derivable from the caller alone. The row costs one insert
+ * and starts nothing.
  *
  * Presence source (documented per task-2 brief, "pick the cheapest honest
  * source"): `working` if any child_watches row is unsettled; else `thinking`
- * if the orchestrator is LIVE in this process (`engineHost.liveSession`,
+ * if the assistant is LIVE in this process (`engineHost.liveSession`,
  * which never builds/restores) and any of its threads has a running queue
  * item (`Thread.runningItemId()`); else `idle`. This collapses the wire
  * `status` event's finer-grained `thinking`/`tool_calling`/`streaming`
@@ -94,20 +107,10 @@ orchestratorRouter.get("/info", async (c) => {
   const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const principal = userPrincipal(user.id);
-  const sessionId = orchestratorSessionId(principal);
 
-  const identityRows = await db
-    .select()
-    .from(orchestratorIdentities)
-    .where(
-      and(
-        eq(orchestratorIdentities.orgId, user.orgId),
-        eq(orchestratorIdentities.ownerType, principal.type),
-        eq(orchestratorIdentities.ownerId, principal.id),
-      ),
-    )
-    .limit(1);
-  const name = identityRows[0]?.handle ?? null;
+  const assistant = await resolveDefaultAssistant(db, user.orgId, principal);
+  const sessionId = assistant.sessionId;
+  const name = assistant.name;
 
   // Own-scope only — a team member's `assistant/personality.md` must never
   // leak into this user's persona/info response (`readOwnFile` bypasses
@@ -140,20 +143,18 @@ orchestratorRouter.get("/info", async (c) => {
 
 /**
  * PATCH /api/orchestrator/info — decision 4/5/20. Works before the engine
- * session exists: `name` upserts `orchestrator_identities.handle` (row
- * keyed by org/owner, `sessionId` set to the deterministic
- * `orchestratorSessionId(principal)` even if no `agent_sessions`/engine row
- * exists yet — same id `ensure` would compute); `personality` writes the
- * `assistant/personality.md` memory file, which never touches the engine
- * either. Either write evicts the cached engine session (cache-only —
- * `EngineHost.evictCache`, NOT `destroy()`, which would delete the engine
- * session row) so the next wake rebuilds the persona from the new identity.
+ * session exists: `name` sets `assistants.name` on the caller's default
+ * assistant (resolving that row if this is the first touch); `personality`
+ * writes the `assistant/personality.md` memory file, which never touches
+ * the engine either. Either write evicts the cached engine session
+ * (cache-only — `EngineHost.evictCache`, NOT `destroy()`, which would
+ * delete the engine session row) so the next wake rebuilds the persona from
+ * the new name.
  */
 orchestratorRouter.patch("/info", async (c) => {
   const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const principal = userPrincipal(user.id);
-  const sessionId = orchestratorSessionId(principal);
 
   let body: PatchOrchestratorInfoRequest;
   try {
@@ -162,22 +163,10 @@ orchestratorRouter.patch("/info", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
+  const assistant = await resolveDefaultAssistant(db, user.orgId, principal);
+
   if (body.name !== undefined) {
-    await db
-      .insert(orchestratorIdentities)
-      .values({
-        id: randomUUID(),
-        orgId: user.orgId,
-        ownerType: principal.type,
-        ownerId: principal.id,
-        sessionId,
-        handle: body.name,
-        createdAt: Date.now(),
-      })
-      .onConflictDoUpdate({
-        target: [orchestratorIdentities.orgId, orchestratorIdentities.ownerType, orchestratorIdentities.ownerId],
-        set: { handle: body.name },
-      });
+    await db.update(assistants).set({ name: body.name }).where(eq(assistants.id, assistant.id));
   }
 
   if (body.personality !== undefined) {
@@ -191,7 +180,7 @@ orchestratorRouter.patch("/info", async (c) => {
     });
   }
 
-  engineHost.evictCache(sessionId);
+  engineHost.evictCache(assistant.sessionId);
 
   const responseBody: PatchOrchestratorInfoResponse = { ok: true };
   return c.json(responseBody);
@@ -200,16 +189,22 @@ orchestratorRouter.patch("/info", async (c) => {
 // ── Children ─────────────────────────────────────────────────────────────
 
 /** GET /api/orchestrator/children — decision 6: `child_watches` ⋈
- * `agent_sessions` for the caller's orchestrator, newest first. `outcome`
- * is never populated this pass — `child_watches` has no outcome column, and
- * decision 6 marks deriving one (e.g. from the engine store's submission
- * outcome) as an optional future improvement, not required here; the UI
- * only needs `status: 'settled'` to show a checkmark. */
+ * `agent_sessions` for the caller's default assistant, newest first.
+ * Creates nothing: a caller with no default assistant has no children, so
+ * the empty list is the honest answer. `outcome` is never populated this
+ * pass — `child_watches` has no outcome column, and decision 6 marks
+ * deriving one (e.g. from the engine store's submission outcome) as an
+ * optional future improvement, not required here; the UI only needs
+ * `status: 'settled'` to show a checkmark. */
 orchestratorRouter.get("/children", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
-  const principal = userPrincipal(user.id);
-  const sessionId = orchestratorSessionId(principal);
+
+  const assistant = await findDefaultAssistant(db, user.orgId, userPrincipal(user.id));
+  if (!assistant) {
+    const empty: GetOrchestratorChildrenResponse = { children: [] };
+    return c.json(empty);
+  }
 
   const rows = await db
     .select({
@@ -221,7 +216,7 @@ orchestratorRouter.get("/children", async (c) => {
     })
     .from(childWatches)
     .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
-    .where(eq(childWatches.parentSessionId, sessionId))
+    .where(eq(childWatches.parentSessionId, assistant.sessionId))
     .orderBy(desc(childWatches.createdAt));
 
   const children: OrchestratorChildSummary[] = rows.map((r) => ({

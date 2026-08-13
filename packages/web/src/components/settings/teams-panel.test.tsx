@@ -54,6 +54,30 @@ const teamsData = () => ({
   ],
 });
 
+// The Assistant link points at the team's DEFAULT assistant, whose id only
+// the assistants list carries.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: {
+        assistants: [
+          {
+            id: "asst_team_1",
+            owner: { type: "team" as const, id: "team_1" },
+            sessionId: "assistant:asst_team_1",
+            isDefault: true,
+            createdAt: 1,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
+
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData(), isLoading: false, error: null }),
   useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
@@ -131,9 +155,11 @@ describe("TeamsPanel — team assistant link", () => {
     expect(screen.getByRole("link", { name: /Assistant/ })).toBeTruthy();
   });
 
-  it("points at the team's assistant on /chat", () => {
+  it("points at the team's default assistant on /chat", () => {
+    // A team owns several assistants now, so the link names one: the
+    // default. The rail is where the others are chosen.
     render(<TeamsPanel orgMembers={orgMembers} />);
     const link = screen.getByRole("link", { name: /Assistant/ });
-    expect(link.getAttribute("href")).toBe("/chat?team=team_1");
+    expect(link.getAttribute("href")).toBe("/chat?assistant=asst_team_1");
   });
 });

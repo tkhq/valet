@@ -2,21 +2,25 @@
  * Session view access, beyond direct ownership. A session's `userId`
  * column is the direct-owner check every session route already had
  * (`eq(agentSessions.userId, caller)`); this adds exactly one more case —
- * a team-owned orchestrator session — without touching the rest.
+ * a team-owned assistant session — without touching the rest.
  *
- * Team orchestrators are real: `orchestratorSessionId` mints
- * `orchestrator:team:{teamId}` and a team-owned workflow's `orchestrator`
- * node actually wakes one (`engine-deps.ts`'s `promptOrchestrator` with an
- * `ownerHint` of `{ownerType:"team", ownerId}`). But the session row it
- * creates gets `userId = "team:{teamId}"` (a synthetic id, never a real
- * user — `actorUserIdFor`), and every session-read route filtered strictly
- * on `userId = caller.id`, so no real user — however privileged — could
- * ever open one. This closes that specific gap.
+ * Team assistants are real: a team owns assistants like any other
+ * principal, and a team-owned workflow's `orchestrator` node actually wakes
+ * one (`engine-deps.ts`'s `promptOrchestrator` with an `ownerHint` of
+ * `{ownerType:"team", ownerId}`). But the session row it creates gets
+ * `userId = "team:{teamId}"` (a synthetic id, never a real user —
+ * `actorUserIdFor`), and every session-read route filtered strictly on
+ * `userId = caller.id`, so no real user — however privileged — could ever
+ * open one. This closes that specific gap.
+ *
+ * These two checks also answer the same questions for an assistant ROW,
+ * through the adapter in `assistants/access.ts` — one definition covering
+ * the assistant and the session it owns.
  *
  * The `agent_sessions` app row is a different row with a different stamp:
- * only `ensureOrchestratorSession` writes it, from `meta.actorUserId` — the
- * member who opened the team's assistant first. Do not read that stamp as
- * ownership. See `canAdministerSession` below.
+ * only `ensureDefaultAssistantSession` writes it, from `meta.actorUserId` —
+ * the member who opened the team's assistant first. Do not read that stamp
+ * as ownership. See `canAdministerSession` below.
  *
  * Two checks live here. They answer different questions, and the split is
  * deliberate:
@@ -64,7 +68,7 @@ export async function canViewSession(
  *
  * A team-owned session belongs to the team, not to the member who opened it
  * first. `agent_sessions.userId` on such a row holds that first actor:
- * `ensureOrchestratorSession` stamps `meta.actorUserId` when it backfills
+ * `ensureDefaultAssistantSession` stamps `meta.actorUserId` when it backfills
  * the row. The direct-owner shortcut that `canViewSession` starts with is
  * therefore wrong here. It would make one arbitrary member the de-facto
  * owner of an agent the whole team shares, and it would refuse every other

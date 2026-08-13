@@ -65,7 +65,7 @@ Every control enumerated (surfaces alone are not a spec).
 - Data: `GET /api/me`.
 
 ### You · Assistant
-- Assistant name: text input (writes `orchestrator_identities.handle`).
+- Assistant name: text input (writes `assistants.name` on the caller's default assistant).
 - Personality: multiline editor (writes `assistant/personality.md` memory file).
 - One Save per field-group, both via existing `PATCH /api/orchestrator/info`; loading/saving/error states as on the dashboard. Components extracted from `IdentityStep` so dashboard and settings share one implementation.
 - **Default model**: typeahead combobox (input + filtered list) over `GET /api/models`; curated `MODEL_CATALOG` entries show their friendly label/tier grouping first, remaining registry models listed by raw id below. Selection → `PATCH /api/me {defaultModel}`; a "System default" clear affordance → `{defaultModel: null}` (falls back to `claude-haiku-4-5`). Helper text: "New conversations start on this model; you can still switch per-thread in the chat header."

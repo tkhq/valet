@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { orchestratorSessionId } from "@valet/engine";
+import { assistantSessionId } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import {
   agentSessions,
@@ -145,11 +145,11 @@ describe("GET /api/usage/summary", () => {
     }
   });
 
-  it("still counts an orchestrator session's turn", async () => {
+  it("still counts an assistant session's turn", async () => {
     const api = await bootTestApi();
     try {
       const now = Date.now();
-      const orchId = orchestratorSessionId({ type: "user", id: "local-user" });
+      const orchId = assistantSessionId("asst_usage");
       await api.providers.db.insert(agentSessions).values({
         id: orchId,
         userId: "local-user",

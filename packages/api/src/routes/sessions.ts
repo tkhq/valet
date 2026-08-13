@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { parseOrchestratorSessionId } from "@valet/engine";
+import { parseAssistantSessionId } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -124,9 +124,12 @@ function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
 // ── List ──────────────────────────────────────────────────────────────────
 
 // Standalone-only (assistant-centered web UI decision 8): excludes
-// orchestrator ids and child ids, server-side, so the client just renders
-// what it gets. Orchestrator-derived children nest inline in the assistant's
-// chat page (via GET /api/orchestrator/children) instead.
+// ASSISTANT ids and child ids, server-side, so the client just renders what
+// it gets. Every assistant is excluded, not only a principal's default —
+// assistants are listed by `GET /api/assistants`, and a principal that owns
+// several would otherwise fill this list with them. Assistant-derived
+// children nest inline in the assistant's chat page (via
+// GET /api/orchestrator/children) instead.
 //
 // Exported so other mounts needing the same "this user's standalone
 // sessions" view (e.g. the MCP `list_sessions` tool, Task 9) reuse the exact
@@ -144,7 +147,7 @@ export async function listStandaloneSessions(db: AppDb, userId: string) {
   ]);
 
   const childIds = new Set(childRows.map((r) => r.childSessionId));
-  return rows.filter((r) => parseOrchestratorSessionId(r.id) === null && !childIds.has(r.id));
+  return rows.filter((r) => parseAssistantSessionId(r.id) === null && !childIds.has(r.id));
 }
 
 sessionsRouter.get("/", async (c) => {

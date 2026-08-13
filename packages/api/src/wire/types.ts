@@ -149,13 +149,75 @@ export interface EnsureOrchestratorResponse {
   sessionId: string;
 }
 
-/** GET /api/orchestrator — probes without creating. */
+/** GET /api/orchestrator — probes without creating. `sessionId` is null
+ * while the caller has no default assistant: an assistant addresses its
+ * session by its own id, so a caller that owns none has no id to report. */
 export interface GetOrchestratorResponse {
-  sessionId: string;
+  sessionId: string | null;
   exists: boolean;
 }
 
 export type OrchestratorPresence = "idle" | "thinking" | "working";
+
+// ── REST: assistants ──────────────────────────────────────────────────────
+//
+// An assistant is a named agent a principal owns, with its own session. A
+// principal — you, or a team — owns any number. See
+// `docs/specs/2026-08-13-assistants-design.md`.
+
+/** Who owns an assistant. The owner is its scope, not its identity: two
+ * assistants owned by the same team are different assistants. */
+export interface AssistantOwner {
+  type: "user" | "team" | "org";
+  id: string;
+}
+
+export interface AssistantSummary {
+  id: string;
+  owner: AssistantOwner;
+  /** Absent until someone names it. The UI shows a placeholder rather than
+   * inventing a name the user never chose. */
+  name?: string;
+  /** `assistant:{id}` — every assistant, default included. Carried here so
+   * listing assistants is also how the client learns their session ids, and
+   * opening one still creates nothing until the conversation starts. */
+  sessionId: string;
+  /** The one machine-driven paths use when nobody chose: workflow
+   * orchestrator nodes, event subscriptions, channel bindings. Exactly one
+   * per owner. */
+  isDefault: boolean;
+  createdAt: number;
+}
+
+export interface ListAssistantsResponse {
+  assistants: AssistantSummary[];
+}
+
+/** `POST /api/assistants`. Omit `owner` for one of your own. Creating a
+ * team's assistant follows the same rule as administering one. */
+export interface CreateAssistantRequest {
+  name?: string;
+  owner?: AssistantOwner;
+}
+
+export type CreateAssistantResponse = AssistantSummary;
+
+/** `PATCH /api/assistants/:id`. `isDefault: true` promotes this one and
+ * demotes the previous default in the same write — a principal is never
+ * left with none, which would strand every automation that targets it. */
+export interface PatchAssistantRequest {
+  name?: string;
+  isDefault?: true;
+}
+
+export type PatchAssistantResponse = AssistantSummary;
+
+/** `POST /api/assistants/:id/session` — get-or-create this assistant's
+ * session. Creating an assistant writes no session, so the client calls this
+ * before opening the conversation. Idempotent. */
+export interface EnsureAssistantSessionResponse {
+  sessionId: string;
+}
 
 /** GET /api/orchestrator/info — assistant identity + presence (assistant-
  * centered web UI decision 4). Never creates the engine session. */

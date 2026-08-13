@@ -45,8 +45,8 @@ export {
 export {
   serializePrincipal,
   parsePrincipal,
-  orchestratorSessionId,
-  parseOrchestratorSessionId,
+  assistantSessionId,
+  parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
 export {

@@ -9,6 +9,12 @@
 import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
+  CreateAssistantRequest,
+  CreateAssistantResponse,
+  EnsureAssistantSessionResponse,
+  ListAssistantsResponse,
+  PatchAssistantRequest,
+  PatchAssistantResponse,
   CancelWorkflowRunResponse,
   CreateWorkflowScheduleRequest,
   CreateWorkflowScheduleResponse,
@@ -248,6 +254,28 @@ export const api = {
     request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
   getOrchestratorChildren: () =>
     request<GetOrchestratorChildrenResponse>("GET", "/orchestrator/children"),
+
+  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
+  // also how the client learns each assistant's session id, so it replaces
+  // the client-side id derivation the rail used to do.
+  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
+  createAssistant: (body: CreateAssistantRequest) =>
+    request<CreateAssistantResponse>("POST", "/assistants", body),
+  patchAssistant: (id: string, body: PatchAssistantRequest) =>
+    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
+  // Archive, not destroy: the row keeps `archived_at` and the conversation
+  // it held survives. `DELETE` carries it because the wire's
+  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
+  // house convention for a soft remove is the same verb as `deleteTeam`.
+  archiveAssistant: (id: string) =>
+    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
+  /** Get-or-create one assistant's session. Creating an assistant writes no
+   * session, so the chat page calls this before opening the conversation. */
+  ensureAssistantSession: (id: string) =>
+    request<EnsureAssistantSessionResponse>(
+      "POST",
+      `/assistants/${encodeURIComponent(id)}/session`,
+    ),
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)

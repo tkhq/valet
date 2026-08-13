@@ -26,6 +26,7 @@ import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
 import { memoryRouter } from "./routes/memory.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
+import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
@@ -210,6 +211,7 @@ export function createApp(
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);
   app.route("/api/orchestrator", orchestratorRouter);
+  app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);

@@ -1,16 +1,21 @@
 // @vitest-environment jsdom
 /**
- * The `/chat` sidebar lists every assistant the caller can reach. The cases
- * that matter most are the ones where it must render NOTHING extra: a solo
- * user with no teams, and an org with the organizations feature turned off,
- * must both see exactly the sidebar they saw before teams existed. Empty
- * scaffolding for a feature you do not have is worse than no feature.
+ * The `/chat` sidebar lists every assistant the caller can reach, grouped by
+ * owner. The cases that matter most are the ones where it must render
+ * NOTHING extra: a solo user with one assistant, and an org with the
+ * organizations feature turned off, must both see exactly the sidebar they
+ * saw before a principal could own several. Empty scaffolding for a feature
+ * you do not have is worse than no feature.
  */
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type {
+  AssistantSummary,
+  ListAssistantsResponse,
   ListTeamsResponse,
+  MeResponse,
   NotificationSummary,
   OrgResponse,
   TeamSummary,
@@ -18,7 +23,10 @@ import type {
 
 let teamsData: ListTeamsResponse | undefined = { teams: [] };
 let orgData: OrgResponse | undefined;
-let searchParams: { team?: string } = {};
+let meData: MeResponse | undefined;
+let assistantsData: ListAssistantsResponse | undefined = { assistants: [] };
+let assistantsError: Error | null = null;
+let searchParams: { assistant?: string } = {};
 
 function RouterLinkStub({
   to,
@@ -51,20 +59,41 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
+  useMe: () => ({ data: meData, isLoading: false, error: null }),
 }));
+
+// importOriginal, not a bare replacement: `vitest.config.ts` sets
+// `isolate: false`, so an incomplete factory in one file can end up governing
+// the module for other files sharing the worker. Spreading the real module
+// keeps every export present.
+const createMutate = vi.fn();
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: assistantsData,
+      isLoading: false,
+      error: assistantsError,
+    }),
+    useCreateAssistant: () => ({ mutate: createMutate, isPending: false, error: null }),
+    usePatchAssistant: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+    useArchiveAssistant: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  };
+});
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({
-    data: { sessionId: "orchestrator:user:u1", name: "Aurora" },
+    data: { sessionId: "assistant:asst_own", name: "Aurora" },
     isLoading: false,
     error: null,
   }),
   useOrchestratorChildren: () => ({ data: { children: [] }, refetch: vi.fn() }),
 }));
 
-// The rail marks a team row when that team's assistant is waiting on an
-// answer, reading the notifications the bell already polls. Swappable per
-// test so the attention cases can drive it.
+// The rail marks a row when that assistant is waiting on an answer, reading
+// the notifications the bell already polls. Swappable per test so the
+// attention cases can drive it.
 let notifications: NotificationSummary[] = [];
 vi.mock("~/api/queries", () => ({
   useNotifications: () => ({ data: { notifications }, isLoading: false, error: null }),
@@ -113,10 +142,52 @@ function org(organizations: boolean): OrgResponse {
   };
 }
 
+function me(orgRole: "admin" | "member" = "member"): MeResponse {
+  return {
+    id: "u1",
+    email: "member@example.com",
+    name: "Member",
+    avatarUrl: null,
+    role: "member",
+    orgId: "org_1",
+    orgRole,
+    defaultModel: null,
+  };
+}
+
+function mine(over: Partial<AssistantSummary> = {}): AssistantSummary {
+  return {
+    id: "asst_own",
+    owner: { type: "user", id: "u1" },
+    name: "Aurora",
+    sessionId: "assistant:asst_own",
+    isDefault: true,
+    createdAt: 1,
+    ...over,
+  };
+}
+
+function teamAssistant(over: Partial<AssistantSummary> = {}): AssistantSummary {
+  return {
+    id: "asst_team",
+    owner: { type: "team", id: "team_1" },
+    name: "Triage",
+    sessionId: "assistant:asst_team",
+    isDefault: true,
+    createdAt: 2,
+    ...over,
+  };
+}
+
 beforeEach(() => {
   teamsData = { teams: [] };
   orgData = org(true);
+  meData = me();
+  assistantsData = { assistants: [mine()] };
+  assistantsError = null;
+  notifications = [];
   searchParams = {};
+  createMutate.mockClear();
 });
 
 describe("eligibleTeams", () => {
@@ -141,61 +212,209 @@ describe("eligibleTeams", () => {
 });
 
 describe("AssistantRail", () => {
-  it("renders no Assistants block for a user with no teams", () => {
+  it("renders no Assistants block for a solo user with one assistant", () => {
+    // One row switches nothing, so the block is not drawn at all.
     renderRail();
-    expect(screen.queryByText("Assistants")).toBeNull();
+    expect(screen.queryByText("Your assistants")).toBeNull();
     expect(screen.getByTestId("thread-tree")).toBeTruthy();
   });
 
   it("renders no Assistants block when the organizations feature is off", () => {
     orgData = org(false);
     teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
     renderRail();
-    expect(screen.queryByText("Assistants")).toBeNull();
+    expect(screen.queryByText("Your assistants")).toBeNull();
+    expect(screen.queryByText("Platform")).toBeNull();
   });
 
-  it("renders nothing until both queries resolve, rather than flashing", () => {
+  it("renders nothing until every query resolves, rather than flashing", () => {
     orgData = undefined;
     teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
     renderRail();
-    expect(screen.queryByText("Assistants")).toBeNull();
+    expect(screen.queryByText("Your assistants")).toBeNull();
   });
 
-  it("lists your assistant and each team you belong to", () => {
-    teamsData = { teams: [team(), team({ id: "team_2", name: "Design" })] };
+  it("renders nothing until the assistants list resolves", () => {
+    assistantsData = undefined;
+    teamsData = { teams: [team()] };
     renderRail();
-    expect(screen.getByText("Assistants")).toBeTruthy();
+    expect(screen.queryByText("Your assistants")).toBeNull();
+  });
+
+  it("names the corrective action when the list cannot be loaded", () => {
+    assistantsError = new Error("network");
+    renderRail();
+    expect(screen.getByText("Cannot load your assistants. Reload the page.")).toBeTruthy();
+  });
+
+  it("groups your assistants under your own header and each team under its name", () => {
+    teamsData = { teams: [team(), team({ id: "team_2", name: "Design" })] };
+    assistantsData = {
+      assistants: [
+        mine(),
+        teamAssistant(),
+        teamAssistant({ id: "asst_design", owner: { type: "team", id: "team_2" }, name: "Roadmap" }),
+      ],
+    };
+    renderRail();
+    expect(screen.getByText("Your assistants")).toBeTruthy();
     expect(screen.getByText("Aurora")).toBeTruthy();
     expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.getByText("Triage")).toBeTruthy();
     expect(screen.getByText("Design")).toBeTruthy();
+    expect(screen.getByText("Roadmap")).toBeTruthy();
   });
 
-  it("links each team row to its assistant and clears the previous thread", () => {
+  /** The rule that changed: one principal, many assistants. The rail used to
+   * derive one session id per team and could show no more than one row. */
+  it("lists every assistant a single team owns", () => {
     teamsData = { teams: [team()] };
+    assistantsData = {
+      assistants: [
+        mine(),
+        teamAssistant(),
+        teamAssistant({ id: "asst_release", name: "Release", isDefault: false }),
+      ],
+    };
     renderRail();
-    const link = screen.getByRole("link", { name: /Platform/ });
-    expect(link.getAttribute("href")).toBe("/chat?team=team_1");
+    expect(screen.getByText("Triage")).toBeTruthy();
+    expect(screen.getByText("Release")).toBeTruthy();
   });
 
-  it("shows your own threads when no team is selected", () => {
+  it("links each row to its own assistant id and clears the previous thread", () => {
     teamsData = { teams: [team()] };
+    assistantsData = {
+      assistants: [mine(), teamAssistant({ id: "asst_release", name: "Release" })],
+    };
     renderRail();
-    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe("own");
+    const link = screen.getByRole("link", { name: /Release/ });
+    expect(link.getAttribute("href")).toBe("/chat?assistant=asst_release");
   });
 
-  it("shows the selected team's threads when ?team= names a team you are on", () => {
+  it("marks the default assistant, once per owner", () => {
     teamsData = { teams: [team()] };
-    searchParams = { team: "team_1" };
+    assistantsData = {
+      assistants: [
+        mine(),
+        teamAssistant(),
+        teamAssistant({ id: "asst_release", name: "Release", isDefault: false }),
+      ],
+    };
+    renderRail();
+    // Your own default and the team's default — the second team row is not
+    // marked.
+    expect(screen.getAllByText("Default")).toHaveLength(2);
+  });
+
+  it("shows your own default's threads when no assistant is selected", () => {
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
     renderRail();
     expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
-      "orchestrator:team:team_1",
+      "assistant:asst_own",
     );
   });
 
-  it("falls back to your own threads when ?team= names a team you cannot reach", () => {
+  it("shows the selected assistant's threads when ?assistant= names one you can reach", () => {
     teamsData = { teams: [team()] };
-    searchParams = { team: "team_nope" };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
     renderRail();
-    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe("own");
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
+      "assistant:asst_team",
+    );
+  });
+
+  it("falls back to your own default when ?assistant= names one you cannot reach", () => {
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_nope" };
+    renderRail();
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
+      "assistant:asst_own",
+    );
+  });
+
+  it("falls back to your own default when ?assistant= names a team you left", () => {
+    // The team is gone from `GET /api/teams`, so its assistant has no group
+    // and cannot be opened, even though the id is real.
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
+    renderRail();
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
+      "assistant:asst_own",
+    );
+  });
+
+  it("offers a new assistant for each owner you may administer", () => {
+    teamsData = { teams: [team({ callerRole: "admin" })] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    renderRail();
+    expect(screen.getByRole("button", { name: "New assistant for Your assistants" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New assistant for Platform" })).toBeTruthy();
+  });
+
+  it("hides the team's create and row actions from a plain member", () => {
+    teamsData = { teams: [team({ callerRole: "member" })] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    renderRail();
+    expect(screen.queryByRole("button", { name: "New assistant for Platform" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Triage actions" })).toBeNull();
+    // Your own assistants stay yours to manage.
+    expect(screen.getByRole("button", { name: "Aurora actions" })).toBeTruthy();
+  });
+
+  it("creates an assistant for the owner whose action was used", async () => {
+    const user = userEvent.setup();
+    teamsData = { teams: [team({ callerRole: "admin" })] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    renderRail();
+    await user.click(screen.getByRole("button", { name: "New assistant for Platform" }));
+    expect(createMutate).toHaveBeenCalledTimes(1);
+    expect(createMutate.mock.calls[0]?.[0]).toEqual({ owner: { type: "team", id: "team_1" } });
+  });
+
+  it("keeps rename and archive behind the row menu", async () => {
+    const user = userEvent.setup();
+    teamsData = { teams: [team()] };
+    assistantsData = {
+      assistants: [mine(), mine({ id: "asst_second", name: "Scratch", isDefault: false })],
+    };
+    renderRail();
+    expect(screen.queryByText("Rename")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Scratch actions" }));
+    expect(screen.getByText("Rename")).toBeTruthy();
+    expect(screen.getByText("Archive")).toBeTruthy();
+    expect(screen.getByText("Make default")).toBeTruthy();
+  });
+
+  it("says how to unblock archiving the default rather than failing on the server", async () => {
+    const user = userEvent.setup();
+    assistantsData = {
+      assistants: [mine(), mine({ id: "asst_second", name: "Scratch", isDefault: false })],
+    };
+    renderRail();
+    await user.click(screen.getByRole("button", { name: "Aurora actions" }));
+    expect(screen.getByText("Make another assistant the default first.")).toBeTruthy();
+  });
+
+  it("marks an assistant that is waiting on you", () => {
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    notifications = [
+      {
+        id: "n1",
+        kind: "question",
+        urgency: "high",
+        title: "Which branch?",
+        sessionId: "assistant:asst_team",
+        createdAt: 1,
+      },
+    ];
+    renderRail();
+    expect(screen.getByLabelText("Waiting on you")).toBeTruthy();
   });
 });

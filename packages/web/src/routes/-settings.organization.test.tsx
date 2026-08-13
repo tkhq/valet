@@ -32,7 +32,6 @@ const deleteTeamMutate = vi.fn();
 const addTeamMemberMutate = vi.fn();
 const setTeamMemberRoleMutate = vi.fn();
 const removeTeamMemberMutate = vi.fn();
-const ensureOrchestratorMutate = vi.fn();
 
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
@@ -116,6 +115,30 @@ vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
 }));
 
+// The teams panel links to each team's DEFAULT assistant, whose id only the
+// assistants list carries.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: {
+        assistants: [
+          {
+            id: "asst_team_1",
+            owner: { type: "team" as const, id: "team_1" },
+            sessionId: "assistant:asst_team_1",
+            isDefault: true,
+            createdAt: 1,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
+
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
 vi.mock("~/api/settings", async (importOriginal) => {
@@ -136,7 +159,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
     useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
-    useEnsureTeamOrchestrator: () => ({ mutate: ensureOrchestratorMutate, isPending: false, error: null }),
     useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
     useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
     useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),

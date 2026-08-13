@@ -18,6 +18,7 @@ import {
   LoadingRow,
 } from "~/components/primitives";
 import { ApiError } from "~/api/client";
+import { defaultAssistantFor, useAssistants } from "~/api/assistants";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
 import {
@@ -140,6 +141,8 @@ function TeamRow({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteTeam = useDeleteTeam();
+  const assistantsQ = useAssistants();
+  const assistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", team.id);
 
   return (
     <div className="py-3">
@@ -165,13 +168,16 @@ function TeamRow({
         </span>
         {/* A cross-link to the working surface, not a second door: `/chat`
             owns the get-or-create, so this creates nothing and needs no
-            pending or error state of its own. */}
-        <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
-          <Link to="/chat" search={{ team: team.id }}>
-            <Bot className="h-3.5 w-3.5" aria-hidden />
-            Assistant
-          </Link>
-        </Button>
+            pending or error state of its own. It opens the team's DEFAULT
+            assistant; the rail is where the others are chosen. */}
+        {assistant && (
+          <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
+            <Link to="/chat" search={{ assistant: assistant.id }}>
+              <Bot className="h-3.5 w-3.5" aria-hidden />
+              Assistant
+            </Link>
+          </Button>
+        )}
         {canMutate && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

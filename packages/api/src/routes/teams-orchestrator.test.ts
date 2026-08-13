@@ -1,7 +1,7 @@
 /**
- * `POST /api/teams/:id/orchestrator` — get-or-create the team's
- * orchestrator session (`services/session-access.ts`'s companion route:
- * this creates the `agent_sessions` row that route widens read access to).
+ * `POST /api/teams/:id/orchestrator` — get-or-create the team's DEFAULT
+ * assistant session (`services/session-access.ts`'s companion route: this
+ * creates the `agent_sessions` row that route widens read access to).
  * Mirrors `POST /api/orchestrator`'s own contract for the user case.
  */
 import { describe, it, expect, afterEach } from "vitest";
@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("POST /api/teams/:id/orchestrator", () => {
-  it("creates the team's orchestrator session for a member and returns its id", async () => {
+  it("creates the team's default assistant session for a member and returns its id", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
@@ -27,7 +27,9 @@ describe("POST /api/teams/:id/orchestrator", () => {
     const res = await fetch(`${api.baseUrl}/api/teams/team_1/orchestrator`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as EnsureOrchestratorResponse;
-    expect(body.sessionId).toBe("orchestrator:team:team_1");
+    // The address is the assistant's own id, so the test asserts the
+    // scheme and the owner columns rather than a derivable literal.
+    expect(body.sessionId).toMatch(/^assistant:asst_/);
 
     const rows = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, body.sessionId));
     expect(rows[0]?.ownerType).toBe("team");
@@ -48,7 +50,7 @@ describe("POST /api/teams/:id/orchestrator", () => {
     expect(rows).toHaveLength(1);
   });
 
-  it("lets an org admin reach a team's orchestrator without being a direct member — same rule GET /:id/members already uses", async () => {
+  it("lets an org admin reach a team's assistant without being a direct member — same rule GET /:id/members already uses", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(teams).values({ id: "team_2", orgId: "local-org", name: "Other Team", createdAt: now });
@@ -113,7 +115,7 @@ describe("GET /api/sessions/:id — team view access", () => {
  * The lifecycle routes on a team-owned session: `PATCH /api/sessions/:id`
  * (model), `POST /api/sessions/:id/pause`, `DELETE /api/sessions/:id`. They
  * follow team authority (`canAdministerSession`), not the `user_id` that
- * `ensureOrchestratorSession` stamped from the first member to open the
+ * `ensureDefaultAssistantSession` stamped from the first member to open the
  * team's assistant.
  *
  * Two identities do the work, both seeded by `bootTestApi`: the default

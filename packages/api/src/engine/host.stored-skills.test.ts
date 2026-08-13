@@ -22,6 +22,7 @@ import type {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createSkill } from "../services/skills.js";
 import { createTeam } from "../services/teams.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const USER = "local-user";
 const ORG = "local-org";
@@ -119,7 +120,7 @@ describe("stored skills on a session", () => {
       content: "# Deploy\n",
     });
 
-    const session = await api.providers.engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: USER },
       { actorUserId: USER, orgId: ORG },
     );

@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/react-router";
 import { Users } from "lucide-react";
+import type { TeamSummary } from "@valet/api/wire";
 import { useOrg, useTeams } from "~/api/settings";
+import { defaultAssistantFor, useAssistants } from "~/api/assistants";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { Spinner } from "~/components/primitives";
 
@@ -17,6 +19,40 @@ import { Spinner } from "~/components/primitives";
  * Renders nothing when the caller belongs to no team, so a solo user's
  * dashboard is unchanged rather than showing empty scaffolding.
  */
+/**
+ * One team, linking to its default assistant — the one a caller means when
+ * it knows only the team. Without an assistant in the list there is no id to
+ * link to, so the row states the team and waits rather than pointing at a
+ * conversation it cannot name.
+ */
+function TeamRow({ team }: { team: TeamSummary }) {
+  const assistantsQ = useAssistants();
+  const assistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", team.id);
+  const body = (
+    <>
+      <Users className="h-4 w-4 shrink-0 text-muted" aria-hidden />
+      <span className="min-w-0 flex-1 truncate text-sm text-ink">{team.name}</span>
+      <span className="shrink-0 text-xs text-muted">
+        {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
+      </span>
+    </>
+  );
+
+  if (assistant === undefined) {
+    return <div className="flex items-center gap-3 px-4 py-2.5 opacity-70">{body}</div>;
+  }
+
+  return (
+    <Link
+      to="/chat"
+      search={{ assistant: assistant.id }}
+      className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-ink-wash/60 focus-visible:outline-none focus-visible:bg-ink-wash"
+    >
+      {body}
+    </Link>
+  );
+}
+
 export function TeamsCard() {
   const orgQ = useOrg();
   const teamsQ = useTeams();
@@ -50,17 +86,7 @@ export function TeamsCard() {
       <ul className="flex-1 overflow-y-auto max-h-64 divide-y divide-line">
         {teams.map((team) => (
           <li key={team.id}>
-            <Link
-              to="/chat"
-              search={{ team: team.id }}
-              className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-ink-wash/60 focus-visible:outline-none focus-visible:bg-ink-wash"
-            >
-              <Users className="h-4 w-4 shrink-0 text-muted" aria-hidden />
-              <span className="min-w-0 flex-1 truncate text-sm text-ink">{team.name}</span>
-              <span className="shrink-0 text-xs text-muted">
-                {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
-              </span>
-            </Link>
+            <TeamRow team={team} />
           </li>
         ))}
       </ul>

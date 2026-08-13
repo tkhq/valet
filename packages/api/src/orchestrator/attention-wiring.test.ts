@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { orchestratorSessionId, type BusEvent, type SessionData } from "@valet/engine";
+import { assistantSessionId, type BusEvent, type SessionData } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { wireAttentionRouter } from "./attention-wiring.js";
 import { notifications } from "../schema/index.js";
@@ -206,13 +206,13 @@ describe("wireAttentionRouter", () => {
     expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(sessionId)}`);
   });
 
-  it("decision_gate on an orchestrator session routes an approval to that session's own owner", async () => {
+  it("decision_gate on an assistant session routes an approval to that session's own owner", async () => {
     api = await bootTestApi();
     const { db, engineStore, eventStream } = api.providers;
     unsub = wireAttentionRouter({ db, engineStore, eventStream });
 
-    // Orchestrator ids carry a colon, so this also covers the href encoding.
-    const sessionId = orchestratorSessionId({ type: "user", id: "local-user" });
+    // Assistant ids carry a colon, so this also covers the href encoding.
+    const sessionId = assistantSessionId("asst_attention");
     await engineStore.saveSession(baseSession({ id: sessionId, purpose: "orchestrator" }));
 
     const gateId = `gate-${randomUUID()}`;

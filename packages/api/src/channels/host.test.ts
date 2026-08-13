@@ -3,7 +3,6 @@ import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import {
   VirtualSandboxProvider,
-  orchestratorSessionId,
   type ChannelTransport,
   type GatePromptRef,
   type InboundChannelEvent,
@@ -18,6 +17,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { eventDropLog, userIdentityLinks } from "../schema/index.js";
 import { linkIdentity, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -158,8 +158,8 @@ describe("ChannelHost.handleUpdate", () => {
     await host.handleUpdate("fake", ev);
     await host.handleUpdate("fake", { ...ev }); // duplicate dispatchId
 
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
       { type: "user", id: USER_ID },
       { actorUserId: USER_ID, orgId: ORG_ID },
     );
@@ -169,7 +169,7 @@ describe("ChannelHost.handleUpdate", () => {
     // returns) — poll briefly instead of asserting immediately.
     let userEntries: Awaited<ReturnType<typeof session.providers.store.getEntries>> = [];
     for (let i = 0; i < 50; i++) {
-      const entries = await session.providers.store.getEntries(sessionId, threadId);
+      const entries = await session.providers.store.getEntries(session.id, threadId);
       userEntries = entries.filter((e) => e.type === "message" && e.role === "user");
       if (userEntries.length > 0) break;
       await new Promise((resolve) => setTimeout(resolve, 20));

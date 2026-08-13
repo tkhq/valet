@@ -2,12 +2,17 @@ import { useEffect } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useEnsureOrchestrator, useOrchestratorInfo } from "~/api/orchestrator";
-import { useEnsureTeamOrchestrator, useOrg, useTeams } from "~/api/settings";
+import { useAssistants, useEnsureAssistantSession } from "~/api/assistants";
+import { useOrg, useTeams } from "~/api/settings";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
-import { eligibleTeams } from "~/components/session/assistant-rail";
-import { teamOrchestratorSessionId } from "~/lib/orchestrator-id";
+import {
+  eligibleTeams,
+  findAssistant,
+  groupAssistants,
+  ownDefaultAssistant,
+} from "~/components/session/assistant-rail";
 import { Spinner } from "~/components/primitives";
 
 interface ChatSearch {
@@ -15,59 +20,94 @@ interface ChatSearch {
   thread?: string;
   /** Open child session id — renders `ChildPanel` as a slide-over. */
   child?: string;
-  /** Talk to this team's assistant instead of your own. Absent = your own. */
-  team?: string;
+  /**
+   * Which assistant to talk to. Absent = your own default, which is what an
+   * absent `?team=` meant before a principal could own several.
+   *
+   * It carries the assistant id, not the session id. The address scheme
+   * (`assistant:{id}`) is the server's to change, and every consumer is
+   * meant to learn a session id from `GET /api/assistants` rather than build
+   * one — a link that carried the address would bake the scheme into every
+   * bookmark. The id is also the shorter, colon-free half of the pair.
+   */
+  assistant?: string;
 }
 
 /**
  * `/chat` — the assistant conversation (assistant-centered web UI,
- * decision 1/12/13). Mounts the shared `SessionView`; the sidebar (`AssistantRail`: every assistant you can reach, then the
- * active one's threads) is swapped in by the root layout for this route
- * (see `__root.tsx`), not rendered here.
+ * decision 1/12/13). Mounts the shared `SessionView`; the sidebar
+ * (`AssistantRail`: every assistant you can reach, then the active one's
+ * threads) is swapped in by the root layout for this route (see
+ * `__root.tsx`), not rendered here.
  *
- * `?team=` selects a team's assistant. The session id is derived, not
- * fetched — see `lib/orchestrator-id.ts` — so linking here from anywhere
- * (the rail, an owner badge, the teams settings panel) costs nothing until
- * someone actually opens the conversation.
+ * `?assistant=` selects one. The session id comes from the assistants list,
+ * which the rail already reads, so linking here from anywhere (the rail, an
+ * owner badge, the teams settings panel) still creates nothing until someone
+ * opens the conversation.
  */
 export const Route = createFileRoute("/chat")({
   validateSearch: (raw): ChatSearch => ({
     thread: typeof raw.thread === "string" ? raw.thread : undefined,
     child: typeof raw.child === "string" ? raw.child : undefined,
-    team: typeof raw.team === "string" ? raw.team : undefined,
+    assistant: typeof raw.assistant === "string" ? raw.assistant : undefined,
   }),
   component: ChatPage,
 });
 
 function ChatPage() {
-  const { thread, child, team } = Route.useSearch();
+  const { thread, child, assistant } = Route.useSearch();
   const info = useOrchestratorInfo();
+  const assistantsQ = useAssistants();
   const teamsQ = useTeams();
   const orgQ = useOrg();
   const navigate = useNavigate({ from: Route.fullPath });
   const ensure = useEnsureOrchestrator();
-  const ensureTeam = useEnsureTeamOrchestrator();
+  const ensureAssistantSession = useEnsureAssistantSession();
 
-  // Only a team the caller belongs to may be opened. A stale or hand-edited
-  // id resolves to nothing and falls back to the personal assistant, rather
-  // than mounting a session the viewer cannot read.
+  // Only an assistant the caller can reach may be opened. An id that names
+  // an archived assistant, a team you left, or nothing at all resolves to
+  // undefined and falls back to your own default, rather than mounting a
+  // session the viewer cannot read.
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
-  const scopeResolved = teamsQ.data !== undefined && orgQ.data !== undefined;
-  const activeTeam = team !== undefined ? teams.find((t) => t.id === team) : undefined;
-  const unavailableTeam = team !== undefined && scopeResolved && activeTeam === undefined;
+  const groups = groupAssistants(assistantsQ.data?.assistants, teams);
+  const scopeResolved =
+    teamsQ.data !== undefined && orgQ.data !== undefined && assistantsQ.data !== undefined;
+  const listFailed = assistantsQ.error != null;
+  const active = findAssistant(groups, assistant);
+  // Two different facts, two different messages: the list says this
+  // assistant is not yours to open, or the list never arrived.
+  const unavailable = assistant !== undefined && scopeResolved && active === undefined;
+  const unresolved = assistant !== undefined && listFailed;
 
-  const personalSessionId = info.data?.sessionId;
-  const sessionId = activeTeam ? teamOrchestratorSessionId(activeTeam.id) : personalSessionId;
+  // `GET /api/orchestrator/info` stays the fallback for your own default:
+  // it answers before the list does on a cold load, and it still answers if
+  // the list fails, so a broken assistants call costs you the switcher
+  // rather than the conversation.
+  const ownDefault = ownDefaultAssistant(groups);
+  const personalSessionId = ownDefault?.sessionId ?? info.data?.sessionId;
+  const sessionId = active?.sessionId ?? personalSessionId;
 
-  // Neither `GET /info` nor the derived team id creates an engine session
-  // (decision 20 / brief), so ensure the active one exists before
-  // SessionView tries to open it. Both calls are idempotent.
-  const activeTeamId = activeTeam?.id;
+  const team =
+    active?.owner.type === "team"
+      ? teams.find((t) => t.id === active.owner.id)
+      : undefined;
+
+  // Neither the list nor `GET /info` creates an engine session (decision 20
+  // / the assistants design), so ensure the active one exists before
+  // SessionView tries to open it. Every call here is idempotent.
+  //
+  // One call for every assistant, default or not: `POST
+  // /api/assistants/:id/session` is addressed by assistant, so nothing here
+  // branches on which one is default or who owns it. The owner-addressed
+  // routes remain the fallback for exactly one case — a cold load where the
+  // assistants list has not arrived, so there is no id to send yet and only
+  // `GET /info` knows the caller's own session.
+  const activeId = active?.id ?? ownDefault?.id;
   useEffect(() => {
-    if (activeTeamId) ensureTeam.mutate(activeTeamId);
+    if (activeId) ensureAssistantSession.mutate(activeId);
     else if (personalSessionId) ensure.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTeamId, personalSessionId]);
+  }, [activeId, personalSessionId]);
 
   // CRITICAL (Task 1 flag): signal entries (e.g. child.settled) only reach
   // the client via REST — no live WS event carries the signal payload.
@@ -83,9 +123,9 @@ function ChatPage() {
     navigate({ search: (prev) => ({ ...prev, child: childId }) });
   }
 
-  // A requested team is unresolved until both queries land. Showing the
-  // personal assistant in the meantime would flash the wrong conversation.
-  if (team !== undefined && !scopeResolved) {
+  // A requested assistant is unresolved until the queries land. Showing your
+  // own in the meantime would flash the wrong conversation.
+  if (assistant !== undefined && !scopeResolved && !listFailed) {
     return (
       <div className="flex-1 grid place-items-center text-sm text-muted">
         <Spinner /> Loading…
@@ -93,7 +133,7 @@ function ChatPage() {
     );
   }
 
-  if (!activeTeam && info.isLoading) {
+  if (!active && info.isLoading) {
     return (
       <div className="flex-1 grid place-items-center text-sm text-muted">
         <Spinner /> Loading…
@@ -101,7 +141,7 @@ function ChatPage() {
     );
   }
 
-  if (!activeTeam && (info.error || !sessionId)) {
+  if (!active && (info.error || !sessionId)) {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
         <div>
@@ -121,29 +161,33 @@ function ChatPage() {
   return (
     <>
       <div className="flex-1 min-h-0 flex flex-col">
-        {activeTeam && (
+        {team && (
           <ScopeNotice>
             <Users className="h-3.5 w-3.5 shrink-0" aria-hidden />
             <span>
-              Shared with {activeTeam.memberCount}{" "}
-              {activeTeam.memberCount === 1 ? "person" : "people"} on{" "}
-              <span className="font-medium text-ink">{activeTeam.name}</span>. Everyone on the
-              team can read this conversation and reply.
+              Shared with {team.memberCount} {team.memberCount === 1 ? "person" : "people"} on{" "}
+              <span className="font-medium text-ink">{team.name}</span>. Everyone on the team can
+              read this conversation and reply.
             </span>
           </ScopeNotice>
         )}
-        {unavailableTeam && (
+        {unavailable && (
           <ScopeNotice>
             <span>
-              That team's assistant isn't available to you. Showing your own assistant instead.
+              That assistant is not available to you. Showing your own assistant instead. Select
+              another one in the sidebar.
             </span>
           </ScopeNotice>
         )}
-        <SessionView
-          sessionId={sessionId}
-          activeThreadId={thread}
-          onOpenChild={openChild}
-        />
+        {unresolved && (
+          <ScopeNotice>
+            <span>
+              Cannot load your assistants, so this one cannot be opened. Showing your own assistant
+              instead. Reload the page.
+            </span>
+          </ScopeNotice>
+        )}
+        <SessionView sessionId={sessionId} activeThreadId={thread} onOpenChild={openChild} />
       </div>
       {child && <ChildPanel childId={child} onClose={closeChild} />}
     </>

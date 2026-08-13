@@ -23,6 +23,7 @@ import { bootTestApi, type TestApi } from "./_setup.js";
 import { buildWorkflowEngineDeps, ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
 
@@ -123,7 +124,7 @@ async function driveForeachRun(opts: {
     executors: createDefaultNodeExecutors(),
   });
 
-  return { park, engineDepsOpts, engineStore, workflowStore };
+  return { park, engineDepsOpts, engineStore, workflowStore, db };
 }
 
 /** The body checkpoints for one foreach body id, ordered by iteration. */
@@ -264,7 +265,7 @@ describe("api integration: workflow session id parsing", () => {
 describe("api integration: foreach with an orchestrator body", () => {
   it("dispatches to the owner's orchestrator once per item", async () => {
     const runId = "wfrun_foreach_orch";
-    const { park, engineStore, workflowStore } = await driveForeachRun({
+    const { park, engineStore, workflowStore, db } = await driveForeachRun({
       workflowId: "wf_foreach_orch",
       runId,
       body: { id: "ask", type: "orchestrator", prompt: "Handle {{item}}.", wait: { mode: "none" } },
@@ -278,13 +279,14 @@ describe("api integration: foreach with an orchestrator body", () => {
     expect(checkpoints.map((cp) => cp.status)).toEqual(["completed", "completed"]);
 
     // An orchestrator node never mints a `wf:` id: both iterations dispatch
-    // onto the owner's ONE orchestrator session, and only the dispatchId
+    // onto the owner's DEFAULT assistant session, and only the dispatchId
     // carries the iteration.
+    const defaultAssistant = await resolveDefaultAssistant(db, LOCAL_ORG.id, {
+      type: "user",
+      id: LOCAL_USER.id,
+    });
     const sessionIds = checkpoints.map((cp) => stringField(cp.result, "sessionId"));
-    expect(sessionIds).toEqual([
-      `orchestrator:user:${LOCAL_USER.id}`,
-      `orchestrator:user:${LOCAL_USER.id}`,
-    ]);
+    expect(sessionIds).toEqual([defaultAssistant.sessionId, defaultAssistant.sessionId]);
 
     const receipts = checkpoints.map((cp) => receiptOf(cp.effects));
     expect(receipts[0].queueItemId).not.toBe(receipts[1].queueItemId);
