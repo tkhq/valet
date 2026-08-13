@@ -147,3 +147,19 @@ Every failure is a `command_result` entry with `ok: false` and a corrective acti
 - Code-hook plugin commands (medium-term; the `CommandContext` seam anticipates them).
 - Client-side commands (theme, layout). These are UI preferences, not slash commands.
 - Extending the legacy v1 `SLASH_COMMANDS` registry or channels on the frozen stack.
+
+## Deviations
+
+These items differ from or add detail to the spec as written. All are intentional implementation decisions recorded here for accuracy.
+
+**Command results and dispatch operate on the session's default thread.** The engine invariant is that `session.prompt()` dispatches against the session's current default thread. A command typed while a different thread is focused lands on the default thread. This follows from `Session.prompt()` being the single dispatch funnel; there is no thread-scoped command path.
+
+**Plugin-command approvals deny by default.** A slash command is not a claimed turn and cannot suspend on a decision gate. The host has no synchronous approve path — approvals resolve asynchronously over `POST /:id/decisions/:gateId/resolve`. The `commandRequestDecision` hook seam exists in `CreateSessionOptions` but is not wired by the host. An approval-requiring plugin command therefore denies immediately. A command-scoped async approval flow is future work.
+
+**Command-path action attachments are dropped.** `PluginActionResult.attachments` are not forwarded on the command path. A `command_result` entry has no sink for blobs or vision content. The `call_tool` (LLM turn) path still carries attachments unchanged.
+
+**Interactive sessions only receive command providers.** `buildCommandOptions` runs only in `EngineHost.buildSession` (the interactive `sessionFor` path). Orchestrator sessions, child sessions, and workflow sessions do not receive `templateProvider`, `commandContext`, `pluginCommands`, or `pluginCatalog`. The helper is reusable; wiring it to those paths is future work.
+
+**`PluginActionResult.data` renders as fenced JSON.** When a plugin action returns a `data` object, the command formatter writes it as a fenced `json` block. When `data` is already a string, the formatter writes it verbatim. There is no HTML or rich-content rendering path for command output.
+
+**Bare-skill-name setting is exposed via `PATCH /api/me { bareSkillCommands }`.** The per-user toggle that registers each skill under its bare name is stored in the `users.bareSkillCommands` column and read through the standard user-settings PATCH route. The spec named the setting but did not specify its wire field name; `bareSkillCommands` is the field used in both the DB schema and the API.
