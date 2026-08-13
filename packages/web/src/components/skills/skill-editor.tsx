@@ -23,7 +23,7 @@ import type { CreateSkillRequest, SkillResponse, UpdateSkillRequest } from "@val
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
-import { useTeams } from "~/api/settings";
+import { useOrg, useTeams } from "~/api/settings";
 import { ApiError } from "~/api/client";
 
 /** Server-side messages carry the corrective action; a network failure does
@@ -57,18 +57,24 @@ export function previewPromptBody(body: string): string {
     .replace(/\$(\d+)/g, (_m, n: string) => `⟨arg${n}⟩`);
 }
 
-/** Owner of a new skill: the caller, or a team the caller belongs to. The
- * value is the `teamId` the create route takes, and "" means the caller. A
- * stored skill does not change owner, so the field is create-only. */
+/** Owner of a new skill: the caller, a team the caller belongs to, or the org
+ * when the caller is an org admin. The value is "" for the caller, `OWNER_ORG`
+ * for the org, or a `teamId` for a team. A stored skill does not change owner,
+ * so the field is create-only. */
 const OWNER_SELF = "";
+const OWNER_ORG = "org";
 
 export function SkillEditor({
   skill,
+  defaultScope,
   onSaved,
   onCancel,
 }: {
   /** Absent to create. Present to edit — its body must already be loaded. */
   skill?: SkillResponse;
+  /** Preselects the owner on a new skill. `"org"` is honored only for an org
+   * admin; anything else falls back to the caller. */
+  defaultScope?: "personal" | "org";
   onSaved: (saved: SkillResponse) => void;
   onCancel: () => void;
 }) {
@@ -76,11 +82,15 @@ export function SkillEditor({
   const create = useCreateSkill();
   const update = useUpdateSkill();
   const teams = useTeams();
+  const org = useOrg();
+  const isAdmin = org.data?.callerRole === "admin";
 
   const [name, setName] = useState(skill?.name ?? "");
   const [description, setDescription] = useState(skill?.description ?? "");
   const [content, setContent] = useState(skill?.content ?? "");
-  const [teamId, setTeamId] = useState(OWNER_SELF);
+  // Preselect the org scope only for an admin — a member never gets the
+  // option, so a member landing on `?scope=org` falls back to a personal skill.
+  const [teamId, setTeamId] = useState(defaultScope === "org" && isAdmin ? OWNER_ORG : OWNER_SELF);
   const [invocation, setInvocation] = useState<"context" | "prompt">(
     skill?.invocation === "prompt" ? "prompt" : "context",
   );
@@ -100,13 +110,23 @@ export function SkillEditor({
       update.mutate({ id: skill.id, body }, { onSuccess: onSaved });
       return;
     }
+    // An org skill needs admin; a member never sees the option, and a stale
+    // `OWNER_ORG` (admin flag not yet loaded) falls back to a personal skill.
+    const ownerFields =
+      teamId === OWNER_ORG
+        ? isAdmin
+          ? { ownerType: "org" as const }
+          : {}
+        : teamId === OWNER_SELF
+          ? {}
+          : { teamId };
     const body: CreateSkillRequest = {
       name,
       description,
       content,
       invocation,
       ...argFields,
-      ...(teamId === OWNER_SELF ? {} : { teamId }),
+      ...ownerFields,
     };
     create.mutate(body, { onSuccess: onSaved });
   }
@@ -135,7 +155,7 @@ export function SkillEditor({
           </p>
         </div>
 
-        {!editing && (teams.data?.teams.length ?? 0) > 0 && (
+        {!editing && ((teams.data?.teams.length ?? 0) > 0 || isAdmin) && (
           <div className="space-y-1.5">
             <Label htmlFor="skill-owner">Owner</Label>
             <select
@@ -150,8 +170,13 @@ export function SkillEditor({
                   {team.name}
                 </option>
               ))}
+              {/* Org visible only to an admin — the create API rejects an org
+                  skill from a member with a 403. */}
+              {isAdmin && <option value={OWNER_ORG}>Organization</option>}
             </select>
-            <p className="text-xs text-muted">A team skill reaches every member's sessions.</p>
+            <p className="text-xs text-muted">
+              A team or org skill reaches every member's sessions.
+            </p>
           </div>
         )}
       </div>
