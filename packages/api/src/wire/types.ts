@@ -958,8 +958,13 @@ export interface ListSkillsResponse {
 export type GetSkillResponse = SkillSummary & { content: string };
 
 /** One stored skill, body included — what the create/read/update routes
- * return. */
-export type SkillResponse = StoredSkillSummary & { content: string };
+ * return.
+ *
+ * `editable` says whether THIS caller may write the row. A user or team row
+ * follows the caller's ownership; an org-library row is editable only for an
+ * org admin. A member reads an org row but gets `editable: false`, so the
+ * detail page shows the body read-only. */
+export type SkillResponse = StoredSkillSummary & { content: string; editable: boolean };
 
 export interface CreateSkillRequest {
   name: string;

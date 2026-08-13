@@ -4,9 +4,11 @@
  * in `skills.test.ts`; this file covers what a database row adds.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createTeam } from "../services/teams.js";
+import { skills } from "../schema/index.js";
 import type {
   CreateSkillRequest,
   GetSkillResponse,
@@ -471,6 +473,66 @@ describe("PATCH/DELETE /api/skills/stored/:id — org-scoped writes", () => {
 
     const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
       method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/skills/stored/:id — org read scope and editable", () => {
+  async function createOrgSkill(baseUrl: string): Promise<SkillResponse> {
+    const res = await fetch(`${baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "org-read-guide",
+        description: "Org-wide guide",
+        content: "Follow the org guide.",
+        ownerType: "org",
+      }),
+    });
+    return (await res.json()) as SkillResponse;
+  }
+
+  it("lets a member READ an org skill with editable false", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(200);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.content).toContain("Follow the org guide.");
+    expect(skill.editable).toBe(false);
+  });
+
+  it("returns editable true when an admin READs an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`);
+    expect(res.status).toBe(200);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.editable).toBe(true);
+  });
+
+  it("returns editable true for the owner of a personal skill", async () => {
+    api = await bootTestApi();
+    const created = (await (await post(api.baseUrl, DEPLOY)).json()) as SkillResponse;
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.editable).toBe(true);
+  });
+
+  it("404s a row in another org (cross-org isolation)", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+    // Move the row to a different org so the caller's org no longer matches.
+    await api.providers.db.update(skills).set({ orgId: "other-org" }).where(eq(skills.id, created.id));
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);

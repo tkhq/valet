@@ -28,13 +28,19 @@ import { SkillEditor } from "~/components/skills/skill-editor";
 export const REPO_SKILL_NOTE =
   "This skill mirrors a repository. Edit it where it came from — the next sync would overwrite a change made here.";
 
+/** Copy for a member viewing an org skill they may read but not change. */
+export const ORG_SKILL_NOTE = "Org skills are managed by org admins.";
+
 export function SkillDoc({
   skillId,
+  defaultScope,
   onCreated,
   onDeleted,
 }: {
   /** Row id to open, or null to write a new skill. */
   skillId: string | null;
+  /** Preselects the owner scope on a new skill. Ignored when editing. */
+  defaultScope?: "personal" | "org";
   onCreated: (id: string) => void;
   onDeleted: () => void;
 }) {
@@ -45,12 +51,16 @@ export function SkillDoc({
   const [editing, setEditing] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
-  const writable = skill?.origin === "local";
+  // A `local` skill is writable only when the server says this caller may
+  // edit it. A member reading an org skill gets `editable: false`, so the
+  // page shows the body read-only with no Edit/Delete.
+  const writable = skill?.origin === "local" && skill.editable;
   const open = creating || editing;
 
   // A failed delete outranks the shadow warning: it is what the reader just
   // tried to do. The shadow warning steps aside while the editor is open —
-  // the name field that fixes it is right there.
+  // the name field that fixes it is right there. A member viewing an org
+  // skill sees the org note when nothing more urgent applies.
   const notice = remove.error
     ? `Could not delete this skill: ${remove.error.message}`
     : open
@@ -59,7 +69,9 @@ export function SkillDoc({
         ? shadowNote(skill)
         : skill?.origin === "repo"
           ? REPO_SKILL_NOTE
-          : undefined;
+          : skill && skill.origin === "local" && !skill.editable
+            ? ORG_SKILL_NOTE
+            : undefined;
 
   return (
     <SkillDocument
@@ -116,7 +128,11 @@ export function SkillDoc({
       error={creating ? undefined : error}
     >
       {creating ? (
-        <SkillEditor onSaved={(saved) => onCreated(saved.id)} onCancel={onDeleted} />
+        <SkillEditor
+          defaultScope={defaultScope}
+          onSaved={(saved) => onCreated(saved.id)}
+          onCancel={onDeleted}
+        />
       ) : editing && skill ? (
         <SkillEditor
           skill={skill}

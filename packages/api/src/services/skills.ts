@@ -156,6 +156,31 @@ export async function ownedSkillRow(
 }
 
 /**
+ * One row a caller may READ, or null when it is missing OR out of reach.
+ *
+ * Read scope is wider than write scope: a member may read ANY row in their
+ * own org, including an org-library row they cannot edit. So this returns the
+ * row when `ownedSkillRow` would (user/team ownership, or an org row the
+ * caller may write), and ALSO for any org-owned row in the caller's own org.
+ *
+ * The detail route (`GET /stored/:id`) uses this so opening an org skill's
+ * page works for every member. Writes stay on `ownedSkillRow`, so a member
+ * still cannot edit or delete an org row.
+ */
+export async function readableSkillRow(
+  db: AppDb,
+  owner: SkillOwner,
+  id: string,
+): Promise<SkillRow | null> {
+  const rows = await db.select().from(skills).where(eq(skills.id, id)).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.orgId !== owner.orgId) return null;
+  if (row.ownerType === "org") return row;
+  return (await isAuthorizedFor(db, owner, row)) ? row : null;
+}
+
+/**
  * Every skill the caller can reach: their own rows first, then the rows of
  * the teams they belong to, then the org-library rows, each group sorted by
  * name.
