@@ -7,7 +7,8 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ExecOpts, ExecResult, Sandbox } from "@valet/engine";
-import { readRepoTemplates } from "./command-providers.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { makeTemplateProvider, readRepoTemplates } from "./command-providers.js";
 
 /** Minimal `Sandbox` whose `exec` returns a canned result. Only `exec` is
  * called by `readRepoTemplates`; the rest throw if ever touched. */
@@ -67,5 +68,23 @@ describe("readRepoTemplates", () => {
     expect(templates.map((t) => t.name)).toEqual(["plan", "review"]);
     expect(templates[0]?.description).toBeUndefined();
     expect(templates[1]?.description).toBe("Review a PR");
+  });
+});
+
+describe("makeTemplateProvider", () => {
+  it("skips user templates when no personal user applies (shared session)", async () => {
+    // A team/org orchestrator passes userId=undefined: the provider must not
+    // touch the DB at all. AppDb is a large Drizzle type; a throwing proxy is
+    // the practical double here (any property access fails the test).
+    const db = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("db must not be touched for a shared session");
+        },
+      },
+    ) as AppDb;
+    const provider = makeTemplateProvider(db, undefined, () => undefined);
+    expect(await provider.listTemplates()).toEqual([]);
   });
 });

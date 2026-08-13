@@ -116,15 +116,19 @@ function readFrontmatterDescription(content: string): string | undefined {
  */
 export function makeTemplateProvider(
   db: AppDb,
-  userId: string,
+  userId: string | undefined,
   sandbox: () => Sandbox | undefined,
 ): TemplateProvider {
   return {
     async listTemplates(): Promise<PromptTemplate[]> {
-      const rows = await db
-        .select()
-        .from(userPromptTemplates)
-        .where(eq(userPromptTemplates.userId, userId));
+      // No personal user (team/org orchestrator): repo templates only. A
+      // shared session must not surface whichever actor's templates woke it.
+      const rows = userId
+        ? await db
+            .select()
+            .from(userPromptTemplates)
+            .where(eq(userPromptTemplates.userId, userId))
+        : [];
       const user: PromptTemplate[] = rows.map((r) => ({
         name: r.name,
         description: r.description ?? undefined,

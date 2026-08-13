@@ -873,8 +873,14 @@ export class EngineHost {
    * Returns `undefined` when the host has no `db` (tests that don't wire one) —
    * the session then builds with no command providers, same as before.
    */
+  /**
+   * `userId` is the PERSONAL user whose templates and bare-skill-names
+   * setting apply. Pass `undefined` for shared sessions (team/org
+   * orchestrators): a shared session must not carry whichever actor's
+   * personal configuration happened to wake it.
+   */
   private async buildCommandOptions(
-    userId: string,
+    userId: string | undefined,
     orgId: string,
     sessionId: string,
     getSession: () => Session | undefined,
@@ -891,11 +897,13 @@ export class EngineHost {
     const db = this.opts.db;
     if (!db) return undefined;
 
-    const bareRows = await db
-      .select({ bareSkillCommands: users.bareSkillCommands })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
+    const bareRows = userId
+      ? await db
+          .select({ bareSkillCommands: users.bareSkillCommands })
+          .from(users)
+          .where(eq(users.id, userId))
+          .limit(1)
+      : [];
     const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
 
     const templateProvider = makeTemplateProvider(db, userId, () => {
@@ -1008,9 +1016,12 @@ export class EngineHost {
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
     // fallback. The getter closes over `builtSession`, assigned below.
+    // Personal configuration (user templates, bare skill names) applies only
+    // when the orchestrator belongs to a user principal — a team or org
+    // orchestrator is shared, so no actor's personal settings apply.
     let builtSession: Session | undefined;
     const commandOptions = await this.buildCommandOptions(
-      meta.actorUserId,
+      principal.type === "user" ? principal.id : undefined,
       meta.orgId,
       sessionId,
       () => builtSession,
