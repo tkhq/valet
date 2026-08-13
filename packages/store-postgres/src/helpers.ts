@@ -1,5 +1,6 @@
 import type {
   BranchSummaryEntry,
+  CommandResultEntry,
   CompactionEntry,
   DecisionGate,
   DecisionGateEntry,
@@ -230,6 +231,19 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
         resolution: jsonOrNull(entry.resolution),
         withdrawnReason: entry.withdrawnReason ?? null,
       };
+    case "command_result":
+      // command, source, ok, and output stored in metadata until Task 8 adds
+      // dedicated columns in the migration.
+      return {
+        ...base,
+        content: entry.output,
+        metadata: JSON.stringify({
+          command: entry.command,
+          source: entry.source,
+          ok: entry.ok,
+          ...(entry.metadata ?? {}),
+        }),
+      };
   }
 }
 
@@ -308,6 +322,25 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         resolvedAt: row.resolvedAt ?? undefined,
         resolution: parseJson(row.resolution),
         withdrawnReason: (row.withdrawnReason as DecisionGateEntry["withdrawnReason"]) ?? undefined,
+        metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
+        createdAt: row.createdAt,
+        queueItemId: row.queueItemId ?? undefined,
+      };
+      return e;
+    }
+    case "command_result": {
+      const meta = parseJson<{ command: string; source: string; ok: boolean } & Record<string, unknown>>(row.metadata);
+      const { command, source, ok, ...userMeta } = meta ?? {};
+      const e: CommandResultEntry = {
+        id: row.id,
+        sessionId: row.sessionId,
+        threadId: row.threadId,
+        parentId: row.parentId,
+        type: "command_result",
+        command: command ?? "",
+        source: (source as CommandResultEntry["source"]) ?? "builtin",
+        ok: ok ?? false,
+        output: row.content ?? "",
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
         queueItemId: row.queueItemId ?? undefined,

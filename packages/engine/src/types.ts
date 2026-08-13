@@ -282,6 +282,10 @@ export interface PromptReceipt {
   threadId: string;
   queueItemId: string;
   status: "queued" | "running" | "blocked_on_decision_gate";
+  /** Set when the submission was handled as a command and no prompt was queued. */
+  command?: { name: string; source: import("./commands/types.js").CommandSource };
+  /** Set when an unknown /word passed through as prompt text; closest registered name. */
+  nearMiss?: string;
 }
 
 // ── Messages and DAG entries ──────────────────────────────────────
@@ -391,7 +395,20 @@ export interface DecisionGateEntry extends BaseEntry {
   withdrawnReason?: DecisionWithdrawReason;
 }
 
-export type SessionEntry = MessageEntry | CompactionEntry | BranchSummaryEntry | DecisionGateEntry;
+export interface CommandResultEntry extends BaseEntry {
+  type: "command_result";
+  command: string; // as typed, with leading slash
+  source: import("./commands/types.js").CommandSource;
+  ok: boolean;
+  output: string; // markdown
+}
+
+export type SessionEntry =
+  | MessageEntry
+  | CompactionEntry
+  | BranchSummaryEntry
+  | DecisionGateEntry
+  | CommandResultEntry;
 
 export interface MessageQuery {
   limit?: number;

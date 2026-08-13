@@ -150,6 +150,16 @@ export {
   deterministicGateId,
 } from "./decision-gate.js";
 export {
+  type CommandSource,
+  type CommandInfo,
+  type RegistryDiagnostic,
+  type CommandDef,
+  type PromptTemplate,
+  type TemplateProvider,
+  type CommandContext,
+  type ResolvedCommand,
+} from "./commands/types.js";
+export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,
