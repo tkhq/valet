@@ -134,9 +134,10 @@ async function modelCommand(
   session: Session,
   ctx: CommandContext | undefined,
 ): Promise<BuiltinResult> {
-  if (!ctx) return { ok: false, output: NO_CONTEXT };
   const target = args[0];
   if (!target) {
+    // Only the listing needs host capabilities; a switch works without them.
+    if (!ctx) return { ok: false, output: NO_CONTEXT };
     const models = await ctx.listModels();
     const rows = models.map((m) => `| ${cell(m.id)} | ${cell(m.name)} |`);
     const output = ["| Model id | Name |", "| --- | --- |", ...rows].join("\n");
@@ -146,7 +147,7 @@ async function modelCommand(
     const { fromModel, toModel } = await session.setModel(target, "slash_command");
     return { ok: true, output: `Model switched from \`${fromModel}\` to \`${toModel}\`.` };
   } catch (err) {
-    const models = await ctx.listModels();
+    const models = ctx ? await ctx.listModels() : [];
     // Compare the typed id against each candidate AND against its
     // target-length prefix, so a typo in a namespaced id ("claude-oups")
     // still matches a longer canonical id ("claude-opus-4-8") whose suffix

@@ -95,6 +95,18 @@ describe("executeBuiltin", () => {
     expect(r.output).toContain("does not expose");
   });
 
+  it("/model with a valid id switches without a CommandContext", async () => {
+    const faux = registerFauxProvider({ provider: "b-model-switch" });
+    cleanups.push(() => faux.unregister());
+    const session = await makeSession(faux);
+
+    // A registry id resolves through the internal resolver; the switch needs
+    // no CommandContext — only the no-args listing does.
+    const r = await executeBuiltin("model", ["claude-opus-4-7"], session, undefined);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("Model switched");
+  });
+
   it("/stop reports idle when no turn is running", async () => {
     const faux = registerFauxProvider({ provider: "b-stop" });
     cleanups.push(() => faux.unregister());

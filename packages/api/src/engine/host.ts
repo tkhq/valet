@@ -1005,6 +1005,16 @@ export class EngineHost {
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    // Slash-command options: same wiring as the interactive path, so the
+    // orchestrator answers /model and /sessions instead of the no-context
+    // fallback. The getter closes over `builtSession`, assigned below.
+    let builtSession: Session | undefined;
+    const commandOptions = await this.buildCommandOptions(
+      meta.actorUserId,
+      meta.orgId,
+      sessionId,
+      () => builtSession,
+    );
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -1046,6 +1056,7 @@ export class EngineHost {
       // PolicySandbox attachment's first-touch contract — never a
       // proactive warm-on-claim kick just because a turn was claimed.
       warmSandboxOnClaim: false,
+      ...(commandOptions ?? {}),
     };
 
     const engine = new Engine({
@@ -1061,6 +1072,7 @@ export class EngineHost {
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
+    builtSession = session;
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
