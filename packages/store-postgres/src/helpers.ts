@@ -57,6 +57,18 @@ export function asStringOrNull(value: unknown, field: string): string | null {
   return value === null || value === undefined ? null : asString(value, field);
 }
 
+/**
+ * Validates and narrows a string into a valid CommandSource enum value.
+ * Invalid values fall back to "builtin".
+ */
+export function asCommandSource(value: unknown): CommandResultEntry["source"] {
+  const validSources: CommandResultEntry["source"][] = ["builtin", "skill", "template", "plugin"];
+  if (typeof value === "string" && validSources.includes(value as CommandResultEntry["source"])) {
+    return value as CommandResultEntry["source"];
+  }
+  return "builtin";
+}
+
 /** Raw column shape of a `SELECT * FROM engine_entries` row. */
 export interface EntryRow {
   id: string;
@@ -338,7 +350,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         parentId: row.parentId,
         type: "command_result",
         command: command ?? "",
-        source: (source as CommandResultEntry["source"]) ?? "builtin",
+        source: asCommandSource(source),
         ok: ok ?? false,
         output: row.content ?? "",
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
