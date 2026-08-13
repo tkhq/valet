@@ -295,6 +295,8 @@ export class SkillSyncService {
     promptEntries: SkillManifestEntry[];
     /** Set of names that came from `prompts/`, so reconcile can parse them differently. */
     promptNames: Set<string>;
+    /** Content keyed by FILE PATH, not by name, to avoid collisions between a
+     * skill directory and a same-named `prompts/<name>.md` file. */
     text: Map<string, string>;
   }> {
     const listing = await this.deps.reader.listDirectory(
@@ -314,7 +316,7 @@ export class SkillSyncService {
       const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
       if (content === null) continue;
       skillEntries.push({ name: dir.name, path, contentSha: fileSha(content) });
-      text.set(dir.name, content);
+      text.set(path, content);
     }
 
     // Scan the `prompts/` directory. A 404 (no such directory) is normal and
@@ -347,7 +349,7 @@ export class SkillSyncService {
         if (content === null) continue;
         promptEntries.push({ name, path, contentSha: fileSha(content) });
         promptNames.add(name);
-        text.set(name, content);
+        text.set(path, content);
       }
     }
 
@@ -381,7 +383,9 @@ export class SkillSyncService {
     let updated = 0;
 
     for (const entry of entries) {
-      const raw = text.get(entry.name);
+      // Content is keyed by PATH to prevent a same-named skill directory and
+      // prompt file from silently overwriting each other in the map.
+      const raw = text.get(entry.path);
       if (raw === undefined) continue;
       const isPrompt = promptNames.has(entry.name);
       const parsed = isPrompt
@@ -399,7 +403,11 @@ export class SkillSyncService {
       if (row === undefined) {
         const wrote = await this.insertMirror(source, entry, parsed);
         if (wrote) imported += 1;
-        else {
+        else if (isPrompt) {
+          warnings.push(
+            `${entry.name}: ${entry.path} collides with an existing skill of the same name. Rename one of them.`,
+          );
+        } else {
           warnings.push(
             `${entry.name}: a skill with this name already exists here. Rename the skill directory, or remove the skill that holds the name.`,
           );
@@ -640,10 +648,14 @@ function parsePromptFile(raw: string, fileName: string): ParsedSkillFile {
     });
   }
 
+  // Only set the resolved `invocation` when it is valid. When the raw value
+  // was invalid, `invocationViolations` carries an error and the file will be
+  // skipped — the frontmatter is never persisted, but returning a misleading
+  // value is still confusing to callers and tests.
   const frontmatter: Record<string, unknown> = {
     ...parsed.frontmatter,
     name: fileName,
-    invocation,
+    ...(invocationViolations.length === 0 ? { invocation } : {}),
   };
 
   return {

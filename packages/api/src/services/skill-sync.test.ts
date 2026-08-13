@@ -523,6 +523,58 @@ Read the reference.
     expect(rows.some((r) => r.name === "bad")).toBe(false);
   });
 
+  // F1 regression: a skill directory and a same-named prompts/ file must not
+  // corrupt each other. The skill row must carry the SKILL.md body; the prompt
+  // entry hits the unique-index guard and produces a warning instead of a
+  // corrupted row or a unique-violation crash.
+  it("a same-named skill directory and prompt file do not corrupt each other", async () => {
+    const f = serve({
+      sha: "commit-1",
+      skills: { standup: skillMd("standup", "Run the standup.", "Ask everyone for updates.") },
+      prompts: { standup: "---\ndescription: Prompt version\n---\nSummarize $1" },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    // Status is warning — the prompt entry collides, and a warning is emitted.
+    expect(outcome?.status).toBe("warning");
+    // The skill row was imported (the skill directory wins by listing order).
+    const rows = await db.select().from(skills).where(eq(skills.sourceId, source.id));
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    // The row must hold SKILL.md content, not the prompt body.
+    expect(row?.content).toBe("Ask everyone for updates.\n");
+    expect(row?.description).toBe("Run the standup.");
+    // The collision warning names both the prompt path and the collision.
+    expect(outcome?.warnings.join(" ")).toMatch(/prompts\/standup\.md/);
+    expect(outcome?.warnings.join(" ")).toMatch(/collides/);
+  });
+
+  // F3: a prompts/ file named after a reserved builtin is skipped with a
+  // per-file warning; the rest of the sync continues.
+  it("skips a prompt file whose name is a reserved builtin command", async () => {
+    const f = serve({
+      sha: "commit-1",
+      skills: {},
+      prompts: {
+        status: "Prompt body for a reserved name",
+        summary: "---\ndescription: A safe name\n---\nSummarize $1",
+      },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.status).toBe("warning");
+    // The reserved-name file is warned about.
+    expect(outcome?.warnings.join(" ")).toContain("status");
+    // The good prompt is still imported.
+    const rows = await db.select().from(skills);
+    expect(rows.some((r) => r.name === "summary")).toBe(true);
+    expect(rows.some((r) => r.name === "status")).toBe(false);
+  });
+
   describe("the sweep", () => {
     it("leases what it claims, so a second claim at the same instant gets nothing", async () => {
       const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
