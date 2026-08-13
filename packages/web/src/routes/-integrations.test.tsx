@@ -10,7 +10,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { ListPluginsResponse } from "@valet/api/wire";
+import type { ListPluginsResponse, PluginServiceSummary } from "@valet/api/wire";
 
 const pluginsData = {
   plugins: [
@@ -246,6 +246,100 @@ describe("IntegrationsPage", () => {
     window.history.replaceState(null, "", "/integrations?error=access_denied");
     render(<IntegrationsPage />);
     expect(screen.getByText(/access_denied/)).toBeTruthy();
+  });
+});
+
+describe("brand marks", () => {
+  it("draws a different mark per service instead of one letter each", () => {
+    currentPluginsData = {
+      plugins: ["github", "gmail", "google-calendar"].map((name) => ({
+        name,
+        version: "0.1.0",
+        actionCount: 1,
+        services: [
+          {
+            service: name,
+            type: "oauth2" as const,
+            configKeys: ["accessToken"],
+            connected: false,
+            connect: "manual" as const,
+            iconSlug: name,
+          },
+        ],
+      })),
+    };
+    const { container } = render(<IntegrationsPage />);
+    const paths = [...container.querySelectorAll("svg path")].map((p) => p.getAttribute("d"));
+    expect(paths).toHaveLength(3);
+    expect(new Set(paths).size).toBe(3);
+  });
+});
+
+describe("connection health", () => {
+  function connectedGmail(health: PluginServiceSummary["health"]): ListPluginsResponse {
+    return {
+      plugins: [
+        {
+          name: "gmail",
+          version: "0.1.0",
+          actionCount: 6,
+          services: [
+            {
+              service: "gmail",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: true,
+              connect: "oauth" as const,
+              iconSlug: "gmail",
+              health,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it("names the connected account", () => {
+    currentPluginsData = connectedGmail({ login: "someone@example.com" });
+    render(<IntegrationsPage />);
+    expect(screen.getByText(/someone@example.com/)).toBeTruthy();
+    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Reconnect" })).toBeNull();
+  });
+
+  it("shows the fix and a Reconnect control when the token expired", () => {
+    currentPluginsData = connectedGmail({ login: "someone@example.com", expiresAt: Date.now() - 1000 });
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("Expired")).toBeTruthy();
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(screen.getByText(/Select Reconnect to sign in again/)).toBeTruthy();
+    // The repair is an OAuth redirect, and Disconnect stays available.
+    expect(screen.getByRole("link", { name: "Reconnect" }).getAttribute("href")).toBe(
+      "/api/credentials/gmail/connect",
+    );
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
+  });
+
+  it("shows the fix when the last refresh failed", () => {
+    currentPluginsData = connectedGmail({ refreshFailed: true });
+    render(<IntegrationsPage />);
+    expect(screen.getByText("Refresh failed")).toBeTruthy();
+    expect(screen.getByText(/The last token refresh failed/)).toBeTruthy();
+  });
+
+  it("shows the fix when the grant carries identity only", () => {
+    currentPluginsData = connectedGmail({ identityOnly: true });
+    render(<IntegrationsPage />);
+    expect(screen.getByText("Sign-in only")).toBeTruthy();
+    expect(screen.getByText(/add the permissions the tools need/)).toBeTruthy();
+  });
+
+  it("keeps the plain Connected badge when the wire reports no health", () => {
+    currentPluginsData = connectedGmail(undefined);
+    render(<IntegrationsPage />);
+    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Reconnect" })).toBeNull();
   });
 });
 

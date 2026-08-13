@@ -6,20 +6,58 @@
  *
  * Never returns secret material — only which services are connected, not
  * their tokens. See `routes/credentials.ts` for the mutation surface.
+ *
+ * A connected service also reports `health`, read from the same four
+ * whitelisted credential fields `GET /api/credentials` returns
+ * (`expiresAt`, `metadata.login`, `metadata.identityOnly`,
+ * `metadata.refreshFailedAt`). `connected` alone is set membership in the
+ * credential store, so an expired or revoked token reads as connected while
+ * `list_tools` hides the service. Health says otherwise, from what the
+ * credential row already knows — this route calls no vendor.
  */
 import { Hono } from "hono";
-import type { CredentialOwner } from "@valet/engine";
+import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { ListPluginsResponse, PluginServiceSummary, PluginSummary } from "../wire/types.js";
 import { findOAuthDeclaration, authCodeEnvReady } from "../services/integration-oauth.js";
+import { pluginIconSlugs } from "../plugins/registry.gen.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
+
+/**
+ * What the stored credential says about itself. Mirrors
+ * `services/github-tokens.ts`'s health rules, minus the parts that need a
+ * token exchange: this is a read of the row, not a probe of the vendor.
+ * Absent fields mean "the grant reports nothing here", NOT "healthy" — a
+ * PAT carries no `expiresAt` and never expires.
+ */
+function credentialHealth(stored: StoredCredential): PluginServiceSummary["health"] {
+  const metadata = stored.metadata;
+  return {
+    expiresAt: stored.expiresAt,
+    login: typeof metadata?.login === "string" ? metadata.login : undefined,
+    refreshFailed: typeof metadata?.refreshFailedAt === "number" ? true : undefined,
+    identityOnly: metadata?.identityOnly === true ? true : undefined,
+  };
+}
 
 pluginsRouter.get("/", async (c) => {
   const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts } = c.var.providers;
   const owner: CredentialOwner = { type: "user", id: c.var.user.id };
 
   const connectedServices = new Set((await engineCredentials.list(owner)).map((cred) => cred.service));
+
+  // `list()` carries neither `expiresAt` nor `metadata`, so each connected
+  // service is read back through `get()` for its health fields — the same
+  // N+1 over a small per-user list `routes/credentials.ts` accepts, rather
+  // than widening the `CredentialStore` port's `list` return shape.
+  const health = new Map<string, PluginServiceSummary["health"]>();
+  await Promise.all(
+    [...connectedServices].map(async (service) => {
+      const stored = await engineCredentials.get(owner, service);
+      if (stored) health.set(service, credentialHealth(stored));
+    }),
+  );
 
   // Connected dynamic services get a live-resolved tool count (TTL-cached,
   // fail-soft — see plugins/dynamic-tool-count.ts). Resolved up front and
@@ -61,6 +99,11 @@ pluginsRouter.get("/", async (c) => {
         dynamic: dynamicServices.has(service) ? true : undefined,
         connect: oauthReady ? "oauth" : "manual",
         toolCount: toolCounts.get(service),
+        // The slug is declared per plugin (`plugin.yaml`), so every service a
+        // plugin declares shares its plugin's mark. A service that names
+        // itself takes its own slug when one exists.
+        iconSlug: pluginIconSlugs[service] ?? pluginIconSlugs[plugin.name],
+        health: health.get(service),
       };
     });
 

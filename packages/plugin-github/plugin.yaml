@@ -2,4 +2,5 @@ name: github
 version: 0.0.1
 description: GitHub integration for PRs, issues, repos, and webhooks
 icon: "\U0001F419"
+iconSlug: github
 v2: true

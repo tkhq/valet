@@ -1,11 +1,12 @@
 /**
  * One tile per skill on `/skills`, built from the same parts as
- * `IntegrationRow`: a monogram, the friendly name, a clamped description,
- * and an `mt-auto` footer that pairs mono metadata on the left with the
- * action on the right.
+ * `IntegrationRow`: a service icon, the friendly name, a clamped
+ * description, and an `mt-auto` footer that pairs mono metadata on the left
+ * with the action on the right.
  *
- * A plugin skill's monogram takes the OWNING PLUGIN's brand color and the
- * skill's own initial, so skills from one plugin read as a family in a mixed
+ * A plugin skill takes the OWNING PLUGIN's icon — its brand mark, or the
+ * plugin's brand colour under the skill's own initial when the plugin has
+ * no mark. Either way skills from one plugin read as a family in a mixed
  * grid. A stored skill takes the moss accent instead — the colour separates
  * a skill a plugin ships from a skill stored for the caller at a glance, and
  * the origin badge says it in words.
@@ -25,9 +26,8 @@ import { Link } from "@tanstack/react-router";
 import type { SkillSummary, StoredSkillSummary } from "@valet/api/wire";
 import { Badge } from "~/components/primitives";
 import { OwnerBadge } from "~/components/owner-badge";
-import { brandHex } from "~/components/integrations/integration-row";
+import { ServiceIcon } from "~/components/service-icon";
 import { displayName } from "~/components/integrations/display-name";
-import { cn } from "~/lib/cn";
 
 /**
  * What to do about a skill another skill of the same name keeps out of every
@@ -62,16 +62,11 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
   const body = (
     <>
       <div className="flex items-start gap-3">
-        <span
-          aria-hidden="true"
-          className={cn(
-            "grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-semibold text-white",
-            skill.origin !== "plugin" && "bg-moss",
-          )}
-          style={skill.origin === "plugin" ? { backgroundColor: brandHex(skill.plugin) } : undefined}
-        >
-          {title.charAt(0).toUpperCase()}
-        </span>
+        <ServiceIcon
+          slug={skill.origin === "plugin" ? skill.plugin : undefined}
+          label={title}
+          tone={skill.origin === "plugin" ? "brand" : "accent"}
+        />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-ink">{title}</span>

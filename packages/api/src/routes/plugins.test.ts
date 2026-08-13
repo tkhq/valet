@@ -138,6 +138,74 @@ describe("GET /api/plugins", () => {
   });
 });
 
+describe("GET /api/plugins iconSlug", () => {
+  it("carries the bundled manifest's slug, and nothing for a plugin that declares none", async () => {
+    // "github" is a real bundled plugin name, so it has an entry in the
+    // generated slug map; "fixture-plugin" never will.
+    const plugins: ValetPlugin[] = [
+      { name: "github", version: "0.1.0", credentials: [{ type: "oauth2", configKeys: ["accessToken"] }] },
+      FIXTURE_PLUGIN,
+    ];
+    api = await bootTestApi({ plugins });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    expect(summaries.find((p) => p.name === "github")?.services[0]?.iconSlug).toBe("github");
+    expect(summaries.find((p) => p.name === "fixture-plugin")?.services[0]?.iconSlug).toBeUndefined();
+  });
+});
+
+describe("GET /api/plugins health", () => {
+  const OWNER = { type: "user", id: "local-user" } as const;
+
+  it("reports no health while the service is disconnected", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    expect(plugins.find((p) => p.name === "fixture-plugin")?.services[0]?.health).toBeUndefined();
+  });
+
+  it("reports the account, the expiry, the refresh failure, and the identity-only grant", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    const expiresAt = Date.now() - 60_000;
+    await api.providers.engineCredentials.save(OWNER, "fixture", {
+      type: "oauth2",
+      accessToken: "stale-token-xyz",
+      expiresAt,
+      metadata: { login: "someone@example.com", refreshFailedAt: 1_700_000_000_000, identityOnly: true },
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const service = plugins.find((p) => p.name === "fixture-plugin")?.services[0];
+    expect(service?.connected).toBe(true);
+    expect(service?.health).toEqual({
+      expiresAt,
+      login: "someone@example.com",
+      refreshFailed: true,
+      identityOnly: true,
+    });
+    // Health never carries token material.
+    expect(JSON.stringify(plugins)).not.toContain("stale-token-xyz");
+  });
+
+  it("reports an empty health object for a healthy credential with no metadata", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    await fetch(`${api.baseUrl}/api/credentials/fixture`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const service = plugins.find((p) => p.name === "fixture-plugin")?.services[0];
+    // An API key reports no expiry and no login — "nothing known", which is
+    // NOT the same as "expired".
+    expect(service?.health).toEqual({});
+  });
+});
+
 describe("GET /api/plugins connect mode", () => {
   it("reports oauth for mcp-mode declarations and manual otherwise", async () => {
     const plugins: ValetPlugin[] = [

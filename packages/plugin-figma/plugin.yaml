@@ -2,6 +2,7 @@ name: figma
 version: 0.0.1
 description: Figma integration for design context, screenshots, and code connect
 icon: "\U0001F3A8"
+iconSlug: figma
 actionType: mcp
 enabled: false
 v2: true
