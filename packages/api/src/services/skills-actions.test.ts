@@ -273,7 +273,7 @@ describe("skillsActionPlugin", () => {
         description: "Summarize the standup.",
         content: "Summarize $1",
         invocation: "prompt",
-        argHint: "<topic>",
+        arg_hint: "<topic>",
       },
       ctx(),
     );
