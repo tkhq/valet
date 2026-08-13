@@ -244,16 +244,16 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
         withdrawnReason: entry.withdrawnReason ?? null,
       };
     case "command_result":
-      // command, source, ok, and output stored in metadata until Task 8 adds
-      // dedicated columns in the migration.
+      // command, source, ok, and output stored in metadata as opaque JSON
+      // per Task 8 design (no dedicated columns needed).
       return {
         ...base,
         content: entry.output,
         metadata: JSON.stringify({
+          ...(entry.metadata ?? {}),
           command: entry.command,
           source: entry.source,
           ok: entry.ok,
-          ...(entry.metadata ?? {}),
         }),
       };
   }

@@ -221,6 +221,78 @@ function runCommandResultSuite(label: string, getDb: () => PgDb) {
         expect(retrieved.output).toBe(`Output from ${s.desc} command`);
       });
     });
+
+    it("preserves system fields (command/source/ok) even when metadata contains same keys", async () => {
+      // Regression test: user metadata spread BEFORE system fields to prevent
+      // accidental override of canonical values by user-supplied metadata.
+      await store.saveSession({
+        id: "sess-4",
+        owner: { type: "user", id: "u4" },
+        userId: "u4",
+        orgId: "o4",
+        workspace: "/",
+        purpose: "interactive",
+        status: "running",
+        createdAt: 4,
+        updatedAt: 4,
+      });
+
+      await store.saveThread("sess-4", {
+        id: "th-4",
+        sessionId: "sess-4",
+        key: "web:default",
+        status: "active",
+        queueMode: "followup",
+        createdAt: 4,
+        updatedAt: 4,
+      });
+
+      // Create entry with user metadata that shadows system field names.
+      // System values: command="/status", source="builtin", ok=true
+      // User metadata: { command: "user-value", source: "wrong", ok: false, note: "keep-me" }
+      // Expected: system values unchanged, user note preserved, shadowed keys dropped.
+      const entry: CommandResultEntry = {
+        id: "e-cmd-4",
+        sessionId: "sess-4",
+        threadId: "th-4",
+        parentId: null,
+        type: "command_result",
+        command: "/status",
+        source: "builtin",
+        ok: true,
+        output: "session idle",
+        metadata: {
+          command: "user-value",
+          source: "wrong",
+          ok: false,
+          note: "keep-me",
+        },
+        createdAt: 4000,
+      };
+
+      await store.appendEntries("sess-4", "th-4", [entry]);
+
+      const loaded = await store.getEntries("sess-4", "th-4");
+      expect(loaded).toHaveLength(1);
+
+      const retrieved = loaded[0];
+      if (retrieved.type !== "command_result") {
+        throw new Error("expected command_result entry");
+      }
+
+      // Verify system fields are canonical (not overridden by user metadata).
+      expect(retrieved.command).toBe("/status");
+      expect(retrieved.source).toBe("builtin");
+      expect(retrieved.ok).toBe(true);
+
+      // Verify other metadata preserved (user-metadata keys that don't shadow system fields).
+      expect(retrieved.metadata?.note).toBe("keep-me");
+
+      // Note: command/source/ok in user metadata may be dropped during roundtrip
+      // (the rowToEntry decomposition filters them out). This is the current behavior
+      // — if a user supplies these keys, they are ignored in favor of the system values.
+      // This test asserts that behavior explicitly.
+    });
   });
 }
 
