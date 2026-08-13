@@ -19,6 +19,7 @@ import { agentSessions, sessionThreads } from "../schema/index.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  ListCommandsResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
@@ -130,6 +131,31 @@ messagesRouter.get("/:id/threads", async (c) => {
     ),
   );
   const body: ListThreadsResponse = { threads: summaries };
+  return c.json(body);
+});
+
+// ── Commands ────────────────────────────────────────────────────────────────
+//
+// GET /:id/commands — the merged slash-command registry for the session
+// (built-ins + skills + user/repo templates + plugin commands) plus registry
+// diagnostics. Building the session (via `loadEngineSession`) is what wires the
+// host `templateProvider`/`commandContext`; the registry is built lazily and
+// cached on the Session, refreshed after workspace prep.
+messagesRouter.get("/:id/commands", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { engineSession } = result;
+
+  // Refresh before reading so user templates (DB-backed, always available) and
+  // repo templates (readable once the sandbox is ready) land in the registry.
+  // Cheap when nothing changed: one DB read plus, only when the sandbox is
+  // ready, one exec.
+  await engineSession.refreshCommandRegistry();
+  const registry = engineSession.commandRegistry();
+  const body: ListCommandsResponse = {
+    commands: registry.list(),
+    diagnostics: registry.diagnostics(),
+  };
   return c.json(body);
 });
 

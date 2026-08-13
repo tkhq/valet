@@ -24,7 +24,17 @@ import {
   type ResolvedModel,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import {
+  buildPluginCatalog,
+  type ActionPlugin,
+  type CommandContext,
+  type CommandDef,
+  type PluginCatalog,
+  type Sandbox,
+  type TemplateProvider,
+} from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
+import { makeCommandContext, makeTemplateProvider } from "./command-providers.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
@@ -422,6 +432,15 @@ export class EngineHost {
             console.error(`EngineHost: onSessionReady failed for session ${sessionId}:`, err),
           );
         }
+        // Prep-completion seam for slash commands (Task 10): repo templates
+        // under `/workspace/.valet/prompts` are only readable once workspace
+        // prep has run, which happens by the time the attachment reaches
+        // `ready`. Refresh the command registry so those templates land. A
+        // no-op when the session has no `templateProvider`. Best-effort — a
+        // refresh failure never breaks the ready transition.
+        Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
+          console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
+        );
       }
     });
   }
@@ -508,6 +527,15 @@ export class EngineHost {
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    // Slash-command options (Task 10). The template provider's sandbox
+    // accessor closes over `builtSession` — resolved lazily, so it is safe that
+    // the session doesn't exist yet at this point.
+    const commandOptions = await this.buildCommandOptions(
+      meta.userId,
+      meta.orgId,
+      sessionId,
+      () => builtSession,
+    );
     // Initial sandbox image: the stock default. The specProvider closure may
     // resolve a prebuild image override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
@@ -536,6 +564,7 @@ export class EngineHost {
             roles: extras.roles.length ? extras.roles : undefined,
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
+            ...(commandOptions ?? {}),
           },
         })
       : await engine.createSession({
@@ -553,6 +582,7 @@ export class EngineHost {
           roles: extras.roles.length ? extras.roles : undefined,
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
+          ...(commandOptions ?? {}),
         });
 
     builtSession = session;
@@ -776,6 +806,80 @@ export class EngineHost {
       }
       return { type: "oauth2", accessToken: resolved.token };
     };
+  }
+
+  /**
+   * Assembles the slash-command options for a session build (slash-commands
+   * plan, Task 10): `templateProvider`, `commandContext`, `bareSkillNames`,
+   * and the plugin-command pair (`pluginCommands` + `pluginCatalog`).
+   *
+   * `getSession` returns the built `Session` once it exists (parked in a local
+   * by the caller, same pattern as `onStartRef`). The template provider's
+   * sandbox accessor uses it to reach `session.sandbox` — but ONLY when the
+   * attachment is already `ready`, so listing commands never provisions a
+   * sandbox. Repo templates become readable once workspace prep finishes; the
+   * host calls `session.refreshCommandRegistry()` on each `ready` transition
+   * (see `trackHibernationWake`) so the registry picks them up then.
+   *
+   * `pluginCommands` and `pluginCatalog` are wired TOGETHER from the SAME
+   * `ActionPlugin[]` that backs the LLM `call_tool` tool (via
+   * `pluginSessionExtras`) — a command entry resolves through the registry, and
+   * its backing action runs against this catalog, so approval policy and arg
+   * validation stay identical to the tool path. Wiring one without the other
+   * makes every plugin command fail with "no plugin catalog is configured".
+   *
+   * No `commandRequestDecision` is supplied: a slash command is not a claimed
+   * turn, so it cannot suspend one on a decision gate, and the host has no
+   * synchronous approve path (approvals resolve asynchronously over REST).
+   * An approval-requiring plugin command therefore denies by default (Task 7
+   * behavior), which is the safe outcome until a command-scoped async approval
+   * flow exists.
+   *
+   * Returns `undefined` when the host has no `db` (tests that don't wire one) —
+   * the session then builds with no command providers, same as before.
+   */
+  private async buildCommandOptions(
+    userId: string,
+    orgId: string,
+    sessionId: string,
+    getSession: () => Session | undefined,
+  ): Promise<
+    | {
+        templateProvider: TemplateProvider;
+        commandContext: CommandContext;
+        bareSkillNames: boolean;
+        pluginCommands: Array<{ pluginName: string; def: CommandDef }>;
+        pluginCatalog: PluginCatalog;
+      }
+    | undefined
+  > {
+    const db = this.opts.db;
+    if (!db) return undefined;
+
+    const bareRows = await db
+      .select({ bareSkillCommands: users.bareSkillCommands })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
+
+    const templateProvider = makeTemplateProvider(db, userId, () => {
+      const session = getSession();
+      // Only reach for the sandbox once it is provisioned — listing commands
+      // must never trigger a cold start just to read repo templates.
+      if (!session || session.attachment.state !== "ready") return undefined;
+      return session.sandbox as Sandbox;
+    });
+    const commandContext = makeCommandContext(db, this.opts.engineCredentials, orgId, sessionId);
+
+    const plugins = this.opts.plugins ?? [];
+    const pluginCommands = plugins.flatMap((p) =>
+      (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
+    );
+    const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
+    const pluginCatalog = buildPluginCatalog(actionPlugins);
+
+    return { templateProvider, commandContext, bareSkillNames, pluginCommands, pluginCatalog };
   }
 
   /**

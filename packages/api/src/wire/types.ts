@@ -12,6 +12,7 @@
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 import type { RepoListItem } from "@valet/sdk/repos";
+import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 
 // ── Common ────────────────────────────────────────────────────────────────
 
@@ -1652,4 +1653,17 @@ export interface HealthResponse {
   /** Resolved sandbox backend (`docker` | `local` | `kubernetes`) the server
    * is running. Append-only; existing consumers ignore it. */
   sandboxBackend?: string;
+}
+
+// ── REST: slash commands (slash-commands plan, Task 10) ──────────────────
+//
+// `GET /api/sessions/:id/commands` — the merged command registry for a
+// session: built-ins, skills, user + repo templates, and plugin commands, plus
+// any registry diagnostics (name collisions, shadowed entries). `CommandInfo`
+// and `RegistryDiagnostic` are the engine's own registry shapes, forwarded
+// as-is.
+
+export interface ListCommandsResponse {
+  commands: CommandInfo[];
+  diagnostics: RegistryDiagnostic[];
 }
