@@ -11,7 +11,7 @@
  * Task 11 extends the Members describe block with the invite dialog + the
  * pending-invites list, mocking `~/api/invites` the same way.
  */
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -88,6 +88,9 @@ let invitesData: {
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
+  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
+    <a {...rest}>{children}</a>
+  ),
 }));
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
@@ -144,6 +147,11 @@ vi.mock("~/api/skill-sources", () => ({
   useAddSkillSource: () => ({ mutate: addSourceMutate, isPending: false, error: null }),
   useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+// The Library page's org skills panel reads the shared skills catalog.
+vi.mock("~/api/skills", () => ({
+  useSkills: () => ({ data: { skills: [] }, isLoading: false, error: null }),
 }));
 
 import { OrganizationGeneralPage } from "./settings.organization.index";

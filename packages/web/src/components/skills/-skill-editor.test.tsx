@@ -19,6 +19,7 @@ vi.mock("~/api/skills", () => ({
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] } }),
+  useOrg: () => ({ data: { callerRole: "member" }, isLoading: false, error: null }),
 }));
 
 // The split markdown editor pulls in CodeMirror; a plain textarea stand-in
@@ -41,6 +42,7 @@ const promptSkill: SkillResponse = {
   updatedAt: 0,
   invocation: "prompt",
   content: "Summarize $1 for $@",
+  editable: true,
 };
 
 describe("previewPromptBody", () => {
