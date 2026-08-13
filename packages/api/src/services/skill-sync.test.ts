@@ -575,6 +575,29 @@ Read the reference.
     expect(rows.some((r) => r.name === "status")).toBe(false);
   });
 
+  // F4 (skill-sync): a skill directory named after a reserved builtin is
+  // skipped with a per-file warning; the rest of the sync continues.
+  it("skips a skill directory whose name is a reserved builtin command", async () => {
+    const f = serve({
+      sha: "commit-1",
+      skills: {
+        status: skillMd("status", "Shows status."),
+        good: skillMd("good", "A safe skill."),
+      },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.status).toBe("warning");
+    // The reserved-name directory is warned about.
+    expect(outcome?.warnings.join(" ")).toContain("status");
+    // The good skill is still imported.
+    const rows = await db.select().from(skills);
+    expect(rows.some((r) => r.name === "good")).toBe(true);
+    expect(rows.some((r) => r.name === "status")).toBe(false);
+  });
+
   describe("the sweep", () => {
     it("leases what it claims, so a second claim at the same instant gets nothing", async () => {
       const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });

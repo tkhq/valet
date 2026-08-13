@@ -42,4 +42,13 @@ describe("buildCommandRegistry", () => {
     expect(r.nearMiss("zzzzzz")).toBeUndefined();
     expect(r.nearMiss("status")).toBeUndefined(); // exact match is not a near-miss
   });
+
+  it("two same-named skills produce one skill:<name> entry resolving to the later one", () => {
+    const first = { name: "review", description: "First version", content: "# v1" };
+    const second = { name: "review", description: "Second version", content: "# v2" };
+    const r = buildCommandRegistry({ skills: [first, second], pluginCommands: [], bareSkillNames: false });
+    const entries = r.list().filter((c) => c.name === "skill:review");
+    expect(entries).toHaveLength(1);
+    expect(r.resolve("skill:review")).toMatchObject({ source: "skill", skill: second });
+  });
 });

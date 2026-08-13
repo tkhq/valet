@@ -590,6 +590,14 @@ function parseSkillFile(raw: string, directoryName: string): ParsedSkillFile {
     name: parsed.frontmatter.name ?? directoryName,
   };
   const violations = validateSkillFrontmatter(frontmatter, { directoryName });
+  // Reject reserved builtin names so a repo skill cannot shadow a built-in command.
+  if ((BUILTIN_COMMAND_NAMES as readonly string[]).includes(directoryName)) {
+    violations.push({
+      field: "name",
+      severity: "error",
+      message: `"${directoryName}" is a reserved built-in command name. Rename the skill directory.`,
+    });
+  }
   return {
     name: typeof frontmatter.name === "string" ? frontmatter.name : directoryName,
     description: typeof frontmatter.description === "string" ? frontmatter.description : "",

@@ -78,7 +78,7 @@ export async function executeBuiltin(
 
 function helpCommand(session: Session): BuiltinResult {
   const infos = session.commandRegistry().list();
-  const order = { builtin: 0, plugin: 1, skill: 2, template: 3 } as const;
+  const order = { builtin: 0, plugin: 1, skill: 2 } as const;
   const grouped = [...infos].sort((a, b) => {
     const d = order[a.source] - order[b.source];
     return d !== 0 ? d : a.name.localeCompare(b.name);

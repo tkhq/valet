@@ -68,6 +68,10 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
 
   function register(name: string, resolved: ResolvedCommand, info: CommandInfo): void {
     map.set(name, resolved);
+    const idx = infos.findIndex((i) => i.name === name);
+    if (idx !== -1) {
+      infos.splice(idx, 1);
+    }
     infos.push(info);
   }
 
