@@ -1055,8 +1055,12 @@ export interface CreateSkillSourceRequest {
   ref?: string;
   subpath?: string;
   /** Track the repository for a team the caller belongs to instead of for
-   * the caller. A non-member or unknown id 404s. */
+   * the caller. A non-member or unknown id 404s. Mutually exclusive with
+   * `ownerType: "org"`. */
   teamId?: string;
+  /** Track the repository for the org instead of for the caller.
+   * Requires the caller to be an org admin; a non-admin gets 403. */
+  ownerType?: "user" | "team" | "org";
 }
 
 /** What a sync did. Returned by the create route too, because adding a

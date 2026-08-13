@@ -315,6 +315,18 @@ skillsRouter.post("/sources", async (c) => {
   }
 
   const { db, skillSync } = c.var.providers;
+
+  // Org-owned source: require org admin.
+  if (body.ownerType === "org") {
+    const adminCheck = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+    if (!adminCheck) {
+      return c.json(
+        { error: "Only an org admin can add an org source. Ask an admin, or add it as a personal source." },
+        403,
+      );
+    }
+  }
+
   let sourceId: string;
   try {
     const row = await createSkillSource(db, owner(c), {
@@ -322,6 +334,7 @@ skillsRouter.post("/sources", async (c) => {
       ref: body.ref,
       subpath: body.subpath,
       teamId: body.teamId,
+      ownerType: body.ownerType,
     });
     sourceId = row.id;
   } catch (err) {
@@ -337,7 +350,8 @@ skillsRouter.post("/sources", async (c) => {
 
 skillsRouter.post("/sources/:id/sync", async (c) => {
   const { db, skillSync } = c.var.providers;
-  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!row) return c.json({ error: "skill source not found" }, 404);
 
   await markSkillSourceDue(db, row.id);
@@ -347,7 +361,8 @@ skillsRouter.post("/sources/:id/sync", async (c) => {
 
 skillsRouter.delete("/sources/:id", async (c) => {
   const { db } = c.var.providers;
-  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!deleted) return c.json({ error: "skill source not found" }, 404);
   const resp: DeleteSkillSourceResponse = { ok: true };
   return c.json(resp);
