@@ -17,6 +17,7 @@ import { and, eq } from "drizzle-orm";
 import {
   orchestratorSessionId,
   type ChannelTransport,
+  type CommandResultEntry,
   type CredentialStore,
   type DecisionAction,
   type DecisionGate,
@@ -302,7 +303,7 @@ export class ChannelHost {
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.outboundUnsub = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_end", "decision_gate", "decision_gate_resolved"] },
+      { eventTypes: ["message_end", "decision_gate", "decision_gate_resolved", "command_result"] },
       (event) => {
         void this.handleOutboundEvent(event);
       },
@@ -324,6 +325,8 @@ export class ChannelHost {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
         await this.deliverGateResolution(e.gateId, e.resolution);
+      } else if (e.type === "command_result") {
+        await this.deliverCommandResult(event.sessionId, e.threadId, e.entry);
       }
     } catch (err) {
       console.error("[channels] outbound delivery failed", err);
@@ -403,6 +406,34 @@ export class ChannelHost {
       }
       // "text" ToolAttachment variant is skipped (rule 2).
     }
+  }
+
+  /**
+   * Rule 6: command_result → send the result markdown to the channel the
+   * command came from. A slash command sent from Telegram or Slack must
+   * answer there — the web UI reads the same entry over REST/WS. Dedup on
+   * the entry id, same LRU as assistant messages.
+   */
+  private async deliverCommandResult(
+    sessionId: string,
+    threadId: string | undefined,
+    entry: CommandResultEntry,
+  ): Promise<void> {
+    if (!threadId) return;
+    const thread = await this.deps.engineStore.getThread(sessionId, threadId);
+    if (!thread) return;
+    const mapped = this.channelThreadFor(thread.key);
+    if (!mapped) return;
+
+    const dedupeKey = `${sessionId}:${entry.id}`;
+    if (this.delivered.has(dedupeKey)) return;
+    this.markDelivered(dedupeKey);
+
+    const transport = this.transports.get(mapped.channelType);
+    if (!transport) return;
+
+    const markdown = `\`${entry.command}\`\n${entry.output}`;
+    await transport.send(mapped.conversationKey, { markdown });
   }
 
   /** Rule 3: decision_gate → sendGatePrompt, record refs for the inbound gate_callback path. */
