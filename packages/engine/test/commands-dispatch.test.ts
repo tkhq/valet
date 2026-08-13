@@ -5,7 +5,6 @@ import { dispatchCommand } from "../src/commands/dispatch.js";
 // Base registry: only built-ins (status, model, etc.)
 const reg = buildCommandRegistry({
   skills: [],
-  templates: [],
   pluginCommands: [],
   bareSkillNames: false,
 });
@@ -18,24 +17,17 @@ const reviewSkill = {
 
 const regWithSkill = buildCommandRegistry({
   skills: [reviewSkill],
-  templates: [],
   pluginCommands: [],
   bareSkillNames: false,
 });
 
-const fixTemplate = {
-  name: "fix",
-  description: "Fix something",
-  content: "Fix $1 with priority $2",
-  origin: "repo" as const,
+const promptSkill = {
+  name: "standup",
+  description: "Daily standup",
+  content: "Summarize $1 today. Audience: $2.",
+  invocation: "prompt" as const,
+  argHint: "<topic> [audience]",
 };
-
-const regWithTemplate = buildCommandRegistry({
-  skills: [],
-  templates: [fixTemplate],
-  pluginCommands: [],
-  bareSkillNames: false,
-});
 
 describe("dispatchCommand", () => {
   it("passes plain text through", () =>
@@ -52,19 +44,27 @@ describe("dispatchCommand", () => {
     if (o.kind === "execute") expect(o.args).toEqual(["claude-opus-4-8"]);
   });
 
-  it("expands a skill command into a skill block with args appended", () => {
+  it("context-invocation skills keep the <skill> wrap (default)", () => {
     const o = dispatchCommand("/skill:review src/", regWithSkill);
     expect(o.kind).toBe("expand");
     if (o.kind === "expand") {
-      expect(o.text).toContain('<skill name="review"');
+      expect(o.text).toContain('<skill name="review">');
       expect(o.text.endsWith("src/")).toBe(true);
     }
   });
 
-  it("expands a template with substitution", () => {
-    // template "fix" content: "Fix $1 with priority $2"
-    const o = dispatchCommand('/fix auth "P1 high"', regWithTemplate);
-    if (o.kind === "expand") expect(o.text).toBe("Fix auth with priority P1 high");
+  it("prompt-invocation skills substitute args and expand bare", () => {
+    const promptReg = buildCommandRegistry({
+      skills: [promptSkill],
+      pluginCommands: [],
+      bareSkillNames: false,
+    });
+    const o = dispatchCommand('/skill:standup auth "the team"', promptReg);
+    expect(o.kind).toBe("expand");
+    if (o.kind === "expand") {
+      expect(o.text).toBe("Summarize auth today. Audience: the team.");
+      expect(o.text).not.toContain("<skill");
+    }
   });
 
   it("multi-line text starting with / only matches on the first line's first token", () =>

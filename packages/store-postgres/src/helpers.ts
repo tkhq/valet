@@ -62,7 +62,7 @@ export function asStringOrNull(value: unknown, field: string): string | null {
  * Invalid values fall back to "builtin".
  */
 export function asCommandSource(value: unknown): CommandResultEntry["source"] {
-  const validSources: CommandResultEntry["source"][] = ["builtin", "skill", "template", "plugin"];
+  const validSources: CommandResultEntry["source"][] = ["builtin", "skill", "plugin"];
   if (typeof value === "string" && validSources.includes(value as CommandResultEntry["source"])) {
     return value as CommandResultEntry["source"];
   }

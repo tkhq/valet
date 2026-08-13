@@ -3,14 +3,12 @@ import {
   BUILTIN_COMMAND_NAMES,
   type CommandDef,
   type CommandInfo,
-  type PromptTemplate,
   type RegistryDiagnostic,
   type ResolvedCommand,
 } from "./types.js";
 
 export interface BuildRegistryInput {
   skills: SkillSource[];
-  templates: PromptTemplate[];
   pluginCommands: Array<{ pluginName: string; def: CommandDef }>;
   bareSkillNames: boolean;
 }
@@ -63,7 +61,7 @@ function levenshtein(a: string, b: string): number {
 }
 
 export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry {
-  const { skills, templates, pluginCommands, bareSkillNames } = input;
+  const { skills, pluginCommands, bareSkillNames } = input;
   const map = new Map<string, ResolvedCommand>();
   const infos: CommandInfo[] = [];
   const diags: RegistryDiagnostic[] = [];
@@ -126,6 +124,7 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
       name: prefixedName,
       description: skill.description ?? skill.name,
       source: "skill",
+      ...(skill.argHint !== undefined ? { argHint: skill.argHint } : {}),
     };
     register(prefixedName, prefixedResolved, prefixedInfo);
 
@@ -136,6 +135,7 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
         name: bareName,
         description: skill.description ?? skill.name,
         source: "skill",
+        ...(skill.argHint !== undefined ? { argHint: skill.argHint } : {}),
       };
       if (map.has(bareName)) {
         const existing = map.get(bareName);
@@ -143,40 +143,6 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
       } else {
         register(bareName, bareResolved, bareInfo);
       }
-    }
-  }
-
-  // 4. Templates: repo first, then user (user overwrites repo, recording a diagnostic)
-  const repoTemplates = templates.filter((t) => t.origin === "repo");
-  const userTemplates = templates.filter((t) => t.origin === "user");
-
-  for (const tmpl of repoTemplates) {
-    const resolved: ResolvedCommand = { source: "template", template: tmpl };
-    const info: CommandInfo = {
-      name: tmpl.name,
-      description: tmpl.description ?? tmpl.name,
-      source: "template",
-    };
-    if (map.has(tmpl.name)) {
-      const existing = map.get(tmpl.name);
-      overwrite(tmpl.name, resolved, info, existing?.source ?? "unknown");
-    } else {
-      register(tmpl.name, resolved, info);
-    }
-  }
-
-  for (const tmpl of userTemplates) {
-    const resolved: ResolvedCommand = { source: "template", template: tmpl };
-    const info: CommandInfo = {
-      name: tmpl.name,
-      description: tmpl.description ?? tmpl.name,
-      source: "template",
-    };
-    if (map.has(tmpl.name)) {
-      const existing = map.get(tmpl.name);
-      overwrite(tmpl.name, resolved, info, existing?.source ?? "unknown");
-    } else {
-      register(tmpl.name, resolved, info);
     }
   }
 

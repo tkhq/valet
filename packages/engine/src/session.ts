@@ -10,7 +10,6 @@ import { GateManager, fromRequest, isDecisionGateExpired } from "./decision-gate
 import type {
   CommandDef,
   CommandSource,
-  PromptTemplate,
   ResolvedCommand,
 } from "./commands/types.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
@@ -227,8 +226,9 @@ export class Session {
    * command.
    */
   private commandGates = new GateManager();
-  /** Cached templates from options.templateProvider; null === not yet loaded. */
-  private templateCache: PromptTemplate[] | null = null;
+  /** Cached workspace skills from options.workspaceSkillsProvider; null === not
+   * yet loaded. */
+  private workspaceSkillsCache: SkillSource[] | null = null;
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -895,8 +895,7 @@ export class Session {
   commandRegistry(): CommandRegistry {
     if (this.commandRegistryCache) return this.commandRegistryCache;
     const registry = buildCommandRegistry({
-      skills: [...this.skills.values()],
-      templates: this.templateCache ?? [],
+      skills: [...this.skills.values(), ...(this.workspaceSkillsCache ?? [])],
       pluginCommands: this.options.pluginCommands ?? [],
       bareSkillNames: this.options.bareSkillNames ?? false,
     });
@@ -905,16 +904,16 @@ export class Session {
   }
 
   /**
-   * Invalidate the cached command registry and refresh templates from the
-   * host `templateProvider` (if any). Call after workspace prep and on any
-   * event that also refreshes `Session.skills`. Idempotent.
+   * Invalidate the cached command registry and refresh workspace skills from
+   * the host `workspaceSkillsProvider` (if any). Call after workspace prep and
+   * on any event that also refreshes `Session.skills`. Idempotent.
    */
   async refreshCommandRegistry(): Promise<void> {
-    const provider = this.options.templateProvider;
+    const provider = this.options.workspaceSkillsProvider;
     // Load first, invalidate after: when the provider throws, the previous
-    // registry (and its template list) keeps serving — a stale list beats an
+    // registry (and its skill list) keeps serving — a stale list beats an
     // empty one mid-session. The rejection still reaches the caller.
-    this.templateCache = provider ? await provider.listTemplates() : [];
+    this.workspaceSkillsCache = provider ? await provider() : [];
     this.commandRegistryCache = null;
   }
 

@@ -1335,6 +1335,12 @@ export interface SkillSource {
    * pre-approved tools. Experimental in the spec, and Valet does not act
    * on it yet. */
   allowedTools?: string;
+  /** How a slash invocation expands. "context" (default): wrap in <skill>
+   * tags, append args. "prompt": substitute $1/$@ into the body, send bare.
+   * Prompt skills are never surfaced as capability documentation. */
+  invocation?: "context" | "prompt";
+  /** Autocomplete hint for the first argument, e.g. "<topic> [audience]". */
+  argHint?: string;
 }
 
 export interface SkillInvokeOptions {
@@ -1522,12 +1528,12 @@ export interface CreateSessionOptions {
    */
   commandContext?: import("./commands/types.js").CommandContext;
   /**
-   * Host-injected prompt-template source for slash commands (`/my-template`).
-   * Absent === no templates. Read lazily and cached; the host calls
+   * Host-injected workspace-skill source for slash commands. Absent === no
+   * workspace skills. Read lazily and cached; the host calls
    * `Session.refreshCommandRegistry()` after workspace prep and on any event
    * that also refreshes skills.
    */
-  templateProvider?: import("./commands/types.js").TemplateProvider;
+  workspaceSkillsProvider?: () => Promise<SkillSource[]>;
   /**
    * When true, a skill named `review` also registers a bare `/review` command
    * in addition to the always-present `/skill:review`. Default false.

@@ -166,8 +166,6 @@ export {
   type CommandInfo,
   type RegistryDiagnostic,
   type CommandDef,
-  type PromptTemplate,
-  type TemplateProvider,
   type CommandContext,
   type ResolvedCommand,
 } from "./commands/types.js";

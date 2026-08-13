@@ -12,8 +12,8 @@ export type DispatchOutcome =
  *
  * - Plain text (no leading `/`): pass through.
  * - Unknown `/word`: pass through with an optional near-miss hint.
- * - Skill command: expand to a `<skill>` block with optional raw args appended.
- * - Template command: expand by substituting positional args into template content.
+ * - Context-invocation skill: expand to a `<skill>` block with raw args appended.
+ * - Prompt-invocation skill: expand by substituting positional args into the body.
  * - Builtin / plugin command: return an execute outcome with parsed args.
  *
  * The command token is the text up to the first whitespace (space or newline),
@@ -40,16 +40,12 @@ export function dispatchCommand(text: string, registry: CommandRegistry): Dispat
   switch (resolved.source) {
     case "skill": {
       const { skill } = resolved;
+      if (skill.invocation === "prompt") {
+        const args = parseCommandArgs(raw);
+        return { kind: "expand", text: substituteArgs(skill.content, args) };
+      }
       const block = `<skill name="${skill.name}">\n${skill.content.trim()}\n</skill>`;
-      const text = raw ? `${block}\n\n${raw}` : block;
-      return { kind: "expand", text };
-    }
-
-    case "template": {
-      const { template } = resolved;
-      const args = parseCommandArgs(raw);
-      const expanded = substituteArgs(template.content, args);
-      return { kind: "expand", text: expanded };
+      return { kind: "expand", text: raw ? `${block}\n\n${raw}` : block };
     }
 
     case "builtin":

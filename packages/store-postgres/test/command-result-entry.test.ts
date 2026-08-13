@@ -164,7 +164,7 @@ function runCommandResultSuite(label: string, getDb: () => PgDb) {
       expect(retrieved.output).toBe(complexOutput);
     });
 
-    it("supports all CommandSource values: builtin, skill, template, plugin", async () => {
+    it("supports all CommandSource values: builtin, skill, plugin", async () => {
       await store.saveSession({
         id: "sess-3",
         owner: { type: "user", id: "u3" },
@@ -190,7 +190,6 @@ function runCommandResultSuite(label: string, getDb: () => PgDb) {
       const sources: Array<{ source: CommandResultEntry["source"]; desc: string }> = [
         { source: "builtin", desc: "built-in" },
         { source: "skill", desc: "skill" },
-        { source: "template", desc: "template" },
         { source: "plugin", desc: "plugin" },
       ];
 
@@ -210,7 +209,7 @@ function runCommandResultSuite(label: string, getDb: () => PgDb) {
       await store.appendEntries("sess-3", "th-3", entries);
 
       const loaded = await store.getEntries("sess-3", "th-3");
-      expect(loaded).toHaveLength(4);
+      expect(loaded).toHaveLength(3);
 
       sources.forEach((s, i) => {
         const retrieved = loaded[i];
