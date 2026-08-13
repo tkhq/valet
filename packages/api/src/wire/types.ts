@@ -13,6 +13,7 @@
  */
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
+export type { CommandInfo, RegistryDiagnostic };
 
 // ── Common ────────────────────────────────────────────────────────────────
 

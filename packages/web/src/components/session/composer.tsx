@@ -4,6 +4,8 @@ import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useCommands } from "~/hooks/use-commands";
+import { CommandPopup } from "./command-popup";
 
 export function Composer({
   sessionId,
@@ -28,6 +30,20 @@ export function Composer({
   // from under whatever the user is typing.
   const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Slash-command autocomplete: derive the command query from the current text.
+  // The popup opens only while the entire message matches /^\/(\S*)$/ — a lone
+  // command token. Dispatch remains server-side; the composer sends text unchanged.
+  const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
+  const { data: commandsData } = useCommands(sessionId);
+  const allCommands = commandsData?.commands ?? [];
+  const filteredCommands = commandQuery !== null
+    ? allCommands.filter((c) => c.name.startsWith(commandQuery))
+    : [];
+  const popupOpen = commandQuery !== null && filteredCommands.length > 0;
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  // Reset selection when the filtered list changes.
+  useEffect(() => { setSelectedIndex(0); }, [filteredCommands.length, commandQuery]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
   // request fires, so a mount-time consume would miss it.
@@ -82,7 +98,46 @@ export function Composer({
     }
   }
 
+  function insertCommand(name: string) {
+    setText(`/${name} `);
+    setSelectedIndex(0);
+  }
+
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // While the popup is open, intercept navigation keys. IME composition
+    // guard applies here too — composition events must not trigger navigation.
+    if (popupOpen && !e.nativeEvent.isComposing) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((i) => Math.min(i + 1, filteredCommands.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        insertCommand(filteredCommands[selectedIndex].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Append a space so the text no longer matches the lone-token pattern,
+        // which closes the popup while leaving the typed prefix in place.
+        setText(text + " ");
+        return;
+      }
+      if (e.key === "Enter") {
+        // Confirm selection — do NOT send.
+        if (e.shiftKey || e.nativeEvent.isComposing) return;
+        e.preventDefault();
+        insertCommand(filteredCommands[selectedIndex].name);
+        return;
+      }
+    }
+
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
     // sending a half-finished message.
@@ -101,7 +156,16 @@ export function Composer({
       className="border-t border-[--border] p-3 bg-[--bg]"
     >
       <QueueIndicator queueState={queueState} />
-      <div className="flex gap-2 items-end">
+      <div className="relative flex gap-2 items-end">
+        {popupOpen && (
+          <CommandPopup
+            commands={filteredCommands}
+            query={commandQuery ?? ""}
+            selectedIndex={selectedIndex}
+            onSelect={insertCommand}
+            onClose={() => setText(text + " ")}
+          />
+        )}
         <Textarea
           ref={inputRef}
           value={text}

@@ -105,6 +105,7 @@ import type {
   UsageSummaryResponse,
   UpdateWorkflowResponse,
   WithdrawDecisionRequest,
+  ListCommandsResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -279,6 +280,13 @@ export const api = {
     request<{ ok: true }>(
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
+    ),
+
+  // slash commands
+  listCommands: (sessionId: string) =>
+    request<ListCommandsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/commands`,
     ),
 
   // decision gates
