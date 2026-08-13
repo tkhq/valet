@@ -31,10 +31,14 @@ function skillMd(name: string, description: string, body = "Do the thing."): str
 /** Directory name to its `SKILL.md`. `null` means a directory with no
  * `SKILL.md` in it — a directory that is not a skill. */
 type RepoSkills = Record<string, string | null>;
+/** Prompt file name (without .md) to its Markdown content. */
+type RepoPrompts = Record<string, string>;
 
 interface FakeRepo {
   sha: string;
   skills: RepoSkills;
+  /** Prompt files in `<root>/prompts/`, keyed by filename without `.md`. */
+  prompts?: RepoPrompts;
   /** Files beside the skill directories, e.g. `README.md`. */
   files?: string[];
   /** Directory the skill directories sit in. Empty means the root. */
@@ -50,6 +54,8 @@ function serve(repo: FakeRepo): GithubFixture {
     getCommit: () => ({ body: { sha: repo.sha } }),
     getContents: (_owner, _name, path) => {
       const root = repo.root ?? "";
+      const prefix = root.length > 0 ? `${root}/` : "";
+      // Root listing: skill directories + loose files.
       if (path === root) {
         return {
           body: [
@@ -58,7 +64,30 @@ function serve(repo: FakeRepo): GithubFixture {
           ],
         };
       }
-      const prefix = root.length > 0 ? `${root}/` : "";
+      // prompts/ directory listing.
+      const promptsDir = root.length > 0 ? `${root}/prompts` : "prompts";
+      if (path === promptsDir) {
+        const prompts = repo.prompts ?? {};
+        return {
+          body: Object.keys(prompts).map((name) => entry(`${name}.md`, "file")),
+        };
+      }
+      // Individual prompt file read.
+      const promptFileMatch = new RegExp(`^${escapeRegex(promptsDir)}/([^/]+)\\.md$`).exec(path);
+      if (promptFileMatch) {
+        const name = promptFileMatch[1];
+        const content = name !== undefined ? (repo.prompts ?? {})[name] : undefined;
+        if (typeof content !== "string") return { status: 404, body: { message: "Not Found" } };
+        return {
+          body: {
+            type: "file",
+            encoding: "base64",
+            content: Buffer.from(content, "utf8").toString("base64"),
+            sha: `blob-prompt-${name}`,
+          },
+        };
+      }
+      // SKILL.md read for a skill directory.
       const match = /^(.*)\/SKILL\.md$/.exec(path);
       const dir = match?.[1]?.slice(prefix.length);
       const content = dir === undefined ? undefined : repo.skills[dir];
@@ -74,6 +103,10 @@ function serve(repo: FakeRepo): GithubFixture {
     },
   });
   return fixture;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function entry(name: string, type: "file" | "dir") {
@@ -452,6 +485,42 @@ Read the reference.
   it("returns null for a source that is gone", async () => {
     fixture = startGithubFixture({});
     expect(await serviceFor(fixture).syncOnce("skillsrc_missing")).toBeNull();
+  });
+
+  it("imports prompts/*.md as prompt-invocation skills", async () => {
+    const f = serve({
+      sha: "commit-1",
+      skills: { deploy: skillMd("deploy", "Deploy it.") },
+      prompts: { standup: "---\ndescription: Daily standup\n---\nSummarize $1" },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.status).toBe("ok");
+    expect(outcome?.imported).toBe(2);
+    const rows = await db.select().from(skills).orderBy(skills.name);
+    const prompt = rows.find((r) => r.name === "standup");
+    expect(prompt?.frontmatter).toMatchObject({ invocation: "prompt" });
+  });
+
+  it("a malformed prompt file warns and does not block the sync", async () => {
+    const f = serve({
+      sha: "commit-1",
+      skills: {},
+      prompts: {
+        bad: "---\ninvocation: sideways\n---\nx",
+        good: "Body $1",
+      },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.status).toBe("warning");
+    const rows = await db.select().from(skills);
+    expect(rows.some((r) => r.name === "good")).toBe(true);
+    expect(rows.some((r) => r.name === "bad")).toBe(false);
   });
 
   describe("the sweep", () => {
