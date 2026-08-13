@@ -32,7 +32,7 @@ import type {
   ThreadSummary,
   WithdrawDecisionRequest,
 } from "../wire/types.js";
-import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
+import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 
 export const messagesRouter = new Hono<AppEnv>();
@@ -49,7 +49,10 @@ async function loadOwnedSession(c: Context<AppEnv>) {
   return rows[0] ?? null;
 }
 
-function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
+export function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
+  if (e.type === "command_result") {
+    return commandResultEntryToMessage(e, sessionId, threadId);
+  }
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -290,7 +293,13 @@ messagesRouter.post("/:id/messages", async (c) => {
   const thread = resolveThread(engineSession, body.threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  const receipt = await thread.submitPrompt(body.text, {});
+  // Route slash commands through `session.prompt()` so command detection and
+  // dispatch fire. Regular prompts go directly to `thread.submitPrompt()` to
+  // preserve thread targeting. Commands always execute on the default thread
+  // (engine invariant: `session.prompt()` uses `this.thread()`).
+  const receipt = body.text.startsWith("/")
+    ? await engineSession.prompt(body.text, {})
+    : await thread.submitPrompt(body.text, {});
 
   // Touch the session row so list ordering reflects recency.
   await db
@@ -300,7 +309,7 @@ messagesRouter.post("/:id/messages", async (c) => {
 
   const resp: SendPromptResponse = {
     messageId: receipt.queueItemId,
-    threadId: thread.id,
+    threadId: receipt.threadId,
   };
   return c.json(resp, 202);
 });

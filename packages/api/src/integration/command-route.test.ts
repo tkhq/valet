@@ -1,10 +1,15 @@
 /**
- * Integration tests for `GET /api/sessions/:id/commands` (slash-commands plan,
- * Task 10).
+ * Integration tests for the slash-commands plan (Tasks 10 and 11).
  *
+ * Task 10 — `GET /api/sessions/:id/commands`:
  *   1. A saved user template appears in the merged registry next to built-ins.
  *   2. A repo template under `/workspace/.valet/prompts` appears only after
  *      workspace prep — the session's sandbox reads it once it is ready.
+ *
+ * Task 11 — `command_result` REST round-trip:
+ *   3. Submitting "/status" through the real stack produces a message with
+ *      `command.name === "status"`, `command.ok === true`, and non-empty
+ *      `content` (the TEXT is reachable on reload, not just during live WS).
  */
 import { describe, expect, it, afterEach } from "vitest";
 import type {
@@ -19,7 +24,12 @@ import type {
 import { VirtualSandboxProvider } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { userPromptTemplates } from "../schema/index.js";
-import type { CreateSessionResponse, ListCommandsResponse } from "../wire/types.js";
+import type {
+  CreateSessionResponse,
+  ListCommandsResponse,
+  ListMessagesResponse,
+  SendPromptResponse,
+} from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 
@@ -88,6 +98,40 @@ describe("GET /api/sessions/:id/commands", () => {
 
     const after = await getCommands(api.baseUrl, sessionId);
     expect(after.commands.some((cmd) => cmd.name === "deploy" && cmd.source === "template")).toBe(true);
+  });
+});
+
+describe("command_result REST round-trip (Task 11)", () => {
+  it("a builtin command round-trips to REST", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+
+    // Post the slash command as a regular prompt — the route detects the
+    // leading slash and dispatches through session.prompt() → executeCommand().
+    const postRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ text: "/status" }),
+    });
+    expect(postRes.status).toBe(202);
+    const postBody = (await postRes.json()) as SendPromptResponse;
+    expect(postBody.threadId).toBeTruthy();
+
+    // Read the transcript via REST — this is the reload path. The
+    // command_result entry must survive the entryToMessage conversion.
+    const msgsRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      headers: HEADERS,
+    });
+    expect(msgsRes.status).toBe(200);
+    const { messages } = (await msgsRes.json()) as ListMessagesResponse;
+
+    const cmd = messages.find((m) => m.command?.name === "status");
+    expect(cmd).toBeDefined();
+    expect(cmd?.command?.ok).toBe(true);
+    // The TEXT is reachable — not "(empty output)". This is the documented
+    // shape-drift regression (CLAUDE.md "Tool-call persistence round trip").
+    expect(cmd?.content.length).toBeGreaterThan(0);
+    expect(cmd?.role).toBe("system");
   });
 });
 

@@ -72,6 +72,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   "queue.state": true,
   "submission.settled": true,
   "sandbox.status": true,
+  command_result: true,
   ping: true,
 };
 

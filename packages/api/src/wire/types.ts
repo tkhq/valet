@@ -252,6 +252,17 @@ export interface MessageSignal {
   senderSessionId?: string;
 }
 
+/**
+ * Slash-command metadata on a `command_result` entry. Present only when
+ * `role === "system"` and the entry originated from a slash command.
+ * `name` is the command name without the leading slash.
+ */
+export interface MessageCommand {
+  name: string;
+  source: string;
+  ok: boolean;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -275,6 +286,12 @@ export interface Message {
    * as a card, never a user bubble (plan decision 3).
    */
   signal?: MessageSignal;
+  /**
+   * Present when this message is a `command_result` entry (slash-commands
+   * plan, Task 11). `name` is the command name without the leading slash.
+   * The renderer uses `ok` to show success/failure styling.
+   */
+  command?: MessageCommand;
 }
 
 export interface ListMessagesResponse {
@@ -482,6 +499,16 @@ export type WireEvent =
       state: string;
       epoch: number;
       estimateMs?: number;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "command_result";
+      /** Target thread id, if the command ran in a thread context. */
+      threadId?: string;
+      /** The completed command as a wire `Message` (role "system", content = output). */
+      message: Message;
     }
   | { seq: number; ts: number; offset?: string; type: "ping" };
 
