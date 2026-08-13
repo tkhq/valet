@@ -45,6 +45,7 @@ export function shadowNote(skill: StoredSkillSummary): string {
 export function originLabel(skill: SkillSummary): string {
   if (skill.origin === "plugin") return "Plugin";
   if (skill.origin === "repo") return "Repo";
+  if (skill.ownerType === "org") return "Org";
   return skill.ownerType === "team" ? "Team" : "Yours";
 }
 
