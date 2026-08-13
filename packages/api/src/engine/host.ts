@@ -537,14 +537,16 @@ export class EngineHost {
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
-    // Slash-command options (Task 10). The template provider's sandbox
+    // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
-    // the session doesn't exist yet at this point.
+    // the session doesn't exist yet at this point. `hasPrep` is true only when
+    // a specProvider exists: without prep there is no `/workspace/.valet/prompts`
+    // to scan (skills-as-commands plan, Task 4).
     const commandOptions = await this.buildCommandOptions(
-      meta.userId,
       meta.orgId,
       sessionId,
       () => builtSession,
+      specProvider !== undefined,
     );
     // Initial sandbox image: the stock default. The specProvider closure may
     // resolve a prebuild image override at provision time — the engine applies
@@ -845,16 +847,32 @@ export class EngineHost {
 
   /**
    * Assembles the slash-command options for a session build (slash-commands
-   * plan, Task 10): `workspaceSkillsProvider`, `commandContext`, `bareSkillNames`,
-   * and the plugin-command pair (`pluginCommands` + `pluginCatalog`).
+   * plan, Task 10; skills-as-commands plan, Task 4): `workspaceSkillsProvider`,
+   * `commandContext`, `bareSkillNames`, and the plugin-command pair
+   * (`pluginCommands` + `pluginCatalog`).
    *
    * `getSession` returns the built `Session` once it exists (parked in a local
-   * by the caller, same pattern as `onStartRef`). The template provider's
-   * sandbox accessor uses it to reach `session.sandbox` — but ONLY when the
-   * attachment is already `ready`, so listing commands never provisions a
-   * sandbox. Repo templates become readable once workspace prep finishes; the
-   * host calls `session.refreshCommandRegistry()` on each `ready` transition
-   * (see `trackHibernationWake`) so the registry picks them up then.
+   * by the caller, same pattern as `onStartRef`). The workspace-skills
+   * provider's sandbox accessor uses it to reach `session.sandbox` — but ONLY
+   * when the attachment is already `ready`, so listing commands never
+   * provisions a sandbox. Repo prompt skills become readable once workspace
+   * prep finishes; the host calls `session.refreshCommandRegistry()` on each
+   * `ready` transition (see `trackHibernationWake`) so the registry picks them
+   * up then.
+   *
+   * `hasPrep` (skills-as-commands plan, Task 4): the workspace-skills provider
+   * is wired ONLY when the session has a prepared workspace (a `specProvider`
+   * exists). Without prep, `/workspace/.valet/prompts` is meaningless — a
+   * non-isolated, repo-less session (and every sandbox-less orchestrator) execs
+   * against a workspace that no prep ever created — so the provider, and its
+   * `===VALET-TMPL` scan on the `ready` refresh, must not fire. When `hasPrep`
+   * is false, `workspaceSkillsProvider` is omitted and `refreshCommandRegistry`
+   * runs an empty scan. DB-stored prompt skills still reach the session through
+   * `sessionExtras` regardless of prep.
+   *
+   * `bareSkillNames` reads `orgs.bareSkillCommands` (Task 3): when the org sets
+   * it, stored/repo skills also register under their bare name in addition to
+   * the always-present `skill:<name>` entry.
    *
    * `pluginCommands` and `pluginCatalog` are wired TOGETHER from the SAME
    * `ActionPlugin[]` that backs the LLM `call_tool` tool (via
@@ -874,19 +892,17 @@ export class EngineHost {
    * the session then builds with no command providers, same as before.
    */
   /**
-   * `userId` is the PERSONAL user whose templates and bare-skill-names
-   * setting apply. Pass `undefined` for shared sessions (team/org
-   * orchestrators): a shared session must not carry whichever actor's
-   * personal configuration happened to wake it.
+   * `hasPrep` gates the workspace-skills provider — see the doc block above.
+   * Pass `true` only when the caller wired a `specProvider` for this build.
    */
   private async buildCommandOptions(
-    userId: string | undefined,
     orgId: string,
     sessionId: string,
     getSession: () => Session | undefined,
+    hasPrep: boolean,
   ): Promise<
     | {
-        workspaceSkillsProvider: () => Promise<SkillSource[]>;
+        workspaceSkillsProvider?: () => Promise<SkillSource[]>;
         commandContext: CommandContext;
         bareSkillNames: boolean;
         pluginCommands: Array<{ pluginName: string; def: CommandDef }>;
@@ -898,7 +914,7 @@ export class EngineHost {
     if (!db) return undefined;
 
     // Task 3: moved bareSkillCommands to org level; read from orgs table.
-    // (Was per-user users.bareSkillCommands — column removed in this task.)
+    // (Was per-user users.bareSkillCommands — column removed in that task.)
     const bareRows = await db
       .select({ bareSkillCommands: orgs.bareSkillCommands })
       .from(orgs)
@@ -906,13 +922,18 @@ export class EngineHost {
       .limit(1);
     const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
 
-    const workspaceSkillsProvider = makeWorkspaceSkillsProvider(() => {
-      const session = getSession();
-      // Only reach for the sandbox once it is provisioned — listing commands
-      // must never trigger a cold start just to read repo prompts.
-      if (!session || session.attachment.state !== "ready") return undefined;
-      return session.sandbox as Sandbox;
-    });
+    // Only a prepared workspace has a `/workspace/.valet/prompts` to scan; a
+    // non-isolated repo-less session and every sandbox-less orchestrator have
+    // none, so omit the provider (and its `===VALET-TMPL` exec) for them.
+    const workspaceSkillsProvider = hasPrep
+      ? makeWorkspaceSkillsProvider(() => {
+          const session = getSession();
+          // Only reach for the sandbox once it is provisioned — listing
+          // commands must never trigger a cold start just to read repo prompts.
+          if (!session || session.attachment.state !== "ready") return undefined;
+          return session.sandbox as Sandbox;
+        })
+      : undefined;
     const commandContext = makeCommandContext(db, this.opts.engineCredentials, orgId, sessionId);
 
     const plugins = this.opts.plugins ?? [];
@@ -922,7 +943,13 @@ export class EngineHost {
     const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
     const pluginCatalog = buildPluginCatalog(actionPlugins);
 
-    return { workspaceSkillsProvider, commandContext, bareSkillNames, pluginCommands, pluginCatalog };
+    return {
+      ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
+      commandContext,
+      bareSkillNames,
+      pluginCommands,
+      pluginCatalog,
+    };
   }
 
   /**
@@ -1016,15 +1043,16 @@ export class EngineHost {
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
     // fallback. The getter closes over `builtSession`, assigned below.
-    // Personal configuration (user templates, bare skill names) applies only
-    // when the orchestrator belongs to a user principal — a team or org
-    // orchestrator is shared, so no actor's personal settings apply.
+    // Orchestrators are sandbox-less (no specProvider), so `hasPrep` is false —
+    // no `/workspace/.valet/prompts` scan. `bareSkillNames` comes from the org
+    // row; DB-stored skills reach the orchestrator through `sessionExtras`,
+    // scoped by the principal (skills-as-commands plan, Task 4).
     let builtSession: Session | undefined;
     const commandOptions = await this.buildCommandOptions(
-      principal.type === "user" ? principal.id : undefined,
       meta.orgId,
       sessionId,
       () => builtSession,
+      false,
     );
     const sessionOptions = {
       userId: meta.actorUserId,

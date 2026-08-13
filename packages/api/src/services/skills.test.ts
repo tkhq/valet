@@ -16,6 +16,7 @@ import {
   listSkillSourcesFor,
   listSkills,
   ownedSkillRow,
+  rowToSkillSource,
   SkillNameConflictError,
   SkillNotLocalError,
   SkillValidationError,
@@ -324,5 +325,50 @@ describe("listSkillSourcesFor", () => {
 
   it("returns nothing for a principal with no skills", async () => {
     expect(await listSkillSourcesFor(db, { type: "user", id: "u2" }, ORG)).toEqual([]);
+  });
+});
+
+describe("rowToSkillSource", () => {
+  function skillRow(frontmatter: Record<string, unknown>): SkillRow {
+    const now = Date.now();
+    return {
+      id: "skill_x",
+      orgId: ORG,
+      ownerType: "user",
+      ownerId: "u1",
+      origin: "local",
+      sourceId: null,
+      name: "standup",
+      description: "Daily standup",
+      content: "Summarize $1",
+      frontmatter: { name: "standup", description: "Daily standup", ...frontmatter },
+      contentSha: "sha",
+      upstreamPath: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  it("maps invocation and argHint out of frontmatter", () => {
+    const src = rowToSkillSource(skillRow({ invocation: "prompt", argHint: "<topic>" }));
+    expect(src).toMatchObject({
+      name: "standup",
+      source: "user",
+      invocation: "prompt",
+      argHint: "<topic>",
+    });
+  });
+
+  it("omits invocation/argHint when absent or the wrong type", () => {
+    const src = rowToSkillSource(skillRow({ invocation: 42, argHint: { nope: true } }));
+    expect(src.invocation).toBeUndefined();
+    expect(src.argHint).toBeUndefined();
+  });
+
+  it("maps a repo-origin row to source 'repo'", () => {
+    const row = { ...skillRow({ invocation: "context" }), origin: "repo" as const };
+    const src = rowToSkillSource(row);
+    expect(src.source).toBe("repo");
+    expect(src.invocation).toBe("context");
   });
 });

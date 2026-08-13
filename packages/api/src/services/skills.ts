@@ -398,13 +398,25 @@ async function rowsForPrincipal(db: AppDb, principal: Principal, orgId: string):
 }
 
 /** A row as the engine sees it. `source` records where the markdown came
- * from: `user` for a skill someone wrote here, `repo` for a synced one. */
+ * from: `user` for a skill someone wrote here, `repo` for a synced one.
+ *
+ * `invocation` and `argHint` are read out of the `frontmatter` jsonb column
+ * (a stored prompt skill carries `invocation: "prompt"` there): they drive how
+ * the engine expands the slash command — a `"prompt"` skill substitutes args
+ * into its body and sends bare, a `"context"` skill wraps in `<skill>` tags.
+ * Both are omitted when absent or the wrong type, so the engine falls back to
+ * its `"context"` default. */
 export function rowToSkillSource(row: SkillRow): SkillSource {
+  const fm = asRecord(row.frontmatter);
+  const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
+  const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
   return {
     name: row.name,
     description: row.description,
     content: row.content,
     source: row.origin === "repo" ? "repo" : "user",
+    ...(invocation ? { invocation } : {}),
+    ...(argHint ? { argHint } : {}),
   };
 }
 
