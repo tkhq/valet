@@ -191,6 +191,7 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
       return map.get(name);
     },
     nearMiss(name: string): string | undefined {
+      if (map.has(name)) return undefined;
       const names = [...map.keys()];
       let best: string | undefined;
       let bestDist = Infinity;

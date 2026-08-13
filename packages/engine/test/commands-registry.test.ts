@@ -36,5 +36,6 @@ describe("buildCommandRegistry", () => {
     const r = buildCommandRegistry({ skills: [], templates: [], pluginCommands: [], bareSkillNames: false });
     expect(r.nearMiss("statsu")).toBe("status");
     expect(r.nearMiss("zzzzzz")).toBeUndefined();
+    expect(r.nearMiss("status")).toBeUndefined(); // exact match is not a near-miss
   });
 });
