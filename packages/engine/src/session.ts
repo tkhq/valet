@@ -6,6 +6,7 @@ import { dispatchCommand } from "./commands/dispatch.js";
 import { parseCommandArgs } from "./commands/args.js";
 import { executeBuiltin } from "./commands/builtins.js";
 import { invokeAction, type InvokeActionResult } from "./plugin-catalog.js";
+import { GateManager, fromRequest, isDecisionGateExpired } from "./decision-gate.js";
 import type {
   CommandDef,
   CommandSource,
@@ -217,6 +218,15 @@ export class Session {
   private threadsByKey = new Map<string, Thread>();
   /** Lazily-built slash-command registry; invalidated by refreshCommandRegistry(). */
   private commandRegistryCache: CommandRegistry | null = null;
+  /**
+   * Gates opened by approval-requiring plugin commands. Session-level, not
+   * thread-level: a command is not a claimed turn, so its gate never
+   * suspends a turn. Resolved through the same `resolveDecision` surface
+   * the turn gates use. Pending command gates do not survive a process
+   * restart — the durable gate row stays pending, and the user re-runs the
+   * command.
+   */
+  private commandGates = new GateManager();
   /** Cached templates from options.templateProvider; null === not yet loaded. */
   private templateCache: PromptTemplate[] | null = null;
   private destroyed = false;
@@ -722,12 +732,58 @@ export class Session {
     } else if (resolved.source === "plugin") {
       source = "plugin";
       name = `${resolved.pluginName}:${resolved.def.name}`;
-      result = await this.executePluginCommand(thread, resolved.pluginName, resolved.def, raw);
+      // An approval-requiring command can wait minutes on its gate. Do not
+      // hold the caller (an HTTP request) for that: give the action a short
+      // grace window, then let it complete in the background — the
+      // command_result entry lands via the same persist+emit path either way.
+      const pending = this.executePluginCommand(thread, resolved.pluginName, resolved.def, raw);
+      const grace = new Promise<null>((resolve) => {
+        const t = setTimeout(() => resolve(null), 500) as { unref?: () => void };
+        if (typeof t.unref === "function") t.unref();
+      });
+      const fast = await Promise.race([pending, grace]);
+      if (fast === null) {
+        const bgName = name;
+        void pending
+          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r))
+          .catch((err: unknown) =>
+            this.persistCommandResult(thread, bgName, "plugin", {
+              ok: false,
+              output: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        return {
+          sessionId: this.id,
+          threadId: thread.id,
+          queueItemId: "",
+          status: "queued",
+          command: { name, source },
+        };
+      }
+      result = fast;
     } else {
       // dispatchCommand only yields execute for builtin/plugin sources.
       throw new Error(`executeCommand: unexpected source ${resolved.source}`);
     }
 
+    await this.persistCommandResult(thread, name, source, result);
+
+    return {
+      sessionId: this.id,
+      threadId: thread.id,
+      queueItemId: "",
+      status: "queued",
+      command: { name, source },
+    };
+  }
+
+  /** Persist a command_result entry and emit its live event. */
+  private async persistCommandResult(
+    thread: Thread,
+    name: string,
+    source: CommandSource,
+    result: { ok: boolean; output: string },
+  ): Promise<void> {
     const entry: CommandResultEntry = {
       id: uid("e"),
       sessionId: this.id,
@@ -742,14 +798,6 @@ export class Session {
     };
     await this.providers.store.appendEntries(this.id, thread.id, [entry]);
     await this.emit({ type: "command_result", threadId: thread.id, entry });
-
-    return {
-      sessionId: this.id,
-      threadId: thread.id,
-      queueItemId: "",
-      status: "queued",
-      command: { name, source },
-    };
   }
 
   /**
@@ -777,8 +825,18 @@ export class Session {
     const mapped = def.mapArgs(parseCommandArgs(raw), raw);
     const ctx = this.buildCommandToolContext(thread);
     const summary = `/${pluginName}:${def.name}${raw ? ` ${raw}` : ""}`;
-    const outcome = await invokeAction(catalog, def.action, mapped, ctx, summary);
-    return formatPluginOutcome(outcome, def.action);
+    try {
+      const outcome = await invokeAction(catalog, def.action, mapped, ctx, summary);
+      return formatPluginOutcome(outcome, def.action);
+    } catch (err) {
+      if (isDecisionGateExpired(err)) {
+        return {
+          ok: false,
+          output: "Approval expired before anyone resolved it. Send the command again to retry.",
+        };
+      }
+      throw err;
+    }
   }
 
   /**
@@ -805,9 +863,12 @@ export class Session {
       signal: new AbortController().signal,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
         if (requestDecision) return requestDecision(req);
-        // No host hook: an approval-requiring command is denied rather than
-        // silently allowed. The command path renders this as the deny text.
-        return { actionId: "deny", resolvedBy: "engine", resolvedAt: Date.now() };
+        // No host hook: open a real decision gate on the default thread.
+        // The gate persists as a decision_gate entry and emits the same
+        // events turn gates do, so the web approvals UI and channel
+        // approve/deny buttons render it. Resolution arrives through
+        // `resolveDecision`, same as every other gate.
+        return this.awaitCommandGate(thread, req);
       },
       threadRead: (key, opts) => this.readEntries(key, opts),
       listThreads: async () => {
@@ -886,6 +947,25 @@ export class Session {
   }
 
   async resolveDecision(gateId: string, resolution: DecisionResolution): Promise<void> {
+    // Command gates first — they are session-level, not owned by any thread.
+    if (this.commandGates.isPending(gateId)) {
+      const existing = await this.providers.store.getDecisionGate(this.id, gateId);
+      this.commandGates.resolve(gateId, resolution);
+      if (existing) {
+        const resolved: DecisionGate = { ...existing, status: "resolved", updatedAt: Date.now() };
+        await this.providers.store.saveDecisionGate(this.id, existing.threadId, resolved);
+        await this.providers.store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
+          gate: resolved,
+          resolution,
+          resolvedAt: new Date(resolution.resolvedAt).toISOString(),
+        });
+        await this.emit(
+          { type: "decision_gate_resolved", threadId: existing.threadId, gateId, resolution },
+          { eventKey: `gate:${gateId}:resolved` },
+        );
+      }
+      return;
+    }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
         t.resolveDecision(gateId, resolution);
@@ -893,6 +973,51 @@ export class Session {
       }
     }
     // Fallback: gate may have already been resolved or never registered.
+  }
+
+  /**
+   * Open a durable decision gate for an approval-requiring plugin command
+   * and wait for its resolution. Rejects with DecisionGateExpiredError when
+   * the gate's expiry lapses first.
+   */
+  private async awaitCommandGate(
+    thread: Thread,
+    req: DecisionGateRequest,
+  ): Promise<DecisionResolution> {
+    // queueItemId is a fresh nonce: command gates never join an earlier
+    // gate the way retried tool calls do — every invocation asks again.
+    const gate = fromRequest(req, {
+      sessionId: this.id,
+      threadId: thread.id,
+      queueItemId: uid("cmd"),
+      resumeKey: req.resumeKey ?? "command",
+      ordinal: 0,
+    });
+    await this.providers.store.saveDecisionGate(this.id, thread.id, gate);
+    const gateEntry: SessionEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "decision_gate",
+      gate,
+      createdAt: Date.now(),
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [gateEntry]);
+    await this.emit(
+      { type: "decision_gate", threadId: thread.id, gate },
+      { eventKey: `gate:${gate.id}:pending` },
+    );
+    return this.commandGates.register(gate, async (gateId) => {
+      await this.providers.store.updateDecisionGateEntry(this.id, thread.id, gateId, {
+        resolvedAt: new Date().toISOString(),
+        gate: { ...gate, status: "expired" },
+      });
+      await this.emit(
+        { type: "decision_gate_expired", threadId: thread.id, gateId },
+        { eventKey: `gate:${gateId}:expired` },
+      );
+    });
   }
 
   async withdrawDecision(gateId: string, reason: DecisionWithdrawReason): Promise<void> {
