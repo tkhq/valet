@@ -40,10 +40,11 @@ export function Composer({
   const filteredCommands = commandQuery !== null
     ? allCommands.filter((c) => c.name.startsWith(commandQuery))
     : [];
-  const popupOpen = commandQuery !== null && filteredCommands.length > 0;
   const [selectedIndex, setSelectedIndex] = useState(0);
-  // Reset selection when the filtered list changes.
-  useEffect(() => { setSelectedIndex(0); }, [filteredCommands.length, commandQuery]);
+  const [dismissed, setDismissed] = useState(false);
+  const popupOpen = commandQuery !== null && !dismissed && filteredCommands.length > 0;
+  // Reset selection and dismissed flag when the query changes (user typed new chars).
+  useEffect(() => { setSelectedIndex(0); setDismissed(false); }, [filteredCommands.length, commandQuery]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
   // request fires, so a mount-time consume would miss it.
@@ -124,9 +125,9 @@ export function Composer({
       }
       if (e.key === "Escape") {
         e.preventDefault();
-        // Append a space so the text no longer matches the lone-token pattern,
-        // which closes the popup while leaving the typed prefix in place.
-        setText(text + " ");
+        // Mark dismissed — the popup closes without modifying the text.
+        // dismissed resets automatically when commandQuery changes (user types).
+        setDismissed(true);
         return;
       }
       if (e.key === "Enter") {
@@ -163,7 +164,6 @@ export function Composer({
             query={commandQuery ?? ""}
             selectedIndex={selectedIndex}
             onSelect={insertCommand}
-            onClose={() => setText(text + " ")}
           />
         )}
         <Textarea

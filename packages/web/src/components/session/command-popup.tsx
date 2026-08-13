@@ -30,8 +30,6 @@ export interface CommandPopupProps {
   selectedIndex: number;
   /** Called with the command name (no leading slash) when the user confirms a row. */
   onSelect: (name: string) => void;
-  /** Called when the user presses Esc or the popup should close. */
-  onClose: () => void;
 }
 
 export function CommandPopup({

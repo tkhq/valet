@@ -24,6 +24,18 @@ vi.mock("~/stores/stream", () => ({
   useQueueStateForThread: () => undefined,
 }));
 
+vi.mock("~/hooks/use-commands", () => ({
+  useCommands: () => ({
+    data: {
+      commands: [
+        { name: "status", description: "Show session status", source: "builtin" },
+        { name: "stop", description: "Stop the agent", source: "builtin" },
+        { name: "skill:review", description: "Run code review", source: "skill" },
+      ],
+    },
+  }),
+}));
+
 import { Composer } from "./composer";
 
 function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
@@ -84,5 +96,39 @@ describe("composer focus request", () => {
       useComposerPrefillStore.getState().requestFocus();
     });
     await waitFor(() => expect(document.activeElement).toBe(textarea));
+  });
+});
+
+describe("Composer — slash-command keyboard handling", () => {
+  it("pressing Enter while popup is open inserts the command and does not send", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/sta");
+    // Popup should be visible (listbox role).
+    expect(screen.getByRole("listbox")).toBeTruthy();
+
+    await userEvent.keyboard("{Enter}");
+    // The selected command "status" (first prefix match) is inserted with trailing space.
+    // If Enter had sent instead, the textarea would have been cleared to "".
+    expect(textarea.value).toBe("/status ");
+  });
+
+  it("pressing Esc while popup is open closes the popup without modifying text", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/sta");
+    expect(screen.getByRole("listbox")).toBeTruthy();
+
+    await userEvent.keyboard("{Escape}");
+    // Popup unmounted — listbox gone.
+    expect(screen.queryByRole("listbox")).toBeNull();
+    // Text is unchanged — no trailing space artifact.
+    expect(textarea.value).toBe("/sta");
   });
 });

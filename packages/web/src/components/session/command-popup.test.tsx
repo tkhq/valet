@@ -3,7 +3,7 @@
  * CommandPopup: filtered autocomplete popup for slash commands.
  *
  * Tests cover: prefix filtering (caller responsibility, but we verify render),
- * Enter fires onSelect, Esc fires onClose via keyboard handlers in composer
+ * Enter fires onSelect, Esc is handled in the composer (keyboard handler).
  * (popup itself delegates via onMouseDown). We test the pure component directly.
  */
 import { describe, expect, it, vi } from "vitest";
@@ -22,7 +22,6 @@ function renderPopup(
   query: string,
   selectedIndex = 0,
   onSelect = vi.fn(),
-  onClose = vi.fn(),
 ) {
   return render(
     <CommandPopup
@@ -30,7 +29,6 @@ function renderPopup(
       query={query}
       selectedIndex={selectedIndex}
       onSelect={onSelect}
-      onClose={onClose}
     />,
   );
 }
