@@ -73,6 +73,7 @@ import type {
   PromptReceipt,
   QueueItem,
   QueueMode,
+  QueueState,
   ResolvedModel,
   SessionEntry,
   SignalContent,
@@ -1182,6 +1183,16 @@ export class Thread {
   /** Current running submission id (for the session heartbeat's lease renewal). */
   runningItemId(): string | undefined {
     return this.runningItem?.id;
+  }
+
+  /**
+   * Read-only snapshot of this thread's derived queue state from durable
+   * rows. Same derivation as the `queue_state` event, without emitting.
+   * Used by the `/status` and `/clear` built-ins.
+   */
+  async currentQueueState(): Promise<QueueState> {
+    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    return deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
   }
 
   /** True when this thread is mid-turn (a submission is claimed and running). */

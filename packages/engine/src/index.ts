@@ -170,6 +170,10 @@ export {
   type DispatchOutcome,
 } from "./commands/dispatch.js";
 export {
+  executeBuiltin,
+  type BuiltinResult,
+} from "./commands/builtins.js";
+export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,

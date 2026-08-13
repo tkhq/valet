@@ -1,6 +1,15 @@
 import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
+import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
+import { dispatchCommand } from "./commands/dispatch.js";
+import { executeBuiltin } from "./commands/builtins.js";
+import type {
+  CommandDef,
+  CommandSource,
+  PromptTemplate,
+  ResolvedCommand,
+} from "./commands/types.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
@@ -9,6 +18,7 @@ import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
+  CommandResultEntry,
   CreateSessionOptions,
   CredentialOwner,
   CredentialProvider,
@@ -39,6 +49,27 @@ import type {
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+}
+
+/**
+ * Extract the plain leading text of a prompt for slash-command detection.
+ * String content is itself; object content uses its `text`; a `SignalContent`
+ * (kind: "signal") never carries a slash command, so it returns undefined.
+ */
+function commandText(content: PromptContent): string | undefined {
+  if (typeof content === "string") return content;
+  if ("kind" in content) return undefined;
+  return content.text;
+}
+
+/**
+ * Replace the leading text of a prompt with `text`, preserving attachments.
+ * Only reached for string/object content (a signal never expands).
+ */
+function withText(content: PromptContent, text: string): PromptContent {
+  if (typeof content === "string") return text;
+  if ("kind" in content) return content;
+  return { ...content, text };
 }
 
 /** Options for {@link Session.emit}. */
@@ -114,6 +145,10 @@ export class Session {
   readonly skills = new Map<string, SkillSource>();
   private threads = new Map<string, Thread>();
   private threadsByKey = new Map<string, Thread>();
+  /** Lazily-built slash-command registry; invalidated by refreshCommandRegistry(). */
+  private commandRegistryCache: CommandRegistry | null = null;
+  /** Cached templates from options.templateProvider; null === not yet loaded. */
+  private templateCache: PromptTemplate[] | null = null;
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -578,7 +613,147 @@ export class Session {
   // ── public API ──────────────────────────────────────────────────
 
   async prompt(content: PromptContent, opts: PromptOptions = {}): Promise<PromptReceipt> {
+    const text = commandText(content);
+    if (text?.startsWith("/")) {
+      const outcome = dispatchCommand(text, this.commandRegistry());
+      if (outcome.kind === "expand") {
+        return this.thread().submitPrompt(withText(content, outcome.text), opts);
+      }
+      if (outcome.kind === "execute") {
+        return this.executeCommand(outcome.resolved, outcome.args, text, opts);
+      }
+      if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
+        const receipt = await this.thread().submitPrompt(content, opts);
+        return { ...receipt, nearMiss: outcome.nearMiss };
+      }
+    }
     return this.thread().submitPrompt(content, opts);
+  }
+
+  /**
+   * Run a resolved built-in or plugin command, persist a `command_result`
+   * entry, emit `command_result`, and return a command-shaped receipt. Never
+   * touches queue admission — a command runs even while a turn streams.
+   */
+  private async executeCommand(
+    resolved: ResolvedCommand,
+    args: string[],
+    raw: string,
+    _opts: PromptOptions,
+  ): Promise<PromptReceipt> {
+    const thread = this.thread();
+    let source: CommandSource;
+    let name: string;
+    let result: { ok: boolean; output: string };
+    if (resolved.source === "builtin") {
+      source = "builtin";
+      name = resolved.name;
+      result = await executeBuiltin(name, args, this, this.options.commandContext);
+    } else if (resolved.source === "plugin") {
+      source = "plugin";
+      name = `${resolved.pluginName}:${resolved.def.name}`;
+      result = await this.executePluginCommand(resolved.pluginName, resolved.def, args, raw);
+    } else {
+      // dispatchCommand only yields execute for builtin/plugin sources.
+      throw new Error(`executeCommand: unexpected source ${resolved.source}`);
+    }
+
+    const entry: CommandResultEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "command_result",
+      command: `/${name}`,
+      source,
+      ok: result.ok,
+      output: result.output,
+      createdAt: Date.now(),
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [entry]);
+    await this.emit({ type: "command_result", threadId: thread.id, entry });
+
+    return {
+      sessionId: this.id,
+      threadId: thread.id,
+      queueItemId: "",
+      status: "queued",
+      command: { name, source },
+    };
+  }
+
+  /**
+   * Plugin-command execution seam. Task 7 replaces this body with real
+   * action dispatch; until then a resolved plugin command reports that it is
+   * unavailable rather than silently doing nothing.
+   */
+  private async executePluginCommand(
+    _pluginName: string,
+    _def: CommandDef,
+    _args: string[],
+    _raw: string,
+  ): Promise<{ ok: boolean; output: string }> {
+    return { ok: false, output: "Plugin commands are not yet available in this build." };
+  }
+
+  /**
+   * Lazily-built slash-command registry for this session. Cached across calls
+   * within a session; `refreshCommandRegistry()` invalidates it (the host
+   * calls that after workspace prep and whenever skills change).
+   */
+  commandRegistry(): CommandRegistry {
+    if (this.commandRegistryCache) return this.commandRegistryCache;
+    const registry = buildCommandRegistry({
+      skills: [...this.skills.values()],
+      templates: this.templateCache ?? [],
+      // Plugin commands are wired in Task 7 (no CreateSessionOptions slot yet).
+      pluginCommands: [],
+      bareSkillNames: this.options.bareSkillNames ?? false,
+    });
+    this.commandRegistryCache = registry;
+    return registry;
+  }
+
+  /**
+   * Invalidate the cached command registry and refresh templates from the
+   * host `templateProvider` (if any). Call after workspace prep and on any
+   * event that also refreshes `Session.skills`. Idempotent.
+   */
+  async refreshCommandRegistry(): Promise<void> {
+    this.commandRegistryCache = null;
+    const provider = this.options.templateProvider;
+    this.templateCache = provider ? await provider.listTemplates() : [];
+    // Force a rebuild on the next read so the fresh templates land.
+    this.commandRegistryCache = null;
+  }
+
+  /**
+   * Settle every never-claimed (queued/collecting) item of a thread as
+   * aborted and return how many were removed. Used by `/clear`.
+   */
+  async clearQueue(threadId: string): Promise<number> {
+    const store = this.providers.store;
+    const items = await store.listUnsettledSubmissions(this.id);
+    let removed = 0;
+    for (const it of items) {
+      if (it.threadId !== threadId) continue;
+      if (it.status === "queued" || it.status === "collecting") {
+        const ok = await store.settleUnclaimed(this.id, threadId, it.id, {
+          outcome: "aborted",
+        });
+        if (ok) removed++;
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Create and switch to a fresh thread. Returns the new thread. Used by
+   * `/new-thread`; mints a unique key so it never re-adopts an existing one.
+   */
+  async newThread(): Promise<Thread> {
+    const key = `web:${uid("t")}`;
+    return this.thread(key);
   }
 
   async resolveDecision(gateId: string, resolution: DecisionResolution): Promise<void> {

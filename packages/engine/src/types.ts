@@ -905,6 +905,17 @@ export type EngineEvent =
     }
   | { type: "model_switched"; threadId?: string; fromModel: string; toModel: string; reason: string }
   | {
+      /**
+       * A slash command ran and produced a transcript record (slash-commands
+       * design). Session-scoped when the command is thread-agnostic; carries
+       * the executing thread id otherwise. Emitted after the
+       * `command_result` entry is persisted.
+       */
+      type: "command_result";
+      threadId?: string;
+      entry: CommandResultEntry;
+    }
+  | {
       type: "submission_settled";
       sessionId: string;
       threadId: string;
@@ -1482,6 +1493,25 @@ export interface CreateSessionOptions {
    * prompt hint.
    */
   warmSandboxOnClaim?: boolean;
+  /**
+   * Host capabilities for slash commands the engine cannot answer alone
+   * (`/model`, `/sessions`). Absent === those built-ins return `ok: false`
+   * with an explicit "not exposed" message, and the engine stays runnable in
+   * bare tests.
+   */
+  commandContext?: import("./commands/types.js").CommandContext;
+  /**
+   * Host-injected prompt-template source for slash commands (`/my-template`).
+   * Absent === no templates. Read lazily and cached; the host calls
+   * `Session.refreshCommandRegistry()` after workspace prep and on any event
+   * that also refreshes skills.
+   */
+  templateProvider?: import("./commands/types.js").TemplateProvider;
+  /**
+   * When true, a skill named `review` also registers a bare `/review` command
+   * in addition to the always-present `/skill:review`. Default false.
+   */
+  bareSkillNames?: boolean;
 }
 
 /**
