@@ -37,6 +37,22 @@ vi.mock("~/hooks/use-commands", () => ({
         { name: "status", description: "Show session status", source: "builtin" },
         { name: "stop", description: "Stop the agent", source: "builtin" },
         { name: "skill:review", description: "Run code review", source: "skill" },
+        {
+          name: "model",
+          description: "Switch model or list choices",
+          source: "builtin",
+          argHint: "[model-id]",
+          argOptions: [
+            { value: "claude-opus-4-8", label: "Opus 4.8" },
+            { value: "claude-haiku-4-5", label: "Haiku 4.5" },
+          ],
+        },
+        {
+          name: "compact",
+          description: "Compact the thread context",
+          source: "builtin",
+          argHint: "[instructions]",
+        },
       ],
     },
   }),
@@ -136,5 +152,35 @@ describe("Composer — slash-command keyboard handling", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
     // Text is unchanged — no trailing space artifact.
     expect(textarea.value).toBe("/sta");
+  });
+
+  it("enumerable arguments get typeahead after the command token", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/model ");
+    // Argument mode: both model ids listed.
+    expect(screen.getByText("claude-opus-4-8")).toBeTruthy();
+    expect(screen.getByText("claude-haiku-4-5")).toBeTruthy();
+
+    // Prefix filter narrows to one; Enter fills it without sending.
+    await userEvent.type(textarea, "claude-o");
+    expect(screen.queryByText("claude-haiku-4-5")).toBeNull();
+    await userEvent.keyboard("{Enter}");
+    expect(textarea.value).toBe("/model claude-opus-4-8 ");
+  });
+
+  it("free-text arguments show the argHint as a passive notice", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/compact ");
+    expect(screen.getByTestId("popup-notice").textContent).toBe("[instructions]");
+    // No selectable rows — Enter must send, not select. (Send path clears the box.)
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
   });
 });

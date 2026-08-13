@@ -1867,7 +1867,23 @@ export interface HealthResponse {
 // and `RegistryDiagnostic` are the engine's own registry shapes, forwarded
 // as-is.
 
+/** One enumerable completion for a command's first argument. */
+export interface CommandArgOption {
+  /** The literal text to insert (e.g. a model id). */
+  value: string;
+  /** Human-readable label shown beside the value (e.g. a model's display name). */
+  label?: string;
+}
+
+/**
+ * Engine `CommandInfo` plus wire-only argument completions. The registry
+ * itself is sync and cannot enumerate async sources (model ids need a DB +
+ * credential read), so the route attaches `argOptions` for the commands it
+ * knows how to enumerate.
+ */
+export type WireCommandInfo = CommandInfo & { argOptions?: CommandArgOption[] };
+
 export interface ListCommandsResponse {
-  commands: CommandInfo[];
+  commands: WireCommandInfo[];
   diagnostics: RegistryDiagnostic[];
 }

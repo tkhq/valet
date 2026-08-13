@@ -5,7 +5,7 @@ import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
-import { CommandPopup } from "./command-popup";
+import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 
 export function Composer({
   sessionId,
@@ -31,20 +31,62 @@ export function Composer({
   const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Slash-command autocomplete: derive the command query from the current text.
-  // The popup opens only while the entire message matches /^\/(\S*)$/ — a lone
-  // command token. Dispatch remains server-side; the composer sends text unchanged.
+  // Slash-command autocomplete: two popup modes derived from the text.
+  // COMMAND mode while the message is a lone "/token"; ARGUMENT mode while it
+  // is "/command <partial-first-arg>" and the command enumerates completions
+  // (e.g. /model's model ids). Dispatch remains server-side; the composer
+  // sends text unchanged.
   const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
+  const argMatch = /^\/(\S+) (\S*)$/.exec(text);
   const { data: commandsData } = useCommands(sessionId);
   const allCommands = commandsData?.commands ?? [];
   const filteredCommands = commandQuery !== null
     ? allCommands.filter((c) => c.name.startsWith(commandQuery))
     : [];
+  const argCommand = argMatch ? allCommands.find((c) => c.name === argMatch[1]) : undefined;
+  const argPrefix = argMatch?.[2] ?? "";
+  const argOptions = argCommand?.argOptions ?? [];
+  const argPrefixLower = argPrefix.toLowerCase();
+  const filteredArgs = argCommand
+    ? argOptions.filter((o) => {
+        if (argPrefixLower === "") return true;
+        // Match the full value, the value after a provider prefix
+        // ("anthropic/claude-…" ⇒ "claude-…"), or the display label —
+        // users type "claude-o" or "opus", not "anthropic/claude-o".
+        const v = o.value.toLowerCase();
+        const tail = v.slice(v.indexOf("/") + 1);
+        return (
+          v.startsWith(argPrefixLower) ||
+          tail.startsWith(argPrefixLower) ||
+          (o.label?.toLowerCase().includes(argPrefixLower) ?? false)
+        );
+      })
+    : [];
+  const popupItems: PopupItem[] =
+    commandQuery !== null
+      ? commandsToItems(filteredCommands)
+      : filteredArgs.map((o) => ({
+          id: o.value,
+          label: o.value,
+          detail: o.label,
+          group: "Arguments",
+        }));
+  // A command whose first argument is free text (argHint, no options) gets a
+  // passive hint row while the argument is still empty — discoverability
+  // without pretending we can complete it.
+  const argNotice =
+    argCommand && argOptions.length === 0 && argPrefix === "" && argCommand.argHint
+      ? argCommand.argHint
+      : undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const popupOpen = commandQuery !== null && !dismissed && filteredCommands.length > 0;
+  const popupOpen = !dismissed && popupItems.length > 0;
+  const noticeOpen = !dismissed && !popupOpen && argNotice !== undefined;
   // Reset selection and dismissed flag when the query changes (user typed new chars).
-  useEffect(() => { setSelectedIndex(0); setDismissed(false); }, [filteredCommands.length, commandQuery]);
+  useEffect(() => {
+    setSelectedIndex(0);
+    setDismissed(false);
+  }, [popupItems.length, commandQuery, argPrefix]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
   // request fires, so a mount-time consume would miss it.
@@ -108,8 +150,12 @@ export function Composer({
     }
   }
 
-  function insertCommand(name: string) {
-    setText(`/${name} `);
+  function insertSelection(id: string) {
+    if (commandQuery !== null) {
+      setText(`/${id} `);
+    } else if (argCommand) {
+      setText(`/${argCommand.name} ${id} `);
+    }
     setSelectedIndex(0);
     // Mouse selection would otherwise leave focus off the textarea.
     inputRef.current?.focus();
@@ -121,7 +167,7 @@ export function Composer({
     if (popupOpen && !e.nativeEvent.isComposing) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, filteredCommands.length - 1));
+        setSelectedIndex((i) => Math.min(i + 1, popupItems.length - 1));
         return;
       }
       if (e.key === "ArrowUp") {
@@ -131,7 +177,7 @@ export function Composer({
       }
       if (e.key === "Tab") {
         e.preventDefault();
-        insertCommand(filteredCommands[selectedIndex].name);
+        insertSelection(popupItems[selectedIndex].id);
         return;
       }
       if (e.key === "Escape") {
@@ -145,7 +191,7 @@ export function Composer({
         // Confirm selection — do NOT send.
         if (e.shiftKey || e.nativeEvent.isComposing) return;
         e.preventDefault();
-        insertCommand(filteredCommands[selectedIndex].name);
+        insertSelection(popupItems[selectedIndex].id);
         return;
       }
     }
@@ -169,12 +215,17 @@ export function Composer({
     >
       <QueueIndicator queueState={queueState} />
       <div className="relative flex gap-2 items-end">
-        {popupOpen && (
+        {(popupOpen || noticeOpen) && (
           <CommandPopup
-            commands={filteredCommands}
-            query={commandQuery ?? ""}
+            items={popupOpen ? popupItems : []}
+            notice={argNotice}
+            ariaLabel={
+              commandQuery !== null
+                ? `Slash command suggestions for /${commandQuery}`
+                : `Argument suggestions for /${argCommand?.name ?? ""}`
+            }
             selectedIndex={selectedIndex}
-            onSelect={insertCommand}
+            onSelect={insertSelection}
             onHover={setSelectedIndex}
           />
         )}

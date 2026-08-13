@@ -1,120 +1,150 @@
 /**
- * CommandPopup — a filtered list of slash commands shown while the composer
- * contains a lone command token (e.g. "/sta"). Pure presentational: no network
- * calls, no state. The composer owns selection state and keyboard handling.
- *
- * Commands are grouped by source: builtin → skill → template → plugin.
+ * CommandPopup — a grouped, keyboard-navigable suggestion list above the
+ * composer. Pure presentational: no network calls, no state. The composer
+ * owns selection state and keyboard handling, and adapts its two data
+ * sources (slash commands, argument completions) into `PopupItem`s.
  */
-import type { CommandInfo } from "@valet/api/wire";
+import type { WireCommandInfo } from "@valet/api/wire";
 
-const SOURCE_ORDER: CommandInfo["source"][] = [
+export interface PopupItem {
+  /** Stable identity, passed to onSelect (a command name or an argument value). */
+  id: string;
+  /** Monospace primary text (e.g. "/status" or "claude-opus-4-8"). */
+  label: string;
+  /** Muted description beside the label. */
+  detail?: string;
+  /** Right-aligned monospace hint (e.g. "[model-id]"). */
+  hint?: string;
+  /** Group header this item renders under; groups keep first-appearance order. */
+  group: string;
+}
+
+const SOURCE_ORDER: WireCommandInfo["source"][] = [
   "builtin",
   "skill",
   "template",
   "plugin",
 ];
 
-const SOURCE_LABEL: Record<CommandInfo["source"], string> = {
+const SOURCE_LABEL: Record<WireCommandInfo["source"], string> = {
   builtin: "Built-in",
   skill: "Skill",
   template: "Template",
   plugin: "Plugin",
 };
 
+/** Adapt registry commands (already prefix-filtered) into popup items. */
+export function commandsToItems(commands: WireCommandInfo[]): PopupItem[] {
+  const ordered = [...commands].sort(
+    (a, b) => SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source),
+  );
+  return ordered.map((c) => ({
+    id: c.name,
+    label: `/${c.name}`,
+    detail: c.description,
+    hint: c.argHint,
+    group: SOURCE_LABEL[c.source],
+  }));
+}
+
 export interface CommandPopupProps {
-  /** Full filtered list to display. Caller applies prefix filter before passing. */
-  commands: CommandInfo[];
-  /** Current partial name (without leading slash), used only for aria labelling. */
-  query: string;
-  /** Index into `commands` of the currently highlighted row. */
+  /** Items to display, already filtered. Empty + no notice renders nothing. */
+  items: PopupItem[];
+  /**
+   * Passive hint shown when a command's argument cannot be enumerated
+   * (e.g. "[instructions]"). Rendered as a single muted row, not selectable.
+   */
+  notice?: string;
+  /** Accessible label for the listbox. */
+  ariaLabel: string;
+  /** Index into `items` of the currently highlighted row. */
   selectedIndex: number;
-  /** Called with the command name (no leading slash) when the user confirms a row. */
-  onSelect: (name: string) => void;
-  /** Called with a row's flat index when the pointer moves over it. */
+  /** Called with the item id when the user confirms a row. */
+  onSelect: (id: string) => void;
+  /** Called with a row's index when the pointer moves over it. */
   onHover: (index: number) => void;
 }
 
 export function CommandPopup({
-  commands,
-  query,
+  items,
+  notice,
+  ariaLabel,
   selectedIndex,
   onSelect,
   onHover,
 }: CommandPopupProps) {
-  if (commands.length === 0) return null;
+  if (items.length === 0 && !notice) return null;
 
-  // Group by source in display order.
-  const groups: { source: CommandInfo["source"]; items: CommandInfo[] }[] = [];
-  for (const source of SOURCE_ORDER) {
-    const items = commands.filter((c) => c.source === source);
-    if (items.length > 0) groups.push({ source, items });
-  }
-
-  // Compute a flat index offset per group so we can find selectedIndex.
-  let flatOffset = 0;
+  // Group by `group` in first-appearance order.
+  const groups: { group: string; items: { item: PopupItem; flatIndex: number }[] }[] = [];
+  items.forEach((item, flatIndex) => {
+    const last = groups.find((g) => g.group === item.group);
+    if (last) last.items.push({ item, flatIndex });
+    else groups.push({ group: item.group, items: [{ item, flatIndex }] });
+  });
 
   return (
     <div
       role="listbox"
-      aria-label={`Slash command suggestions for /${query}`}
+      aria-label={ariaLabel}
       className="absolute bottom-full left-0 right-0 mb-1 z-50 rounded-md border border-[--border] bg-[--bg] shadow-lg overflow-hidden max-h-72 overflow-y-auto"
     >
-      {groups.map(({ source, items }) => {
-        const groupOffset = flatOffset;
-        flatOffset += items.length;
-        return (
-          <div key={source}>
-            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted border-b border-[--border]">
-              {SOURCE_LABEL[source]}
-            </div>
-            {items.map((cmd, i) => {
-              const flatIndex = groupOffset + i;
-              const isSelected = flatIndex === selectedIndex;
-              return (
-                <div
-                  key={cmd.name}
-                  role="option"
-                  aria-selected={isSelected}
-                  ref={(el) => {
-                    // Keep the highlighted row visible as ↑/↓ move it past
-                    // the popup's max-height fold. Guarded: JSDOM (tests)
-                    // does not implement scrollIntoView.
-                    if (isSelected && el && typeof el.scrollIntoView === "function") {
-                      el.scrollIntoView({ block: "nearest" });
-                    }
-                  }}
-                  className={`flex items-start gap-2 px-3 py-1.5 cursor-pointer text-sm ${
-                    // bg-ink-wash-strong is the app's press/selected wash.
-                    // (An invented var like --accent silently paints nothing —
-                    // that bug shipped once; see theme.css's wash comment.)
-                    isSelected ? "bg-ink-wash-strong" : ""
-                  }`}
-                  onMouseDown={(e) => {
-                    // Prevent textarea blur before we can call onSelect.
-                    e.preventDefault();
-                    onSelect(cmd.name);
-                  }}
-                  onMouseMove={() => {
-                    // Pointer and keyboard share ONE highlight. mousemove, not
-                    // mouseenter: arrow-driven scrollIntoView shifts rows under
-                    // a stationary cursor, and a spurious mouseenter would
-                    // yank the selection back to wherever the pointer sits.
-                    if (!isSelected) onHover(flatIndex);
-                  }}
-                >
-                  <span className="font-mono font-medium shrink-0">/{cmd.name}</span>
-                  <span className="text-muted truncate">{cmd.description}</span>
-                  {cmd.argHint && (
-                    <span className="ml-auto font-mono text-xs text-muted shrink-0 opacity-70">
-                      {cmd.argHint}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
+      {groups.map(({ group, items: groupItems }) => (
+        <div key={group}>
+          <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted border-b border-[--border]">
+            {group}
           </div>
-        );
-      })}
+          {groupItems.map(({ item, flatIndex }) => {
+            const isSelected = flatIndex === selectedIndex;
+            return (
+              <div
+                key={item.id}
+                role="option"
+                aria-selected={isSelected}
+                ref={(el) => {
+                  // Keep the highlighted row visible as ↑/↓ move it past
+                  // the popup's max-height fold. Guarded: JSDOM (tests)
+                  // does not implement scrollIntoView.
+                  if (isSelected && el && typeof el.scrollIntoView === "function") {
+                    el.scrollIntoView({ block: "nearest" });
+                  }
+                }}
+                className={`flex items-start gap-2 px-3 py-1.5 cursor-pointer text-sm ${
+                  // bg-ink-wash-strong is the app's press/selected wash.
+                  // (An invented var like --accent silently paints nothing —
+                  // that bug shipped once; see theme.css's wash comment.)
+                  isSelected ? "bg-ink-wash-strong" : ""
+                }`}
+                onMouseDown={(e) => {
+                  // Prevent textarea blur before we can call onSelect.
+                  e.preventDefault();
+                  onSelect(item.id);
+                }}
+                onMouseMove={() => {
+                  // Pointer and keyboard share ONE highlight. mousemove, not
+                  // mouseenter: arrow-driven scrollIntoView shifts rows under
+                  // a stationary cursor, and a spurious mouseenter would
+                  // yank the selection back to wherever the pointer sits.
+                  if (!isSelected) onHover(flatIndex);
+                }}
+              >
+                <span className="font-mono font-medium shrink-0">{item.label}</span>
+                {item.detail && <span className="text-muted truncate">{item.detail}</span>}
+                {item.hint && (
+                  <span className="ml-auto font-mono text-xs text-muted shrink-0 opacity-70">
+                    {item.hint}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      {notice && (
+        <div className="px-3 py-1.5 text-sm text-muted font-mono" data-testid="popup-notice">
+          {notice}
+        </div>
+      )}
     </div>
   );
 }

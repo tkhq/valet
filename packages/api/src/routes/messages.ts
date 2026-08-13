@@ -17,10 +17,12 @@ import { dispatchCommand } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
+import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
   ListCommandsResponse,
+  WireCommandInfo,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
@@ -156,8 +158,25 @@ messagesRouter.get("/:id/commands", async (c) => {
   // ready, one exec.
   await engineSession.refreshCommandRegistry();
   const registry = engineSession.commandRegistry();
+
+  // Attach argument completions for commands whose first argument is
+  // enumerable. Today that is `/model` (the org's active model catalog).
+  // Failure to enumerate degrades to no completions, never a route error.
+  const { db, engineCredentials } = c.var.providers;
+  const commands: WireCommandInfo[] = registry.list();
+  const model = commands.find((cmd) => cmd.source === "builtin" && cmd.name === "model");
+  if (model) {
+    try {
+      const ctx = makeCommandContext(db, engineCredentials, result.session.orgId, result.session.id);
+      const models = await ctx.listModels();
+      model.argOptions = models.map((m) => ({ value: m.id, label: m.name }));
+    } catch (err) {
+      console.error(`GET /commands: model enumeration failed for ${result.session.id}:`, err);
+    }
+  }
+
   const body: ListCommandsResponse = {
-    commands: registry.list(),
+    commands,
     diagnostics: registry.diagnostics(),
   };
   return c.json(body);
