@@ -111,10 +111,7 @@ export function commandResultEntryToMessage(
   sessionId: string,
   threadId: string,
 ): Message {
-  const created =
-    typeof e.createdAt === "number"
-      ? e.createdAt
-      : Date.parse(e.createdAt as unknown as string);
+  const created = e.createdAt;
   return {
     id: e.id,
     sessionId,
