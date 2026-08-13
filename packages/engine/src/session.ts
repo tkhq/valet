@@ -3,7 +3,9 @@ import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
 import { dispatchCommand } from "./commands/dispatch.js";
+import { parseCommandArgs } from "./commands/args.js";
 import { executeBuiltin } from "./commands/builtins.js";
+import { invokeAction, type InvokeActionResult } from "./plugin-catalog.js";
 import type {
   CommandDef,
   CommandSource,
@@ -23,6 +25,7 @@ import type {
   CredentialOwner,
   CredentialProvider,
   DecisionGate,
+  DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
   EngineEvent,
@@ -42,6 +45,7 @@ import type {
   SkillSource,
   StoredCredential,
   ThreadData,
+  ToolContext,
   ToolDef,
   WriteFence,
 } from "./types.js";
@@ -70,6 +74,72 @@ function withText(content: PromptContent, text: string): PromptContent {
   if (typeof content === "string") return text;
   if ("kind" in content) return content;
   return { ...content, text };
+}
+
+/**
+ * Render an {@link InvokeActionResult} into the `{ ok, output }` shape a
+ * `command_result` entry carries. Error variants name the corrective action,
+ * per the repo's user-facing-error rule.
+ */
+function formatPluginOutcome(
+  outcome: InvokeActionResult,
+  actionId: string,
+): { ok: boolean; output: string } {
+  switch (outcome.kind) {
+    case "ok": {
+      const { result } = outcome;
+      if (!result.success) {
+        return { ok: false, output: `Action failed. ${result.error ?? "Unknown error."}` };
+      }
+      if (result.data === undefined) return { ok: true, output: "Done." };
+      const body =
+        typeof result.data === "string" ? result.data : "```json\n" + stableJson(result.data) + "\n```";
+      return { ok: true, output: body };
+    }
+    case "unknown":
+      return {
+        ok: false,
+        output: `Unknown action "${actionId}". The plugin command points at an action that is not loaded.`,
+      };
+    case "resolve-failed":
+      return {
+        ok: false,
+        output: `Could not load ${outcome.service} actions. ${outcome.message}`,
+      };
+    case "denied-policy":
+      return {
+        ok: false,
+        output: "This action is blocked by org policy. Ask an administrator to allow it.",
+      };
+    case "denied-approval":
+      return {
+        ok: false,
+        output: "Approval was denied. Adjust action policies in Settings to allow this action.",
+      };
+    case "pending-approval":
+      return {
+        ok: false,
+        output: "Approval is pending. Resolve it from the approvals panel.",
+      };
+    case "invalid-args":
+      return { ok: false, output: `Invalid arguments. ${outcome.error}` };
+    case "missing-credential":
+      return {
+        ok: false,
+        output: `Connect the ${outcome.service} integration in Settings.`,
+      };
+    case "error":
+      return { ok: false, output: `Action failed. ${outcome.message}` };
+  }
+}
+
+/** Stable JSON stringify used for plugin-result rendering. */
+function stableJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 /** Options for {@link Session.emit}. */
@@ -652,7 +722,7 @@ export class Session {
     } else if (resolved.source === "plugin") {
       source = "plugin";
       name = `${resolved.pluginName}:${resolved.def.name}`;
-      result = await this.executePluginCommand(resolved.pluginName, resolved.def, args, raw);
+      result = await this.executePluginCommand(thread, resolved.pluginName, resolved.def, raw);
     } else {
       // dispatchCommand only yields execute for builtin/plugin sources.
       throw new Error(`executeCommand: unexpected source ${resolved.source}`);
@@ -683,17 +753,77 @@ export class Session {
   }
 
   /**
-   * Plugin-command execution seam. Task 7 replaces this body with real
-   * action dispatch; until then a resolved plugin command reports that it is
-   * unavailable rather than silently doing nothing.
+   * Run an action-backed plugin command. Maps the raw arg string through the
+   * command's `mapArgs`, then invokes the backing action against the shared
+   * plugin catalog via `invokeAction` — the SAME approval + validation core
+   * the LLM `call_tool` path uses. Renders the outcome as markdown for a
+   * `command_result` entry. A command is not a claimed turn, so approvals
+   * route through the host `commandRequestDecision` hook, not the turn gate.
    */
   private async executePluginCommand(
-    _pluginName: string,
-    _def: CommandDef,
-    _args: string[],
-    _raw: string,
+    thread: Thread,
+    pluginName: string,
+    def: CommandDef,
+    raw: string,
   ): Promise<{ ok: boolean; output: string }> {
-    return { ok: false, output: "Plugin commands are not yet available in this build." };
+    const catalog = this.options.pluginCatalog;
+    if (!catalog) {
+      return {
+        ok: false,
+        output:
+          "Plugin commands are not available in this deployment. No plugin catalog is configured.",
+      };
+    }
+    const mapped = def.mapArgs(parseCommandArgs(raw), raw);
+    const ctx = this.buildCommandToolContext(thread);
+    const summary = `/${pluginName}:${def.name}${raw ? ` ${raw}` : ""}`;
+    const outcome = await invokeAction(catalog, def.action, mapped, ctx, summary);
+    return formatPluginOutcome(outcome, def.action);
+  }
+
+  /**
+   * Build a command-scoped {@link ToolContext} for a plugin command. Unlike
+   * the Thread's turn-scoped context it never suspends a turn: `requestDecision`
+   * delegates to the host `commandRequestDecision` hook (or denies when none is
+   * set), and there is no fence/DAG bookkeeping. Credentials, sandbox, and
+   * thread reads mirror the turn context so a plugin action behaves the same
+   * whether reached from a slash command or from `call_tool`.
+   */
+  private buildCommandToolContext(thread: Thread): ToolContext {
+    const requestDecision = this.options.commandRequestDecision;
+    return {
+      userId: this.options.userId,
+      orgId: this.options.orgId,
+      sessionId: this.id,
+      threadId: thread.id,
+      sessionPurpose: this.options.purpose,
+      cwd: this.options.workspace,
+      credentials: this.credentialProvider(),
+      sandbox: this.sandbox,
+      config: this.options.toolConfig,
+      owner: this.principal,
+      signal: new AbortController().signal,
+      requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        if (requestDecision) return requestDecision(req);
+        // No host hook: an approval-requiring command is denied rather than
+        // silently allowed. The command path renders this as the deny text.
+        return { actionId: "deny", resolvedBy: "engine", resolvedAt: Date.now() };
+      },
+      threadRead: (key, opts) => this.readEntries(key, opts),
+      listThreads: async () => {
+        const datas = await this.providers.store.listThreads(this.id);
+        return datas.map((d) => ({
+          id: d.id,
+          key: d.key,
+          status: d.status,
+          model: d.model,
+          summary: d.summary,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        }));
+      },
+      setModel: (args) => thread.setModel(args.model),
+    };
   }
 
   /**
@@ -706,8 +836,7 @@ export class Session {
     const registry = buildCommandRegistry({
       skills: [...this.skills.values()],
       templates: this.templateCache ?? [],
-      // Plugin commands are wired in Task 7 (no CreateSessionOptions slot yet).
-      pluginCommands: [],
+      pluginCommands: this.options.pluginCommands ?? [],
       bareSkillNames: this.options.bareSkillNames ?? false,
     });
     this.commandRegistryCache = registry;

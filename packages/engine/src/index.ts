@@ -105,6 +105,8 @@ export {
 } from "./builtin-tools/index.js";
 export {
   pluginCatalogTools,
+  buildPluginCatalog,
+  invokeAction,
   prepareActionArgs,
   RESOLVE_TTL_MS,
   type ActionPlugin,
@@ -112,7 +114,9 @@ export {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type PluginCatalog,
   type PluginCatalogOptions,
+  type InvokeActionResult,
 } from "./plugin-catalog.js";
 export {
   validateValetPlugin,

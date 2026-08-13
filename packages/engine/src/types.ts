@@ -1512,6 +1512,36 @@ export interface CreateSessionOptions {
    * in addition to the always-present `/skill:review`. Default false.
    */
   bareSkillNames?: boolean;
+  /**
+   * Action-backed plugin commands, registered under `${pluginName}:${def.name}`.
+   * The host derives these from every loaded `ValetPlugin.commands`. Absent ===
+   * no plugin commands. Paired with `pluginCatalog`: the registry entry resolves
+   * the command, and `pluginCatalog` invokes its backing action.
+   */
+  pluginCommands?: Array<{
+    pluginName: string;
+    def: import("./commands/types.js").CommandDef;
+  }>;
+  /**
+   * Plugin action catalog for the slash-command path — built by the host with
+   * `buildPluginCatalog(actionPlugins)` from the SAME plugins that back the
+   * LLM `call_tool` tool. A plugin command's `def.action` is invoked against
+   * this catalog through the shared `invokeAction` core, so approval policy and
+   * arg validation stay identical to the tool path. Absent === plugin commands
+   * report that no catalog is available.
+   */
+  pluginCatalog?: import("./plugin-catalog.js").PluginCatalog;
+  /**
+   * Host approval hook for the slash-command path only. A plugin command whose
+   * action needs approval (`require_approval`) calls this instead of the
+   * turn-scoped decision gate — a command is not a claimed turn, so it cannot
+   * suspend one. Return a resolution with `actionId: "approve"` to proceed,
+   * `"pending"` when the decision is deferred, anything else to deny. Absent ===
+   * approval-requiring plugin commands are denied.
+   */
+  commandRequestDecision?: (
+    req: DecisionGateRequest,
+  ) => Promise<DecisionResolution>;
 }
 
 /**
