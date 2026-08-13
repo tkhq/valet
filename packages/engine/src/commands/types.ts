@@ -1,5 +1,16 @@
 import type { SkillSource } from "../types.js";
 
+export const BUILTIN_COMMAND_NAMES = [
+  "help",
+  "status",
+  "stop",
+  "clear",
+  "model",
+  "compact",
+  "new-thread",
+  "sessions",
+] as const;
+
 export type CommandSource = "builtin" | "skill" | "template" | "plugin";
 
 export interface CommandInfo {

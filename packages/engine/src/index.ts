@@ -150,6 +150,7 @@ export {
   deterministicGateId,
 } from "./decision-gate.js";
 export {
+  BUILTIN_COMMAND_NAMES,
   type CommandSource,
   type CommandInfo,
   type RegistryDiagnostic,
