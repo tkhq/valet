@@ -96,9 +96,12 @@ export interface OwnerScope {
 }
 
 /**
- * True when `owner` may act on a row: its direct user owner, or a live
- * member of its owning team. Org-owned rows are readable by nobody yet —
- * nothing creates one, and an org-wide skill needs its own admin gate.
+ * True when `owner` may WRITE a row: its direct user owner, or a live member
+ * of its owning team. Org-owned rows return false here — an org-library skill
+ * needs its own admin gate before a member may edit it. Note this governs
+ * WRITES only: `listSkills` still delivers org rows to a member read-only, so
+ * an org skill reaches the member's catalog and sessions without letting a
+ * non-admin edit it.
  *
  * Exported because `services/skill-sources.ts` scopes tracked repositories
  * by exactly this rule. One implementation, so the two tables cannot drift.
@@ -132,14 +135,20 @@ export async function ownedSkillRow(
 
 /**
  * Every skill the caller can reach: their own rows first, then the rows of
- * the teams they belong to, each group sorted by name.
+ * the teams they belong to, then the org-library rows, each group sorted by
+ * name.
  *
- * The personal-before-team order is load-bearing. The unique index stops two
- * rows sharing a name inside ONE owner scope, but a personal skill and a
- * team skill may legitimately share one — and only one of them can reach a
+ * The user > team > org order is load-bearing. The unique index stops two
+ * rows sharing a name inside ONE owner scope, but a personal, a team, and an
+ * org skill may legitimately share one — and only one of them can reach a
  * session, because a skill name is the `skill` tool's lookup key.
  * `listSkillSourcesFor` keeps the first of a repeated name, so this order is
- * what makes "my own copy wins" true.
+ * what makes "my own copy wins, then my team's, then the org's" true.
+ *
+ * Org-library rows are READ-ONLY to a member here: they show in the catalog
+ * and reach the member's sessions, but `isAuthorizedFor` still returns false
+ * for a non-admin org write, so `ownedSkillRow` (and every write path built
+ * on it) never treats an org row as the caller's to edit.
  */
 export async function listSkills(db: AppDb, owner: SkillOwner): Promise<SkillRow[]> {
   const teamIds = (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
@@ -148,14 +157,27 @@ export async function listSkills(db: AppDb, owner: SkillOwner): Promise<SkillRow
     teamIds.length > 0
       ? and(eq(skills.ownerType, "team"), inArray(skills.ownerId, teamIds))
       : undefined;
+  const orgMatch = eq(skills.ownerType, "org");
 
   const rows = await db
     .select()
     .from(skills)
-    .where(and(eq(skills.orgId, owner.orgId), teamMatch ? or(ownerMatch, teamMatch) : ownerMatch))
+    .where(
+      and(
+        eq(skills.orgId, owner.orgId),
+        teamMatch ? or(ownerMatch, teamMatch, orgMatch) : or(ownerMatch, orgMatch),
+      ),
+    )
     .orderBy(asc(skills.name));
 
-  return [...rows.filter((r) => r.ownerType === "user"), ...rows.filter((r) => r.ownerType !== "user")];
+  // Explicit user → team → org assembly. Do not rely on incidental row order
+  // from the query — the dedupe in `listSkillSourcesFor` is first-name-wins,
+  // so this precedence must be deterministic in code.
+  return [
+    ...rows.filter((r) => r.ownerType === "user"),
+    ...rows.filter((r) => r.ownerType === "team"),
+    ...rows.filter((r) => r.ownerType === "org"),
+  ];
 }
 
 export interface CreateSkillInput {
@@ -352,8 +374,9 @@ export async function deleteSkill(
  * `SkillSource`s.
  *
  * Scope by principal type:
- *   - `user` — that person's own skills, plus the skills of every team they
- *     belong to. The same union `listSkills` returns.
+ *   - `user` — that person's own skills, then the skills of every team they
+ *     belong to, then the org-library skills. The same union `listSkills`
+ *     returns, deduped user > team > org (first name wins).
  *   - `team` — that team's skills only. A team-owned session is shared, so
  *     one member's personal skills must not appear in it.
  *   - `org`  — that org's own skills only.

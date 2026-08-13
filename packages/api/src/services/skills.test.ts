@@ -36,6 +36,28 @@ function owner(userId: string): SkillOwner {
   return { userId, orgId: ORG };
 }
 
+/** Insert an org-owned skill row directly. `createSkill` only writes user and
+ * team rows, so the org-library case must seed the row itself. */
+async function insertOrgSkill(db: AppDb, name: string, content: string): Promise<void> {
+  const now = Date.now();
+  await db.insert(skills).values({
+    id: `skill_${name}`,
+    orgId: ORG,
+    ownerType: "org",
+    ownerId: ORG,
+    origin: "local",
+    sourceId: null,
+    name,
+    description: `${name} description`,
+    content,
+    frontmatter: { name, description: `${name} description` },
+    contentSha: "sha",
+    upstreamPath: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
 const BODY = "# Deploy\n\nRun `make deploy`.\n";
 
 describe("stored skills service", () => {
@@ -321,6 +343,40 @@ describe("listSkillSourcesFor", () => {
     const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
     expect(sources).toHaveLength(1);
     expect(sources[0]?.content).toBe("# Personal\n");
+  });
+
+  it("delivers an org-library skill to a user principal, ordered after team", async () => {
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await createSkill(db, owner("u1"), { name: "mine", description: "Personal.", content: BODY });
+    await createSkill(db, owner("u1"), {
+      name: "ours",
+      description: "Shared.",
+      content: BODY,
+      teamId: team.id,
+    });
+    await insertOrgSkill(db, "org-skill", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
+    // user rows → team rows → org rows, each still name-sorted within group.
+    expect(sources.map((s) => s.name)).toEqual(["mine", "ours", "org-skill"]);
+  });
+
+  it("lets a user's own skill shadow an org skill of the same name", async () => {
+    await createSkill(db, owner("u1"), { name: "deploy", description: "Personal.", content: "# Personal\n" });
+    await insertOrgSkill(db, "deploy", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
+    expect(sources).toHaveLength(1);
+    // First-name-wins with user before org — the personal copy survives.
+    expect(sources[0]?.content).toBe("# Personal\n");
+  });
+
+  it("returns only the org's own skills for an org principal", async () => {
+    await createSkill(db, owner("u1"), { name: "mine", description: "Personal.", content: BODY });
+    await insertOrgSkill(db, "org-skill", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "org", id: ORG }, ORG);
+    expect(sources.map((s) => s.name)).toEqual(["org-skill"]);
   });
 
   it("returns nothing for a principal with no skills", async () => {

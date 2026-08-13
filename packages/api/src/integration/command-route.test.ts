@@ -17,7 +17,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { createSkill } from "../services/skills.js";
-import { orgs } from "../schema/index.js";
+import { orgs, skills } from "../schema/index.js";
 import type {
   CreateSessionResponse,
   ListCommandsResponse,
@@ -97,6 +97,36 @@ describe("GET /api/sessions/:id/commands", () => {
     const bare = commands.find((cmd) => cmd.name === "standup");
     expect(bare).toBeDefined();
     expect(bare?.source).toBe("skill");
+  });
+
+  // Task 4 fix: an org-library prompt skill reaches a member's session through
+  // `sessionExtras`, even though the member never owns the org row.
+  it("lists an org-owned prompt skill as skill:<name> for a member's session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(skills).values({
+      id: "skill_orgstandup",
+      orgId: OWNER.orgId,
+      ownerType: "org",
+      ownerId: OWNER.orgId,
+      origin: "local",
+      sourceId: null,
+      name: "orgstandup",
+      description: "Org-wide standup",
+      content: "Summarize $1",
+      frontmatter: { name: "orgstandup", description: "Org-wide standup", invocation: "prompt", argHint: "<topic>" },
+      contentSha: "sha",
+      upstreamPath: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const sessionId = await createSession(api.baseUrl);
+    const { commands } = await getCommands(api.baseUrl, sessionId);
+
+    const prefixed = commands.find((cmd) => cmd.name === "skill:orgstandup");
+    expect(prefixed).toBeDefined();
+    expect(prefixed?.source).toBe("skill");
   });
 });
 
