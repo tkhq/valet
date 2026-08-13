@@ -35,6 +35,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { partitionByName } from "../plugins/assemble.js";
 import {
+  asRecord,
   createSkill,
   deleteSkill,
   listSkills,
@@ -117,11 +118,6 @@ function toStoredSummary(row: SkillRow, shadowed: boolean): StoredSkillSummary {
   };
 }
 
-/** `frontmatter` is a jsonb column, so drizzle types it as `unknown`. */
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-  return { ...(value as Record<string, unknown>) };
-}
 
 function owner(c: { var: { user: { id: string; orgId: string } } }): SkillOwner {
   return { userId: c.var.user.id, orgId: c.var.user.orgId };
@@ -246,6 +242,8 @@ skillsRouter.patch("/stored/:id", async (c) => {
     );
   }
 
+  const orgAdmin = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+
   try {
     const row = await updateSkill(c.var.providers.db, owner(c), c.req.param("id"), {
       name: body.name,
@@ -253,6 +251,7 @@ skillsRouter.patch("/stored/:id", async (c) => {
       content: body.content,
       invocation: body.invocation,
       argHint: typeof body.argHint === "string" ? body.argHint : undefined,
+      isOrgAdmin: orgAdmin,
     });
     if (!row) return c.json({ error: "skill not found" }, 404);
     const resp: SkillResponse = {
@@ -267,7 +266,8 @@ skillsRouter.patch("/stored/:id", async (c) => {
 });
 
 skillsRouter.delete("/stored/:id", async (c) => {
-  const result = await deleteSkill(c.var.providers.db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+  const result = await deleteSkill(c.var.providers.db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (result === "not_found") return c.json({ error: "skill not found" }, 404);
   if (result === "not_local") {
     return c.json(

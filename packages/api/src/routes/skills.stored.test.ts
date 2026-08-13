@@ -413,3 +413,66 @@ describe("POST /api/skills — org-scoped writes", () => {
     expect((orgSkill as StoredSkillSummary).ownerType).toBe("org");
   });
 });
+
+describe("PATCH/DELETE /api/skills/stored/:id — org-scoped writes", () => {
+  async function createOrgSkill(baseUrl: string): Promise<SkillResponse> {
+    const res = await fetch(`${baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "org-guide",
+        description: "Org-wide guide",
+        content: "Follow the org guide.",
+        ownerType: "org",
+      }),
+    });
+    return (await res.json()) as SkillResponse;
+  }
+
+  it("admin can PATCH an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "# Updated org guide\n" }),
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as SkillResponse;
+    expect(updated.content).toBe("# Updated org guide\n");
+  });
+
+  it("admin can DELETE an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("member cannot PATCH an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ content: "# Hacked\n" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("member cannot DELETE an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+});

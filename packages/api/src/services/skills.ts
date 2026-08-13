@@ -147,11 +147,12 @@ export async function ownedSkillRow(
   db: AppDb,
   owner: SkillOwner,
   id: string,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<SkillRow | null> {
   const rows = await db.select().from(skills).where(eq(skills.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  return (await isAuthorizedFor(db, owner, row)) ? row : null;
+  return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
 }
 
 /**
@@ -327,6 +328,11 @@ export interface UpdateSkillInput {
    * When present, replaces the stored value.
    */
   argHint?: string;
+  /**
+   * When the row is org-owned, the caller must be an org admin to edit it.
+   * Pass `true` after checking — the service trusts this flag.
+   */
+  isOrgAdmin?: boolean;
 }
 
 /**
@@ -341,7 +347,7 @@ export async function updateSkill(
   id: string,
   input: UpdateSkillInput,
 ): Promise<SkillRow | null> {
-  const row = await ownedSkillRow(db, owner, id);
+  const row = await ownedSkillRow(db, owner, id, { isOrgAdmin: input.isOrgAdmin });
   if (!row) return null;
   if (row.origin !== "local") throw new SkillNotLocalError(id);
 
@@ -428,8 +434,9 @@ export async function deleteSkill(
   db: AppDb,
   owner: SkillOwner,
   id: string,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<DeleteSkillResult> {
-  const row = await ownedSkillRow(db, owner, id);
+  const row = await ownedSkillRow(db, owner, id, opts);
   if (!row) return "not_found";
   if (row.origin !== "local") return "not_local";
   const removed = await db.delete(skills).where(writeScope(owner, row)).returning({ id: skills.id });
@@ -513,7 +520,7 @@ export function rowToSkillSource(row: SkillRow): SkillSource {
 }
 
 /** `frontmatter` is a jsonb column, so drizzle types it as `unknown`. */
-function asRecord(value: unknown): Record<string, unknown> {
+export function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   return { ...(value as Record<string, unknown>) };
 }
