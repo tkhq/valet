@@ -36,12 +36,25 @@ export interface GetMemoryDocResponse {
  * `SearchResult` (`packages/api/src/services/memory.ts`), narrowed to what
  * the explorer's result list actually reads.
  */
+/**
+ * One run of snippet text. The server builds these from `ts_headline` and
+ * strips its markup first, so `text` is plain text that React renders as a
+ * text node — the snippet is never HTML and must never be treated as HTML.
+ */
+export interface SearchMemorySnippetSegment {
+  text: string;
+  /** True for the words that matched the query. */
+  match: boolean;
+}
+
 export interface SearchMemoryResult {
   path: string;
   title: string;
   description: string;
   type: string;
   rank: number;
+  /** Matched text from the body, in reading order. */
+  snippet: SearchMemorySnippetSegment[];
 }
 
 export interface SearchMemoryResponse {

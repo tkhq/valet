@@ -1,6 +1,7 @@
-import { isValidElement, type ReactNode } from "react";
+import { isValidElement, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { resolveLinkTarget } from "@valet/api/memory-links";
 import { cn } from "~/lib/cn";
 import { CodeBlock } from "./code-block";
 
@@ -22,6 +23,44 @@ function languageFromClassName(className: unknown): string | undefined {
 }
 
 /**
+ * Opt-in memory cross-reference handling for `Markdown`.
+ *
+ * A memory document links to its siblings with relative paths
+ * (`../people/alice.md`). Those are not web URLs, so the default
+ * `target="_blank"` treatment sends the reader to a dead tab. Give the path
+ * of the document being rendered and a navigate callback, and every link
+ * that resolves to a memory path navigates in place instead.
+ *
+ * This is a prop rather than a change to the default because `Markdown`
+ * also renders the chat transcript, where a relative-looking href is just a
+ * link the model wrote and has no memory file behind it. Opting in per call
+ * site keeps chat link behavior exactly as it was.
+ *
+ * `onNavigate` is a callback, not a router import, so `Markdown` and its
+ * callers still render in tests without a `RouterProvider` — the same
+ * convention `MemoryDoc` uses for `onNavigateToChat`/`onDeleted`.
+ */
+export interface MemoryLinkHandling {
+  /** Path of the memory document that `children` came from. Relative link
+   * targets resolve against its directory. */
+  fromPath: string;
+  onNavigate: (path: string) => void;
+}
+
+/** In-app path for a memory file. Segments are encoded one at a time so the
+ * separators survive — the router's splat param holds the whole path. */
+function memoryHref(path: string): string {
+  return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/** True for a click the browser would handle as a plain same-tab
+ * navigation. A modified click (new tab, new window, download) keeps the
+ * browser's own behavior, which the real `href` on the anchor supports. */
+function isPlainLeftClick(e: MouseEvent<HTMLAnchorElement>): boolean {
+  return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
+
+/**
  * Markdown rendering for chat message text. Wraps `react-markdown` + GFM
  * (tables, strikethrough, task lists, autolinks) with our token-aware
  * styling. Code blocks/pre/inline-code/links are themed against `--bg`,
@@ -29,8 +68,19 @@ function languageFromClassName(className: unknown): string | undefined {
  *
  * No raw HTML is allowed (react-markdown's default), so this is safe to
  * render arbitrary assistant or user text.
+ *
+ * Pass `memoryLinks` to make cross-references between memory documents
+ * navigate in place — see `MemoryLinkHandling`.
  */
-export function Markdown({ children, className }: { children: string; className?: string }) {
+export function Markdown({
+  children,
+  className,
+  memoryLinks,
+}: {
+  children: string;
+  className?: string;
+  memoryLinks?: MemoryLinkHandling;
+}) {
   return (
     <div
       className={cn(
@@ -75,12 +125,42 @@ export function Markdown({ children, className }: { children: string; className?
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          // Force external links to open in a new tab and not leak referrer.
-          a: ({ children, href, ...rest }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
-              {children}
-            </a>
-          ),
+          // External links open in a new tab and do not leak referrer.
+          // Inside a memory document, a cross-reference to another memory
+          // file navigates in place instead, and an in-page anchor stays in
+          // this tab. The anchor keeps a real `href` in both cases, so
+          // cmd-click, middle-click and the status bar all still work.
+          a: ({ children, href, ...rest }) => {
+            const target = memoryLinks && href ? resolveLinkTarget(memoryLinks.fromPath, href) : null;
+            if (memoryLinks && target !== null) {
+              const navigate = memoryLinks.onNavigate;
+              return (
+                <a
+                  href={memoryHref(target)}
+                  onClick={(e) => {
+                    if (!isPlainLeftClick(e)) return;
+                    e.preventDefault();
+                    navigate(target);
+                  }}
+                  {...rest}
+                >
+                  {children}
+                </a>
+              );
+            }
+            if (memoryLinks && href?.startsWith("#")) {
+              return (
+                <a href={href} {...rest}>
+                  {children}
+                </a>
+              );
+            }
+            return (
+              <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+                {children}
+              </a>
+            );
+          },
           // A fenced block always arrives as `pre > code`; `children` here
           // is that inner `code` element (react-markdown's default code
           // renderer output — not separately overridden), carrying the

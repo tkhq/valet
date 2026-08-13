@@ -28,6 +28,11 @@ export interface MemoryDocProps {
   /** Called after a successful delete (`navigate({ to: "/memory" })` in
    * production) — same router-free convention as `onNavigateToChat`. */
   onDeleted?: () => void;
+  /** Called with the target path when the reader follows a cross-reference
+   * to another memory file (`navigate({ to: "/memory/$" })` in production)
+   * — same router-free convention as `onNavigateToChat`. Without it, a
+   * cross-reference falls back to a plain link. */
+  onOpenPath?: (path: string) => void;
 }
 
 /**
@@ -40,9 +45,10 @@ export interface MemoryDocProps {
  * Edit swaps the rendered body for a plain-markdown textarea over the
  * STORED content (`file.content`, no frontmatter — the server re-derives
  * the title and keeps type/tags/pinned as they were). Delete is
- * confirm-gated inline, no dialog.
+ * confirm-gated inline, no dialog. Pin toggles `pinned` through the same
+ * `PUT /api/memory` write, with no `content` — a metadata-only update.
  */
-export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps) {
+export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
   const docQ = useMemoryDoc(path);
   const info = useOrchestratorInfo();
   const queryClient = useQueryClient();
@@ -56,6 +62,16 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
     mutationFn: (content: string) => api.writeMemoryDoc({ path, content }),
     onSuccess: async () => {
       setEditing(false);
+      await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path) });
+      await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
+    },
+  });
+
+  // Metadata-only write: `PUT /api/memory` leaves the body untouched when
+  // `content` is absent, so pinning never rewrites the document.
+  const pinMutation = useMutation({
+    mutationFn: (pinned: boolean) => api.writeMemoryDoc({ path, pinned }),
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path) });
       await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
     },
@@ -141,6 +157,15 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
           </h1>
           {!editing && (
             <div className="flex shrink-0 items-center gap-2 pt-2 text-xs">
+              <button
+                type="button"
+                onClick={() => pinMutation.mutate(!file.pinned)}
+                disabled={pinMutation.isPending}
+                aria-pressed={file.pinned}
+                className="text-muted hover:text-moss"
+              >
+                {file.pinned ? "Unpin" : "Pin"}
+              </button>
               <button type="button" onClick={startEditing} className="text-muted hover:text-moss">
                 Edit
               </button>
@@ -185,6 +210,11 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
           {meta.origin && <Badge variant="neutral">{meta.origin}</Badge>}
         </div>
         <p className="text-xs text-muted">Updated {relativeTime(file.updatedAt)}</p>
+        {pinMutation.error instanceof Error && (
+          <p className="text-xs text-danger-500">
+            Pin failed: {pinMutation.error.message}. Try again, or reload the page.
+          </p>
+        )}
         {deleteMutation.error instanceof Error && (
           <p className="text-xs text-danger-500">Delete failed: {deleteMutation.error.message}</p>
         )}
@@ -213,7 +243,12 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
           </div>
         </div>
       ) : (
-        <Markdown className="font-display text-[17px] prose-headings:font-display">{body}</Markdown>
+        <Markdown
+          className="font-display text-[17px] prose-headings:font-display"
+          memoryLinks={onOpenPath ? { fromPath: path, onNavigate: onOpenPath } : undefined}
+        >
+          {body}
+        </Markdown>
       )}
 
       {!editing && (

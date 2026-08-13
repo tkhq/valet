@@ -216,6 +216,66 @@ describe("MemoryDoc", () => {
     del.mockRestore();
   });
 
+  /** `PUT /api/memory` has always honoured `pinned`; the doc view had no
+   * control for it, so a pin could only be set by the agent. The write
+   * carries no `content`, which is what keeps the body untouched. */
+  it("pins a file with a metadata-only write", async () => {
+    const doc = renderedDoc("body");
+    docMock.mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: { ...doc, file: { ...doc.file, pinned: false } },
+      refetch: vi.fn(),
+    });
+    const write = vi.spyOn(api, "writeMemoryDoc").mockResolvedValue({});
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Pin"));
+
+    await waitFor(() =>
+      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", pinned: true }),
+    );
+    write.mockRestore();
+  });
+
+  it("unpins a pinned file", async () => {
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc("body"), refetch: vi.fn() });
+    const write = vi.spyOn(api, "writeMemoryDoc").mockResolvedValue({});
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Unpin"));
+
+    await waitFor(() =>
+      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", pinned: false }),
+    );
+    write.mockRestore();
+  });
+
+  /** The memory corpus cross-references itself with relative paths. Those
+   * used to open a new tab that went nowhere. */
+  it("opens a cross-reference in place instead of a new tab", () => {
+    const rendered = '---\ntype: "note"\n---\n\nSee [alice](../people/alice.md).\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const onOpenPath = vi.fn();
+
+    renderWithClient(
+      <MemoryDoc path="journal/2026-08-12.md" onNavigateToChat={vi.fn()} onOpenPath={onOpenPath} />,
+    );
+
+    const link = screen.getByText("alice").closest("a");
+    if (!link) throw new Error("no anchor around the cross-reference");
+    expect(link.target).toBe("");
+
+    const cancel = (e: Event) => e.preventDefault();
+    document.addEventListener("click", cancel);
+    try {
+      fireEvent.click(link, { button: 0 });
+    } finally {
+      document.removeEventListener("click", cancel);
+    }
+    expect(onOpenPath).toHaveBeenCalledWith("people/alice.md");
+  });
+
   it("delete confirm can be cancelled without calling the API", () => {
     const rendered = '---\ntype: "note"\n---\n\nBody.\n';
     docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });

@@ -12,6 +12,10 @@
     "./wire": {
       "types": "./src/wire/types.ts",
       "import": "./src/wire/types.ts"
+    },
+    "./memory-links": {
+      "types": "./src/lib/memory-links.ts",
+      "import": "./src/lib/memory-links.ts"
     }
   },
   "scripts": {

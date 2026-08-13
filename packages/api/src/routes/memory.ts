@@ -5,7 +5,7 @@
  *   PUT    /api/memory                  → write (create/update)
  *   POST   /api/memory/patch            → exact-replace body patch
  *   DELETE /api/memory?path=            → remove
- *   GET    /api/memory/search?q=        → FTS5 search
+ *   GET    /api/memory/search?q=        → full-text search, with a matched-text snippet per hit
  *   GET    /api/memory/export           → OKF bundle manifest (include=all only, decision 12)
  *   POST   /api/memory/import           → OKF bundle import
  *

@@ -13,7 +13,12 @@
  *    (decision 14) and its immediate revocation on membership loss.
  *  - expiry filtering: `expires <= Date.now()` (numeric ms) is excluded,
  *    `expires: null` and future `expires` are not.
- *  - result shape: exactly `{ path, title, description, type, rank }`.
+ *  - result shape: exactly `{ path, title, description, type, rank, snippet }`.
+ *  - snippet: matched body text, split into `{ text, match }` segments. The
+ *    segments carry no markup — `ts_headline`'s default `<b>` markers are
+ *    replaced with inert control characters and consumed here, because the
+ *    client renders the snippet as React nodes and must never be handed
+ *    agent-authored HTML.
  *  - malformed query strings: `websearch_to_tsquery` is deliberately
  *    forgiving (unlike fts5's `MATCH`) and does not raise a Postgres syntax
  *    error for things like unbalanced quotes or bare operators — it
@@ -34,7 +39,16 @@ import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "./teams.js";
-import { patchFile, removeFile, searchFiles, writeFile, type MemoryScope, type SearchResult } from "./memory.js";
+import {
+  parseSnippet,
+  patchFile,
+  removeFile,
+  searchFiles,
+  writeFile,
+  type MemoryScope,
+  type SearchResult,
+  type SearchSnippetSegment,
+} from "./memory.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -156,7 +170,7 @@ describe("searchFiles contract (spec decision 9)", () => {
   });
 
   describe("result shape", () => {
-    it("returns exactly { path, title, description, type, rank }", async () => {
+    it("returns exactly { path, title, description, type, rank, snippet }", async () => {
       const scope = scopeFor("u1");
       await writeFile(db, scope, {
         path: "notes/shaped.md",
@@ -168,7 +182,7 @@ describe("searchFiles contract (spec decision 9)", () => {
       const results = await searchFiles(db, scope, { query: "uniqueshapedterm" });
       expect(results).toHaveLength(1);
       const [r] = results;
-      expect(Object.keys(r).sort()).toEqual(["description", "path", "rank", "title", "type"]);
+      expect(Object.keys(r).sort()).toEqual(["description", "path", "rank", "snippet", "title", "type"]);
       expect(r).toMatchObject({
         path: "notes/shaped.md",
         title: "Shaped",
@@ -176,6 +190,109 @@ describe("searchFiles contract (spec decision 9)", () => {
         type: "note",
       });
       expect(typeof r.rank).toBe("number");
+      expect(Array.isArray(r.snippet)).toBe(true);
+    });
+  });
+
+  describe("matched-text snippet", () => {
+    /** A body long enough that a leading excerpt would miss the match — the
+     * whole point of the snippet is to show the line the user searched for,
+     * not the first line of the file. */
+    function longBody(marker: string): string {
+      const filler = Array.from({ length: 40 }, (_, i) => `Routine paragraph ${i} with nothing of interest.`);
+      return `# Journal\n\nOpening remarks that no reader went looking for.\n\n${filler.join("\n\n")}\n\nThe ${marker} sat on the runway all afternoon.\n\n${filler.join("\n\n")}\n`;
+    }
+
+    function snippetText(segments: SearchSnippetSegment[]): string {
+      return segments.map((s) => s.text).join("");
+    }
+
+    it("excerpts the matching line from deep inside the body, not the opening line", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "journal/long.md", content: longBody("albatross") });
+
+      const [r] = await searchFiles(db, scope, { query: "albatross" });
+      expect(snippetText(r.snippet)).toContain("sat on the runway");
+      expect(snippetText(r.snippet)).not.toContain("Opening remarks");
+    });
+
+    it("marks the matched words and only those", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "journal/long.md", content: longBody("albatross") });
+
+      const [r] = await searchFiles(db, scope, { query: "albatross" });
+      const matched = r.snippet.filter((s) => s.match).map((s) => s.text.toLowerCase());
+      expect(matched).toEqual(["albatross"]);
+      expect(r.snippet.some((s) => !s.match)).toBe(true);
+    });
+
+    it("carries no markup — a body full of HTML produces plain text segments", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, {
+        path: "notes/markup.md",
+        content: '# Markup\n\nA line with <img src=x onerror="alert(1)"> next to the pelican.\n',
+      });
+
+      const [r] = await searchFiles(db, scope, { query: "pelican" });
+      const text = snippetText(r.snippet);
+      expect(text).not.toContain("<");
+      expect(text).not.toContain(">");
+      expect(text).toContain("pelican");
+    });
+
+    it("a body that already holds the marker characters cannot fake a highlight", async () => {
+      const scope = scopeFor("u1");
+      // U+0002/U+0003 are what ts_headline is told to emit around a hit.
+      await writeFile(db, scope, {
+        path: "notes/spoof.md",
+        content: "# Spoof\n\nA \u0002forged\u0003 run of words next to the ptarmigan.\n",
+      });
+
+      const [r] = await searchFiles(db, scope, { query: "ptarmigan" });
+      const matched = r.snippet.filter((s) => s.match).map((s) => s.text.toLowerCase());
+      expect(matched).toEqual(["ptarmigan"]);
+      for (const seg of r.snippet) {
+        expect(seg.text).not.toContain("\u0002");
+        expect(seg.text).not.toContain("\u0003");
+      }
+    });
+
+    it("collapses newlines so a snippet reads as one line", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/wrapped.md", content: "# Wrapped\n\nline one\nwith the\nkestrel here\n" });
+
+      const [r] = await searchFiles(db, scope, { query: "kestrel" });
+      expect(snippetText(r.snippet)).not.toContain("\n");
+    });
+
+    it("excerpts the heading when the file has no body below it", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/titled.md", content: "# Hoopoe\n" });
+
+      const [r] = await searchFiles(db, scope, { query: "hoopoe" });
+      expect(snippetText(r.snippet)).toContain("Hoopoe");
+      expect(r.snippet.filter((s) => s.match).map((s) => s.text)).toEqual(["Hoopoe"]);
+    });
+  });
+
+  describe("parseSnippet", () => {
+    it("splits paired markers into matched segments and drops stray ones", () => {
+      expect(parseSnippet("before \u0002hit\u0003 after")).toEqual([
+        { text: "before ", match: false },
+        { text: "hit", match: true },
+        { text: " after", match: false },
+      ]);
+      expect(parseSnippet("stray \u0003 marker")).toEqual([{ text: "stray marker", match: false }]);
+      expect(parseSnippet("unclosed \u0002hit")).toEqual([{ text: "unclosed hit", match: false }]);
+    });
+
+    it("collapses whitespace runs and trims the ends", () => {
+      expect(parseSnippet("  a\n\n  b  ")).toEqual([{ text: "a b", match: false }]);
+    });
+
+    it("returns no segments for empty input", () => {
+      expect(parseSnippet("")).toEqual([]);
+      expect(parseSnippet("   \n  ")).toEqual([]);
     });
   });
 

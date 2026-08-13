@@ -16,6 +16,13 @@
  *                 dangling reference worth seeing), capped and filtered
  *                 to path-shaped targets only.
  */
+import { resolveLinkTarget } from "./memory-links.js";
+
+/** Re-exported so graph callers keep one import site. The implementation
+ * lives in `memory-links.ts` because the web client needs the same
+ * resolution rules to navigate cross-references in place — see that file's
+ * header for the sharing rationale. */
+export { resolveLinkTarget };
 
 export interface MemoryGraphNode {
   id: string;
@@ -56,44 +63,6 @@ export interface GraphSourceFile {
 }
 
 const LINK_RE = /\[([^\]]*)\]\(([^)\s]+)\)/g;
-
-/**
- * Resolve a markdown link target to a bundle path, or null when the target
- * is not a cross-file reference (external URL, anchor, template garbage).
- */
-export function resolveLinkTarget(fromPath: string, target: string): string | null {
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(target);
-  } catch {
-    decoded = target;
-  }
-
-  if (/^[a-z][a-z0-9+\-.]*:/i.test(decoded)) return null; // any scheme (http:, mailto:)
-  if (/[{}<>]/.test(decoded)) return null; // template placeholders like {url}
-
-  const hashIdx = decoded.indexOf("#");
-  if (hashIdx === 0) return null; // anchor-only
-  const path = hashIdx > 0 ? decoded.slice(0, hashIdx) : decoded;
-  if (path === "") return null;
-
-  let absolute: string;
-  if (path.startsWith("/")) {
-    absolute = path.slice(1);
-  } else {
-    const lastSlash = fromPath.lastIndexOf("/");
-    const dir = lastSlash >= 0 ? fromPath.slice(0, lastSlash + 1) : "";
-    absolute = dir + path;
-  }
-
-  const resolved: string[] = [];
-  for (const seg of absolute.split("/")) {
-    if (seg === "..") resolved.pop();
-    else if (seg !== "." && seg !== "") resolved.push(seg);
-  }
-  const joined = resolved.join("/");
-  return joined === "" ? null : joined;
-}
 
 /** Markdown `[text](target)` targets in `body`, resolved to bundle paths,
  * deduped, code fences and inline code skipped. */
