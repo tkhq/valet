@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
+import type { SessionRunState, SessionSummary } from "@valet/api/wire";
 import { useSessions } from "~/api/queries";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { NewSessionDialog } from "~/components/new-session-dialog";
+import { RunStateBadge } from "~/components/run-state-badge";
+import { relativeTime } from "~/lib/relative-time";
 
 /**
  * `/sessions` — the standalone-only list (decision 1/8). Filtering happens
@@ -11,15 +14,49 @@ import { NewSessionDialog } from "~/components/new-session-dialog";
  * present in `child_watches.child_session_id`) — this route just renders
  * what it gets. Hosts the "Sessions" nav link and the "New session" action
  * (moved out of the top nav per decision 9/assistant-first IA).
+ *
+ * The query polls itself while work is in flight (see `useSessions`), so a
+ * row's state and its age stay true on a page nobody is touching.
  */
 export const Route = createFileRoute("/sessions/")({
   component: SessionsPage,
 });
 
-function SessionsPage() {
+/**
+ * How far up the list each run state pulls a row.
+ *
+ * `needs_you` leads because nothing moves until a person answers. `failed`
+ * is second for the same reason — the turn stopped, and only a person
+ * restarts it. `working` follows: it advances on its own, so it is news,
+ * not a task. `idle` and `sleeping` share the last rank because neither
+ * asks for anything; recency alone separates them.
+ */
+const ATTENTION_RANK: Record<SessionRunState, number> = {
+  needs_you: 0,
+  failed: 1,
+  working: 2,
+  idle: 3,
+  sleeping: 3,
+};
+
+/**
+ * Sorts the rows that need a person to the top, then orders each rank by
+ * most recent activity. Pure and exported so the order is testable without
+ * a render. It copies before it sorts — the array belongs to the query
+ * cache, and `Array.prototype.sort` mutates in place.
+ */
+export function sortByAttention(sessions: readonly SessionSummary[]): SessionSummary[] {
+  return [...sessions].sort((a, b) => {
+    const byRank = ATTENTION_RANK[a.runState] - ATTENTION_RANK[b.runState];
+    if (byRank !== 0) return byRank;
+    return b.lastActivityAt - a.lastActivityAt;
+  });
+}
+
+export function SessionsPage() {
   const [newOpen, setNewOpen] = useState(false);
-  const { data, isLoading, error } = useSessions();
-  const sessions = data?.sessions ?? [];
+  const { data, isLoading, error, refetch } = useSessions();
+  const sessions = sortByAttention(data?.sessions ?? []);
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -32,42 +69,33 @@ function SessionsPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
-        {isLoading && (
-          <div className="flex items-center gap-2 text-sm text-muted">
-            <Spinner size={14} /> Loading sessions…
-          </div>
-        )}
+        {isLoading && <LoadingRow label="Loading sessions…" className="py-0" />}
         {!isLoading && error && (
-          <div className="text-sm text-danger-500">Failed to load sessions.</div>
+          <ErrorRow className="flex items-center gap-3 py-0">
+            <span>The sessions did not load. Select Retry.</span>
+            <Button size="sm" variant="secondary" onClick={() => void refetch()}>
+              Retry
+            </Button>
+          </ErrorRow>
         )}
         {!isLoading && !error && sessions.length === 0 && (
-          <div className="text-sm text-muted">
-            Standalone sessions are for direct work and automation —{" "}
+          <EmptyRow className="py-0">
+            No standalone sessions. A standalone session is for direct work and automation.
+            Select{" "}
             <button
               type="button"
               onClick={() => setNewOpen(true)}
               className="text-ink underline underline-offset-2 hover:text-moss"
             >
-              create one
-            </button>
-            .
-          </div>
+              New session
+            </button>{" "}
+            to start one.
+          </EmptyRow>
         )}
         {!isLoading && sessions.length > 0 && (
           <ul className="space-y-2">
             {sessions.map((s) => (
-              <li key={s.id}>
-                <Link
-                  to="/sessions/$sessionId"
-                  params={{ sessionId: s.id }}
-                  className="flex flex-col gap-0.5 rounded border border-line bg-paper px-4 py-3 hover:bg-ink-wash"
-                >
-                  <span className="text-sm font-medium text-ink truncate">
-                    {s.title || "Untitled session"}
-                  </span>
-                  <span className="text-xs text-muted font-mono truncate">{s.workspace}</span>
-                </Link>
-              </li>
+              <SessionRow key={s.id} session={s} />
             ))}
           </ul>
         )}
@@ -75,5 +103,33 @@ function SessionsPage() {
 
       <NewSessionDialog open={newOpen} onOpenChange={setNewOpen} />
     </div>
+  );
+}
+
+/**
+ * One row, read left to right: what it is, what it is doing, and how long
+ * it has been doing it. The workspace label stays as the second line — it
+ * is the only thing that tells two same-named sessions apart.
+ */
+function SessionRow({ session }: { session: SessionSummary }) {
+  return (
+    <li>
+      <Link
+        to="/sessions/$sessionId"
+        params={{ sessionId: session.id }}
+        className="flex flex-col gap-1 rounded border border-line bg-paper px-4 py-3 hover:bg-ink-wash"
+      >
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">
+            {session.title || "Untitled session"}
+          </span>
+          <RunStateBadge state={session.runState} className="shrink-0" />
+        </div>
+        <div className="flex items-baseline gap-2 text-xs text-muted">
+          <span className="min-w-0 flex-1 truncate font-mono">{session.workspace}</span>
+          <span className="shrink-0">{relativeTime(session.lastActivityAt)}</span>
+        </div>
+      </Link>
+    </li>
   );
 }
