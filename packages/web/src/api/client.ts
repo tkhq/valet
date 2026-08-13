@@ -111,6 +111,7 @@ import type {
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
+  RedeliverEventResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -256,7 +257,10 @@ export const api = {
   searchMemory: (q: string) =>
     request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
   getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
-  writeMemoryDoc: (body: { path: string; content: string }) =>
+  // `content` and `pinned` are both optional: the route leaves the body
+  // alone when `content` is absent, which is how the doc view pins a file
+  // without rewriting it.
+  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }) =>
     request<unknown>("PUT", "/memory", body),
   deleteMemoryDoc: (path: string) =>
     request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
@@ -401,6 +405,8 @@ export const api = {
     return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
   },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
+  redeliverEvent: (id: string) =>
+    request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
   listEventSubscriptions: () =>
     request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>

@@ -19,6 +19,7 @@ import type {
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
+  RedeliverEventResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -60,6 +61,20 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
     // expanded; poll so the badge follows.
     refetchInterval: 15_000,
     ...opts,
+  });
+}
+
+/**
+ * Replays one event through the subscriptions that match it now. The server
+ * writes NEW delivery rows, so the detail query is refetched to show them.
+ */
+export function useRedeliverEvent(id: string) {
+  const qc = useQueryClient();
+  return useMutation<RedeliverEventResponse, Error, void>({
+    mutationFn: () => api.redeliverEvent(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkEvents.detail(id) });
+    },
   });
 }
 

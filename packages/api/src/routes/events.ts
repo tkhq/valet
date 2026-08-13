@@ -12,11 +12,12 @@
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { catalogForService } from "../events/ingest.js";
+import { eventKeyMatches, filtersMatch, type SubscriptionFilter } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -31,6 +32,7 @@ import type {
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
+  RedeliverEventResponse,
 } from "../wire/types.js";
 
 export const eventsRouter = new Hono<AppEnv>();
@@ -238,21 +240,25 @@ eventsRouter.get("/events/:id", async (c) => {
   const row = rows[0];
   if (!row) return c.json({ error: "event not found" }, 404);
 
+  // The join carries the subscription NAME onto each delivery, so a row can
+  // say what it was trying to reach. It also does the org scoping the
+  // previous `subscriptionId IN (org subscriptions)` subquery did, over the
+  // same set: a delivery whose subscription row is deleted has no join
+  // partner and stays hidden, exactly as before.
   const deliveryRows = await db
-    .select()
+    .select({
+      id: eventDeliveries.id,
+      subscriptionId: eventDeliveries.subscriptionId,
+      subscriptionName: eventSubscriptions.name,
+      status: eventDeliveries.status,
+      attempts: eventDeliveries.attempts,
+      lastError: eventDeliveries.lastError,
+      deliveredAt: eventDeliveries.deliveredAt,
+      nextAttemptAt: eventDeliveries.nextAttemptAt,
+    })
     .from(eventDeliveries)
-    .where(
-      and(
-        eq(eventDeliveries.eventId, id),
-        inArray(
-          eventDeliveries.subscriptionId,
-          db
-            .select({ id: eventSubscriptions.id })
-            .from(eventSubscriptions)
-            .where(eq(eventSubscriptions.orgId, user.orgId)),
-        ),
-      ),
-    )
+    .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
+    .where(and(eq(eventDeliveries.eventId, id), eq(eventSubscriptions.orgId, user.orgId)))
     .orderBy(desc(eventDeliveries.createdAt));
 
   const resp: GetEventResponse = {
@@ -260,12 +266,98 @@ eventsRouter.get("/events/:id", async (c) => {
     deliveries: deliveryRows.map((d) => ({
       id: d.id,
       subscriptionId: d.subscriptionId,
+      subscriptionName: d.subscriptionName,
       status: d.status,
       attempts: d.attempts,
       lastError: d.lastError,
       deliveredAt: d.deliveredAt,
+      // `next_attempt_at` keeps its last value after a delivery settles: a
+      // dead row holds the timestamp of the attempt that gave up, and a
+      // delivered row holds its claim lease. Report it only while another
+      // attempt is really coming, or the UI promises a retry that the
+      // dispatcher will never make.
+      nextAttemptAt: d.status === "pending" || d.status === "failed" ? d.nextAttemptAt : null,
     })),
   };
+  return c.json(resp);
+});
+
+/**
+ * `POST /api/events/:id/redeliver` — replay one event through the
+ * subscriptions that match it NOW.
+ *
+ * Three decisions worth stating, because each one is load-bearing:
+ *
+ * 1. **New delivery rows, always.** The dispatcher derives a workflow run id
+ *    from the delivery id (`wfrun_evt_${deliveryId}`) and returns early when
+ *    that run exists, so a "retry" that reset an old row would report
+ *    success and start nothing. Redelivery therefore INSERTs, and never
+ *    revives, a delivery row. A dead row stays dead as the record of what
+ *    happened.
+ * 2. **The subscriptions that match now, not the ones that matched then.**
+ *    Someone who repaired a broken subscription expects this event to reach
+ *    it, so a subscription created or fixed after the event still gets a
+ *    delivery. Someone who disabled a subscription does not, so
+ *    `enabled = false` rows are skipped. The match itself is the ingest
+ *    match (`eventKeyMatches` + `filtersMatch` over the service catalog),
+ *    called here so the two paths cannot drift.
+ * 3. **No de-duplication against deliveries still in flight.** A `pending`
+ *    or `failed` row is still on the dispatcher's due list, so redelivering
+ *    an event mid-backoff can start a second run. The caller decides that:
+ *    the UI names the scheduled retries in its confirm step. Suppressing the
+ *    new row instead would make an explicit press do nothing.
+ *
+ * Access follows the other event routes: org scope, and a cross-org event
+ * answers 404 like a missing one. The fan-out is the same fan-out any
+ * webhook for this event would cause, and every target is an enabled
+ * subscription its owner chose to arm.
+ */
+eventsRouter.post("/events/:id/redeliver", async (c) => {
+  const { db, plugins, eventDispatcher } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const rows = await db
+    .select()
+    .from(events)
+    .where(and(eq(events.id, id), eq(events.orgId, user.orgId)))
+    .limit(1);
+  const event = rows[0];
+  if (!event) return c.json({ error: "event not found" }, 404);
+
+  const subs = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)));
+
+  // Both jsonb columns come back `unknown`; their shapes are owned by
+  // `validateSubscription` above, which gates every write to this table.
+  const catalog = catalogForService(plugins, event.service);
+  const matched = subs.filter(
+    (sub) =>
+      eventKeyMatches(event.eventKey, sub.eventKeys as string[]) &&
+      filtersMatch(event.payload, event.eventKey, sub.filters as SubscriptionFilter[], catalog),
+  );
+
+  if (matched.length > 0) {
+    const now = Date.now();
+    await db.insert(eventDeliveries).values(
+      matched.map((sub) => ({
+        id: randomUUID(),
+        eventId: event.id,
+        subscriptionId: sub.id,
+        status: "pending" as const,
+        attempts: 0,
+        nextAttemptAt: now,
+        createdAt: now,
+      })),
+    );
+    // Same in-process nudge the ingest path uses, so redelivery does not
+    // wait for the next 1s poll tick.
+    eventDispatcher.nudge();
+  }
+
+  const resp: RedeliverEventResponse = { created: matched.length };
   return c.json(resp);
 });
 

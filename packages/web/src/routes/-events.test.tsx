@@ -12,6 +12,7 @@
  * they gate on it.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import type { ReactNode } from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const catalogData = {
@@ -45,16 +46,46 @@ const eventsData = {
   ],
 };
 
+/** A long error, so a truncation regression shows up as a failed substring
+ * match rather than a passing prefix match. */
+const LONG_ERROR =
+  "Error: workflow wf_1 not found in org acme — the definition was deleted while the delivery was in flight";
+
 const eventDetailData = {
   event: { ...eventsData.events[0], payload: { action: "opened", number: 7 } },
   deliveries: [
     {
       id: "d1",
       subscriptionId: "sub_1",
+      subscriptionName: "PR alerts",
       status: "delivered" as const,
       attempts: 1,
       lastError: null,
       deliveredAt: 1_723_200_001_000,
+      nextAttemptAt: null,
+    },
+    {
+      id: "d2",
+      subscriptionId: "sub_2",
+      subscriptionName: "Deploy watcher",
+      status: "failed" as const,
+      attempts: 2,
+      lastError: LONG_ERROR,
+      deliveredAt: null,
+      // Eight minutes out, with 30s of slack: the countdown rounds DOWN, so
+      // the assertion stays "in 8 minutes" however long the suite takes to
+      // reach this file.
+      nextAttemptAt: Date.now() + 8 * 60_000 + 30_000,
+    },
+    {
+      id: "d3",
+      subscriptionId: "sub_3",
+      subscriptionName: "Nightly triage",
+      status: "dead" as const,
+      attempts: 4,
+      lastError: "Error: connect ECONNREFUSED 127.0.0.1:8788",
+      deliveredAt: null,
+      nextAttemptAt: null,
     },
   ],
 };
@@ -97,6 +128,21 @@ const deleteMutate = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+  Link: ({
+    children,
+    to,
+    params: _params,
+    ...rest
+  }: {
+    children: ReactNode;
+    to?: string;
+    params?: Record<string, string>;
+    [key: string]: unknown;
+  }) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
 }));
 
 vi.mock("~/api/events", () => ({
@@ -123,7 +169,7 @@ vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
 }));
 
-import { EventsPage } from "./events";
+import { EventsPage } from "./events.index";
 
 beforeEach(() => {
   patchMutate.mockClear();
@@ -139,11 +185,37 @@ describe("EventsPage — Activity", () => {
     expect(screen.getByText("octocat")).toBeTruthy();
   });
 
+  it("links each row to the event's own URL", () => {
+    render(<EventsPage />);
+    const link = screen.getByRole("link", { name: /Open PR #7/ }) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/events/$eventId");
+  });
+
   it("expands an event into its deliveries and payload", () => {
     render(<EventsPage />);
     fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
     expect(screen.getByText("delivered")).toBeTruthy();
     expect(screen.getByText(/"action": "opened"/)).toBeTruthy();
+  });
+
+  it("names the subscription each delivery was trying to reach", () => {
+    render(<EventsPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
+    expect(screen.getByText("PR alerts")).toBeTruthy();
+    expect(screen.getByText("Deploy watcher")).toBeTruthy();
+  });
+
+  it("separates a delivery that retries from one that gave up", () => {
+    render(<EventsPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
+    expect(screen.getByText(/Retries in 8 minutes/)).toBeTruthy();
+    expect(screen.getByText(/Gave up after 4 attempts\. To send it again, press Redeliver\./)).toBeTruthy();
+  });
+
+  it("shows the whole error string, never a truncated one", () => {
+    render(<EventsPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
+    expect(screen.getByText(LONG_ERROR)).toBeTruthy();
   });
 });
 
