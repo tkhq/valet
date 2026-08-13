@@ -168,10 +168,19 @@ export function SessionHeader({
               Team
             </Badge>
           )}
-          {/* No `uppercase` on the badge — workspace names are
-              case-sensitive paths; shouting them in caps misrepresents
-              them. */}
-          {session.workspace && (
+          {/* An orchestrator's workspace is a synthetic internal directory
+              (`~/.valet/orchestrator/{type}-{principalId}`), not a place
+              anyone chose or can act on. On a team assistant it rendered as
+              `team-team_99235d43-…` — the doubled prefix is the principal
+              type joined to an id that already carries it — which is an
+              internal identifier shown to a user for no reason. The file's
+              own note above says these paths "shouted at users from the
+              subtitle"; this is that intent, finally applied to the chip.
+
+              No `uppercase` on the chip when it does render — real
+              workspace names are case-sensitive paths, and shouting them in
+              caps misrepresents them. */}
+          {session.workspace && teamId === null && !isOwnOrchestrator && (
             <span className="text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>

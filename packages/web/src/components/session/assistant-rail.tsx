@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { Link, useSearch } from "@tanstack/react-router";
 import { Bot, Users } from "lucide-react";
 import type { TeamSummary } from "@valet/api/wire";
 import { useOrchestratorInfo } from "~/api/orchestrator";
+import { useNotifications } from "~/api/queries";
+import { attentionSessionIds } from "~/lib/use-attention-ping";
 import { useOrg, useTeams } from "~/api/settings";
 import { Tooltip } from "~/components/primitives";
 import { teamOrchestratorSessionId } from "~/lib/orchestrator-id";
@@ -41,6 +44,13 @@ export function AssistantRail() {
   // rather than rendering a session the viewer cannot read.
   const activeTeam = teams.find((t) => t.id === search.team);
 
+  // Costs no request: the bell is already polling this query.
+  const notificationsQ = useNotifications();
+  const needsAttention = attentionSessionIds(notificationsQ.data?.notifications);
+  const [showAllTeams, setShowAllTeams] = useState(false);
+  const shown = showAllTeams ? teams : visibleTeams(teams, needsAttention);
+  const hiddenCount = teams.length - shown.length;
+
   return (
     <>
       {showAssistants && (
@@ -49,9 +59,23 @@ export function AssistantRail() {
             Assistants
           </p>
           <PersonalAssistantRow active={activeTeam === undefined} />
-          {teams.map((team) => (
-            <TeamAssistantRow key={team.id} team={team} active={activeTeam?.id === team.id} />
+          {shown.map((team) => (
+            <TeamAssistantRow
+              key={team.id}
+              team={team}
+              active={activeTeam?.id === team.id}
+              needsYou={needsAttention.has(teamOrchestratorSessionId(team.id))}
+            />
           ))}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowAllTeams(true)}
+              className="w-full pl-4 pr-4 py-1.5 text-left text-xs text-muted transition-colors hover:bg-ink-wash/60 hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none"
+            >
+              Show {hiddenCount} more
+            </button>
+          )}
         </div>
       )}
       {activeTeam ? (
@@ -65,6 +89,41 @@ export function AssistantRail() {
         <ThreadTree />
       )}
     </>
+  );
+}
+
+/**
+ * How many team rows the block shows before it stops growing.
+ *
+ * Two lists share this column, and without a cap the containers win: at
+ * nine teams the Assistants block measured 42% of the sidebar, and it has
+ * no scroll of its own, so it squeezes the thread list rather than
+ * scrolling. Twenty teams would leave room for about two threads.
+ */
+const VISIBLE_TEAM_CAP = 5;
+
+/**
+ * The teams the block renders, in their given order, plus any team past
+ * the cap that is waiting on a person.
+ *
+ * Order is NOT changed by attention. Pulling a team to the top the moment
+ * it needs you would reorder the list under the cursor — the same fault
+ * this product avoids in the thread list, where rows move on their own
+ * because agents work unattended. A row that moves while you reach for it
+ * is worse than a row you have to expand to find.
+ *
+ * What the cap must never do is hide live work. So the overflow is not a
+ * plain `slice`: a team below the fold that is blocked on you comes back
+ * into the visible set, keeping its position relative to the others.
+ */
+export function visibleTeams(
+  teams: TeamSummary[],
+  needsAttention: ReadonlySet<string>,
+  cap: number = VISIBLE_TEAM_CAP,
+): TeamSummary[] {
+  if (teams.length <= cap) return teams;
+  return teams.filter(
+    (t, i) => i < cap || needsAttention.has(teamOrchestratorSessionId(t.id)),
   );
 }
 
@@ -94,10 +153,23 @@ function PersonalAssistantRow({ active }: { active: boolean }) {
   );
 }
 
-function TeamAssistantRow({ team, active }: { team: TeamSummary; active: boolean }) {
+function TeamAssistantRow({
+  team,
+  active,
+  needsYou,
+}: {
+  team: TeamSummary;
+  active: boolean;
+  needsYou: boolean;
+}) {
+  const shared = `${team.memberCount} ${team.memberCount === 1 ? "person" : "people"}`;
   return (
     <Tooltip
-      content={`${team.name} — shared with ${team.memberCount} ${team.memberCount === 1 ? "person" : "people"}`}
+      content={
+        needsYou
+          ? `${team.name} — waiting on an answer. Shared with ${shared}.`
+          : `${team.name} — shared with ${shared}`
+      }
       delayDuration={600}
     >
       <AssistantRow
@@ -105,6 +177,18 @@ function TeamAssistantRow({ team, active }: { team: TeamSummary; active: boolean
         icon={<Users className="h-3.5 w-3.5 shrink-0" aria-hidden />}
         label={team.name}
         active={active}
+        // A dot, not a count. Slack's grammar: a mark says something
+        // changed, a number says it is addressed to you — and a column of
+        // numbers reads as noise long before it reads as priority. The
+        // count belongs once, on the bell, not on every row.
+        trailing={
+          needsYou ? (
+            <span
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning-fg"
+              aria-label="Waiting on you"
+            />
+          ) : undefined
+        }
       />
     </Tooltip>
   );
@@ -115,11 +199,13 @@ function AssistantRow({
   icon,
   label,
   active,
+  trailing,
 }: {
   to: { team: string | undefined };
   icon: React.ReactNode;
   label: string;
   active: boolean;
+  trailing?: React.ReactNode;
 }) {
   return (
     <Link
@@ -138,6 +224,7 @@ function AssistantRow({
     >
       {icon}
       <span className="flex-1 truncate">{label}</span>
+      {trailing}
     </Link>
   );
 }

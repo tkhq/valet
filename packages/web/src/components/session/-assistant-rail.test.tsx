@@ -9,7 +9,12 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import type { ListTeamsResponse, OrgResponse, TeamSummary } from "@valet/api/wire";
+import type {
+  ListTeamsResponse,
+  NotificationSummary,
+  OrgResponse,
+  TeamSummary,
+} from "@valet/api/wire";
 
 let teamsData: ListTeamsResponse | undefined = { teams: [] };
 let orgData: OrgResponse | undefined;
@@ -55,6 +60,14 @@ vi.mock("~/api/orchestrator", () => ({
     error: null,
   }),
   useOrchestratorChildren: () => ({ data: { children: [] }, refetch: vi.fn() }),
+}));
+
+// The rail marks a team row when that team's assistant is waiting on an
+// answer, reading the notifications the bell already polls. Swappable per
+// test so the attention cases can drive it.
+let notifications: NotificationSummary[] = [];
+vi.mock("~/api/queries", () => ({
+  useNotifications: () => ({ data: { notifications }, isLoading: false, error: null }),
 }));
 
 // The thread list is covered by its own suite; stub it so these cases are

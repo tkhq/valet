@@ -178,6 +178,38 @@ describe("SessionHeader — team orchestrator", () => {
     expect(screen.getByText("Team")).toBeTruthy();
   });
 
+  /**
+   * The workspace chip is a real filesystem path on a real session, but an
+   * orchestrator's is synthetic — `~/.valet/orchestrator/{type}-{id}` — and
+   * on a team it rendered as `team-team_99235d43-…`, the principal type
+   * joined to an id that already carries it. An internal identifier, shown
+   * to a user, for no reason. These two cases pin that it stays hidden.
+   */
+  it("does not show the internal workspace path on a team assistant", () => {
+    withTeam("member");
+    render(
+      <TooltipProvider>
+        <SessionHeader
+          session={{ ...teamSession(), workspace: "/root/.valet/orchestrator/team-team_1" }}
+          agentStatus="idle"
+          conn="open"
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByText(/team-team_1/)).toBeNull();
+    expect(screen.queryByText(/orchestrator/)).toBeNull();
+  });
+
+  it("still shows the workspace on an ordinary session, where it names a real place", () => {
+    withTeam("member");
+    render(
+      <TooltipProvider>
+        <SessionHeader session={baseSession()} agentStatus="idle" conn="open" />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText("repo")).toBeTruthy();
+  });
+
   it("hides pause and delete from a plain team member", () => {
     withTeam("member");
     renderTeamHeader();

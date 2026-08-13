@@ -52,6 +52,21 @@ export function isActionable(n: NotificationSummary): boolean {
   return n.readAt === undefined && NEEDS_ACTION.includes(n.kind);
 }
 
+/**
+ * Sessions with something unanswered waiting on a person, keyed by session
+ * id. The notifications query is already polling for the bell, so a caller
+ * that wants to mark a row costs no extra request.
+ */
+export function attentionSessionIds(
+  notifications: NotificationSummary[] | undefined,
+): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const n of notifications ?? []) {
+    if (isActionable(n) && n.sessionId !== undefined) out.add(n.sessionId);
+  }
+  return out;
+}
+
 export interface PingContext {
   /** Where the user is right now, e.g. `/chat` or `/sessions/abc`. */
   pathname: string;
