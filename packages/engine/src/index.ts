@@ -166,6 +166,10 @@ export {
   type CommandRegistry,
 } from "./commands/registry.js";
 export {
+  dispatchCommand,
+  type DispatchOutcome,
+} from "./commands/dispatch.js";
+export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,
