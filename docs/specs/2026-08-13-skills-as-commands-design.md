@@ -157,3 +157,20 @@ where shared orchestrators had no templates at all.
   git history cover both).
 - Renaming the "skill" concept. Presentation copy may say "Prompts" for
   `invocation: prompt` skills; the artifact keeps one name.
+
+## Deviations
+
+Recorded at implementation time (2026-08-13):
+
+- No ambient skill delivery exists in the engine (skills reach the model
+  through invocation, not system-prompt injection), so the "exclude prompt
+  skills from ambient delivery" rule is enforced by absence. Whoever adds
+  ambient delivery must filter `invocation: "prompt"`.
+- Org-owned skill rows deliver to org members' sessions read-only through
+  `listSkills`; org writes (create, update, delete) require org admin
+  through routes and agent actions alike.
+- The workspace prompt scan runs only for sessions with a prep
+  (`specProvider`) — a sandbox-less orchestrator never execs the scan
+  because its workspace cannot contain `.valet/prompts`.
+- Skills agent actions use snake_case params (`arg_hint`, `owner_type`),
+  matching the existing action-parameter convention.

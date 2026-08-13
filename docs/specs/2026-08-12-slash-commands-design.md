@@ -40,7 +40,10 @@ Skills already reach the session catalog through plugins. This feature exposes t
 
 **Bare-name setting.** A per-user setting (default off) also registers each skill under its bare name (`/<name>`). A template with the same name shadows a bare skill name: user-authored beats plugin-provided. Shadowing emits a diagnostic. `/skill:<name>` always works, with or without the setting.
 
-### 3. Prompt templates (`source: "template"`)
+### 3. Prompt templates (`source: "template"`) — SUPERSEDED
+
+> Superseded by `2026-08-13-skills-as-commands-design.md`: templates fold
+> into skills as `invocation: prompt`. This section stays for history only.
 
 Bare `/name [args]`. The template body replaces the command text before the prompt path runs. Substitution supports `$1`, `$2`, `$@`, `$ARGUMENTS`, and `${@:N:L}`, with quote-aware argument parsing. Port Pi's `parseCommandArgs` and `substituteArgs` (small, pure functions in `packages/coding-agent/src/core/prompt-templates.ts`).
 
