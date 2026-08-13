@@ -308,8 +308,11 @@ export interface SendPromptRequest {
 }
 
 export interface SendPromptResponse {
-  /** ID for client-side optimistic placeholder; the actual user-message row created server-side. */
-  messageId: string;
+  /**
+   * Queue item id for client-side optimistic linkage. `null` when the text
+   * executed as a slash command — commands never take a queue item.
+   */
+  messageId: string | null;
   threadId: string;
 }
 

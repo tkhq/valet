@@ -79,8 +79,9 @@ export function Composer({
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of
-      // falling back to a recency heuristic.
-      setMessageQueueItemId(sessionId, localId, res.messageId);
+      // falling back to a recency heuristic. Null for slash commands —
+      // they never queue, so there is nothing to link.
+      if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
       // message stays visible — they can see what they sent + retry; on the

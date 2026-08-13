@@ -910,10 +910,11 @@ export class Session {
    * event that also refreshes `Session.skills`. Idempotent.
    */
   async refreshCommandRegistry(): Promise<void> {
-    this.commandRegistryCache = null;
     const provider = this.options.templateProvider;
+    // Load first, invalidate after: when the provider throws, the previous
+    // registry (and its template list) keeps serving — a stale list beats an
+    // empty one mid-session. The rejection still reaches the caller.
     this.templateCache = provider ? await provider.listTemplates() : [];
-    // Force a rebuild on the next read so the fresh templates land.
     this.commandRegistryCache = null;
   }
 

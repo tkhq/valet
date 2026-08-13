@@ -238,7 +238,7 @@ export function useMarkAllNotificationsRead() {
 export function useSendPrompt(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
-    { messageId: string; threadId: string },
+    { messageId: string | null; threadId: string },
     Error,
     { text: string; threadId?: string }
   >({

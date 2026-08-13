@@ -13,6 +13,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray } from "drizzle-orm";
+import { dispatchCommand } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -293,13 +294,21 @@ messagesRouter.post("/:id/messages", async (c) => {
   const thread = resolveThread(engineSession, body.threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  // Route slash commands through `session.prompt()` so command detection and
-  // dispatch fire. Regular prompts go directly to `thread.submitPrompt()` to
-  // preserve thread targeting. Commands always execute on the default thread
-  // (engine invariant: `session.prompt()` uses `this.thread()`).
-  const receipt = body.text.startsWith("/")
-    ? await engineSession.prompt(body.text, {})
-    : await thread.submitPrompt(body.text, {});
+  // Resolve "/"-text against the registry BEFORE choosing a path, so only
+  // confirmed commands lose thread targeting:
+  // - execute-kind (builtin/plugin) → `session.prompt()`; commands run on
+  //   the default thread (engine invariant).
+  // - expand-kind (skill/template) → expand here, then submit the expanded
+  //   text to the REQUESTED thread like any prompt.
+  // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
+  //   requested thread, text unchanged — never silently rerouted.
+  const outcome = body.text.startsWith("/")
+    ? dispatchCommand(body.text, engineSession.commandRegistry())
+    : null;
+  const receipt =
+    outcome && outcome.kind === "execute"
+      ? await engineSession.prompt(body.text, {})
+      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : body.text, {});
 
   // Touch the session row so list ordering reflects recency.
   await db
@@ -308,7 +317,8 @@ messagesRouter.post("/:id/messages", async (c) => {
     .where(eq(agentSessions.id, session.id));
 
   const resp: SendPromptResponse = {
-    messageId: receipt.queueItemId,
+    // Commands take no queue item; "" would read as a real (broken) id.
+    messageId: receipt.queueItemId || null,
     threadId: receipt.threadId,
   };
   return c.json(resp, 202);
