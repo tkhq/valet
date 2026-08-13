@@ -71,6 +71,9 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
             <Badge variant={skill.origin === "plugin" ? "neutral" : "accent"}>
               {originLabel(skill)}
             </Badge>
+            {skill.origin !== "plugin" && skill.invocation === "prompt" && (
+              <Badge variant="neutral">prompt</Badge>
+            )}
           </div>
           {skill.description && (
             <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">

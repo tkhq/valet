@@ -19,7 +19,7 @@
  * edit made here — the detail page offers no Edit for one.
  */
 import { useState } from "react";
-import type { SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
+import type { CreateSkillRequest, SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
@@ -39,6 +39,22 @@ export function errorText(err: unknown): string {
   }
   if (err instanceof Error) return `${err.message}. Check the server is running, then try again.`;
   return "Could not save the skill. Try again.";
+}
+
+/**
+ * Renders a prompt body the way a session reads it, with the argument markers
+ * shown in place: `$1`→`⟨arg1⟩`, `$2`→`⟨arg2⟩`, and `$@` or `$ARGUMENTS`→
+ * `⟨all args⟩`. Display only — a pure string replace, so the editor can show
+ * where the args land without running the engine substitution.
+ *
+ * `$ARGUMENTS` is replaced before `$@`, and both before the numbered markers,
+ * so a longer token never leaves a stray `$` behind a shorter one.
+ */
+export function previewPromptBody(body: string): string {
+  return body
+    .replace(/\$ARGUMENTS\b/g, "⟨all args⟩")
+    .replace(/\$@/g, "⟨all args⟩")
+    .replace(/\$(\d+)/g, (_m, n: string) => `⟨arg${n}⟩`);
 }
 
 /** Owner of a new skill: the caller, or a team the caller belongs to. The
@@ -65,6 +81,10 @@ export function SkillEditor({
   const [description, setDescription] = useState(skill?.description ?? "");
   const [content, setContent] = useState(skill?.content ?? "");
   const [teamId, setTeamId] = useState(OWNER_SELF);
+  const [invocation, setInvocation] = useState<"context" | "prompt">(
+    skill?.invocation === "prompt" ? "prompt" : "context",
+  );
+  const [argHint, setArgHint] = useState(skill?.argHint ?? "");
 
   const pending = create.isPending || update.isPending;
   const error = create.error ?? update.error;
@@ -72,15 +92,23 @@ export function SkillEditor({
 
   function submit() {
     if (!complete || pending) return;
+    // A `context` skill takes no argHint, so send it only for a `prompt`.
+    const argFields =
+      invocation === "prompt" && argHint.trim() !== "" ? { argHint: argHint.trim() } : {};
     if (editing && skill) {
-      const body: UpdateSkillRequest = { name, description, content };
+      const body: UpdateSkillRequest = { name, description, content, invocation, ...argFields };
       update.mutate({ id: skill.id, body }, { onSuccess: onSaved });
       return;
     }
-    create.mutate(
-      { name, description, content, ...(teamId === OWNER_SELF ? {} : { teamId }) },
-      { onSuccess: onSaved },
-    );
+    const body: CreateSkillRequest = {
+      name,
+      description,
+      content,
+      invocation,
+      ...argFields,
+      ...(teamId === OWNER_SELF ? {} : { teamId }),
+    };
+    create.mutate(body, { onSuccess: onSaved });
   }
 
   return (
@@ -144,6 +172,54 @@ export function SkillEditor({
           When to reach for this skill. The assistant reads this to decide.
         </p>
       </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="skill-invocation">Invocation</Label>
+          <select
+            id="skill-invocation"
+            value={invocation}
+            onChange={(e) => setInvocation(e.target.value === "prompt" ? "prompt" : "context")}
+            className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
+          >
+            <option value="context">Context — load as reference</option>
+            <option value="prompt">Prompt — substitute args and send</option>
+          </select>
+          <p className="text-xs text-muted">
+            A context skill loads the body as reference. A prompt skill fills its arguments and
+            sends the body as the message.
+          </p>
+        </div>
+
+        {invocation === "prompt" && (
+          <div className="space-y-1.5">
+            <Label htmlFor="skill-arg-hint">Argument hint</Label>
+            <Input
+              id="skill-arg-hint"
+              value={argHint}
+              onChange={(e) => setArgHint(e.target.value)}
+              placeholder="<topic>"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="text-xs text-muted">
+              Shown in the command palette for the first argument.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {invocation === "prompt" && (
+        <div className="space-y-1.5">
+          <Label>Preview</Label>
+          <p className="whitespace-pre-wrap rounded border border-line bg-paper px-3 py-2 text-xs text-muted">
+            {previewPromptBody(content)}
+          </p>
+          <p className="text-xs text-muted">
+            {"$1"} and {"$2"} fill the arguments in order; {"$@"} fills all of them.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <Label htmlFor="skill-content">Playbook</Label>

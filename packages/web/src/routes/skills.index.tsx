@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { SkillSummary } from "@valet/api/wire";
 import { useSkills } from "~/api/skills";
 import { Button, Spinner } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { SkillCard } from "~/components/skills/skill-card";
 import { SkillSourcesPanel } from "~/components/skills/skill-sources-panel";
 import { displayName } from "~/components/integrations/display-name";
@@ -34,10 +36,35 @@ function sortByName(skills: SkillSummary[]): SkillSummary[] {
   return [...skills].sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
 }
 
+/** A skill runs as a prompt when it declares `invocation: "prompt"`. Only a
+ * stored skill carries the field; a plugin skill never does, so it always
+ * counts as a plain skill. */
+function isPrompt(skill: SkillSummary): boolean {
+  return skill.origin !== "plugin" && skill.invocation === "prompt";
+}
+
+/** The Library filter: everything, the plain skills, or the prompts. */
+export type SkillFilter = "all" | "skills" | "prompts";
+
+const FILTER_CHIPS: ReadonlyArray<{ id: SkillFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "skills", label: "Skills" },
+  { id: "prompts", label: "Prompts" },
+];
+
+/** Keeps the rows the active chip selects. `all` keeps everything; `prompts`
+ * keeps prompt-invocation skills; `skills` keeps the rest. */
+export function filterSkills(skills: SkillSummary[], filter: SkillFilter): SkillSummary[] {
+  if (filter === "all") return skills;
+  if (filter === "prompts") return skills.filter(isPrompt);
+  return skills.filter((s) => !isPrompt(s));
+}
+
 export function SkillsIndexPage() {
   const { data, isLoading, error } = useSkills();
+  const [filter, setFilter] = useState<SkillFilter>("all");
   const skills = data?.skills ?? [];
-  const sorted = sortByName(skills);
+  const sorted = sortByName(filterSkills(skills, filter));
   const pluginCount = new Set(
     skills.flatMap((s) => (s.origin === "plugin" ? [s.plugin] : [])),
   ).size;
@@ -65,6 +92,28 @@ export function SkillsIndexPage() {
           <SkillSourcesPanel />
         </div>
 
+        {!isLoading && !error && skills.length > 0 && (
+          <div className="mt-8 flex items-center gap-2" role="tablist" aria-label="Filter skills">
+            {FILTER_CHIPS.map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                role="tab"
+                aria-selected={filter === chip.id}
+                onClick={() => setFilter(chip.id)}
+                className={cn(
+                  "rounded-full border px-3 py-1 text-xs transition-colors",
+                  filter === chip.id
+                    ? "border-moss bg-moss text-white"
+                    : "border-line bg-paper text-muted hover:text-ink",
+                )}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="mt-8 space-y-12">
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
@@ -79,6 +128,13 @@ export function SkillsIndexPage() {
           {!isLoading && !error && skills.length === 0 && (
             <div className="text-sm text-muted">
               No skills yet. Write one, or ask your assistant to write one for you.
+            </div>
+          )}
+          {!isLoading && !error && skills.length > 0 && sorted.length === 0 && (
+            <div className="text-sm text-muted">
+              {filter === "prompts"
+                ? "No prompts yet. Set a skill's invocation to prompt to list it here."
+                : "No skills match this filter."}
             </div>
           )}
 

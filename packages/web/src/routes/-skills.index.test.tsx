@@ -6,7 +6,7 @@
  * that TanStack Query works.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { ListSkillsResponse } from "@valet/api/wire";
 
@@ -33,6 +33,19 @@ const skillsData: ListSkillsResponse = {
       origin: "plugin",
       plugin: "slack",
       takesArgs: false,
+    },
+    {
+      name: "standup",
+      description: "Summarize the standup.",
+      origin: "local",
+      id: "skill_1",
+      ownerType: "user",
+      ownerId: "u1",
+      shadowed: false,
+      takesArgs: false,
+      updatedAt: 0,
+      invocation: "prompt",
+      argHint: "<topic>",
     },
   ],
 };
@@ -77,7 +90,7 @@ describe("SkillsIndexPage", () => {
     expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
     // Router `Link`s render `to`, not `href`, so they carry no link role.
     // Counted inside the grid: the header carries links of its own.
-    expect(container.querySelectorAll(".grid a").length).toBe(4);
+    expect(container.querySelectorAll(".grid a").length).toBe(5);
   });
 
   it("offers a New skill action", () => {
@@ -105,7 +118,7 @@ describe("SkillsIndexPage", () => {
 
   it("counts the skills, the plugins that ship them, and the caller's own", () => {
     render(<SkillsIndexPage />);
-    expect(screen.getByText("4 skills · 3 plugins · 0 yours")).toBeTruthy();
+    expect(screen.getByText("5 skills · 3 plugins · 1 yours")).toBeTruthy();
   });
 
   it("links each card to its detail route", () => {
@@ -131,6 +144,22 @@ describe("SkillsIndexPage", () => {
     currentState = { isLoading: false, error: new Error("boom") };
     render(<SkillsIndexPage />);
     expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
+  });
+
+  it("filters to prompts when the Prompts chip is picked", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    // Only the one prompt-invocation skill stays in the grid.
+    expect(container.querySelectorAll(".grid a").length).toBe(1);
+    expect(screen.getByText("Standup")).toBeTruthy();
+  });
+
+  it("hides the prompt when the Skills chip is picked", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
+    // The four plugin skills stay; the one prompt drops out.
+    expect(container.querySelectorAll(".grid a").length).toBe(4);
+    expect(screen.queryByText("Standup")).toBeNull();
   });
 
   it("offers the GitHub import above the grid", () => {
