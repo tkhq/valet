@@ -161,6 +161,11 @@ export {
   type ResolvedCommand,
 } from "./commands/types.js";
 export {
+  buildCommandRegistry,
+  type BuildRegistryInput,
+  type CommandRegistry,
+} from "./commands/registry.js";
+export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,
