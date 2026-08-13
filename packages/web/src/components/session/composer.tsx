@@ -54,6 +54,14 @@ export function Composer({
   }, [focusNonce]);
   const send = useSendPrompt(sessionId);
   const abort = useAbortThread(sessionId);
+  // The textarea disables while a send is in flight, which drops focus to
+  // <body>. Refocus when the send settles so the user can type the next
+  // message or command immediately (covers Enter sends and Send clicks).
+  const sendWasPending = useRef(false);
+  useEffect(() => {
+    if (sendWasPending.current && !send.isPending) inputRef.current?.focus();
+    sendWasPending.current = send.isPending;
+  }, [send.isPending]);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
@@ -103,6 +111,8 @@ export function Composer({
   function insertCommand(name: string) {
     setText(`/${name} `);
     setSelectedIndex(0);
+    // Mouse selection would otherwise leave focus off the textarea.
+    inputRef.current?.focus();
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {

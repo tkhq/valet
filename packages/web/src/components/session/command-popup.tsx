@@ -72,6 +72,14 @@ export function CommandPopup({
                   key={cmd.name}
                   role="option"
                   aria-selected={isSelected}
+                  ref={(el) => {
+                    // Keep the highlighted row visible as ↑/↓ move it past
+                    // the popup's max-height fold. Guarded: JSDOM (tests)
+                    // does not implement scrollIntoView.
+                    if (isSelected && el && typeof el.scrollIntoView === "function") {
+                      el.scrollIntoView({ block: "nearest" });
+                    }
+                  }}
                   className={`flex items-start gap-2 px-3 py-1.5 cursor-pointer text-sm ${
                     isSelected ? "bg-[--accent] text-[--accent-fg]" : "hover:bg-[--hover]"
                   }`}
