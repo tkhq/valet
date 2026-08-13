@@ -7,7 +7,6 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ExecOpts, ExecResult, Sandbox } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
 import { makeWorkspaceSkillsProvider, readRepoTemplates } from "./command-providers.js";
 
 /** Minimal `Sandbox` whose `exec` returns a canned result. Only `exec` is
@@ -73,19 +72,9 @@ describe("readRepoTemplates", () => {
 });
 
 describe("makeWorkspaceSkillsProvider", () => {
-  it("skips user templates when no personal user applies (shared session)", async () => {
-    // A team/org orchestrator passes userId=undefined: the provider must not
-    // touch the DB at all. AppDb is a large Drizzle type; a throwing proxy is
-    // the practical double here (any property access fails the test).
-    const db = new Proxy(
-      {},
-      {
-        get() {
-          throw new Error("db must not be touched for a shared session");
-        },
-      },
-    ) as AppDb;
-    const provider = makeWorkspaceSkillsProvider(db, undefined, () => undefined);
+  it("returns empty when no sandbox is available", async () => {
+    // No sandbox means no repo prompts — provider must return [].
+    const provider = makeWorkspaceSkillsProvider(() => undefined);
     expect(await provider()).toEqual([]);
   });
 });

@@ -22,7 +22,7 @@ import type {
 } from "@valet/engine";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, userPromptTemplates } from "../schema/index.js";
+import { agentSessions, childWatches } from "../schema/index.js";
 import { buildOrgCatalog } from "../services/model-catalog.js";
 
 /** Where repo templates live inside a prepared workspace. */
@@ -108,40 +108,21 @@ function readFrontmatterDescription(content: string): string | undefined {
 }
 
 /**
- * Builds the workspace-skills provider for a session. Repo prompts come first
- * so a user prompt of the same name shadows the repo one (registry precedence:
- * the later entry wins on a name collision). Both origins are
- * `invocation: "prompt"` skills.
+ * Builds the workspace-skills provider for a session. Serves repo prompts
+ * read from the session's sandbox (`/workspace/.valet/prompts/*.md`).
  *
  * `sandbox()` resolves the session's sandbox handle lazily and returns
  * `undefined` when no prepared sandbox is available — the host guards it so a
  * `GET /commands` call never provisions a sandbox just to list prompts.
  *
- * Tasks 3-4 replace this with the `skills`/`skill_sources` model.
+ * Note (Task 3): per-user `user_prompt_templates` DB reads are removed here.
+ * Task 4 wires the `skills`/`skill_sources` model as the full replacement.
  */
 export function makeWorkspaceSkillsProvider(
-  db: AppDb,
-  userId: string | undefined,
   sandbox: () => Sandbox | undefined,
 ): () => Promise<SkillSource[]> {
   return async (): Promise<SkillSource[]> => {
-    // No personal user (team/org orchestrator): repo prompts only. A shared
-    // session must not surface whichever actor's prompts woke it.
-    const rows = userId
-      ? await db
-          .select()
-          .from(userPromptTemplates)
-          .where(eq(userPromptTemplates.userId, userId))
-      : [];
-    const user: SkillSource[] = rows.map((r) => ({
-      name: r.name,
-      description: r.description ?? undefined,
-      content: r.content,
-      source: "user" as const,
-      invocation: "prompt" as const,
-    }));
-    const repo = await readRepoTemplates(sandbox());
-    return [...repo, ...user];
+    return readRepoTemplates(sandbox());
   };
 }
 

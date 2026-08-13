@@ -23,7 +23,6 @@ import type {
 } from "@valet/engine";
 import { VirtualSandboxProvider } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
-import { userPromptTemplates } from "../schema/index.js";
 import type {
   CreateSessionResponse,
   ListCommandsResponse,
@@ -58,26 +57,9 @@ async function getCommands(baseUrl: string, sessionId: string): Promise<ListComm
 }
 
 describe("GET /api/sessions/:id/commands", () => {
-  // Task 4 rewires: templates now register as prompt-invocation skills under
-  // `skill:<name>`, so the merge assertions here need a rewrite.
+  // Task 3: user_prompt_templates removed; Task 4 rewires via skills/skill_sources.
   it.skip("merges a user template into the registry next to built-ins", async () => {
-    api = await bootTestApi();
-    const now = Date.now();
-    await api.providers.db.insert(userPromptTemplates).values({
-      id: "tmpl_standup",
-      userId: "local-user",
-      name: "standup",
-      description: "Daily standup",
-      content: "Summarize $1",
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    const sessionId = await createSession(api.baseUrl);
-    const body = await getCommands(api.baseUrl, sessionId);
-
-    expect(body.commands.some((cmd) => cmd.name === "standup" && cmd.source === "skill")).toBe(true);
-    expect(body.commands.some((cmd) => cmd.name === "status" && cmd.source === "builtin")).toBe(true);
+    // Stub — Task 4 will rewrite this test against the skills model.
   });
 
   // Task 4 rewires: see the note above; repo prompts register as prompt skills.

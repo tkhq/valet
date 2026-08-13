@@ -44,6 +44,9 @@ export const orgs = pgTable("orgs", {
   // — jsonb, mirroring the `features` column above.
   modelPreferences: jsonb("model_preferences").notNull().default([]),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  // Org-level toggle: present skill names as bare slash-commands instead of
+  // prefixed `/skill <name>`. Replaces the deleted per-user `users.bareSkillCommands`.
+  bareSkillCommands: boolean("bare_skill_commands").notNull().default(false),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -78,7 +81,6 @@ export const users = pgTable("user", {
   // Nullable user preference feeding `EngineHost`'s model override seam;
   // null falls back to the host default (split-settings design, decision 9).
   defaultModel: text("default_model"),
-  bareSkillCommands: boolean("bare_skill_commands").notNull().default(false),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────
@@ -1258,26 +1260,6 @@ export const linearInstallations = pgTable(
   (t) => [uniqueIndex("linear_installations_org_workspace").on(t.orgId, t.workspaceId)],
 );
 
-// ─── User prompt templates (slash-commands plan, Task 9) ────────────────────
-//
-// Per-user slash-command templates. `name` must match `/^[a-z][a-z0-9-]*$/`
-// and not collide with BUILTIN_COMMAND_NAMES — enforced at the route layer.
-// Unique per (user_id, name) so a PUT is a true upsert.
-
-export const userPromptTemplates = pgTable(
-  "user_prompt_templates",
-  {
-    id: text("id").primaryKey(),
-    userId: text("user_id").notNull(),
-    name: text("name").notNull(),
-    description: text("description"),
-    content: text("content").notNull(),
-    createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-  },
-  (t) => [uniqueIndex("user_prompt_templates_user_name").on(t.userId, t.name)],
-);
-
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -1325,4 +1307,3 @@ export type EventRow = typeof events.$inferSelect;
 export type EventSubscriptionRow = typeof eventSubscriptions.$inferSelect;
 export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;
 export type LinearInstallationRow = typeof linearInstallations.$inferSelect;
-export type UserPromptTemplateRow = typeof userPromptTemplates.$inferSelect;

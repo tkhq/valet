@@ -25,7 +25,7 @@ import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel", "bareSkillCommands"]);
+const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel"]);
 
 async function loadMeResponse(
   db: AppDb,
@@ -51,7 +51,6 @@ async function loadMeResponse(
     orgId: user.orgId,
     orgRole: membership?.role ?? "member",
     defaultModel: row.defaultModel,
-    bareSkillCommands: row.bareSkillCommands,
   };
 }
 
@@ -83,7 +82,7 @@ meRouter.patch("/", async (c) => {
 
   // Keyed by db column name (`image`, not wire-level `avatarUrl`) since this
   // feeds `db.update(users).set(...)` directly.
-  const update: { name?: string; image?: string; defaultModel?: string | null; bareSkillCommands?: boolean } = {};
+  const update: { name?: string; image?: string; defaultModel?: string | null } = {};
 
   if ("name" in raw) {
     if (typeof raw.name !== "string") {
@@ -113,13 +112,6 @@ meRouter.patch("/", async (c) => {
       }
     }
     update.defaultModel = defaultModel;
-  }
-
-  if ("bareSkillCommands" in raw) {
-    if (typeof raw.bareSkillCommands !== "boolean") {
-      return c.json({ error: "bareSkillCommands must be a boolean" }, 400);
-    }
-    update.bareSkillCommands = raw.bareSkillCommands;
   }
 
   if (Object.keys(update).length > 0) {

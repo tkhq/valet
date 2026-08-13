@@ -47,7 +47,7 @@ import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orchestratorIdentities, users } from "../schema/index.js";
+import { agentSessions, orchestratorIdentities, orgs, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
@@ -897,16 +897,16 @@ export class EngineHost {
     const db = this.opts.db;
     if (!db) return undefined;
 
-    const bareRows = userId
-      ? await db
-          .select({ bareSkillCommands: users.bareSkillCommands })
-          .from(users)
-          .where(eq(users.id, userId))
-          .limit(1)
-      : [];
+    // Task 3: moved bareSkillCommands to org level; read from orgs table.
+    // (Was per-user users.bareSkillCommands — column removed in this task.)
+    const bareRows = await db
+      .select({ bareSkillCommands: orgs.bareSkillCommands })
+      .from(orgs)
+      .where(eq(orgs.id, orgId))
+      .limit(1);
     const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
 
-    const workspaceSkillsProvider = makeWorkspaceSkillsProvider(db, userId, () => {
+    const workspaceSkillsProvider = makeWorkspaceSkillsProvider(() => {
       const session = getSession();
       // Only reach for the sandbox once it is provisioned — listing commands
       // must never trigger a cold start just to read repo prompts.
