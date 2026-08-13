@@ -64,16 +64,6 @@ vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
 }));
 
-// The repositories panel has its own suite
-// (`components/skills/-skill-sources-panel.test.tsx`); here it only has to
-// render, so its hooks return an empty, settled list.
-vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: { sources: [] }, isLoading: false, error: null }),
-  useAddSkillSource: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
-  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
-}));
-
 import { SkillsIndexPage } from "./skills.index";
 
 describe("SkillsIndexPage", () => {
@@ -162,8 +152,37 @@ describe("SkillsIndexPage", () => {
     expect(screen.queryByText("Standup")).toBeNull();
   });
 
-  it("offers the GitHub import above the grid", () => {
+  it("links to the settings sync-sources page instead of an inline panel", () => {
     render(<SkillsIndexPage />);
-    expect(screen.getByRole("button", { name: /import from github/i })).toBeTruthy();
+    const link = screen.getByText(/Manage sync sources in Settings/).closest("a");
+    expect(link?.getAttribute("to")).toBe("/settings/library-sources");
+    // The inline import panel is gone.
+    expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
+  });
+
+  it("filters the grid by a case-insensitive search over name and description", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.change(screen.getByLabelText("Search skills"), { target: { value: "SLACK" } });
+    expect(container.querySelectorAll(".grid a").length).toBe(1);
+    expect(screen.getByText("Slack tools")).toBeTruthy();
+  });
+
+  it("filters the grid by scope", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.change(screen.getByLabelText("Filter by scope"), { target: { value: "personal" } });
+    // Only the one stored personal skill stays.
+    expect(container.querySelectorAll(".grid a").length).toBe(1);
+    expect(screen.getByText("Standup")).toBeTruthy();
+  });
+
+  it("shows a scope badge on every card", () => {
+    const { container } = render(<SkillsIndexPage />);
+    // Query inside the grid so the scope-filter dropdown's <option>s do not
+    // count. Four plugin skills → four Plugin badges; one personal stored.
+    const grid = container.querySelector(".grid");
+    const badges = (label: string) =>
+      Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
+    expect(badges("Plugin").length).toBe(4);
+    expect(badges("Personal").length).toBe(1);
   });
 });
