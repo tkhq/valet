@@ -505,6 +505,33 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(startNoGrantRes.status).toBe(201);
       const { runId: runNoGrant } = (await startNoGrantRes.json()) as StartWorkflowRunResponse;
 
+      // Under the new contract a require_approval tool node parks the run
+      // (waiting for a human decision) instead of immediately failing it.
+      const parkedNoGrant = await poll(
+        async () => {
+          const r = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}`);
+          expect(r.status).toBe(200);
+          return (await r.json()) as GetWorkflowRunResponse;
+        },
+        (r) => r.run.status === "parked",
+        15_000,
+      );
+      const approvalWait = (parkedNoGrant.run.waitingOn as Array<Record<string, unknown>>).find(
+        (w) => w.kind === "signal" && w.signalType === "approval:call",
+      );
+      expect(approvalWait).toBeDefined();
+      const pendingCheckpoint = parkedNoGrant.checkpoints.find((c) => c.nodeId === "call");
+      expect(pendingCheckpoint?.status).toBe("intent");
+
+      // Deny the gate — the run must settle as failed.
+      const denyRes = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}/approvals/call`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ approved: false }),
+      });
+      expect(denyRes.status).toBe(200);
+      expect(((await denyRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
+
       const settledNoGrant = await poll(
         async () => {
           const r = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}`);
@@ -517,7 +544,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(settledNoGrant.run.outcome).toBe("failed");
       const failedCheckpoint = settledNoGrant.checkpoints.find((c) => c.nodeId === "call");
       expect(failedCheckpoint?.status).toBe("failed");
-      expect(failedCheckpoint?.error).toContain("requires an approval node or a runtime grant");
+      expect(failedCheckpoint?.error).toContain("denied by");
 
       // A second run with an upstream approval node that grants the rest of
       // the run lets the same tool node pass.
@@ -593,7 +620,9 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const wfRows = allEntries.filter((e) => e.workflowExecutionId === runNoGrant || e.workflowExecutionId === runGrant);
       expect(wfRows.length).toBeGreaterThanOrEqual(2);
       const wfDeniedRow = wfRows.find((e) => e.workflowExecutionId === runNoGrant);
-      expect(wfDeniedRow).toMatchObject({ resolvedMode: "require_approval", status: "denied" });
+      // The gate audit row is written as "pending" when the run parks; the
+      // denied outcome is recorded on the checkpoint, not the audit row.
+      expect(wfDeniedRow).toMatchObject({ resolvedMode: "require_approval", status: "pending" });
       const wfAllowedRow = wfRows.find((e) => e.workflowExecutionId === runGrant);
       expect(wfAllowedRow).toMatchObject({ resolvedMode: "allow", status: "completed" });
       // The decision row was stamped with the execution outcome + result
