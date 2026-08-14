@@ -48,7 +48,7 @@ import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { credentials, githubInstallations, type GithubInstallationRow } from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
-import { resolveGithubApiUrl } from "./github-env.js";
+import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 
 const GITHUB_APP_SERVICE = "github_app";
 const CACHED_TOKEN_MARGIN_MS = 5 * 60 * 1000;
@@ -79,6 +79,10 @@ export interface GithubAppDeps {
   fetchImpl?: typeof fetch;
   /** Injectable clock; defaults to `Date.now`. */
   now?: () => number;
+  /** Environment for the `GITHUB_APP_*` fallback config — defaults to
+   * `process.env`. Tests inject a plain object instead of mutating the
+   * global environment. */
+  env?: NodeJS.ProcessEnv;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,11 +93,95 @@ function appConfigOwner(orgId: string): CredentialOwner {
   return { type: "org", id: orgId };
 }
 
-/** Reads the org's GitHub App config. `null` when no app is configured yet.
- * Throws if a `github_app` credential row exists but is malformed (missing
- * a required field) — that should never happen outside a bug in
- * `saveAppConfig` or a hand-edited row. */
+// ── Environment fallback (`GITHUB_APP_*`) ────────────────────────────────
+// A deployment can bring its own pre-existing GitHub App through the
+// environment instead of the manifest flow. The env is the config: nothing
+// is written to the DB, and an org that later completes the manifest flow
+// gets its own credential row, which shadows the fallback (see
+// `loadAppConfigWithSource`).
+
+const ENV_REQUIRED_VARS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_SLUG",
+  "GITHUB_APP_CLIENT_ID",
+  "GITHUB_APP_CLIENT_SECRET",
+  "GITHUB_APP_PRIVATE_KEY",
+] as const;
+const ENV_ALL_VARS = [...ENV_REQUIRED_VARS, "GITHUB_APP_WEBHOOK_SECRET"] as const;
+
+/** Accepts the private key as a raw PEM or as base64-encoded PEM (the
+ * friendly shape for one-line env delivery, e.g. a Kubernetes Secret synced
+ * from a secrets manager). Throws when neither form yields a PEM. */
+function parseEnvPrivateKey(raw: string): string {
+  if (raw.trimStart().startsWith("-----BEGIN")) return raw;
+  const decoded = Buffer.from(raw, "base64").toString("utf8");
+  if (decoded.trimStart().startsWith("-----BEGIN")) return decoded;
+  throw new Error(
+    "GITHUB_APP_PRIVATE_KEY is not a PEM private key. Set it to the app's PEM, raw or base64-encoded.",
+  );
+}
+
+/** Reads the `GITHUB_APP_*` fallback config from `env`. Returns `null` when
+ * no `GITHUB_APP_*` variable is set. Throws when the config is partial —
+ * a half-set fallback is a deployment mistake, and failing loudly beats a
+ * deployment that silently behaves as if no app exists. */
+export function resolveGithubAppEnvConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
+  if (ENV_ALL_VARS.every((name) => !env[name])) return null;
+  const {
+    GITHUB_APP_ID: appId,
+    GITHUB_APP_SLUG: appSlug,
+    GITHUB_APP_CLIENT_ID: oauthClientId,
+    GITHUB_APP_CLIENT_SECRET: oauthClientSecret,
+    GITHUB_APP_PRIVATE_KEY: privateKey,
+  } = env;
+  if (!appId || !appSlug || !oauthClientId || !oauthClientSecret || !privateKey) {
+    const missing = ENV_REQUIRED_VARS.filter((name) => !env[name]);
+    throw new Error(
+      `Partial GITHUB_APP_* config: missing ${missing.join(", ")}. Set all of ${ENV_REQUIRED_VARS.join(", ")} (GITHUB_APP_WEBHOOK_SECRET is optional), or unset them all.`,
+    );
+  }
+  return {
+    appId,
+    appSlug,
+    oauthClientId,
+    htmlUrl: `${resolveGithubUrl(env)}/apps/${appSlug}`,
+    oauthClientSecret,
+    webhookSecret: env.GITHUB_APP_WEBHOOK_SECRET ?? "",
+    privateKeyPem: parseEnvPrivateKey(privateKey),
+  };
+}
+
+export type GithubAppConfigSource = "org" | "environment";
+
+/** `loadAppConfig` plus where the config came from: `"org"` for the org's
+ * own `github_app` credential row, `"environment"` for the `GITHUB_APP_*`
+ * fallback. The row always shadows the fallback. */
+export async function loadAppConfigWithSource(
+  deps: Pick<GithubAppDeps, "credentials" | "env">,
+  orgId: string,
+): Promise<{ config: GithubAppConfig; source: GithubAppConfigSource } | null> {
+  const stored = await loadStoredAppConfig(deps, orgId);
+  if (stored) return { config: stored, source: "org" };
+  const fromEnv = resolveGithubAppEnvConfig(deps.env ?? process.env);
+  return fromEnv ? { config: fromEnv, source: "environment" } : null;
+}
+
+/** Reads the org's GitHub App config: the org's `github_app` credential
+ * row, or the `GITHUB_APP_*` environment fallback when there is no row.
+ * `null` when neither is configured. Throws if a `github_app` credential
+ * row exists but is malformed (missing a required field) — that should
+ * never happen outside a bug in `saveAppConfig` or a hand-edited row. */
 export async function loadAppConfig(
+  deps: Pick<GithubAppDeps, "credentials" | "env">,
+  orgId: string,
+): Promise<GithubAppConfig | null> {
+  const result = await loadAppConfigWithSource(deps, orgId);
+  return result?.config ?? null;
+}
+
+/** The credential-row half of `loadAppConfig` — see the module doc comment
+ * for the field mapping. */
+async function loadStoredAppConfig(
   deps: Pick<GithubAppDeps, "credentials">,
   orgId: string,
 ): Promise<GithubAppConfig | null> {
