@@ -65,13 +65,16 @@ export function computeDiffRows(
     const run = flat.slice(i, j).map((r) => r.line);
     const isLeading = i === 0;
     const isTrailing = j === flat.length;
-    const keepHead = isLeading ? 0 : context;
-    const keepTail = isTrailing ? 0 : context;
-    const hidden = run.length - keepHead - keepTail;
+    // The gap is the run minus the context kept on each edge that touches a
+    // change. `hidden > MIN_GAP` implies gapStart < gapEnd, which keeps all
+    // three slices below well-formed by construction, not by accident.
+    const gapStart = isLeading ? 0 : context;
+    const gapEnd = run.length - (isTrailing ? 0 : context);
+    const hidden = gapEnd - gapStart;
     if (hidden > MIN_GAP) {
-      for (const line of run.slice(0, keepHead)) rows.push({ kind: "context", line });
-      rows.push({ kind: "gap", lines: run.slice(keepHead, run.length - keepTail) });
-      for (const line of run.slice(run.length - keepTail)) rows.push({ kind: "context", line });
+      for (const line of run.slice(0, gapStart)) rows.push({ kind: "context", line });
+      rows.push({ kind: "gap", lines: run.slice(gapStart, gapEnd) });
+      for (const line of run.slice(gapEnd)) rows.push({ kind: "context", line });
     } else {
       for (const line of run) rows.push({ kind: "context", line });
     }
@@ -110,7 +113,9 @@ export function DiffView({ before, after }: { before: string; after: string }) {
 
   return (
     <div className="font-mono text-[12px] leading-[1.55] py-1">
-      <pre className="whitespace-pre overflow-x-auto">
+      {/* Not a <pre>: the rows are divs and the gap is a button, neither of
+          which is valid inside <pre>. whitespace-pre keeps the layout. */}
+      <div className="whitespace-pre overflow-x-auto">
         {rows.map((row, i) => {
           if (row.kind !== "gap") {
             return <DiffLine key={i} kind={row.kind} line={row.line} />;
@@ -136,7 +141,7 @@ export function DiffView({ before, after }: { before: string; after: string }) {
             </button>
           );
         })}
-      </pre>
+      </div>
     </div>
   );
 }
