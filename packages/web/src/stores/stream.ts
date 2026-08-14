@@ -395,6 +395,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "ping": {
       return next;
     }
+
+    case "command_result": {
+      // Command results reach the message list through the REST refetch in
+      // useSendPrompt's onSuccess, not through the stream store. The frame
+      // still advances lastOffset via `next`.
+      return next;
+    }
   }
 }
 
