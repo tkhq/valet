@@ -17,9 +17,12 @@ vi.mock("~/api/skills", () => ({
   useUpdateSkill: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
 
+// Mutable so a test can simulate the org query resolving AFTER first render
+// (the real query is async; a static mock hides initializer-race bugs).
+let orgData: { callerRole: string } | undefined = { callerRole: "member" };
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] } }),
-  useOrg: () => ({ data: { callerRole: "member" }, isLoading: false, error: null }),
+  useOrg: () => ({ data: orgData, isLoading: orgData === undefined, error: null }),
 }));
 
 // The split markdown editor pulls in CodeMirror; a plain textarea stand-in
@@ -66,5 +69,21 @@ describe("SkillEditor", () => {
     render(<SkillEditor skill={promptSkill} onSaved={vi.fn()} onCancel={vi.fn()} />);
     const select = screen.getByLabelText("Invocation");
     expect(select).toBeTruthy();
+  });
+});
+
+describe("SkillEditor — org scope preselect", () => {
+  it("honors ?scope=org when the admin flag resolves after first render", () => {
+    // First render: org query still in flight → admin unknown → initializer
+    // falls back to "You". The reset effect must pick Org once the flag lands.
+    orgData = undefined;
+    const { rerender } = render(<SkillEditor defaultScope="org" onSaved={() => {}} />);
+
+    orgData = { callerRole: "admin" };
+    rerender(<SkillEditor defaultScope="org" onSaved={() => {}} />);
+
+    const select = screen.getByLabelText("Owner") as HTMLSelectElement;
+    expect(select.value).toBe("org");
+    orgData = { callerRole: "member" };
   });
 });

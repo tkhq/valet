@@ -18,7 +18,7 @@
  * the repository it was synced from, and the next sync would overwrite an
  * edit made here — the detail page offers no Edit for one.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CreateSkillRequest, SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
@@ -91,6 +91,16 @@ export function SkillEditor({
   // Preselect the org scope only for an admin — a member never gets the
   // option, so a member landing on `?scope=org` falls back to a personal skill.
   const [teamId, setTeamId] = useState(defaultScope === "org" && isAdmin ? OWNER_ORG : OWNER_SELF);
+  // The admin flag arrives async: on the first render `org.data` is often
+  // still in flight, so the initializer above ran with `isAdmin === false`
+  // and picked "You". When the flag resolves true, honor `?scope=org` —
+  // but only while the field is untouched, never over a user's own choice.
+  const scopeTouched = useRef(false);
+  useEffect(() => {
+    if (defaultScope === "org" && isAdmin && !scopeTouched.current) {
+      setTeamId(OWNER_ORG);
+    }
+  }, [defaultScope, isAdmin]);
   const [invocation, setInvocation] = useState<"context" | "prompt">(
     skill?.invocation === "prompt" ? "prompt" : "context",
   );
@@ -161,7 +171,10 @@ export function SkillEditor({
             <select
               id="skill-owner"
               value={teamId}
-              onChange={(e) => setTeamId(e.target.value)}
+              onChange={(e) => {
+                scopeTouched.current = true;
+                setTeamId(e.target.value);
+              }}
               className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
             >
               <option value={OWNER_SELF}>You</option>
