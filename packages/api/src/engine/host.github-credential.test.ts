@@ -153,6 +153,60 @@ describe("EngineHost session github credential resolution", () => {
     expect(cred?.accessToken).toBe("inst-999");
   });
 
+  it('"github:installation" resolves the installation token even though default resolution picks the user token', async () => {
+    const { appDb, credentials } = await harness();
+    // The reported bug: a linked user credential wins default `github`
+    // resolution, and `list_repos scope:"installation"` then 403s on
+    // `GET /installation/repositories`. The virtual service must hand the
+    // action the installation tier regardless of the user credential.
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_211",
+      orgId,
+      installationId: 211,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-scope", { userId, orgId, workspace: "/tmp" });
+    const provider = session.credentialProvider();
+
+    expect((await provider.get("github"))?.accessToken).toBe("user-tok");
+    expect((await provider.get("github:installation"))?.accessToken).toBe("inst-211");
+  });
+
+  it('"github:installation" resolves null (not a user-token substitute) when no installation exists', async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-scope-none", { userId, orgId, workspace: "/tmp" });
+
+    expect(await session.credentialProvider().get("github:installation")).toBeNull();
+  });
+
   it("non-github service is a byte-identical raw store read through the session path", async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "user", id: userId }, "linear", {

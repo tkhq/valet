@@ -29,6 +29,28 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
   return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
 }
 
+/**
+ * Virtual credential service for an explicit App-installation-token request.
+ * Mirrors `GITHUB_INSTALLATION_CREDENTIAL_SERVICE` in the api package's
+ * `services/github-tokens.ts` — the two literals must stay identical, and
+ * this package cannot import it (`@valet/api` depends on this package).
+ */
+const GITHUB_INSTALLATION_CREDENTIAL_SERVICE = "github:installation";
+
+/**
+ * Octokit bound to the org's App installation token, or `null` when the host
+ * resolves none (no App installation, or a host without the resolver seam).
+ * Default credential resolution prefers a linked user token, and
+ * `GET /installation/repositories` rejects user tokens outright — the
+ * installation listing must switch the CREDENTIAL, not only the endpoint.
+ */
+async function getInstallationOctokit(ctx: PluginActionContext): Promise<Octokit | null> {
+  const cred = await ctx.credentials.get(GITHUB_INSTALLATION_CREDENTIAL_SERVICE);
+  const token = cred?.accessToken;
+  if (!token) return null;
+  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+}
+
 const PERMISSION_HINTS: Record<string, string> = {
   "github.list_workflow_runs": "actions:read",
   "github.get_workflow_run": "actions:read + checks:read",
@@ -153,20 +175,40 @@ const listRepos = action(Type.Object({
     const octokit = await getOctokit(ctx);
     const scope = args.scope ?? "auto";
 
-    // GET /user/repos is user-token-only; an App installation token gets
-    // "403 Resource not accessible by integration" there and must use
-    // GET /installation/repositories instead. "auto" makes the tool work
-    // regardless of which credential tier resolution handed us.
+    // GET /user/repos is user-token-only; GET /installation/repositories is
+    // installation-token-only. The endpoint AND the credential must switch
+    // together: the default credential is a user token whenever the user has
+    // one linked, so the installation listing asks the host for the
+    // installation token explicitly and falls back to the default credential
+    // only when the host resolves none (then the default credential already
+    // IS the installation token, or there is no App to list from).
     async function listInstallation() {
-      const { data } = await octokit.request("GET /installation/repositories", {
+      const installationOctokit = (await getInstallationOctokit(ctx)) ?? octokit;
+      const { data } = await installationOctokit.request("GET /installation/repositories", {
         per_page: args.perPage,
         page: args.page,
       });
       return { success: true as const, data: data.repositories };
     }
 
+    if (scope === "installation") {
+      try {
+        return await listInstallation();
+      } catch (err) {
+        if (isForbidden(err)) {
+          return {
+            success: false,
+            error:
+              "List repos (installation): GitHub returned 403 Forbidden. No installation " +
+              "token could be resolved, so the request used a credential the endpoint " +
+              "rejects. Install the GitHub App for this organization in Settings.",
+          };
+        }
+        return handleOctokitError(err, "github.list_repos", "List repos (installation)");
+      }
+    }
+
     try {
-      if (scope === "installation") return await listInstallation();
       const { data } = await octokit.request("GET /user/repos", {
         sort: args.sort,
         per_page: args.perPage,

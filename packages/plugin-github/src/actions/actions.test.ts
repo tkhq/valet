@@ -56,6 +56,71 @@ describe("github action base URL", () => {
   });
 });
 
+// ─── list_repos credential scope ────────────────────────────────────────────
+
+describe("github.list_repos credential scope", () => {
+  it("switches to the installation token for scope=installation when the host resolves one", async () => {
+    const server = useFixture();
+
+    const result = await findAction("github.list_repos").execute(
+      { scope: "installation" },
+      fakeActionContext("user-token", { "github:installation": "installation-token" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /installation/repositories",
+    ]);
+    expect(server.calls[0].authHeader).toContain("installation-token");
+    expect(server.calls[0].authHeader).not.toContain("user-token");
+  });
+
+  it("falls back to the default credential when the host resolves no installation token", async () => {
+    const server = useFixture();
+
+    const result = await findAction("github.list_repos").execute(
+      { scope: "installation" },
+      fakeActionContext("default-token"),
+    );
+
+    expect(result.success).toBe(true);
+    expect(server.calls[0].authHeader).toContain("default-token");
+  });
+
+  it("uses the installation token for the auto fallback after a 403 from /user/repos", async () => {
+    const server = useFixture({
+      listUserRepos: () => ({ status: 403, body: { message: "Resource not accessible by integration" } }),
+    });
+
+    const result = await findAction("github.list_repos").execute(
+      {},
+      fakeActionContext("user-token", { "github:installation": "installation-token" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /user/repos",
+      "GET /installation/repositories",
+    ]);
+    expect(server.calls[1].authHeader).toContain("installation-token");
+  });
+
+  it("names the corrective step when the installation listing still gets a 403", async () => {
+    useFixture({
+      listInstallationRepos: () => ({ status: 403, body: { message: "Resource not accessible by integration" } }),
+    });
+
+    const result = await findAction("github.list_repos").execute(
+      { scope: "installation" },
+      fakeActionContext("user-token"),
+    );
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("Install the GitHub App");
+  });
+});
+
 // ─── inspect_pull_request ───────────────────────────────────────────────────
 
 interface InspectFile {

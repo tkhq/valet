@@ -58,6 +58,12 @@ export interface GithubFixtureHandlers {
   listReviewComments?: (ref: PullRef) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/commits/:ref/check-runs` */
   listCheckRuns?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
+  /** `GET /user/repos` — receives the auth header so a fixture can answer by
+   * credential tier (an installation token 403s here on the real API). */
+  listUserRepos?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /installation/repositories` — same auth-header view; the real API
+   * rejects user tokens on this endpoint. */
+  listInstallationRepos?: (authHeader: string | undefined) => GithubFixtureResponse;
 }
 
 export interface GithubFixture {
@@ -90,6 +96,10 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   }),
   listReviewComments: () => ({ body: [] }),
   listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
+  listUserRepos: () => ({ body: [{ full_name: "fixture-user/repo" }] }),
+  listInstallationRepos: () => ({
+    body: { total_count: 1, repositories: [{ full_name: "fixture-org/repo" }] },
+  }),
 };
 
 function listenPort(server: ServerType): number {
@@ -199,6 +209,20 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     const ref = c.req.param("ref");
     record(c, { owner, repo, ref });
     const { status, body } = handlers.listCheckRuns(owner, repo, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/user/repos", (c) => {
+    record(c, {});
+    const auth = c.req.header("authorization") ?? undefined;
+    const { status, body } = handlers.listUserRepos(auth);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/installation/repositories", (c) => {
+    record(c, {});
+    const auth = c.req.header("authorization") ?? undefined;
+    const { status, body } = handlers.listInstallationRepos(auth);
     return c.json(body as object, status ?? 200);
   });
 
