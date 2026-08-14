@@ -1,7 +1,7 @@
 import { Terminal } from "lucide-react";
 import { cn } from "~/lib/cn";
 import { CopyButton, ToolBody, TruncatedText } from "./tool-shell";
-import { resultText, type ToolRenderer } from "./types";
+import { isActiveStatus, resultText, type ToolRenderer } from "./types";
 
 interface BashArgs {
   command?: unknown;
@@ -71,7 +71,7 @@ export const bashRenderer: ToolRenderer = {
         )}
         {/* Output. While running, show a subtle blinking caret. */}
         <div className="px-3 py-2">
-          {(status === "running" || status === "streaming") && !body ? (
+          {isActiveStatus(status) && !body ? (
             <BlinkingCaret />
           ) : body ? (
             <TruncatedText

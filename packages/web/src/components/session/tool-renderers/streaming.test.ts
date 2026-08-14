@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { showsLiveBody } from "./types";
+import { isActiveStatus, showsLiveBody } from "./types";
 import { statusLabel } from "./tool-shell";
 import { writeRenderer } from "./write";
 import { bashRenderer } from "./bash";
@@ -34,5 +34,19 @@ describe("streaming tool-call rendering (pure logic)", () => {
     expect(statusLabel("running")).toBe("running");
     expect(statusLabel("completed")).toBe("done");
     expect(statusLabel("error")).toBe("error");
+  });
+
+  it("isActiveStatus covers exactly the in-flight states", () => {
+    expect(isActiveStatus("streaming")).toBe(true);
+    expect(isActiveStatus("running")).toBe(true);
+    expect(isActiveStatus("completed")).toBe(false);
+    expect(isActiveStatus("error")).toBe(false);
+  });
+
+  it("write suppresses its line-count summary while args are streaming", () => {
+    // Partial args mid-stream must not surface a churning "+N lines" count.
+    expect(
+      writeRenderer.formatSummary?.({ path: "/tmp/x", content: "a\nb" }, undefined, "streaming"),
+    ).toBeUndefined();
   });
 });

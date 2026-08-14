@@ -2,7 +2,7 @@ import { FilePlus2 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "~/lib/cn";
 import { PathLabel, ToolBody } from "./tool-shell";
-import type { ToolRenderer } from "./types";
+import { isActiveStatus, type ToolRenderer } from "./types";
 
 interface WriteArgs {
   path?: unknown;
@@ -29,7 +29,9 @@ export const writeRenderer: ToolRenderer = {
   streamsArgs: true,
   formatTarget: (args) => getPath(args) || undefined,
   formatSummary: (args, _result, status) => {
-    if (status === "running") return undefined;
+    // No line count while in flight — partial args would show a churning
+    // wrong total.
+    if (isActiveStatus(status)) return undefined;
     const lines = getContent(args).split("\n").length;
     return `+${lines} ${lines === 1 ? "line" : "lines"}`;
   },
@@ -49,7 +51,7 @@ export const writeRenderer: ToolRenderer = {
             )}
           </div>
         )}
-        {(status === "running" || status === "streaming") && !content ? (
+        {isActiveStatus(status) && !content ? (
           <div className="px-3 py-2 text-[11px] text-muted italic font-mono">
             writing…
           </div>

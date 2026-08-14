@@ -38,7 +38,9 @@ function truncate(text: string, max: number): string {
 
 function safeJson(value: unknown, indent = 2): string {
   try {
-    return JSON.stringify(value, null, indent);
+    // JSON.stringify(undefined) returns undefined (not a string) — a
+    // streaming tool_call can have no args yet.
+    return JSON.stringify(value, null, indent) ?? "undefined";
   } catch (err) {
     return `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
   }
@@ -76,7 +78,7 @@ function renderMessage(m: Message, index: number): string {
       lines.push("```json");
       lines.push(truncate(safeJson(part.args), 8000));
       lines.push("```");
-      if (part.status !== "running") {
+      if (part.status !== "running" && part.status !== "streaming") {
         lines.push("**result**");
         lines.push("```json");
         lines.push(truncate(safeJson(part.result), 8000));

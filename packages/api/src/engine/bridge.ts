@@ -244,7 +244,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "tool_start",
           threadId: e.threadId,
           toolName: e.tool,
-          ...(e.callId !== undefined ? { callId: e.callId } : {}),
+          callId: e.callId,
           args: e.args,
         },
       ];
@@ -255,7 +255,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "tool_end",
           threadId: e.threadId,
           toolName: e.tool,
-          ...(e.callId !== undefined ? { callId: e.callId } : {}),
+          callId: e.callId,
           result: e.result,
           isError: e.isError,
         },

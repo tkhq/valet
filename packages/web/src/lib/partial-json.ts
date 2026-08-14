@@ -13,13 +13,18 @@
  */
 export function parsePartialJson(text: string): Record<string, unknown> | undefined {
   let candidate = text.trim();
-  const MAX_CHOPS = 500;
+  // Each chop re-runs an O(n) repair scan; 120 covers any realistic dangling
+  // key/literal tail while bounding worst-case work. Beyond it, callers keep
+  // their last good parse.
+  const MAX_CHOPS = 120;
   for (let i = 0; i < MAX_CHOPS && candidate; i++) {
     const repaired = repair(candidate);
     if (repaired !== undefined) {
       try {
         const parsed: unknown = JSON.parse(repaired);
         if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          // typeof narrows only to `object`; a parsed non-array JSON object
+          // is always string-keyed, so the assertion is safe.
           return parsed as Record<string, unknown>;
         }
         // Parseable but not an object — tool args are always objects.

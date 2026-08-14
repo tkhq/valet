@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
-import type { ToolCategory, ToolStatus } from "./types";
+import { isActiveStatus, type ToolCategory, type ToolStatus } from "./types";
 
 /**
  * Friendly display names for tool identifiers. Unknown (plugin) tools fall
@@ -69,18 +69,16 @@ const STATUS_DOT: Record<ToolStatus, string> = {
   error: "bg-danger-600 dark:bg-danger-500",
 };
 
+const STATUS_LABEL: Record<ToolStatus, string> = {
+  streaming: "writing",
+  running: "running",
+  completed: "done",
+  error: "error",
+};
+
 /** Header pip label per status. Exported for tests. */
 export function statusLabel(status: ToolStatus): string {
-  switch (status) {
-    case "streaming":
-      return "writing";
-    case "running":
-      return "running";
-    case "completed":
-      return "done";
-    case "error":
-      return "error";
-  }
+  return STATUS_LABEL[status];
 }
 
 export function ToolShell({
@@ -165,7 +163,7 @@ export function ToolShell({
           {/* Scanner overlay — only active while running. The gradient sweeps
               left→right behind the header content, low-alpha, in the
               category color via currentColor. */}
-          {(status === "running" || status === "streaming") && (
+          {isActiveStatus(status) && (
             <span
               aria-hidden
               className={cn(
@@ -222,7 +220,7 @@ function StatusPip({ status }: { status: ToolStatus }) {
     <span
       className={cn(
         "shrink-0 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-medium",
-        (status === "running" || status === "streaming") && "text-muted",
+        isActiveStatus(status) && "text-muted",
         status === "completed" && "text-success-600 dark:text-success-500",
         status === "error" && "text-danger-600 dark:text-danger-500",
       )}
@@ -232,8 +230,7 @@ function StatusPip({ status }: { status: ToolStatus }) {
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           STATUS_DOT[status],
-          (status === "running" || status === "streaming") &&
-            "animate-pulse motion-reduce:animate-none",
+          isActiveStatus(status) && "animate-pulse motion-reduce:animate-none",
         )}
       />
       {statusLabel(status)}

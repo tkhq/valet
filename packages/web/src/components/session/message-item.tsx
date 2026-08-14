@@ -93,8 +93,14 @@ function TextBlock({ text }: { text: string }) {
 
 function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
   const renderer = pickRenderer(part.toolName, part.args);
-  const target = renderer.formatTarget(part.args);
-  const summary = renderer.formatSummary?.(part.args, part.result, part.status);
+  // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
+  // formatTarget/formatSummary would compute from partial, jagged args
+  // (truncated paths, churning line counts) the renderer never opted to see.
+  const live = showsLiveBody(renderer, part.status);
+  const target = live ? renderer.formatTarget(part.args) : undefined;
+  const summary = live
+    ? renderer.formatSummary?.(part.args, part.result, part.status)
+    : undefined;
   const Body = renderer.Body;
 
   return (
@@ -106,7 +112,7 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
       summary={summary}
       status={part.status}
     >
-      {showsLiveBody(renderer, part.status) ? (
+      {live ? (
         <Body
           args={part.args}
           result={part.result}

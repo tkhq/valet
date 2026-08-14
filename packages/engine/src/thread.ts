@@ -2918,6 +2918,12 @@ export class Thread {
         break;
       }
       case "message_update": {
+        // A superseded (zombie) attempt can keep receiving buffered stream
+        // events after its fence died. Fenced durable emits already throw
+        // StaleAttemptError; ephemeral emits (text_delta, tool_call_update)
+        // bypass the fence, so gate them on the detected-stale flag to stop
+        // painting a dead attempt's output into live clients.
+        if (this.staleFenceDetected) break;
         const ev = event.assistantMessageEvent;
         if (ev.type === "text_delta") {
           await this.session.emit({

@@ -71,6 +71,11 @@ export function showsLiveBody(renderer: ToolRenderer, status: ToolStatus): boole
   return status !== "streaming" || renderer.streamsArgs === true;
 }
 
+/** The call is still in flight (args generating or tool executing). */
+export function isActiveStatus(status: ToolStatus): boolean {
+  return status === "streaming" || status === "running";
+}
+
 export function matches(renderer: ToolRenderer, toolName: string, args?: unknown): boolean {
   const m = renderer.matches;
   if (typeof m === "string") return m === toolName;

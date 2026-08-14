@@ -593,8 +593,77 @@ describe("streaming tool calls", () => {
       messageId: "m1",
       reason: "abort",
     });
-    const m1 = useStreamStore.getState().bySession[SESSION].messages[0];
-    expect(m1.parts).toHaveLength(0);
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages[0].parts).toHaveLength(0);
+    // The accumulated args scratch dies with the part.
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+
+  it("message_end abort with an unknown messageId still sweeps the thread's streaming parts", () => {
+    // A client that connected mid-turn never saw message_start for the
+    // in-flight message; the streaming part sits on an older message.
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m-never-seen",
+      reason: "abort",
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages[0].parts).toHaveLength(0);
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+
+  it("turn_end sweeps parts still streaming and their scratch (zombie deltas cannot outlive the turn)", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    // tool_start never arrives (e.g. superseded attempt) — turn ends.
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "turn_end",
+      threadId: THREAD,
+      reason: "end_turn",
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages[0].parts).toHaveLength(0);
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+
+  it("message_start sweeps stale streaming parts left by a zombie delta from a prior aborted run", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "abort",
+    });
+    // Zombie delta from the aborted attempt lands after cleanup and
+    // re-synthesizes a streaming part on m1.
+    ingest(SESSION, toolCallUpdate("tc1", ',"content":"stale"'));
+    expect(
+      useStreamStore.getState().bySession[SESSION].messages[0].parts.length,
+    ).toBeGreaterThan(0);
+    // The next run's message_start clears it.
+    ingest(SESSION, messageStart("m2", 3));
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const streamingParts = slice.messages.flatMap((m) =>
+      m.parts.filter((p) => p.kind === "tool_call" && p.status === "streaming"),
+    );
+    expect(streamingParts).toHaveLength(0);
+    expect(slice.streamingArgs ?? {}).toEqual({});
   });
 });
 

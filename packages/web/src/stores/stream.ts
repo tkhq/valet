@@ -95,10 +95,13 @@ export interface SessionStreamState {
   sandbox?: { state: string; epoch: number };
   /**
    * Accumulated raw args JSON per in-flight tool call (`tool_call_update`
-   * frames), keyed by callId. Client-local scratch — dropped when the call
-   * starts executing (`tool_start`) or its message ends on abort/error.
+   * frames), keyed by callId. `parsedLen` is the buffer length at the last
+   * parse attempt — large buffers re-parse on a geometric stride instead of
+   * per delta. Client-local scratch: entries die with their part — on
+   * `tool_start` (call executes), and via `sweepStreamingParts` on
+   * message_start / turn_end / abort-or-error message_end.
    */
-  streamingArgsText?: Record<string, string>;
+  streamingArgs?: Record<string, { text: string; parsedLen: number }>;
 }
 
 export interface StreamStore {
@@ -215,11 +218,15 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // A new message is actually streaming — any error banner from a prior
       // failed turn is stale now.
       next.error = undefined;
+      // Any part still `streaming` on this thread belongs to a dead attempt
+      // (zombie deltas from a superseded run are unfenced and can arrive
+      // after its cleanup) — sweep before the new message begins.
+      sweepStreamingParts(next, ev.threadId);
       // Begin a new message row. The wire's role is the full MessageRole
       // union (user/assistant/tool/system); we forward verbatim. Earlier
       // versions collapsed to assistant which broke any future user-role
       // synthesized events.
-      const exists = slice.messages.some((m) => m.id === ev.messageId);
+      const exists = next.messages.some((m) => m.id === ev.messageId);
       if (exists) return next;
       const newMsg: Message = {
         id: ev.messageId,
@@ -230,7 +237,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         parts: [],
         createdAt: ev.ts,
       };
-      next.messages = [...slice.messages, newMsg];
+      next.messages = [...next.messages, newMsg];
       return next;
     }
 
@@ -258,16 +265,15 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "message_end": {
-      // On abort/error, drop parts still in `streaming` status: their tool
+      // On abort/error, sweep parts still in `streaming` status: their tool
       // call never reached toolcall_end, so the engine never persisted them —
-      // keeping them would show a phantom card that vanishes on reload.
+      // keeping them would show a phantom card that vanishes on reload. The
+      // sweep is thread-wide (not by messageId) so a client that attached
+      // the part to an older message (mid-turn connect) still cleans up.
+      // On end_turn the streaming parts are about to execute — tool_start
+      // upgrades them in place.
       if (ev.reason === "end_turn") return next;
-      const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
-      if (idx < 0) return next;
-      const m = slice.messages[idx];
-      const parts = m.parts.filter((p) => !(p.kind === "tool_call" && p.status === "streaming"));
-      if (parts.length === m.parts.length) return next;
-      next.messages = replaceAt(slice.messages, idx, { ...m, parts });
+      sweepStreamingParts(next, ev.threadId);
       return next;
     }
 
@@ -283,17 +289,32 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // A delta arriving after tool_start (reordered frames) must not
       // regress an executing part back to streaming.
       if (prev && prev.kind === "tool_call" && prev.status !== "streaming") return next;
-      const argsText = (slice.streamingArgsText?.[ev.callId] ?? "") + ev.argsDelta;
-      next.streamingArgsText = { ...slice.streamingArgsText, [ev.callId]: argsText };
-      const parsed = parsePartialJson(argsText);
+      const scratch = slice.streamingArgs?.[ev.callId];
+      const text = (scratch?.text ?? "") + ev.argsDelta;
+      // Parse policy: small buffers parse on every delta (live feel). Past
+      // PARSE_EAGER_LIMIT, re-parse only when the buffer grew ~12.5% since
+      // the last attempt — bounds total parse work to O(n log n) instead of
+      // O(n²) for large streamed args. tool_start ships the complete args
+      // later, so a briefly stale tail preview is fine.
+      const shouldParse =
+        text.length <= PARSE_EAGER_LIMIT ||
+        text.length - (scratch?.parsedLen ?? 0) >= Math.max(256, text.length >> 3);
+      const prevArgs = prev?.kind === "tool_call" ? prev.args : undefined;
+      let args = prevArgs;
+      let parsedLen = scratch?.parsedLen ?? 0;
+      if (shouldParse) {
+        // A mid-key fragment parses to undefined — keep the last good parse
+        // so the preview never flickers empty.
+        args = parsePartialJson(text) ?? prevArgs;
+        parsedLen = text.length;
+      }
+      next.streamingArgs = { ...slice.streamingArgs, [ev.callId]: { text, parsedLen } };
       const part: MessagePart = {
         kind: "tool_call",
         callId: ev.callId,
         toolName: ev.toolName,
         status: "streaming",
-        // A mid-key fragment parses to undefined — keep the last good parse
-        // so the preview never flickers empty.
-        args: parsed ?? (prev?.kind === "tool_call" ? prev.args : undefined),
+        args,
       };
       const parts = pidx >= 0 ? replaceAt(m.parts, pidx, part) : [...m.parts, part];
       next.messages = replaceAt(slice.messages, idx, { ...m, parts });
@@ -318,9 +339,9 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         ev.callId !== undefined
           ? m.parts.findIndex((p) => p.kind === "tool_call" && p.callId === ev.callId)
           : -1;
-      if (ev.callId !== undefined && slice.streamingArgsText?.[ev.callId] !== undefined) {
-        const { [ev.callId]: _, ...rest } = slice.streamingArgsText;
-        next.streamingArgsText = rest;
+      if (ev.callId !== undefined && slice.streamingArgs?.[ev.callId] !== undefined) {
+        const { [ev.callId]: _, ...rest } = slice.streamingArgs;
+        next.streamingArgs = rest;
       }
       const parts = pidx >= 0 ? replaceAt(m.parts, pidx, part) : [...m.parts, part];
       next.messages = replaceAt(slice.messages, idx, { ...m, parts });
@@ -332,19 +353,18 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (idx < 0) return next;
       const m = slice.messages[idx];
       // Resolve by callId when the wire ships one; fall back to the most
-      // recent running tool_call with this name (pre-callId frames).
+      // recent running tool_call with this name (pre-callId frames from
+      // durable logs written before callId existed — remove once those age
+      // out).
       let pidx = -1;
       if (ev.callId !== undefined) {
         pidx = m.parts.findIndex((p) => p.kind === "tool_call" && p.callId === ev.callId);
       }
       if (pidx < 0) {
-        for (let i = m.parts.length - 1; i >= 0; i--) {
-          const p = m.parts[i];
-          if (p.kind === "tool_call" && p.toolName === ev.toolName && p.status === "running") {
-            pidx = i;
-            break;
-          }
-        }
+        pidx = lastIndex(
+          m.parts,
+          (p) => p.kind === "tool_call" && p.toolName === ev.toolName && p.status === "running",
+        );
       }
       if (pidx < 0) return next;
       const old = m.parts[pidx];
@@ -367,6 +387,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
 
     case "turn_end": {
       next.agentStatus = "idle";
+      // No further tool activity can arrive for this turn — any part still
+      // `streaming` (superseded attempt, dropped upgrade) is dead. Sweep it
+      // and its scratch so zombie state cannot outlive the turn.
+      sweepStreamingParts(next, ev.threadId);
       // Deliberately KEEP `slice.error`: on a failed turn the engine emits
       // `error` then `turn_end` within the same tick, so clearing here made
       // the error banner flash for milliseconds and vanish — a failing turn
@@ -492,6 +516,49 @@ function replaceAt<T>(arr: T[], i: number, val: T): T[] {
   const out = arr.slice();
   out[i] = val;
   return out;
+}
+
+/**
+ * Past this buffer size, tool_call_update re-parses on a geometric stride
+ * instead of per delta (see the reducer case).
+ */
+const PARSE_EAGER_LIMIT = 4096;
+
+/**
+ * Drop every `streaming` tool_call part on the thread, then prune
+ * `streamingArgs` down to the callIds that still have a streaming part
+ * anywhere (which also collects orphaned scratch from drops elsewhere).
+ * Mutates `next` in place.
+ *
+ * Called wherever the stream proves no upgrade (`tool_start`) can arrive
+ * for those parts anymore: message_start on the thread, turn_end, and
+ * abort/error message_end. tool_call_update frames are unfenced ephemerals,
+ * so a superseded (zombie) attempt can keep emitting them after its fenced
+ * cleanup frames were suppressed — these sweeps bound that state's lifetime.
+ */
+function sweepStreamingParts(next: SessionStreamState, threadId: string): void {
+  let changed = false;
+  const messages = next.messages.map((m) => {
+    if (m.threadId !== threadId) return m;
+    const parts = m.parts.filter((p) => !(p.kind === "tool_call" && p.status === "streaming"));
+    if (parts.length === m.parts.length) return m;
+    changed = true;
+    return { ...m, parts };
+  });
+  if (changed) next.messages = messages;
+  const scratch = next.streamingArgs;
+  if (!scratch || Object.keys(scratch).length === 0) return;
+  const live = new Set<string>();
+  for (const m of next.messages) {
+    for (const p of m.parts) {
+      if (p.kind === "tool_call" && p.status === "streaming") live.add(p.callId);
+    }
+  }
+  const pruned: Record<string, { text: string; parsedLen: number }> = {};
+  for (const [callId, entry] of Object.entries(scratch)) {
+    if (live.has(callId)) pruned[callId] = entry;
+  }
+  next.streamingArgs = pruned;
 }
 
 /**
