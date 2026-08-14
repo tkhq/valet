@@ -87,6 +87,22 @@ org:
     - email: test@valet.test
       role: admin
 
+teams:
+  - name: Platform
+    members:
+      - email: test@valet.test
+        role: admin
+
+llmProviders:
+  - kind: anthropic              # known kinds are per-org singletons
+    models:
+      - id: claude-opus-4
+  - kind: openai_compatible
+    name: local-vllm
+    baseUrl: http://vllm.internal:8000/v1
+    models:
+      - id: qwen-coder
+
 skillSources:
   - repo: obra/superpowers      # owner/repo on github.com
     ref: main                   # optional; omitted = default branch
@@ -102,6 +118,8 @@ Top-level keys in v1:
 | `plugins`      | object | boot config assembly (plugin filter)               |
 | `toolPolicies` | list   | boot config assembly (plugin catalog)              |
 | `org`          | object | DB reconciler → `orgs`, `org_members`, `invites`   |
+| `teams`        | list   | DB reconciler → `teams`, `team_members`            |
+| `llmProviders` | list   | DB reconciler → `llm_providers`                    |
 | `skillSources` | list   | DB reconciler → `skill_sources` (org-owned)        |
 
 Every key except `version` is optional, and so is every subfield —
@@ -216,7 +234,47 @@ the declarative admin grants. An "admit any SSO-authenticated user"
 option (no domain list) does not exist today and is out of scope here —
 it would be a new auth-config option, not a file concern.
 
-### `skillSources` section
+### `teams` section
+
+A team's identity is its name — `teams` has a unique (org, name) index, so
+the reconciler keys by name and no id-prefix marking is needed:
+
+- A declared team that does not exist → created (id `team_cfg_<hash>` for
+  traceability; identity remains the name).
+- A declared team that exists (either origin) → adopted; the reconciler
+  asserts the declared members on it.
+- **`members`** — same email semantics as `org.members`: an existing user
+  is upserted into `team_members` at the declared role. A declared member
+  with no user yet is bound by the provisioning hook at first sign-in —
+  after admission, the hook checks the loaded config for team declarations
+  matching the new user's email. (Org membership needed the invite table
+  because admission itself gates on it; team membership does not gate
+  sign-in, so a post-admission bind suffices.)
+- The section only asserts. It never deletes a team or removes a member —
+  those stay UI actions; the reconciler logs divergence.
+
+### `llmProviders` section
+
+Non-secret provider shape only — `kind`, `name`, `baseUrl`, `models`,
+`enabled`. API keys stay in the credential store (or the existing
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env handling); a declared provider
+without a connected credential reconciles fine and waits for its key,
+same as one created in the UI.
+
+This section exists because `org.modelPreferences` references namespaced
+model ids (`{kind|rowId}/{modelId}`) that point at provider rows — after
+a wipe, a preference with no declared provider points at nothing. Declare
+both and the pair survives together.
+
+- **Known kinds** (`anthropic`, `openai`, `google`, `openrouter`) are
+  per-org singletons — the kind is the identity. The reconciler adopts
+  the existing row or creates it, then overwrites the declared fields.
+  `name` defaults to the kind.
+- **`openai_compatible`** entries require a `name`; the reconciler keys
+  them by name and creates missing rows as `prov_cfg_<hash>`.
+- The section only asserts; it never deletes a provider row. (Deletion
+  has service-level guards — the org default model's provider refuses to
+  delete — and stays in the UI.)
 
 Declared sources are org-owned (`owner_type='org'`). For each entry the
 reconciler upserts a `skillsrc_cfg_*` row; the existing `SkillSyncService`
