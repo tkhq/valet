@@ -65,9 +65,17 @@ describe("STEPS", () => {
   // strings ("pnpm ... test -- <files>").
   it("no step command smuggles args past a bare -- separator", () => {
     for (const s of STEPS) {
+      // Case 1: "--" as its own argv element (the direct-spawn / apiTest
+      // case). Element equality, so "--filter"/"--exclude" don't match.
       expect(s.command, s.id).not.toContain("--");
+      // Case 2: " -- " inside a test-running arg — the `bash -c "…"` case.
+      // Scoped to vitest/pnpm-test invocations so an unrelated command's
+      // legitimate `-- <pathspec>` (git's, e.g. registry-drift's
+      // `git diff --quiet -- "$f"`) is not flagged. Catches every test
+      // command word: `pnpm … test -- foo`, `vitest -- foo`, `run test -- foo`.
       for (const part of s.command) {
-        expect(part, `${s.id}: ${part}`).not.toMatch(/ test -- /);
+        const isTestCmd = /\bvitest\b|\btest\b/.test(part);
+        if (isTestCmd) expect(part, `${s.id}: ${part}`).not.toContain(" -- ");
       }
     }
   });
