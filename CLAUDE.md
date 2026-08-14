@@ -16,6 +16,25 @@ make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Do
                         # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ~/.valet/pg
 ```
 
+### Start the local stack cleanly (one stack at a time)
+
+The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns `~/.valet/pg`. PGlite allows exactly one owner. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
+
+1. Check the ports: `lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN`.
+2. If a listener exists, find its checkout: `lsof -p <pid> | grep cwd`. A stack from another worktree serves stale code, so your changes do not appear in the UI.
+3. If the old stack is stale, kill its listeners.
+4. Confirm nothing still holds the database: `lsof +D ~/.valet/pg` must return nothing. An orphaned api process here makes the next api crash at startup.
+5. Run `make dev-local`.
+6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
+
+Symptom → cause:
+
+- Vite proxy `ECONNREFUSED /api/...` → the api is down (crashed, or it lost the port race to another stack).
+- PGlite WASM `Aborted()` stack trace at api startup → another process owns `~/.valet/pg` (step 4).
+- The UI does not show your changes → :5173 is served from a different checkout (step 2).
+
+`make e2e` isolates its own state (scratch `VALET_DATA_DIR`, random ports 18790+), so it can run beside the dev stack — but Docker-heavy suites can flake from daemon contention while the dev stack's sandboxes run. If a Docker row goes red during concurrent work, re-run it in isolation before you treat it as real: `make e2e E2E_ARGS="--only <suite-id>"`.
+
 While iterating:
 
 ```bash
