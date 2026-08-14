@@ -1476,6 +1476,11 @@ export interface GithubAppInfo {
 
 export interface GetGithubAppResponse {
   configured: boolean;
+  /** Where the config came from: `"org"` for the org's own credential row
+   * (manifest flow), `"environment"` for the deployment-wide `GITHUB_APP_*`
+   * fallback. Absent when unconfigured. An environment-sourced config
+   * cannot be removed through the API — unset the variables instead. */
+  source?: "org" | "environment";
   app?: GithubAppInfo;
   installations: GithubAppInstallationSummary[];
   webhook: { mode: "public" | "manual" };
