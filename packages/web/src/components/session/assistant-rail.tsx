@@ -26,6 +26,7 @@ import {
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { cn } from "~/lib/cn";
+import { activeWorkspaceKey } from "~/components/layout/workspace-switcher";
 import { ThreadTree } from "./thread-tree";
 
 /**
@@ -80,9 +81,17 @@ export function AssistantRail() {
   // Costs no request: the bell is already polling this query.
   const notificationsQ = useNotifications();
   const needsAttention = attentionSessionIds(notificationsQ.data?.notifications);
-  const [showAll, setShowAll] = useState(false);
-  const shown = showAll ? groups : visibleGroups(groups, needsAttention);
-  const hiddenCount = total - countAssistants(shown);
+  // One workspace at a time. The switcher beside the logo chooses it, and
+  // the active assistant is what names it — so the rail draws exactly the
+  // group the open conversation belongs to.
+  //
+  // This is what retired the row cap. Every owner's assistants used to share
+  // this column, so the block grew with the number of teams (42% of the
+  // sidebar at nine) and needed a budget, a fair-share pass and a "Show N
+  // more" control to stay bounded. Scoping to one workspace bounds it by
+  // construction: the block is as tall as one owner's assistant list,
+  // whether you belong to two teams or twenty.
+  const shown = groups.filter((g) => g.key === activeWorkspaceKey(active));
 
   const [renaming, setRenaming] = useState<AssistantSummary | null>(null);
   const [archiving, setArchiving] = useState<AssistantSummary | null>(null);
@@ -108,15 +117,6 @@ export function AssistantRail() {
               onArchive={setArchiving}
             />
           ))}
-          {hiddenCount > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowAll(true)}
-              className="w-full pl-4 pr-4 py-1.5 text-left text-xs text-muted transition-colors hover:bg-ink-wash/60 hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none"
-            >
-              Show {hiddenCount} more
-            </button>
-          )}
         </div>
       )}
       {/* Children are deliberately omitted on every assistant but your own
@@ -160,23 +160,6 @@ export function AssistantRail() {
   );
 }
 
-/**
- * How many assistant rows the block shows before it stops growing.
- *
- * Two lists share this column, and without a cap the containers win: at nine
- * teams the block measured 42% of the sidebar, and it has no scroll of its
- * own, so it squeezes the thread list rather than scrolling.
- *
- * The cap counts ROWS, summed across every owner, because a row is what
- * consumes the column — and rows are now the part that grows without bound,
- * since anyone can create another assistant at any time. The old cap counted
- * teams, which was the same measurement while a team meant exactly one row.
- *
- * Five rows under at most five headers is about the height the old six rows
- * under one header occupied, so the measurement it came from still holds.
- */
-const VISIBLE_ROW_CAP = 5;
-
 /** An owner and the assistants it owns, in the order the rail draws them. */
 export interface AssistantGroup {
   /** Stable react key: `user` for your own, else the team id. */
@@ -186,60 +169,6 @@ export interface AssistantGroup {
   /** Absent for your own group. Carries the member count and caller role. */
   team?: TeamSummary;
   assistants: AssistantSummary[];
-}
-
-/**
- * The rows the block renders, in their given order, plus any row past the
- * cap that is waiting on a person.
- *
- * Order is NOT changed by attention. Pulling a row to the top the moment it
- * needs you would reorder the list under the cursor — the same fault this
- * product avoids in the thread list, where rows move on their own because
- * agents work unattended. A row that moves while you reach for it is worse
- * than a row you have to expand to find.
- *
- * The budget is spent one row per owner per pass, not first-come. A global
- * "first five" would let whoever sorts first take the whole budget, and an
- * owner with none of its rows drawn is an owner with no header either — a
- * team that simply disappears from the sidebar, which is the failure the
- * rail exists to prevent. Passing round also bounds the header count: a
- * visible group always holds at least one row, so there can never be more
- * headers than the row cap.
- *
- * What the cap must never do is hide live work. So the overflow is not a
- * plain `slice`: a row below the fold that is blocked on you comes back into
- * the visible set, keeping its position relative to the others.
- */
-export function visibleGroups(
-  groups: AssistantGroup[],
-  needsAttention: ReadonlySet<string>,
-  cap: number = VISIBLE_ROW_CAP,
-): AssistantGroup[] {
-  if (countAssistants(groups) <= cap) return groups;
-
-  const quota = groups.map(() => 0);
-  let left = cap;
-  while (left > 0) {
-    let served = false;
-    for (let i = 0; i < groups.length && left > 0; i++) {
-      const group = groups[i];
-      const taken = quota[i] ?? 0;
-      if (!group || taken >= group.assistants.length) continue;
-      quota[i] = taken + 1;
-      left -= 1;
-      served = true;
-    }
-    if (!served) break;
-  }
-
-  return groups
-    .map((group, i) => ({
-      ...group,
-      assistants: group.assistants.filter(
-        (a, row) => row < (quota[i] ?? 0) || needsAttention.has(a.sessionId),
-      ),
-    }))
-    .filter((group) => group.assistants.length > 0);
 }
 
 export function countAssistants(groups: AssistantGroup[]): number {

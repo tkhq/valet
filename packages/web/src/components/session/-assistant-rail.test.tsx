@@ -249,7 +249,7 @@ describe("AssistantRail", () => {
     expect(screen.getByText("Cannot load your assistants. Reload the page.")).toBeTruthy();
   });
 
-  it("groups your assistants under your own header and each team under its name", () => {
+  it("draws only the active workspace, not every owner at once", () => {
     teamsData = { teams: [team(), team({ id: "team_2", name: "Design" })] };
     assistantsData = {
       assistants: [
@@ -259,12 +259,32 @@ describe("AssistantRail", () => {
       ],
     };
     renderRail();
+    // Nothing open means your own workspace. The other owners exist and are
+    // reachable, but through the switcher beside the logo — not by stacking
+    // every owner's rows into one column, which is what made the block grow
+    // with the number of teams.
     expect(screen.getByText("Your assistants")).toBeTruthy();
     expect(screen.getByText("Aurora")).toBeTruthy();
+    expect(screen.queryByText("Platform")).toBeNull();
+    expect(screen.queryByText("Design")).toBeNull();
+  });
+
+  it("draws the team's workspace when one of its assistants is open", () => {
+    teamsData = { teams: [team(), team({ id: "team_2", name: "Design" })] };
+    assistantsData = {
+      assistants: [
+        mine(),
+        teamAssistant(),
+        teamAssistant({ id: "asst_design", owner: { type: "team", id: "team_2" }, name: "Roadmap" }),
+      ],
+    };
+    searchParams = { assistant: "asst_team" };
+    renderRail();
     expect(screen.getByText("Platform")).toBeTruthy();
     expect(screen.getByText("Triage")).toBeTruthy();
-    expect(screen.getByText("Design")).toBeTruthy();
-    expect(screen.getByText("Roadmap")).toBeTruthy();
+    // The workspace you are not in stays out of the column entirely.
+    expect(screen.queryByText("Your assistants")).toBeNull();
+    expect(screen.queryByText("Design")).toBeNull();
   });
 
   /** The rule that changed: one principal, many assistants. The rail used to
@@ -278,6 +298,7 @@ describe("AssistantRail", () => {
         teamAssistant({ id: "asst_release", name: "Release", isDefault: false }),
       ],
     };
+    searchParams = { assistant: "asst_team" };
     renderRail();
     expect(screen.getByText("Triage")).toBeTruthy();
     expect(screen.getByText("Release")).toBeTruthy();
@@ -288,12 +309,13 @@ describe("AssistantRail", () => {
     assistantsData = {
       assistants: [mine(), teamAssistant({ id: "asst_release", name: "Release" })],
     };
+    searchParams = { assistant: "asst_release" };
     renderRail();
     const link = screen.getByRole("link", { name: /Release/ });
     expect(link.getAttribute("href")).toBe("/chat?assistant=asst_release");
   });
 
-  it("marks the default assistant, once per owner", () => {
+  it("marks the workspace's default assistant, and only it", () => {
     teamsData = { teams: [team()] };
     assistantsData = {
       assistants: [
@@ -302,10 +324,11 @@ describe("AssistantRail", () => {
         teamAssistant({ id: "asst_release", name: "Release", isDefault: false }),
       ],
     };
+    searchParams = { assistant: "asst_team" };
     renderRail();
-    // Your own default and the team's default — the second team row is not
-    // marked.
-    expect(screen.getAllByText("Default")).toHaveLength(2);
+    // One workspace is drawn, so one default is marked. Your own default is
+    // not on screen to be confused with the team's.
+    expect(screen.getAllByText("Default")).toHaveLength(1);
   });
 
   it("shows your own default's threads when no assistant is selected", () => {
@@ -352,24 +375,25 @@ describe("AssistantRail", () => {
     teamsData = { teams: [team({ callerRole: "admin" })] };
     assistantsData = { assistants: [mine(), teamAssistant()] };
     renderRail();
+    // Only the open workspace is drawn, so only its create action exists.
     expect(screen.getByRole("button", { name: "New assistant for Your assistants" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "New assistant for Platform" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "New assistant for Platform" })).toBeNull();
   });
 
   it("hides the team's create and row actions from a plain member", () => {
     teamsData = { teams: [team({ callerRole: "member" })] };
     assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
     renderRail();
     expect(screen.queryByRole("button", { name: "New assistant for Platform" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Triage actions" })).toBeNull();
-    // Your own assistants stay yours to manage.
-    expect(screen.getByRole("button", { name: "Aurora actions" })).toBeTruthy();
   });
 
   it("creates an assistant for the owner whose action was used", async () => {
     const user = userEvent.setup();
     teamsData = { teams: [team({ callerRole: "admin" })] };
     assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
     renderRail();
     await user.click(screen.getByRole("button", { name: "New assistant for Platform" }));
     expect(createMutate).toHaveBeenCalledTimes(1);
@@ -414,6 +438,7 @@ describe("AssistantRail", () => {
         createdAt: 1,
       },
     ];
+    searchParams = { assistant: "asst_team" };
     renderRail();
     expect(screen.getByLabelText("Waiting on you")).toBeTruthy();
   });

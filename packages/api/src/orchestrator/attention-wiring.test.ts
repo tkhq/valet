@@ -211,7 +211,6 @@ describe("wireAttentionRouter", () => {
     const { db, engineStore, eventStream } = api.providers;
     unsub = wireAttentionRouter({ db, engineStore, eventStream });
 
-    // Assistant ids carry a colon, so this also covers the href encoding.
     const sessionId = assistantSessionId("asst_attention");
     await engineStore.saveSession(baseSession({ id: sessionId, purpose: "orchestrator" }));
 
@@ -230,8 +229,12 @@ describe("wireAttentionRouter", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.userId).toBe("local-user");
     expect(rows[0]?.sessionId).toBe(sessionId);
-    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(sessionId)}`);
-    expect(rows[0]?.href).toContain("%3A");
+    // An assistant's conversation lives at /chat, and /sessions deliberately
+    // excludes assistants — a /sessions link for one points at a surface
+    // that does not list it. The `?assistant=` form also carries the owner
+    // implicitly, so the reader lands in the right context instead of
+    // looking at a conversation their current scope excludes.
+    expect(rows[0]?.href).toBe("/chat?assistant=asst_attention");
   });
 
   it("decision_gate on a child whose parent row is gone falls back to the child's own owner", async () => {

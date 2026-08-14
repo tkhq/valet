@@ -1,6 +1,14 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useSearch } from "@tanstack/react-router";
 import { Settings } from "lucide-react";
 import { useOrchestratorInfo } from "~/api/orchestrator";
+import { useAssistants } from "~/api/assistants";
+import { useOrg, useTeams } from "~/api/settings";
+import { eligibleTeams } from "~/components/session/assistant-rail";
+import {
+  WorkspaceSwitcher,
+  activeWorkspaceKey,
+  workspaceOptions,
+} from "~/components/layout/workspace-switcher";
 import { PresenceMark } from "~/components/assistant/presence-mark";
 import { NotificationsBell } from "./notifications-bell";
 
@@ -43,6 +51,18 @@ export function TopNav() {
   const info = useOrchestratorInfo();
   const presence = info.data?.presence ?? "idle";
 
+  // The switcher reads the same three queries the rail does, so switching
+  // costs no extra request — react-query serves all three from cache.
+  const assistantsQ = useAssistants();
+  const teamsQ = useTeams();
+  const orgQ = useOrg();
+  const search = (useSearch({ strict: false }) ?? {}) as { assistant?: string };
+  const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
+  const options = workspaceOptions(assistantsQ.data?.assistants, teams);
+  const activeKey = activeWorkspaceKey(
+    (assistantsQ.data?.assistants ?? []).find((a) => a.id === search.assistant),
+  );
+
   // The logo is the PRODUCT (Valet), not the orchestrator — the
   // orchestrator's chosen name shows up in its own title card (session
   // header) instead. The presence dot stays: it still reflects the
@@ -59,6 +79,10 @@ export function TopNav() {
         </span>
         <PresenceMark name="Valet" state={presence} size="nav" />
       </Link>
+
+      {/* Beside the logo, not in the sidebar: it scopes the surfaces below
+          rather than filtering one list. */}
+      <WorkspaceSwitcher options={options} activeKey={activeKey} />
 
       {/*
        * Six labelled links do not fit beside the logo and the icons on a
