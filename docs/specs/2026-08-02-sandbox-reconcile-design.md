@@ -142,6 +142,8 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 
 **Creds Secret adopted under the Sandbox CR** (commit fe6e20ea). `updateCreds`/create best-effort set an `ownerReference` on the creds Secret so that deleting the Sandbox CR garbage-collects the Secret. This closes the rotate-sweep orphan risk not addressed in the spec.
 
+**Docker `updateCreds` waits for container-view convergence.** The spec assumed a host write to the creds bind dir propagates instantly. On macOS Docker Desktop, VirtioFS caches dentries: after a host-side rename, the container gets ENOENT for the renamed file for ~1-2s. `updateCreds` now polls the container (via exec, content compared base64-encoded) until every file matches and every removed file is gone, bounded at 5s. The wait is best-effort — if the container is stopped or the deadline passes, `updateCreds` returns and the mount converges on its own.
+
 **DDL runbook lives in `deploy/README.md`** (commit 215c4ca8). The pre-1.0 restructure (`image_sources`/`bakes`) requires manual DDL on live clusters. The runnable block is in `deploy/README.md`; the commit-body placeholder was not executable.
 
 **Deferred items still open.** Cascade + scheduler double-dispatch guard landed (I3). The `packages/web` package is not yet in the root `tsc --build` graph (CI follow-up tracked separately). The manual-rebuild path uses the stock ref as FROM when no base bake exists — documented escape hatch, not a spec violation.
