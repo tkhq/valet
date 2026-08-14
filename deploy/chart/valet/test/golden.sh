@@ -345,6 +345,40 @@ if grep -q 'valet-grafana-dashboards' "$TMP_DIR/no-observability.yaml"; then
 fi
 pass "observability: valet dashboard ConfigMap rendered and gated on observability.enabled"
 
+# --- instance config: ConfigMap + subPath mount + VALET_CONFIG env ---------
+# api.instanceConfig renders a ConfigMap holding valet.yaml, mounts it as a
+# single file via subPath at /etc/valet/valet.yaml, points VALET_CONFIG at it,
+# and stamps a checksum/instance-config pod annotation so a config edit rolls
+# the pod.
+echo "== helm template (instance config) =="
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set api.instanceConfig="version: 1" \
+  > "$TMP_DIR/instance-config.yaml"
+pass "renders with api.instanceConfig set"
+
+INSTANCE_CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{f=0} f&&/valet-instance-config/{hit=1} hit{print} f==0{hit=0}' "$TMP_DIR/instance-config.yaml")
+grep -q 'name: valet-instance-config' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: no valet-instance-config ConfigMap"
+grep -q 'valet.yaml:' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: ConfigMap has no valet.yaml key"
+pass "instance-config render: ConfigMap with valet.yaml key present"
+
+grep -q 'VALET_CONFIG' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: api container missing VALET_CONFIG env"
+grep -q 'value: /etc/valet/valet.yaml' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: VALET_CONFIG is not /etc/valet/valet.yaml"
+pass "instance-config render: VALET_CONFIG points at /etc/valet/valet.yaml"
+
+grep -q 'mountPath: /etc/valet/valet.yaml' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: volumeMount not at /etc/valet/valet.yaml"
+grep -q 'subPath: valet.yaml' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: volumeMount missing subPath valet.yaml (directory mount would shadow /etc/valet)"
+pass "instance-config render: valet.yaml mounted via subPath (no directory shadowing)"
+
+grep -q 'checksum/instance-config:' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: pod template missing checksum/instance-config — a config edit would not roll the pod"
+pass "instance-config render: pod template carries checksum/instance-config"
+
 # --- GitHub App env fallback: secret/non-secret split --------------------
 helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   --set api.githubApp.appId="123456" \

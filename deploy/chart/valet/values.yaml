@@ -83,6 +83,14 @@ api:
     githubAppClientSecret: ""
     githubAppWebhookSecret: ""
 
+  # Optional instance config file content (multiline YAML string). Supply via
+  # --set-file api.instanceConfig=config/valet.prod.yaml on helm install/upgrade.
+  # When set, the chart creates a ConfigMap (<fullname>-instance-config), mounts
+  # it at /etc/valet, and sets VALET_CONFIG=/etc/valet/valet.yaml on the api
+  # container. Also rolls the Deployment when the content changes (via checksum
+  # annotation). Leave blank to disable the ConfigMap and mount entirely.
+  instanceConfig: ""
+
   # Additional envFrom entries appended to the api Deployment. Use this
   # to load env vars from Secrets/ConfigMaps managed outside the chart
   # (e.g. External Secrets Operator syncing from AWS Secrets Manager).

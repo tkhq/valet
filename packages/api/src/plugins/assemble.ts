@@ -145,7 +145,10 @@ export function pluginSessionExtras(
   extraSkills: SkillSource[] = [],
 ): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
-  const tools = actionPlugins.length > 0 ? pluginCatalogTools({ plugins: actionPlugins }) : [];
+  const tools =
+    actionPlugins.length > 0
+      ? pluginCatalogTools({ plugins: actionPlugins })
+      : [];
   const pluginSkills = collectSkills(plugins);
   const { kept, shadowed } = partitionByName(
     pluginSkills.map((s) => s.name),

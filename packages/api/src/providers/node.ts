@@ -47,6 +47,8 @@ import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from ".
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
+import type { InstanceConfig } from "../config/instance-config.js";
+import { InstanceConfigError } from "../config/instance-config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -71,6 +73,18 @@ export function parseValetPluginsEnv(
   if (mode === "allow") return { allowlist: names };
   if (mode === "deny") return { denylist: names };
   return {};
+}
+
+/**
+ * True only when the config's `plugins` block actually declares an allow or
+ * deny list. An empty `plugins: {}` block (both keys undefined) does NOT count
+ * as "config declares plugins": it neither trips the VALET_PLUGINS both-set
+ * guard nor suppresses env parsing. `null`/absent config → false.
+ */
+export function configDeclaresPlugins(
+  plugins: InstanceConfig["plugins"] | undefined,
+): boolean {
+  return plugins !== undefined && (plugins.allow !== undefined || plugins.deny !== undefined);
 }
 
 export interface NodeProviderOpts {
@@ -139,6 +153,14 @@ export interface NodeProviderOpts {
    * `main.ts` calls it.
    */
   seedLocalIdentity?: boolean;
+  /**
+   * Parsed instance config (`valet.yaml`). When present:
+   * - `plugins` allow/deny feeds `loadNodeModulesPlugins` instead of
+   *   `parseValetPluginsEnv`. Both set simultaneously is an error.
+   * - `toolPolicies` reconcile into `action_policies` rows (org policies)
+   *   by `reconcileInstanceConfig`; the policy engine reads them at runtime.
+   */
+  instanceConfig?: InstanceConfig;
 }
 
 /**
@@ -260,7 +282,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
-  const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
+  // Plugin filter: config file `plugins` block takes precedence over
+  // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
+  // the operator must remove one to avoid ambiguity.
+  const configPlugins = opts.instanceConfig?.plugins;
+  const configHasPlugins = configDeclaresPlugins(configPlugins);
+  if (configHasPlugins && process.env.VALET_PLUGINS) {
+    throw new InstanceConfigError(
+      "VALET_PLUGINS is set and the config file declares plugins. Remove one.",
+    );
+  }
+  const { allowlist, denylist } = configHasPlugins
+    ? { allowlist: configPlugins!.allow, denylist: configPlugins!.deny }
+    : parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
     : assemblePlugins([

@@ -657,8 +657,11 @@ export class EngineHost {
    */
   private async sessionExtras(owner: Principal, orgId: string): Promise<PluginSessionExtras> {
     const plugins = this.opts.plugins ?? [];
-    if (!this.opts.db) return pluginSessionExtras(plugins);
-    return pluginSessionExtras(plugins, await listSkillSourcesFor(this.opts.db, owner, orgId));
+    if (!this.opts.db) return pluginSessionExtras(plugins, []);
+    return pluginSessionExtras(
+      plugins,
+      await listSkillSourcesFor(this.opts.db, owner, orgId),
+    );
   }
 
   /**

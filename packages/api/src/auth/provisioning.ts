@@ -6,11 +6,13 @@
  */
 import { createAuthMiddleware, APIError } from "better-auth/api";
 import type { Account, BetterAuthOptions, User } from "better-auth";
+import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, users } from "../schema/index.js";
+import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
+import type { InstanceConfig } from "../config/instance-config.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
 
 export type Admission =
@@ -30,10 +32,15 @@ function domainOf(email: string): string | undefined {
  * The single admission rule, used by both the signup invite gate and the
  * OAuth/SSO creation gate. Order (first match wins):
  *   1. zero users in the db → admin (bootstraps the first operator)
- *   2. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
+ *   2. a valid invite matching by code, else by email → the invite's role
+ *   3. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
  *      no subdomain match) → member
- *   3. a valid invite matching by code, else by email → the invite's role
  *   4. otherwise → denied
+ *
+ * The invite rule precedes the domain rule so a config-declared admin whose
+ * email domain is also allowlisted is admitted as admin (the invite's role),
+ * not silently downgraded to member. An allowlisted email WITHOUT an invite
+ * still falls through to the domain rule → member.
  */
 export async function evaluateAdmission(
   db: AppQueryable,
@@ -45,14 +52,14 @@ export async function evaluateAdmission(
     return { allowed: true, role: "admin" };
   }
 
-  const domain = domainOf(email);
-  if (domain && cfg.allowedEmailDomains.includes(domain)) {
-    return { allowed: true, role: "member" };
-  }
-
   const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
+  }
+
+  const domain = domainOf(email);
+  if (domain && cfg.allowedEmailDomains.includes(domain)) {
+    return { allowed: true, role: "member" };
   }
 
   return { allowed: false };
@@ -82,6 +89,7 @@ export interface ProvisioningDeps {
   db: AppDb;
   cfg: AuthConfig;
   credentialStore: CredentialStore;
+  instanceConfig?: InstanceConfig | null;
 }
 
 /** Google plugins' credential-read keys (`ActionPlugin.service`, underscored —
@@ -134,7 +142,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   beforeHook: ReturnType<typeof createAuthMiddleware>;
   databaseHooks: BetterAuthOptions["databaseHooks"];
 } {
-  const { db, cfg, credentialStore } = deps;
+  const { db, cfg, credentialStore, instanceConfig } = deps;
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
@@ -186,6 +194,32 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
 
     if (admission?.allowed && admission.inviteId) {
       await acceptInvite(db, admission.inviteId, user.id);
+    }
+
+    // Bind the user to any config-declared teams whose member list includes
+    // this email. Team rows are resolved by name within the org — if a team
+    // is missing (e.g. config edited after boot), skip silently; the next
+    // boot's reconciler recreates it.
+    const userEmail = keyForEmail(user.email);
+    for (const teamDecl of instanceConfig?.teams ?? []) {
+      const match = (teamDecl.members ?? []).find((m) => m.email === userEmail);
+      if (!match) continue;
+
+      const teamRows = await db
+        .select({ id: teams.id })
+        .from(teams)
+        .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
+        .limit(1);
+      const teamRow = teamRows[0];
+      if (!teamRow) continue;
+
+      await db
+        .insert(teamMembers)
+        .values({ teamId: teamRow.id, userId: user.id, role: match.role })
+        .onConflictDoUpdate({
+          target: [teamMembers.teamId, teamMembers.userId],
+          set: { role: match.role },
+        });
     }
   };
 

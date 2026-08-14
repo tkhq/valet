@@ -114,6 +114,7 @@ dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	if [ -z "$$BETTER_AUTH_SECRET" ] && [ -z "$$VALET_LOCAL_AUTH" ]; then export VALET_LOCAL_AUTH=1; fi; \
+	if [ -f config/valet.dev.yaml ] && [ -z "$$VALET_CONFIG" ]; then export VALET_CONFIG="$$(pwd)/config/valet.dev.yaml"; fi; \
 	cd packages/api && PORT=8788 $(PNPM) run dev
 
 dev-web: ## Start the new web client (@valet/web) on :5173

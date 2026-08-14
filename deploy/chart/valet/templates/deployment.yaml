@@ -30,6 +30,9 @@ spec:
         # `kubectl rollout restart deployment/<release>-api`.
         checksum/secret: {{ include "valet.apiSecretChecksum" . }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.api.instanceConfig }}
+        checksum/instance-config: {{ .Values.api.instanceConfig | sha256sum }}
+        {{- end }}
       labels:
         {{- include "valet.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
@@ -103,6 +106,20 @@ spec:
             - name: DATABASE_URL
               value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ include "valet.fullname" . }}-postgres:5432/$(POSTGRES_DB)"
             {{- end }}
+            {{- if .Values.api.instanceConfig }}
+            - name: VALET_CONFIG
+              value: /etc/valet/valet.yaml
+            {{- end }}
+          {{- if .Values.api.instanceConfig }}
+          volumeMounts:
+            # subPath mounts the single valet.yaml file, not the directory —
+            # a directory mount at /etc/valet would shadow anything else the
+            # image places there.
+            - name: instance-config
+              mountPath: /etc/valet/valet.yaml
+              subPath: valet.yaml
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           readinessProbe:
@@ -117,3 +134,9 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+      {{- if .Values.api.instanceConfig }}
+      volumes:
+        - name: instance-config
+          configMap:
+            name: {{ include "valet.fullname" . }}-instance-config
+      {{- end }}
