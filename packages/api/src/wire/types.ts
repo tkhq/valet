@@ -413,6 +413,21 @@ export type WireEvent =
   | { seq: number; ts: number; offset?: string; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
   | { seq: number; ts: number; offset?: string; type: "text_delta"; threadId: string; messageId: string; delta: string }
   | {
+      /**
+       * Live-only tool-call argument streaming (ephemeral, no offset).
+       * `argsDelta` is a raw chunk of the args JSON; concatenate per callId
+       * and parse leniently. `tool_start` later carries the complete args
+       * and self-heals any dropped delta.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "tool_call_update";
+      threadId: string;
+      callId: string;
+      toolName: string;
+      argsDelta: string;
+    }
+  | {
       seq: number;
       ts: number; offset?: string;
       type: "message_update";

@@ -1074,8 +1074,8 @@ export type EngineEvent =
       messageId: string;
       reason: "end_turn" | "error" | "abort";
     }
-  | { type: "tool_start"; threadId: string; tool: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; result: string; isError: boolean }
+  | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
+  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
   | {
       type: "turn_end";
       threadId: string;
