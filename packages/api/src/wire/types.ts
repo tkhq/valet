@@ -236,7 +236,13 @@ export type MessagePart =
       kind: "tool_call";
       callId: string;
       toolName: string;
-      status: "running" | "completed" | "error";
+      /**
+       * `streaming` is a live-plane-only state: the client synthesizes it
+       * from `tool_call_update` frames while args are still being generated.
+       * The engine never persists it, so REST (`GET /messages`) and
+       * `message_update` frames only ever carry the other three.
+       */
+      status: "streaming" | "running" | "completed" | "error";
       args?: unknown;
       result?: unknown;
       error?: string;

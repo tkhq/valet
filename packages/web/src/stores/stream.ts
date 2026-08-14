@@ -8,6 +8,7 @@
  * granularity for free.
  */
 import { create } from "zustand";
+import { parsePartialJson } from "~/lib/partial-json";
 import type {
   DecisionGate,
   Message,
@@ -92,6 +93,12 @@ export interface SessionStreamState {
    * and is dropped (see `reduce`'s `sandbox.status` case).
    */
   sandbox?: { state: string; epoch: number };
+  /**
+   * Accumulated raw args JSON per in-flight tool call (`tool_call_update`
+   * frames), keyed by callId. Client-local scratch — dropped when the call
+   * starts executing (`tool_start`) or its message ends on abort/error.
+   */
+  streamingArgsText?: Record<string, string>;
 }
 
 export interface StreamStore {
@@ -251,12 +258,52 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "message_end": {
-      // Just a marker. We could clear streaming flags here when we add them.
+      // On abort/error, drop parts still in `streaming` status: their tool
+      // call never reached toolcall_end, so the engine never persisted them —
+      // keeping them would show a phantom card that vanishes on reload.
+      if (ev.reason === "end_turn") return next;
+      const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
+      if (idx < 0) return next;
+      const m = slice.messages[idx];
+      const parts = m.parts.filter((p) => !(p.kind === "tool_call" && p.status === "streaming"));
+      if (parts.length === m.parts.length) return next;
+      next.messages = replaceAt(slice.messages, idx, { ...m, parts });
+      return next;
+    }
+
+    case "tool_call_update": {
+      // Live args streaming: upsert a `streaming` tool_call part keyed by
+      // callId on the latest assistant message, accumulating the raw JSON
+      // and best-effort parsing it so renderers can preview args early.
+      const idx = lastAssistantIndex(slice.messages, ev.threadId);
+      if (idx < 0) return next;
+      const m = slice.messages[idx];
+      const pidx = m.parts.findIndex((p) => p.kind === "tool_call" && p.callId === ev.callId);
+      const prev = pidx >= 0 ? m.parts[pidx] : undefined;
+      // A delta arriving after tool_start (reordered frames) must not
+      // regress an executing part back to streaming.
+      if (prev && prev.kind === "tool_call" && prev.status !== "streaming") return next;
+      const argsText = (slice.streamingArgsText?.[ev.callId] ?? "") + ev.argsDelta;
+      next.streamingArgsText = { ...slice.streamingArgsText, [ev.callId]: argsText };
+      const parsed = parsePartialJson(argsText);
+      const part: MessagePart = {
+        kind: "tool_call",
+        callId: ev.callId,
+        toolName: ev.toolName,
+        status: "streaming",
+        // A mid-key fragment parses to undefined — keep the last good parse
+        // so the preview never flickers empty.
+        args: parsed ?? (prev?.kind === "tool_call" ? prev.args : undefined),
+      };
+      const parts = pidx >= 0 ? replaceAt(m.parts, pidx, part) : [...m.parts, part];
+      next.messages = replaceAt(slice.messages, idx, { ...m, parts });
       return next;
     }
 
     case "tool_start": {
-      // Add a tool_call part (running) to the latest assistant message.
+      // Upsert the tool_call part (running) on the latest assistant message.
+      // A `streaming` part with the same callId upgrades in place; without
+      // one (no args streaming happened) this appends as before.
       const idx = lastAssistantIndex(slice.messages, ev.threadId);
       if (idx < 0) return next;
       const m = slice.messages[idx];
@@ -267,7 +314,16 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         status: "running",
         args: ev.args,
       };
-      next.messages = replaceAt(slice.messages, idx, { ...m, parts: [...m.parts, part] });
+      const pidx =
+        ev.callId !== undefined
+          ? m.parts.findIndex((p) => p.kind === "tool_call" && p.callId === ev.callId)
+          : -1;
+      if (ev.callId !== undefined && slice.streamingArgsText?.[ev.callId] !== undefined) {
+        const { [ev.callId]: _, ...rest } = slice.streamingArgsText;
+        next.streamingArgsText = rest;
+      }
+      const parts = pidx >= 0 ? replaceAt(m.parts, pidx, part) : [...m.parts, part];
+      next.messages = replaceAt(slice.messages, idx, { ...m, parts });
       return next;
     }
 
@@ -275,13 +331,19 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const idx = lastAssistantIndex(slice.messages, ev.threadId);
       if (idx < 0) return next;
       const m = slice.messages[idx];
-      // Find the most recent running tool_call with this name.
+      // Resolve by callId when the wire ships one; fall back to the most
+      // recent running tool_call with this name (pre-callId frames).
       let pidx = -1;
-      for (let i = m.parts.length - 1; i >= 0; i--) {
-        const p = m.parts[i];
-        if (p.kind === "tool_call" && p.toolName === ev.toolName && p.status === "running") {
-          pidx = i;
-          break;
+      if (ev.callId !== undefined) {
+        pidx = m.parts.findIndex((p) => p.kind === "tool_call" && p.callId === ev.callId);
+      }
+      if (pidx < 0) {
+        for (let i = m.parts.length - 1; i >= 0; i--) {
+          const p = m.parts[i];
+          if (p.kind === "tool_call" && p.toolName === ev.toolName && p.status === "running") {
+            pidx = i;
+            break;
+          }
         }
       }
       if (pidx < 0) return next;
