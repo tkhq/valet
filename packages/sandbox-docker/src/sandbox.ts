@@ -637,6 +637,19 @@ function credsHostDir(sandboxId: string): string {
   return join(homedir(), ".valet", "creds", sandboxId);
 }
 
+/** Throw when any name is not a plain filename ("../evil", "a/b", ".", "..").
+ * Guards every place a creds key becomes part of a path — host writes and
+ * the in-container check script alike. */
+function assertPlainFilenames(caller: string, names: string[]): void {
+  for (const name of names) {
+    if (name === "." || name === ".." || basename(name) !== name) {
+      throw new Error(
+        `${caller}: unsafe key "${name}" — keys must be plain filenames with no path separators`,
+      );
+    }
+  }
+}
+
 /** Write credential files into the given directory (mode 0600). Creates the
  * directory (mode 0700, mkdir -p equivalent) before writing.
  *
@@ -645,13 +658,7 @@ function credsHostDir(sandboxId: string): string {
  *
  * Exported for unit testing. */
 export async function writeCredsFiles(dir: string, files: Record<string, string>): Promise<void> {
-  for (const name of Object.keys(files)) {
-    if (name === "." || name === ".." || basename(name) !== name) {
-      throw new Error(
-        `writeCredsFiles: unsafe key "${name}" — keys must be plain filenames with no path separators`,
-      );
-    }
-  }
+  assertPlainFilenames("writeCredsFiles", Object.keys(files));
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   for (const [name, content] of Object.entries(files)) {
     // Write to a sibling temp file then rename so the container-side bind
@@ -683,6 +690,10 @@ export function credsCheckScript(
   files: Record<string, string>,
   removed: string[],
 ): string {
+  // `files` keys are validated again by writeCredsFiles and `removed` comes
+  // from readdir, but this function builds in-container paths, so it
+  // enforces the invariant itself rather than trusting its callers.
+  assertPlainFilenames("credsCheckScript", [...Object.keys(files), ...removed]);
   const checks: string[] = [];
   for (const [name, content] of Object.entries(files)) {
     const path = shQuote(`${CREDS_MOUNT_PATH}/${name}`);

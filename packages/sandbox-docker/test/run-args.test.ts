@@ -191,3 +191,17 @@ describe("credsCheckScript (pure — no Docker required)", () => {
     expect(credsCheckScript({}, [])).toBe("exit 0");
   });
 });
+
+describe("credsCheckScript path-traversal guard", () => {
+  it("rejects traversal in file keys", () => {
+    expect(() => credsCheckScript({ "../../../etc/passwd": "x" }, [])).toThrow(
+      /unsafe key.*etc\/passwd/,
+    );
+    expect(() => credsCheckScript({ "a/b": "x" }, [])).toThrow(/unsafe key/);
+  });
+
+  it("rejects traversal in removed names", () => {
+    expect(() => credsCheckScript({}, ["../outside"])).toThrow(/unsafe key/);
+    expect(() => credsCheckScript({}, ["."])).toThrow(/unsafe key/);
+  });
+});
