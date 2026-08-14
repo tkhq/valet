@@ -759,7 +759,7 @@ export interface PolicyInvocationRecord {
   orgId?: string;
   appliesIn: "session" | "workflow";
   summary?: string;
-  status: "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
+  status: "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
   resolvedMode: ApprovalMode;
   provenance: PolicyDecision["provenance"];
   durationMs?: number;

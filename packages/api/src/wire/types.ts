@@ -2074,7 +2074,7 @@ export interface PreviewOrgPolicyResponse {
   };
 }
 
-export type ActionInvocationStatusWire = "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
+export type ActionInvocationStatusWire = "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
 
 export interface ActionLogEntryWire {
   invocationId: string;

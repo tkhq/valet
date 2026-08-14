@@ -128,6 +128,13 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
 
     const result = await computeResult(opts, req, ctx);
 
+    // Gate outcomes must not be stored: the approved retry must reach
+    // enforcement fresh (re-evaluating the current policy state) rather than
+    // replaying a parked result.
+    if (!result.ok && "requiresApproval" in result && result.requiresApproval) {
+      return result;
+    }
+
     await opts.db
       .insert(actionInvocations)
       .values({ invocationId: req.invocationId, result, createdAt: clock() })
@@ -166,6 +173,11 @@ function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
   }
   if (record.ok === false && typeof record.error === "string") {
     return { ok: false, error: record.error };
+  }
+  // A requiresApproval row must never land in the dedup table (the guard in
+  // buildActionInvoker skips the insert). If one exists, the data is corrupt.
+  if (record.ok === false && record.requiresApproval === true) {
+    throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
   }
   throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
 }
@@ -315,20 +327,98 @@ async function enforceWorkflowPolicy(
   if (!ctx.orgId || !ctx.workflowExecutionId) return null;
   const now = (opts.clock ?? Date.now)();
 
-  const decision = await resolveActionPolicy(opts.db, {
-    orgId: ctx.orgId,
-    userId: ctx.userId,
-    service: req.service,
-    actionId: policyActionId,
-    riskLevel,
-    params: req.params,
-    appliesIn: "workflow",
-    workflowExecutionId: ctx.workflowExecutionId,
-    pluginDefault,
-    now,
-  });
+  let decision: Awaited<ReturnType<typeof resolveActionPolicy>>;
+  try {
+    decision = await resolveActionPolicy(opts.db, {
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      service: req.service,
+      actionId: policyActionId,
+      riskLevel,
+      params: req.params,
+      appliesIn: "workflow",
+      workflowExecutionId: ctx.workflowExecutionId,
+      pluginDefault,
+      now,
+    });
+  } catch (err) {
+    console.error("action-invoker: policy resolution failed:", err);
+    if (req.approval) {
+      // Human approval is the authorization — proceed even though the
+      // resolver could not be consulted. The signal is the authority.
+      return null;
+    }
+    return { ok: false, requiresApproval: true, provenance: "resolver_error" };
+  }
 
-  const allowed = decision.mode === "allow";
+  if (decision.mode === "allow") {
+    await persistInvocationAudit(opts.db, {
+      invocationId: `pol:wf:${req.invocationId}`,
+      service: req.service,
+      actionId: policyActionId,
+      riskLevel,
+      resolvedMode: decision.mode,
+      baseMode: decision.provenance.baseMode,
+      matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
+      matchedGrantId: decision.provenance.matchedGrantId ?? null,
+      matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
+      status: "allowed",
+      workflowExecutionId: ctx.workflowExecutionId,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      params: req.params,
+      createdAt: now,
+    });
+    return null;
+  }
+
+  if (decision.mode === "deny") {
+    await persistInvocationAudit(opts.db, {
+      invocationId: `pol:wf:${req.invocationId}`,
+      service: req.service,
+      actionId: policyActionId,
+      riskLevel,
+      resolvedMode: decision.mode,
+      baseMode: decision.provenance.baseMode,
+      matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
+      matchedGrantId: decision.provenance.matchedGrantId ?? null,
+      matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
+      status: "denied",
+      workflowExecutionId: ctx.workflowExecutionId,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      params: req.params,
+      createdAt: now,
+    });
+    return { ok: false, error: `${req.service}.${req.action} is blocked by org policy` };
+  }
+
+  // decision.mode === "require_approval"
+  if (req.approval) {
+    // The tool executor holds an approved, unconsumed signal — treat as authorized.
+    await persistInvocationAudit(opts.db, {
+      invocationId: `pol:wf:${req.invocationId}`,
+      service: req.service,
+      actionId: policyActionId,
+      riskLevel,
+      resolvedMode: decision.mode,
+      baseMode: decision.provenance.baseMode,
+      matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
+      matchedGrantId: decision.provenance.matchedGrantId ?? null,
+      matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
+      status: "approved",
+      workflowExecutionId: ctx.workflowExecutionId,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      params: req.params,
+      createdAt: now,
+    });
+    return null;
+  }
+
+  // Park: write a "pending" audit row so the gate is visible in the audit log,
+  // then return the requiresApproval signal. This row must NOT live in the
+  // dedup table — the approved retry must reach enforcement fresh.
   await persistInvocationAudit(opts.db, {
     invocationId: `pol:wf:${req.invocationId}`,
     service: req.service,
@@ -339,22 +429,14 @@ async function enforceWorkflowPolicy(
     matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
     matchedGrantId: decision.provenance.matchedGrantId ?? null,
     matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
-    status: allowed ? "allowed" : "denied",
+    status: "pending",
     workflowExecutionId: ctx.workflowExecutionId,
     userId: ctx.userId,
     orgId: ctx.orgId,
     params: req.params,
     createdAt: now,
   });
-
-  if (allowed) return null;
-  if (decision.mode === "deny") {
-    return { ok: false, error: `${req.service}.${req.action} is blocked by org policy` };
-  }
-  return {
-    ok: false,
-    error: `${req.service}.${req.action} requires an approval node or a runtime grant`,
-  };
+  return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
 }
 
 /** The canonical policy-facing action id: the fully-qualified fqid
@@ -528,7 +610,7 @@ function buildActionContext(
     signal: AbortSignal.timeout(ACTION_TIMEOUT_MS),
     requestDecision: () =>
       Promise.reject(
-        new Error("approvals are not available in workflow tool nodes — model the gate as an approval node"),
+        new Error("approvals inside workflow tool actions ride the policy gate — this callback is unreachable"),
       ),
     threadRead: () =>
       Promise.reject(new Error("thread history is not available in workflow action invocation")),

@@ -753,10 +753,19 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
   const RUN = "run_wf1";
   // A high-risk action: with no policy it defaults to require_approval.
   function highRiskAction() {
-    return countingAction({
+    let deployCount = 0;
+    const inner = countingAction({
       id: "demo.deploy",
-      execute: async () => ({ success: true, data: { deployed: true } }),
+      execute: async () => {
+        deployCount += 1;
+        return { success: true as const, data: { deployed: true } };
+      },
     });
+    return {
+      action: inner.action,
+      calls: () => deployCount,
+      lastArgs: inner.lastArgs,
+    };
   }
   const highRiskPlugin = (a: PluginAction) => actionPluginByServiceOf("demo", {
     service: "demo",
@@ -766,17 +775,16 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     userId: "u1", orgId: ORG, owner: { type: "user", id: "u1" }, workflowExecutionId: RUN,
   };
 
-  it("require_approval (high-risk, no grant) fails the node with instructive text; action never runs", async () => {
+  it("require_approval (high-risk, no grant) returns requiresApproval and parks a pending audit row; action never runs", async () => {
     const db = await makeDb();
     const fixture = highRiskAction();
     const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
     const res = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n1" }, wfCtx);
-    expect(res.ok).toBe(false);
-    expect((res as { error: string }).error).toContain("requires an approval node or a runtime grant");
+    expect(res).toEqual({ ok: false, requiresApproval: true, riskLevel: "critical", provenance: "risk_default" });
     expect(fixture.calls()).toBe(0);
     const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.workflowExecutionId, RUN));
     expect(audit).toHaveLength(1);
-    expect(audit[0].status).toBe("denied");
+    expect(audit[0].status).toBe("pending");
     expect(audit[0].resolvedMode).toBe("require_approval");
   });
 
@@ -827,5 +835,134 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     expect(second).toEqual(first); // stored result row is authoritative
     const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n4"));
     expect(audit).toHaveLength(1);
+  });
+
+  // ── requiresApproval gate (Task 4) ──────────────────────────────────────
+
+  it("require_approval with no approval field returns requiresApproval outcome and is NOT stored in the dedup table", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const req = { service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n5" };
+    const res = await invoke(req, wfCtx);
+    expect(res).toEqual({ ok: false, requiresApproval: true, riskLevel: "critical", provenance: "risk_default" });
+    // Gate outcomes must NOT land in the dedup table — an approved retry must
+    // reach enforcement fresh (re-querying the current policy state).
+    const rows = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, req.invocationId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("require_approval WITH the approval field executes and stamps audit row status approved", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const req = {
+      service: "demo",
+      action: "deploy",
+      params: { msg: "x" },
+      invocationId: "workflow:run_wf1:n6",
+      approval: { resolvedBy: "u1", note: "lgtm" },
+    };
+    const res = await invoke(req, wfCtx);
+    expect(res).toEqual({ ok: true, result: { deployed: true } });
+    expect(fixture.calls()).toBe(1);
+    // The audit row is stamped "approved" on the policy side.
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n6"));
+    expect(audit).toHaveLength(1);
+    // persistInvocationAudit writes "approved" but updateInvocationOutcome
+    // then stamps the final execution outcome ("completed"). Task 5 will assert
+    // resolvedBy once that column lands.
+    expect(audit[0].status).toBe("completed");
+    // The dedup table holds the computed result so a re-drive returns it without re-running.
+    const dedup = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, req.invocationId));
+    expect(dedup).toHaveLength(1);
+  });
+
+  it("resolver throw returns requiresApproval with provenance resolver_error; action never runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    // Wrap db with a Proxy that throws on the second select call.
+    // selectStoredResult (the dedup check) is the first select; policy
+    // resolution (resolveActionPolicy) does the subsequent selects. Because
+    // requiresApproval is returned without reaching the dedup insert, only two
+    // select calls happen (initial dedup check + first policy table select).
+    let selectCallCount = 0;
+    const origSelect = db.select.bind(db);
+    const failingDb: AppDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "select") return Reflect.get(target, prop, receiver);
+        return function (...args: unknown[]) {
+          selectCallCount += 1;
+          if (selectCallCount === 1) {
+            // First select is selectStoredResult — let it through.
+            return (origSelect as (...a: unknown[]) => unknown)(...args);
+          }
+          throw new Error("simulated db error during policy resolution");
+        };
+      },
+    }) as AppDb;
+
+    const invoke2 = buildActionInvoker({ db: failingDb, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke2(
+      { service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n7" },
+      wfCtx,
+    );
+    expect(res).toEqual({ ok: false, requiresApproval: true, provenance: "resolver_error" });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("resolver_error + approval field executes on the signal's authority", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    // Same failing db strategy: second select throws. With approval set,
+    // enforceWorkflowPolicy catches the throw and returns null (proceed).
+    // The action executes, then the dedup insert and re-select both use the
+    // real db. Call order: 1=dedup-pre, 2=policy (throw), 3=dedup-post.
+    // We allow calls 1 and 3, throw on 2.
+    let selectCallCount = 0;
+    const origSelect = db.select.bind(db);
+    const failingDb: AppDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "select") return Reflect.get(target, prop, receiver);
+        return function (...args: unknown[]) {
+          selectCallCount += 1;
+          if (selectCallCount === 2) {
+            throw new Error("simulated db error during policy resolution");
+          }
+          return (origSelect as (...a: unknown[]) => unknown)(...args);
+        };
+      },
+    }) as AppDb;
+
+    const invoke = buildActionInvoker({ db: failingDb, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke(
+      {
+        service: "demo",
+        action: "deploy",
+        params: { msg: "x" },
+        invocationId: "workflow:run_wf1:n8",
+        approval: { resolvedBy: "u1" },
+      },
+      wfCtx,
+    );
+    // Resolver error + approval set → human resolution authorizes execution
+    expect(res).toEqual({ ok: true, result: { deployed: true } });
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("parseStoredResult rejects a stored requiresApproval row (defensive: such rows must never exist)", async () => {
+    const db = await makeDb();
+    // Seed a row with { ok: false, requiresApproval: true } directly
+    await db.insert(actionInvocations).values({
+      invocationId: "corrupt:n9",
+      result: { ok: false, requiresApproval: true },
+      createdAt: Date.now(),
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(highRiskAction().action) });
+    // A stored requiresApproval result is corrupt — such rows must never be persisted,
+    // but if one exists the invoker must throw rather than silently returning it.
+    await expect(
+      invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "corrupt:n9" }, wfCtx),
+    ).rejects.toThrow("corrupt stored result");
   });
 });

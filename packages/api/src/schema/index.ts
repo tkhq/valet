@@ -1061,7 +1061,7 @@ export const actionInvocations = pgTable(
     matchedGrantId: text("matched_grant_id"),
     matchedOverrideId: text("matched_override_id"),
     status: text("status", {
-      enum: ["allowed", "denied", "approved", "rejected", "error", "completed"],
+      enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed"],
     }),
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
