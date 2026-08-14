@@ -1408,10 +1408,11 @@ The engine emits typed events through a callback. Platform adapters subscribe an
 type EngineEvent =
   | { type: 'message_start'; threadId: string; messageId: string; role: 'assistant' | 'system' }
   | { type: 'text_delta'; threadId: string; text: string }
+  | { type: 'tool_call_update'; threadId: string; callId: string; toolName: string; argsDelta: string }
   | { type: 'message_update'; threadId: string; messageId: string; parts: MessagePart[]; content?: string }
   | { type: 'message_end'; threadId: string; messageId: string; reason: 'end_turn' | 'error' | 'abort' }
-  | { type: 'tool_start'; threadId: string; tool: string; args: Record<string, unknown> }
-  | { type: 'tool_end'; threadId: string; tool: string; result: string; isError: boolean }
+  | { type: 'tool_start'; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
+  | { type: 'tool_end'; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
   | { type: 'turn_end'; threadId: string; reason: 'end_turn' | 'error' | 'abort' }
   | { type: 'thread_start'; threadId: string; parentThreadId?: string }
   | { type: 'queue_state'; threadId: string; state: QueueState }
@@ -1972,7 +1973,9 @@ type Unsubscribe = () => void;
 
 **Gap handling:** live fan-out transports may be lossy (Redis pub/sub is at-most-once). A subscriber that observes a live event whose offset is not contiguous with its last delivered offset MUST re-read the durable log from that offset before delivering — adapters using lossy fan-out are required to implement this refetch, which is what makes "delivery order matches offset order" true end-to-end rather than merely asserted.
 
-**Delta handling:** high-frequency streaming events (`text_delta`) are live-only — they fan out to subscribers but are not durably appended and **carry no offset** (the durable record of streamed text is the persisted `MessageEntry`, delivered via `message_update`/`message_end`). All discrete events (message lifecycle, tool start/end, queue state, decision gates, status, errors) are durable. This keeps the log linear in conversation size rather than quadratic in streamed bytes.
+**Delta handling:** high-frequency streaming events (`text_delta`, `tool_call_update`) are live-only — they fan out to subscribers but are not durably appended and **carry no offset** (the durable record of streamed text is the persisted `MessageEntry`, delivered via `message_update`/`message_end`). All discrete events (message lifecycle, tool start/end, queue state, decision gates, status, errors) are durable. This keeps the log linear in conversation size rather than quadratic in streamed bytes.
+
+`tool_call_update` streams a tool call's arguments while the model generates them: one frame with an empty `argsDelta` when the call opens, then one frame per raw args-JSON chunk, keyed by `callId`. Clients concatenate the chunks per `callId` and parse the accumulated string leniently to preview the call before it executes. Because the plane is lossy, the later durable `tool_start` (which carries the complete `args` and the same `callId`) is the reconciliation point; a client that missed deltas just upgrades its preview there. Aborted-mid-args calls never reach `toolcall_end`, are never persisted, and clients drop their preview parts on a `message_end` with reason `abort`/`error`.
 
 **Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. For **permanent sessions** (orchestrators never terminate), retention applies per submission instead: events whose `queueItemId` references a submission settled longer than the retention window ago are truncatable while the session lives — the transcript entries remain the durable record. Truncation never removes events whose `queueItemId` references an unsettled submission; the linkage field is what makes both rules computable.
 
