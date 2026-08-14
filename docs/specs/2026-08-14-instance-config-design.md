@@ -69,9 +69,9 @@ plugins:
   allow: [plugin-github, plugin-linear]   # replaces VALET_PLUGINS; or `deny:`
 
 toolPolicies:
-  - match: "github/merge_pull_request"
+  - match: "github.merge_pull_request"
     mode: deny
-  - match: "linear/*"
+  - match: "linear.*"
     mode: allow
   - match: "*"
     mode: require_approval
@@ -302,12 +302,13 @@ instance-level override layer; this section is the first.
 Each rule:
 
 ```yaml
-- match: "github/merge_pull_request"   # tool id, or a glob on service/action
+- match: "github.merge_pull_request"   # tool id, or a glob on service/action
   mode: deny                            # allow | require_approval | deny
 ```
 
 - **Matching** — `match` is a glob over the qualified tool id
-  (`service/action`). `github/*` covers a service; `*` is a catch-all.
+  (`service.action`, per `qualifiedId` in `plugin-catalog.ts`). `github.*`
+  covers a service; `*` is a catch-all.
 - **First match wins.** Order the list from specific to general. A tool
   with no matching rule keeps its manifest/riskLevel default, so the file
   can tighten one tool without restating the world.
