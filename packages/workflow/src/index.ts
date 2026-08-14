@@ -85,6 +85,7 @@ export type {
   NodeExecutor,
   NodeExecutorArgs,
   NodeExecutorRegistry,
+  OnApprovalGrant,
   OnApprovalPending,
 } from './nodes/index.js';
 

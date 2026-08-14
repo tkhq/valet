@@ -472,7 +472,15 @@ export async function cancelWorkflowRun(
 export async function resolveWorkflowApproval(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
-  input: { runId: string; nodeId: string; approved: boolean; note?: string },
+  input: {
+    runId: string;
+    nodeId: string;
+    approved: boolean;
+    note?: string;
+    /** "Grant the rest of this run" — exec-scoped runtime grants written by
+     * the approval node's `onApprovalGrant` host seam on approval. */
+    grantActions?: Array<{ service: string; actionId: string }>;
+  },
 ): Promise<"ok" | "not_found"> {
   const run = await ownedRun(deps, owner, input.runId);
   if (!run) return "not_found";
@@ -480,7 +488,7 @@ export async function resolveWorkflowApproval(
     runId: input.runId,
     signalId: `approval:${input.nodeId}:resolution`,
     signalType: `approval:${input.nodeId}`,
-    payload: { approved: input.approved, resolvedBy: owner.userId, note: input.note },
+    payload: { approved: input.approved, resolvedBy: owner.userId, note: input.note, grantActions: input.grantActions },
     createdAt: Date.now(),
   });
   await deps.workflowRunHost.wake(input.runId);

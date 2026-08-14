@@ -15,6 +15,8 @@ import type {
   ListSourcesResponse,
   PatchSourceResponse,
   TriggerBakeResponse,
+  CreateOrgPolicyRequest,
+  CreateOrgPolicyResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   CreateTeamRequest,
@@ -26,6 +28,11 @@ import type {
   CreateWorkflowRequest,
   CreateWorkflowResponse,
   DeleteCredentialResponse,
+  DeleteGrantRequest,
+  DeleteGrantResponse,
+  DeleteOrgPolicyResponse,
+  DeletePolicyOverrideRequest,
+  DeletePolicyOverrideResponse,
   EnsureOrchestratorResponse,
   GetGithubAppResponse,
   GetMemoryTreeResponse,
@@ -38,9 +45,13 @@ import type {
   GetWorkflowResponse,
   GetWorkflowRunResponse,
   ListCredentialsResponse,
+  ListActionLogResponse,
   ListDecisionsResponse,
+  ListGrantsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
+  ListOrgPoliciesResponse,
+  ListPolicyOverridesResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
@@ -79,6 +90,8 @@ import type {
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
   PatchIdentityLinkRequest,
+  PatchOrgPolicyRequest,
+  PatchOrgPolicyResponse,
   PatchOrgRequest,
   PatchOrgResponse,
   PatchSessionRequest,
@@ -90,6 +103,8 @@ import type {
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
   OpenrouterRegistryResponse,
+  PreviewOrgPolicyRequest,
+  PreviewOrgPolicyResponse,
   ProbeLlmProviderResponse,
   PutCredentialRequest,
   PutCredentialResponse,
@@ -97,6 +112,8 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  PutPolicyOverrideRequest,
+  PutPolicyOverrideResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -551,6 +568,50 @@ export const api = {
     request<{ ok: true }>("PATCH", `/me/identity-links/${encodeURIComponent(provider)}`, body),
   deleteIdentityLink: (provider: string) =>
     request<{ ok: true }>("DELETE", `/me/identity-links/${encodeURIComponent(provider)}`),
+
+  // org action policies (action-policies plan, Task 4/5): admin CRUD +
+  // preview, keyset-paginated action log.
+  listOrgPolicies: () => request<ListOrgPoliciesResponse>("GET", "/org/policies"),
+  createOrgPolicy: (body: CreateOrgPolicyRequest) =>
+    request<CreateOrgPolicyResponse>("POST", "/org/policies", body),
+  patchOrgPolicy: (id: string, body: PatchOrgPolicyRequest) =>
+    request<PatchOrgPolicyResponse>("PATCH", `/org/policies/${encodeURIComponent(id)}`, body),
+  deleteOrgPolicy: (id: string) =>
+    request<DeleteOrgPolicyResponse>("DELETE", `/org/policies/${encodeURIComponent(id)}`),
+  previewOrgPolicy: (body: PreviewOrgPolicyRequest) =>
+    request<PreviewOrgPolicyResponse>("POST", "/org/policies/preview", body),
+  listActionLog: (opts?: {
+    cursor?: string;
+    limit?: number;
+    service?: string;
+    userId?: string;
+    resolvedMode?: string;
+    status?: string;
+    from?: number;
+    to?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.service) qs.set("service", opts.service);
+    if (opts?.userId) qs.set("userId", opts.userId);
+    if (opts?.resolvedMode) qs.set("resolvedMode", opts.resolvedMode);
+    if (opts?.status) qs.set("status", opts.status);
+    if (opts?.from !== undefined) qs.set("from", String(opts.from));
+    if (opts?.to !== undefined) qs.set("to", String(opts.to));
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListActionLogResponse>("GET", `/org/action-log${tail}`);
+  },
+
+  // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)
+  listMyPolicyOverrides: () => request<ListPolicyOverridesResponse>("GET", "/me/policy-overrides"),
+  putMyPolicyOverride: (body: PutPolicyOverrideRequest) =>
+    request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
+  deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>
+    request<DeletePolicyOverrideResponse>("DELETE", "/me/policy-overrides", body),
+  listMyGrants: () => request<ListGrantsResponse>("GET", "/me/grants"),
+  deleteMyGrant: (body: DeleteGrantRequest) =>
+    request<DeleteGrantResponse>("DELETE", "/me/grants", body),
 };
 
 export { ApiError };

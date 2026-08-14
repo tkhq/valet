@@ -46,6 +46,8 @@ import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { policiesRouter, actionLogRouter } from "./routes/policies.js";
+import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
@@ -232,6 +234,14 @@ export function createApp(
   app.route("/api/org/settings", orgSettingsRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
+  app.route("/api/org/policies", policiesRouter);
+  app.route("/api/org/action-log", actionLogRouter);
+  // Same defensive-ordering note as identityLinksRouter/githubConnectRouter
+  // above: meRouter has no wildcard route today, so there's no real
+  // collision — mounted after /api/me for readability (grouped with the
+  // other policy routes) rather than before it.
+  app.route("/api/me/policy-overrides", mePolicyOverridesRouter);
+  app.route("/api/me/grants", meGrantsRouter);
   app.route("/api/org/github-app", githubAppRouter);
   app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/sources", sourcesRouter);

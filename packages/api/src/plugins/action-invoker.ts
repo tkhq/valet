@@ -26,6 +26,7 @@ import { eq } from "drizzle-orm";
 import {
   prepareActionArgs,
   type ActionPlugin,
+  type ApprovalMode,
   type Credential,
   type CredentialOwner,
   type CredentialProvider,
@@ -34,6 +35,7 @@ import {
   type PluginActionContext,
   type PluginActionResult,
   type Principal,
+  type RiskLevel,
   type Sandbox,
   type ValetPlugin,
 } from "@valet/engine";
@@ -43,6 +45,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { actionInvocations } from "../schema/index.js";
 import type { GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { persistInvocationAudit, resolveActionPolicy } from "../policies/service.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -73,6 +76,15 @@ export interface ActionInvocationContext {
    * a test exercising the repo-bound branch) can opt in.
    */
   sessionId?: string;
+  /**
+   * The workflow run this invocation belongs to (action-policies plan,
+   * Task 3), scoping `appliesIn: "workflow"` policy resolution and any
+   * exec-scoped runtime grant that quiets a `require_approval` action. Set by
+   * `workflows/engine-deps.ts`'s `invokeAction` (the run id). Absent === no
+   * workflow-policy enforcement runs (a direct/test caller with no run
+   * context), so the action executes as before.
+   */
+  workflowExecutionId?: string;
 }
 
 export interface ActionInvokerOpts {
@@ -191,12 +203,26 @@ async function computeResult(
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
       : buildCredentialProvider(opts.credentials, owner, credentialService);
 
+  // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
+  // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
+  // exists once the action is resolved. Discovery may touch credentials (an
+  // MCP-proxy plugin lists its tools over an authenticated upstream), but no
+  // action is EXECUTED here; enforcement below still gates the actual call.
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
     const resolved = await entry.actionPlugin.resolveActions({ credentials });
     action = findAction(resolved, req.service, req.action);
   }
   if (!action) return unknownAction(req);
+
+  // Policy enforcement (action-policies plan, Task 3): a workflow tool node
+  // runs with no live gate, so `deny` and `require_approval` both fail the
+  // node — the latter with instructive text pointing at the two ways to make
+  // it pass (an approval node, or a runtime grant). An exec-scoped grant is
+  // consulted transparently by `resolveActionPolicy` (grant rung), so a
+  // covered action resolves straight to `allow`.
+  const denial = await enforceWorkflowPolicy(opts, req, ctx, action.riskLevel, entry.actionPlugin.defaultApprovalMode);
+  if (denial) return denial;
 
   const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) return { ok: false, error: prepared.error };
@@ -224,6 +250,66 @@ async function computeResult(
 
 function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionResult {
   return { ok: false, error: `unknown action: ${req.service}.${req.action}` };
+}
+
+/**
+ * Resolve + enforce org policy for a workflow tool-node invocation
+ * (action-policies plan, Task 3). Returns a failure `WorkflowInvokeActionResult`
+ * when the action must NOT run (deny / require_approval with no covering
+ * grant), or `null` to proceed. Writes a durable audit row either way
+ * (deterministic PK `pol:wf:{invocationId}` → dedups a byte-identical replay).
+ * A no-op when the caller supplied no run/org context.
+ */
+async function enforceWorkflowPolicy(
+  opts: ActionInvokerOpts,
+  req: WorkflowInvokeActionRequest,
+  ctx: ActionInvocationContext,
+  riskLevel: RiskLevel,
+  pluginDefault: ApprovalMode | undefined,
+): Promise<WorkflowInvokeActionResult | null> {
+  if (!ctx.orgId || !ctx.workflowExecutionId) return null;
+  const now = (opts.clock ?? Date.now)();
+
+  const decision = await resolveActionPolicy(opts.db, {
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    service: req.service,
+    actionId: req.action,
+    riskLevel,
+    params: req.params,
+    appliesIn: "workflow",
+    workflowExecutionId: ctx.workflowExecutionId,
+    pluginDefault,
+    now,
+  });
+
+  const allowed = decision.mode === "allow";
+  await persistInvocationAudit(opts.db, {
+    invocationId: `pol:wf:${req.invocationId}`,
+    service: req.service,
+    actionId: req.action,
+    riskLevel,
+    resolvedMode: decision.mode,
+    baseMode: decision.provenance.baseMode,
+    matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
+    matchedGrantId: decision.provenance.matchedGrantId ?? null,
+    matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
+    status: allowed ? "allowed" : "denied",
+    workflowExecutionId: ctx.workflowExecutionId,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    params: req.params,
+    createdAt: now,
+  });
+
+  if (allowed) return null;
+  if (decision.mode === "deny") {
+    return { ok: false, error: `${req.service}.${req.action} is blocked by org policy` };
+  }
+  return {
+    ok: false,
+    error: `${req.service}.${req.action} requires an approval node or a runtime grant`,
+  };
 }
 
 /** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */

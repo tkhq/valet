@@ -10,7 +10,7 @@
 import { Hono } from "hono";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import type { ListPluginsResponse, PluginServiceSummary, PluginSummary } from "../wire/types.js";
+import type { ListPluginsResponse, PluginActionSummary, PluginServiceSummary, PluginSummary } from "../wire/types.js";
 import { findOAuthDeclaration, authCodeEnvReady } from "../services/integration-oauth.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
@@ -45,6 +45,20 @@ pluginsRouter.get("/", async (c) => {
         .map((actionPlugin) => actionPlugin.credentialService ?? actionPlugin.service),
     );
 
+    // Actions grouped by their credential-service key (`credentialService ??
+    // service`) — matching `dynamicServices` above — so a `PluginServiceSummary`
+    // exposes exactly the actions that ran under that connected credential.
+    const actionsByService = new Map<string, PluginActionSummary[]>();
+    for (const actionPlugin of actionPlugins) {
+      const service = actionPlugin.credentialService ?? actionPlugin.service;
+      const summaries: PluginActionSummary[] = actionPlugin.actions.map((a) => ({
+        id: a.id,
+        name: a.name,
+        riskLevel: a.riskLevel,
+      }));
+      actionsByService.set(service, [...(actionsByService.get(service) ?? []), ...summaries]);
+    }
+
     const services: PluginServiceSummary[] = (plugin.credentials ?? []).map((decl) => {
       const service = decl.service ?? plugin.name;
       const found = findOAuthDeclaration(plugins, service);
@@ -61,6 +75,7 @@ pluginsRouter.get("/", async (c) => {
         dynamic: dynamicServices.has(service) ? true : undefined,
         connect: oauthReady ? "oauth" : "manual",
         toolCount: toolCounts.get(service),
+        actions: actionsByService.get(service) ?? [],
       };
     });
 

@@ -431,7 +431,14 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     async invokeAction(req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult> {
       const runId = parseWorkflowDispatchId(req.invocationId);
       const ctx = await resolveRunContext(opts, runId);
-      return invokeActionImpl(req, { userId: ctx.actorUserId, orgId: ctx.orgId, owner: ctx.owner });
+      // `workflowExecutionId: runId` scopes `appliesIn: "workflow"` policy
+      // enforcement + exec-scoped grant matching (action-policies plan, T3).
+      return invokeActionImpl(req, {
+        userId: ctx.actorUserId,
+        orgId: ctx.orgId,
+        owner: ctx.owner,
+        workflowExecutionId: runId,
+      });
     },
 
     /**
