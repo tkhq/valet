@@ -269,6 +269,9 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (body.scope !== undefined && !["once", "run", "always"].includes(body.scope)) {
     return c.json({ error: "scope must be one of: once, run, always" }, 400);
   }
+  if (body.iteration !== undefined && (!Number.isInteger(body.iteration) || body.iteration < 0)) {
+    return c.json({ error: "iteration must be a non-negative integer" }, 400);
+  }
 
   const result = await resolveWorkflowApproval(deps, owner, {
     runId,
@@ -284,7 +287,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (result === "not_parked") return c.json({ error: "run is not parked on this approval gate" }, 409);
   if (result === "already_resolved") return c.json({ error: "this approval gate has already been resolved" }, 409);
   if (result === "timed_out") return c.json({ error: "this approval gate has timed out" }, 409);
-  if (result === "forbidden_always") return c.json({ error: "scope=always requires an org admin" }, 403);
+  if (result === "forbidden_always") return c.json({ error: "Always allow requires an org admin. Ask an org admin, or approve for the rest of this run." }, 403);
   if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
   if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
 

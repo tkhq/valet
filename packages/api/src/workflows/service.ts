@@ -472,7 +472,9 @@ export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
   | "forbidden_always" | "org_mismatch" | "human_only";
 
-/** Scan `definition` (unknown at runtime) for the node with `nodeId`. */
+/** Scan `definition` (unknown at runtime) for the node with `nodeId`. Searches
+ * `definition.nodes` directly and, for each `type === "foreach"` node, also checks
+ * `node.body.id`. Nested foreach is not a legal definition shape today. */
 export function findNodeInDefinition(definition: unknown, nodeId: string): Record<string, unknown> | undefined {
   if (typeof definition !== "object" || definition === null) return undefined;
   const def = definition as Record<string, unknown>;
@@ -567,12 +569,12 @@ export async function resolveWorkflowApproval(
   const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
   if (existing.some((s) => s.signalType === signalType)) return "already_resolved";
 
+  const orgId = await definitionOrgId(deps.db, run.params.workflowId);
+  if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
+
   const node = findNodeInDefinition(run.definition, input.nodeId);
   const isPolicyGate = node?.type === "tool";
   if (isPolicyGate && input.via === "agent") return "human_only";
-
-  const orgId = await definitionOrgId(deps.db, run.params.workflowId);
-  if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
 
   if (input.approved && isPolicyGate) {
     const n = node as Record<string, unknown>;

@@ -13,7 +13,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
-import { actionInvocations, orgs, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import { actionInvocations, actionPolicies, orgs, runtimeGrants, workflowDefinitions, workflowVersions } from "../schema/index.js";
 import {
   getWorkflowRunDetail,
   listWorkflowRuns,
@@ -570,6 +570,13 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("not parked") });
+    // No DB writes on failure
+    const signals = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signals).toHaveLength(0);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
   });
 
   it("unknown run → 404", async () => {
@@ -581,6 +588,11 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       body: JSON.stringify({ approved: true }),
     });
     expect(res.status).toBe(404);
+    // No DB writes on failure
+    const grants = await api.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await api.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
   });
 
   it("already resolved → 409", async () => {
@@ -597,6 +609,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       payload: { approved: true },
       createdAt: Date.now(),
     });
+    const signalsBefore = await localApi.providers.workflowStore.listSignals(runId);
     const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -604,6 +617,13 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("already been resolved") });
+    // No additional DB writes on failure — signal count unchanged
+    const signalsAfter = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signalsAfter).toHaveLength(signalsBefore.length);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
   });
 
   it("timed out → 409", async () => {
@@ -619,6 +639,13 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("timed out") });
+    // No DB writes on failure
+    const signals = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signals).toHaveLength(0);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
   });
 
   it("policy gate + scope=run → writes execution grant + 200", async () => {
@@ -634,6 +661,10 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    // Assert runtime_grants row was written
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ workflowExecutionId: runId, policyKey: "widgets.nuke" });
   });
 
   it("policy gate + scope=always + admin → writes org policy + 200", async () => {
@@ -649,6 +680,12 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    // Assert action_policies row written with the deterministic id
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies.some((p) => p.id === "pol:approval:local-org:widgets.nuke")).toBe(true);
+    // Assert runtime_grants row also written (scope=always implies scope=run grant too)
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants.some((g) => g.workflowExecutionId === runId && g.policyKey === "widgets.nuke")).toBe(true);
   });
 
   it("policy gate + scope=always + non-admin → 403", async () => {
@@ -687,7 +724,14 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       body: JSON.stringify({ approved: true, scope: "always" }),
     });
     expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ error: expect.stringContaining("org admin") });
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Ask an org admin") });
+    // No policy row, no grant, no signal written on failure
+    const signals = await localApi.providers.workflowStore.listSignals(memberRunId);
+    expect(signals).toHaveLength(0);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
   });
 
   it("approval node (non-tool) + scope=run → 200 no grant written", async () => {
