@@ -1,5 +1,6 @@
 import { Pencil } from "lucide-react";
 import { DiffView, formatDiffStats } from "./diff-view";
+import { isMarkdownPath, MarkdownDiffBody } from "./markdown-view";
 import { PathLabel, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
@@ -55,20 +56,31 @@ export const editRenderer: ToolRenderer = {
       status === "error" ||
       resultText(result).startsWith("no match for old_string");
 
+    const markdown = isMarkdownPath(path);
+    const header = (
+      <span className="flex items-center gap-2 min-w-0">
+        {path && <PathLabel path={path} />}
+        {failed && (
+          <span className="text-danger-600 dark:text-danger-500 text-[10px] uppercase tracking-wider">
+            {error ? "failed" : "no match"}
+          </span>
+        )}
+      </span>
+    );
+
     return (
       <ToolBody className="px-0 py-0">
-        {path && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
-            <PathLabel path={path} />
-            {failed && (
-              <span className="text-danger-600 dark:text-danger-500 text-[10px] uppercase tracking-wider">
-                {error ? "failed" : "no match"}
-              </span>
-            )}
+        {/* MarkdownDiffBody carries the header itself; render the plain
+            strip only while running or for non-markdown diffs. */}
+        {(status === "running" || !markdown) && (path || failed) && (
+          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px]">
+            {header}
           </div>
         )}
         {status === "running" ? (
           <div className="px-3 py-2 text-[11px] text-muted italic font-mono">editing…</div>
+        ) : markdown ? (
+          <MarkdownDiffBody before={before} after={after} left={header} />
         ) : (
           <DiffView before={before} after={after} />
         )}

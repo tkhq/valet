@@ -1,5 +1,6 @@
 import { NotebookPen } from "lucide-react";
-import { DiffView, formatDiffStats } from "./diff-view";
+import { formatDiffStats } from "./diff-view";
+import { MarkdownDiffBody } from "./markdown-view";
 import { PathLabel, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
@@ -38,22 +39,31 @@ export const memPatchRenderer: ToolRenderer = {
     const after = getStr(args, "newString");
     const failed = status === "error";
 
+    const header = (
+      <span className="flex items-center gap-2 min-w-0">
+        {path && <PathLabel path={path} />}
+        {failed && (
+          <span className="text-danger-600 dark:text-danger-500 text-[10px] uppercase tracking-wider">
+            failed
+          </span>
+        )}
+      </span>
+    );
+
     return (
       <ToolBody className="px-0 py-0">
-        {path && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
-            <PathLabel path={path} />
-            {failed && (
-              <span className="text-danger-600 dark:text-danger-500 text-[10px] uppercase tracking-wider">
-                failed
-              </span>
-            )}
-          </div>
-        )}
         {status === "running" ? (
-          <div className="px-3 py-2 text-[11px] text-muted italic font-mono">patching…</div>
+          <>
+            {path && (
+              <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px]">
+                {header}
+              </div>
+            )}
+            <div className="px-3 py-2 text-[11px] text-muted italic font-mono">patching…</div>
+          </>
         ) : (
-          <DiffView before={before} after={after} />
+          // Memory files are markdown, so the preview toggle is always on.
+          <MarkdownDiffBody before={before} after={after} left={header} />
         )}
         {failed && (error || resultText(result)) && (
           <div className="px-3 py-2 border-t border-danger-500/30 bg-danger-500/5 text-[11px] text-danger-700 dark:text-danger-400 font-mono whitespace-pre-wrap">
