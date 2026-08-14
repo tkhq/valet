@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { MessageSquare, Plus, Search, X } from "lucide-react";
+import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Plus, RefreshCw, Search, X } from "lucide-react";
 import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
-import { useCreateThread, useThreads } from "~/api/queries";
+import {
+  useArchivedThreads,
+  useCreateThread,
+  useReplaceSandbox,
+  useSetThreadArchived,
+  useThreads,
+} from "~/api/queries";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
-import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
+import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
 import {
@@ -14,7 +20,14 @@ import {
   threadOriginBucket,
   type ThreadOriginBucket,
 } from "~/lib/thread-origin";
-import { Spinner, Tooltip } from "~/components/primitives";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+  Tooltip,
+} from "~/components/primitives";
 import { cn } from "~/lib/cn";
 
 const BUCKET_STORAGE_KEY = "valet:thread-bucket";
@@ -83,6 +96,11 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
   const childrenQ = useOrchestratorChildren({ refetchInterval: CHILDREN_POLL_MS });
   useInvalidateChildrenOnQueueState(sessionId, childrenQ.refetch);
   const createThread = useCreateThread(sessionId);
+  const setArchived = useSetThreadArchived(sessionId);
+  const replaceSandbox = useReplaceSandbox(sessionId);
+  const dismissChild = useDismissChild();
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
   const navigate = useNavigate({ from: "/chat" });
 
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
@@ -224,9 +242,43 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
               active={t.id === activeThreadId}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
+              onArchive={(threadId) => void setArchived.mutateAsync({ threadId, archived: true })}
+              onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
+              onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
             />
           ))}
         </nav>
+        <div className="border-t border-line/60 px-2 py-1.5">
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            aria-expanded={showArchived}
+            className="w-full flex items-center gap-2 rounded px-2 py-1 text-xs text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash"
+          >
+            <Archive className="h-3 w-3 shrink-0" aria-hidden />
+            <span>{showArchived ? "Hide archived" : "Show archived"}</span>
+          </button>
+          {showArchived && (
+            <ul className="mt-1 space-y-0.5">
+              {(archivedQ.data?.threads ?? []).length === 0 && !archivedQ.isLoading && (
+                <li className="px-2 py-1 text-xs text-muted">No archived threads.</li>
+              )}
+              {(archivedQ.data?.threads ?? []).map((t) => (
+                <li key={t.id} className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
+                  <span className="flex-1 truncate">{t.title ?? t.id}</span>
+                  <button
+                    type="button"
+                    aria-label={`Unarchive ${t.title ?? t.id}`}
+                    onClick={() => void setArchived.mutateAsync({ threadId: t.id, archived: false })}
+                    className="shrink-0 rounded p-0.5 hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
+                  >
+                    <ArchiveRestore className="h-3 w-3" aria-hidden />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </>
   );
@@ -238,49 +290,88 @@ function ThreadNode({
   active,
   childSessions,
   activeChildId,
+  onArchive,
+  onReplaceSandbox,
+  onDismissChild,
 }: {
   thread: ThreadSummary;
   index: number;
   active: boolean;
   childSessions: OrchestratorChildSummary[];
   activeChildId?: string;
+  onArchive: (threadId: string) => void;
+  onReplaceSandbox: () => void;
+  onDismissChild: (childSessionId: string) => void;
 }) {
   const label = thread.title ?? (index === 0 ? "today" : `Thread ${index + 1}`);
 
   return (
     <div>
-      <Tooltip content={label} delayDuration={600}>
-        <Link
-          to="/chat"
-          search={(prev) => ({
-            ...prev,
-            thread: index === 0 ? undefined : thread.id,
-            child: undefined,
-          })}
-          className={cn(
-            // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
-            // title at the same x-offset whether or not the moss rail is
-            // present — no shift when you click between threads.
-            "flex items-center pr-4 py-2 text-sm transition-colors",
-            "focus-visible:outline-none focus-visible:bg-ink-wash",
-            active
-              ? "bg-moss-wash-strong text-ink border-l-2 border-moss pl-[calc(1rem-2px)] font-medium"
-              : "text-ink/85 hover:bg-ink-wash/60 pl-4 border-l-2 border-transparent",
-          )}
-        >
-          <span className="flex-1 truncate">{label}</span>
-        </Link>
-      </Tooltip>
+      {/* Row = link + context menu side by side; nesting the menu button
+          inside the Link would make it part of the navigation target. */}
+      <div
+        className={cn(
+          "group flex items-center pr-2 transition-colors",
+          active
+            ? "bg-moss-wash-strong border-l-2 border-moss"
+            : "hover:bg-ink-wash/60 border-l-2 border-transparent",
+        )}
+      >
+        <Tooltip content={label} delayDuration={600}>
+          <Link
+            to="/chat"
+            search={(prev) => ({
+              ...prev,
+              thread: index === 0 ? undefined : thread.id,
+              child: undefined,
+            })}
+            className={cn(
+              // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
+              // title at the same x-offset whether or not the moss rail is
+              // present — no shift when you click between threads.
+              "flex-1 min-w-0 flex items-center py-2 text-sm",
+              "focus-visible:outline-none focus-visible:bg-ink-wash",
+              active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
+            )}
+          >
+            <span className="flex-1 truncate">{label}</span>
+          </Link>
+        </Tooltip>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={`Thread menu: ${label}`}
+              className="shrink-0 rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuItem onSelect={() => onArchive(thread.id)}>
+              <Archive className="h-3.5 w-3.5 mr-2" aria-hidden />
+              Archive thread
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onReplaceSandbox}>
+              <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
+              Replace sandbox (all threads)
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       {childSessions.length > 0 && (
         <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
           {childSessions.map((c) => (
-            <li key={c.sessionId}>
+            <li key={c.sessionId} className="group/child flex items-center gap-1">
               <Link
                 to="/chat"
                 search={(prev) => ({ ...prev, child: c.sessionId })}
                 className={cn(
-                  "flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
+                  "flex-1 min-w-0 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
                   "focus-visible:outline-none focus-visible:bg-ink-wash",
+                  // Settled children recede: their work is done and their
+                  // compute reclaimed — visually distinct from live ones.
+                  c.status === "settled" && "opacity-60",
                   c.sessionId === activeChildId
                     ? "bg-moss-wash-strong text-ink"
                     : "text-muted hover:bg-ink-wash/60 hover:text-ink",
@@ -299,6 +390,16 @@ function ThreadNode({
                   />
                 )}
               </Link>
+              {c.status === "settled" && (
+                <button
+                  type="button"
+                  aria-label={`Dismiss ${c.title || c.sessionId}`}
+                  onClick={() => onDismissChild(c.sessionId)}
+                  className="shrink-0 rounded p-0.5 text-muted opacity-0 group-hover/child:opacity-100 focus-visible:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
+                >
+                  <X className="h-3 w-3" aria-hidden />
+                </button>
+              )}
             </li>
           ))}
         </ul>

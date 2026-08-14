@@ -253,6 +253,11 @@ export const api = {
     request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
   getOrchestratorChildren: () =>
     request<GetOrchestratorChildrenResponse>("GET", "/orchestrator/children"),
+  dismissChild: (childSessionId: string) =>
+    request<{ ok: true }>(
+      "POST",
+      `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
+    ),
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
@@ -271,8 +276,11 @@ export const api = {
     request<ImportMemoryResponse>("POST", "/memory/import", body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string) =>
-    request<ListThreadsResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads`),
+  listThreads: (sessionId: string, opts?: { archived?: boolean }) =>
+    request<ListThreadsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.archived ? "?archived=1" : ""}`,
+    ),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
     request<CreateThreadResponse>(
       "POST",

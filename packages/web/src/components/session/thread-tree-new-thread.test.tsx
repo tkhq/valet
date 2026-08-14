@@ -42,12 +42,16 @@ vi.mock("~/api/queries", async (importOriginal) => {
       mutateAsync: createThreadMutateAsync,
       isPending: false,
     }),
+    useArchivedThreads: () => ({ data: undefined, isLoading: false, error: null }),
+    useSetThreadArchived: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useReplaceSandbox: () => ({ mutateAsync: vi.fn(), isPending: false }),
   };
 });
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: { sessionId: "orchestrator:user-1" } }),
   useOrchestratorChildren: () => ({ data: { children: [] }, refetch: vi.fn() }),
+  useDismissChild: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 vi.mock("~/stores/stream", () => ({
