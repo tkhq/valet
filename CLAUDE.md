@@ -46,6 +46,8 @@ make smoke-orchestrator                         # fastest agent-loop-alive check
 
 **Before calling any change finished, run `make e2e` and get a clean scorecard.** It loads `.env.e2e`, probes your daemons/creds, and runs every suite it can — this is THE validation, not an optional extra. Pre-existing environmental failures (dead keys, missing creds) are the only acceptable red rows, and you must be able to name why each one is unrelated to your change.
 
+Capture the FULL `make e2e` output — never pipe it through `tail`, `head`, or `grep`. The scorecard is small, and a truncated capture drops the failing rows, which forces a full re-run just to see what failed. If you need the output later, use `make e2e 2>&1 | tee /tmp/e2e.log`.
+
 ```bash
 make e2e                          # full scorecard
 make e2e E2E_ARGS="--doctor"      # environment readiness (fresh machine)
