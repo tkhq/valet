@@ -49,6 +49,7 @@ import {
   type NodeExecutorRegistry,
   type OnApprovalGrant,
   type OnApprovalPending,
+  type OnGateResolved,
 } from './nodes/index.js';
 import type { NodeCheckpoint, RunParkState, RunWaitCondition, WorkflowRun, WorkflowStore } from './store.js';
 
@@ -59,6 +60,7 @@ export interface InterpreterDeps {
   executors?: NodeExecutorRegistry;
   onApprovalPending?: OnApprovalPending;
   onApprovalGrant?: OnApprovalGrant;
+  onGateResolved?: OnGateResolved;
   /**
    * Host-only extension point (Phase 5 plan decision 20): invoked
    * synchronously right after `store.beginTerminalize` succeeds, before
@@ -111,7 +113,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 }
 
 async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, span: Span): Promise<RunParkState> {
-  const { store, engine, clock, onApprovalPending, onApprovalGrant, onBeginTerminalize } = deps;
+  const { store, engine, clock, onApprovalPending, onApprovalGrant, onGateResolved, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
 
   // `valet.workflow.id` is fixed for a run's whole lifetime (written once by
@@ -204,6 +206,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
       engine,
       onApprovalPending,
       onApprovalGrant,
+      onGateResolved,
     }));
 
     for (let i = 0; i < runnable.length; i++) {
