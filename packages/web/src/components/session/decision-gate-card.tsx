@@ -13,9 +13,19 @@
 import { useState } from "react";
 import { AlertTriangle, HelpCircle, KeyRound, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
-import { Button, Spinner, Textarea } from "~/components/primitives";
+import { Button, Spinner, Textarea, Tooltip } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
+import { useMe } from "~/api/settings";
 import { cn } from "~/lib/cn";
+
+// The gate action id the policy resolver offers on a `require_approval`
+// decision that grants an org-wide `allow` policy going forward — the API
+// 403s it for non-admins at resolve (`org admin required for
+// always_allow`, `routes/messages.ts`). Hardcoded here (not imported) since
+// it's a server-internal constant (`policies/service.ts`'s
+// `GATE_ACTION_ALWAYS_ALLOW`), not part of the wire contract.
+const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
+const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
 export function DecisionGateCard({
   sessionId,
@@ -26,6 +36,8 @@ export function DecisionGateCard({
 }) {
   const resolve = useResolveDecision(sessionId);
   const withdraw = useWithdrawDecision(sessionId);
+  const meQ = useMe();
+  const isAdmin = meQ.data?.orgRole === "admin";
   const [value, setValue] = useState("");
 
   const busy = resolve.isPending || withdraw.isPending;
@@ -110,6 +122,12 @@ export function DecisionGateCard({
         </div>
       )}
 
+      {gate.provenance && (
+        <div className="px-3.5 pb-2 text-[11px] text-muted" data-testid="gate-provenance">
+          {provenanceLine(gate.provenance)}
+        </div>
+      )}
+
       {gate.type === "question" ? (
         <div className="px-3.5 pb-3 flex items-end gap-2">
           <Textarea
@@ -129,29 +147,67 @@ export function DecisionGateCard({
         </div>
       ) : (
         <div className="px-3.5 pb-3 flex flex-wrap gap-2">
-          {gate.actions.map((a) => (
-            <Button
-              key={a.id}
-              onClick={() => pickAction(a.id)}
-              disabled={busy}
-              variant={
-                a.style === "primary"
-                  ? "primary"
-                  : a.style === "danger"
-                    ? "danger"
-                    : "secondary"
-              }
-            >
-              {busy && resolve.variables?.gateId === gate.id ? (
-                <Spinner size={14} />
-              ) : null}
-              <span>{a.label}</span>
-            </Button>
-          ))}
+          {gate.actions.map((a) => {
+            const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
+            const disabled = busy || (isAlwaysAllow && !isAdmin);
+            const button = (
+              <Button
+                key={a.id}
+                onClick={() => pickAction(a.id)}
+                disabled={disabled}
+                variant={
+                  a.style === "primary"
+                    ? "primary"
+                    : a.style === "danger"
+                      ? "danger"
+                      : "secondary"
+                }
+              >
+                {busy && resolve.variables?.gateId === gate.id ? (
+                  <Spinner size={14} />
+                ) : null}
+                <span>{a.label}</span>
+              </Button>
+            );
+            // `isAdmin` reads `false` while `useMe()` is still loading —
+            // fail-closed (disabled + tooltip) rather than briefly offering
+            // a button the API will 403.
+            if (isAlwaysAllow && !isAdmin) {
+              return (
+                <Tooltip key={a.id} content={ALWAYS_ALLOW_TOOLTIP}>
+                  <span>{button}</span>
+                </Tooltip>
+              );
+            }
+            return button;
+          })}
         </div>
       )}
     </div>
   );
+}
+
+/** One line naming the precedence rung that gated this call. Policy/override
+ * rungs link nowhere from here (the Action Log carries the row links); this
+ * is the live "why" the spec's decision 4 promised. */
+function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
+  // Cases mirror the engine's `PolicyProvenanceSource` values exactly.
+  switch (p.source) {
+    case "org_policy":
+      return "Gated by an org policy.";
+    case "override":
+      return "Gated by your personal policy override.";
+    case "runtime_grant":
+      return "Gated by a session grant.";
+    case "plugin_default":
+      return "Gated by the plugin's default approval mode.";
+    case "risk_default":
+      return "Gated by the action's risk level.";
+    case "resolver_error":
+      return "Policy check failed — approval requested as a safe fallback.";
+    default:
+      return `Gated by policy (${p.source}).`;
+  }
 }
 
 const ICON_FOR_TYPE = {

@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
@@ -21,7 +22,8 @@ import type {
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { sessionRepos, githubInstallations } from "../schema/index.js";
+import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations } from "../schema/index.js";
+import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
@@ -743,5 +745,87 @@ describe("buildActionInvoker: github service resolution", () => {
     // Refused before the action ran — an ignored selection would have let it
     // execute under the workflow owner's own credential.
     expect(fixture2.calls()).toBe(0);
+  });
+});
+
+describe("buildActionInvoker: workflow policy enforcement (action-policies T3)", () => {
+  const ORG = "org1";
+  const RUN = "run_wf1";
+  // A high-risk action: with no policy it defaults to require_approval.
+  function highRiskAction() {
+    return countingAction({
+      id: "demo.deploy",
+      execute: async () => ({ success: true, data: { deployed: true } }),
+    });
+  }
+  const highRiskPlugin = (a: PluginAction) => actionPluginByServiceOf("demo", {
+    service: "demo",
+    actions: [{ ...a, riskLevel: "critical" }],
+  });
+  const wfCtx: ActionInvocationContext = {
+    userId: "u1", orgId: ORG, owner: { type: "user", id: "u1" }, workflowExecutionId: RUN,
+  };
+
+  it("require_approval (high-risk, no grant) fails the node with instructive text; action never runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n1" }, wfCtx);
+    expect(res.ok).toBe(false);
+    expect((res as { error: string }).error).toContain("requires an approval node or a runtime grant");
+    expect(fixture.calls()).toBe(0);
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.workflowExecutionId, RUN));
+    expect(audit).toHaveLength(1);
+    expect(audit[0].status).toBe("denied");
+    expect(audit[0].resolvedMode).toBe("require_approval");
+  });
+
+  it("an org deny fails the node as blocked; action never runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    await db.insert(actionPolicies).values({
+      id: "pd", orgId: ORG, principalType: "org", principalId: ORG,
+      // Action-scope policies target the fully-qualified fqid — the ONE
+      // canonical id both invocation paths resolve to (spec T6 #3, fixed).
+      service: null, actionId: "demo.deploy", riskLevel: null, mode: "deny",
+      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke({ service: "demo", action: "deploy", params: {}, invocationId: "workflow:run_wf1:n2" }, wfCtx);
+    expect(res.ok).toBe(false);
+    expect((res as { error: string }).error).toContain("blocked by org policy");
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("an exec-scoped grant covers the action → it runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    await db.insert(runtimeGrants).values({
+      id: "gr", orgId: ORG, sessionId: null, workflowExecutionId: RUN,
+      policyKey: grantPolicyKey("demo", "deploy"), mode: "allow", grantedBy: "u1", createdAt: 1, revokedAt: null,
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n3" }, wfCtx);
+    // The returned data proves the action executed (the grant quieted the gate).
+    expect(res).toEqual({ ok: true, result: { deployed: true } });
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n3"));
+    // The decision row is stamped with the execution outcome + full
+    // PluginActionResult after execute (spec T6 #6, fixed).
+    expect(audit[0].status).toBe("completed");
+    expect(audit[0].result).toEqual({ success: true, data: { deployed: true } });
+    expect(audit[0].matchedGrantId).toBe("gr");
+  });
+
+  it("dedup: a replayed invocationId writes exactly one audit row and never re-runs enforcement", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const req = { service: "demo", action: "deploy", params: {}, invocationId: "workflow:run_wf1:n4" };
+    const first = await invoke(req, wfCtx);
+    const second = await invoke(req, wfCtx);
+    expect(second).toEqual(first); // stored result row is authoritative
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n4"));
+    expect(audit).toHaveLength(1);
   });
 });

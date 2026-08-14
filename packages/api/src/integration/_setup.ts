@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
+import { eq } from "drizzle-orm";
 import {
   VirtualSandboxProvider,
   type ChildReader,
@@ -21,7 +22,7 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
+import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalGrant, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
@@ -38,8 +39,9 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
@@ -289,6 +291,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     apiBaseUrl,
     plugins,
+    actionPluginByService,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -333,10 +336,37 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     // the whole path was untestable.
     githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
   });
+  // "Grant the rest of this run" (action-policies plan, Task 3/6): mirrors
+  // `providers/node.ts`'s real-boot `onApprovalGrant` wiring so integration
+  // tests can exercise an approval node's `grantActions` end to end — the
+  // real boot path wires this via `providers/node.ts`, which this harness
+  // otherwise duplicates rather than reuses (same rationale as every other
+  // hand-assembled dep below).
+  const onApprovalGrant: OnApprovalGrant = async (info) => {
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.params.workflowId) return;
+      const defRows = await db
+        .select({ orgId: workflowDefinitions.orgId })
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.params.workflowId))
+        .limit(1);
+      const orgId = defRows[0]?.orgId;
+      if (!orgId) return;
+      const now = Date.now();
+      for (const g of info.grants) {
+        await writeExecutionGrant(db, info.runId, { orgId, service: g.service, actionId: g.actionId, grantedBy: info.resolvedBy, now });
+      }
+    } catch (err) {
+      console.error(`test harness: workflow approval grant write failed for run ${info.runId}:`, err);
+    }
+  };
+
   const realWorkflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
+    onApprovalGrant,
   });
   const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
   // Only start the host loop when it's the real one under test control — a

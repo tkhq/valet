@@ -904,6 +904,13 @@ export class Session {
       sandbox: this.sandbox,
       config: this.options.toolConfig,
       owner: this.principal,
+      // The SAME policy port the turn context threads (plugin-catalog's
+      // invokeAction consults it) — a plugin action reached from a slash
+      // command gets identical policy resolution, gating, and audit to a
+      // call_tool invocation. Commands run outside the queue, so there is
+      // no queueItemId; gated command audits key on (resumeKey, ordinal)
+      // with an empty turn scope, matching their gate-ordinal scoping.
+      policyResolver: this.options.policyResolver,
       signal: new AbortController().signal,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
         if (requestDecision) return requestDecision(req);

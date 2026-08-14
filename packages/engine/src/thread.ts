@@ -2630,6 +2630,8 @@ export class Thread {
       sandbox: session.sandbox,
       config: session.options.toolConfig,
       owner: session.owner,
+      policyResolver: session.options.policyResolver,
+      queueItemId: this.runningItem?.id,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
@@ -2652,8 +2654,13 @@ export class Thread {
           suspendedDecision: this.suspendedDecisionForReplay,
         });
         if (sc.match) {
+          const replayOrdinal = this.suspendedDecisionForReplay?.ordinal;
           this.suspendedDecisionForReplay = undefined; // one-shot
-          return sc.resolution;
+          // The persisted resolution already carries gateOrdinal from the
+          // original (non-replay) requestDecision call below, but stamp it
+          // defensively so a replay is self-describing even if the stored
+          // record predates this field.
+          return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
         }
         // Ordinal resolution: reuse a still-pending gate for this
         // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
@@ -2759,7 +2766,7 @@ export class Thread {
         );
 
         try {
-          const resolution = await this.gates.register(gate, async (gateId) => {
+          const rawResolution = await this.gates.register(gate, async (gateId) => {
             await session.providers.store.updateDecisionGateEntry(
               session.id,
               this.id,
@@ -2771,6 +2778,12 @@ export class Thread {
               { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
             );
           });
+          // Stamp the gate's ordinal onto the resolution before it is
+          // persisted or handed back to the calling tool — the caller (e.g.
+          // call_tool's policy audit) needs this to distinguish a
+          // restart-replay double-fire (same ordinal) from a fresh
+          // legitimate repeat (new ordinal) for the same resumeKey.
+          const resolution: DecisionResolution = { ...rawResolution, gateOrdinal: gate.ordinal };
           // Mark gate resolved in store and update DAG entry
           const resolved: DecisionGate = { ...gate, status: "resolved", updatedAt: Date.now() };
           await session.providers.store.saveDecisionGate(session.id, this.id, resolved);
