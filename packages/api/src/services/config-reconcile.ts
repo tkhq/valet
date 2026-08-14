@@ -11,9 +11,9 @@
  * logic can upsert safely.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull, like } from "drizzle-orm";
+import { and, eq, isNull, like, notLike } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { invites, orgMembers, orgs, users } from "../schema/index.js";
+import { invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import {
   ensureOrg,
@@ -22,6 +22,14 @@ import {
   setOrgMemberRole,
   LAST_ADMIN_ERROR,
 } from "./org.js";
+import {
+  createLlmProvider,
+  updateLlmProvider,
+  listLlmProviders,
+  isKnownProviderKind,
+  type LlmProviderKind,
+} from "./llm-providers.js";
+import { parseRepoInput } from "./skill-sources.js";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -188,6 +196,265 @@ async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Teams pass
+// ---------------------------------------------------------------------------
+
+async function reconcileTeamsPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
+  if (!cfg.teams) return;
+
+  const org = await ensureOrg(db);
+
+  for (const teamDecl of cfg.teams) {
+    const teamId = configTeamId(teamDecl.name);
+
+    // Insert the team if it does not already exist (keyed by name within the org).
+    const existingTeam = await db
+      .select({ id: teams.id })
+      .from(teams)
+      .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
+      .limit(1);
+
+    if (!existingTeam[0]) {
+      // Insert with the deterministic id only if no team with this name exists.
+      await db
+        .insert(teams)
+        .values({ id: teamId, orgId: org.id, name: teamDecl.name, createdAt: Date.now() })
+        .onConflictDoNothing();
+    }
+
+    // Resolve the actual team id (may differ from configTeamId if a UI team was adopted).
+    const teamRows = await db
+      .select({ id: teams.id })
+      .from(teams)
+      .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
+      .limit(1);
+    const resolvedTeamId = teamRows[0]?.id;
+    if (!resolvedTeamId) continue;
+
+    // Members
+    for (const memberDecl of teamDecl.members ?? []) {
+      const email = memberDecl.email.toLowerCase();
+
+      // Resolve email → user.
+      const userRows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
+      const foundUser = userRows[0];
+      if (!foundUser) {
+        console.warn(`[config-reconcile] team "${teamDecl.name}": user "${email}" not found — skipping`);
+        continue;
+      }
+
+      // Check org membership.
+      const orgMemberRows = await db
+        .select({ role: orgMembers.role })
+        .from(orgMembers)
+        .where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.userId, foundUser.id)))
+        .limit(1);
+      if (!orgMemberRows[0]) {
+        console.warn(
+          `[config-reconcile] team "${teamDecl.name}": user "${email}" is not an org member — skipping`,
+        );
+        continue;
+      }
+
+      // Upsert team_members row.
+      const existingMember = await db
+        .select({ role: teamMembers.role })
+        .from(teamMembers)
+        .where(and(eq(teamMembers.teamId, resolvedTeamId), eq(teamMembers.userId, foundUser.id)))
+        .limit(1);
+
+      if (existingMember[0]) {
+        if (existingMember[0].role !== memberDecl.role) {
+          await db
+            .update(teamMembers)
+            .set({ role: memberDecl.role })
+            .where(and(eq(teamMembers.teamId, resolvedTeamId), eq(teamMembers.userId, foundUser.id)));
+        }
+      } else {
+        await db.insert(teamMembers).values({
+          teamId: resolvedTeamId,
+          userId: foundUser.id,
+          role: memberDecl.role,
+        });
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LLM providers pass
+// ---------------------------------------------------------------------------
+
+async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
+  if (!cfg.llmProviders) return;
+
+  const org = await ensureOrg(db);
+  const orgId = org.id;
+
+  for (const provDecl of cfg.llmProviders) {
+    const kind = provDecl.kind as LlmProviderKind;
+    const declaredName = provDecl.name ?? kind;
+    const declaredEnabled = provDecl.enabled ?? true;
+    const declaredModels = provDecl.models?.map((m) => ({ id: m.id, name: m.name ?? m.id }));
+
+    if (isKnownProviderKind(kind)) {
+      // Singleton by kind — find or create.
+      const existingRows = await listLlmProviders(db, orgId);
+      const existing = existingRows.find((r) => r.kind === kind);
+
+      if (existing) {
+        await updateLlmProvider(db, orgId, existing.id, {
+          name: provDecl.name ?? existing.name,
+          enabled: declaredEnabled,
+          ...(declaredModels !== undefined ? { models: declaredModels } : {}),
+          ...(provDecl.baseUrl !== undefined ? { baseUrl: provDecl.baseUrl } : {}),
+        });
+      } else {
+        await createLlmProvider(db, {
+          orgId,
+          kind,
+          name: declaredName,
+          baseUrl: provDecl.baseUrl,
+          models: declaredModels,
+        });
+      }
+    } else {
+      // openai_compatible — keyed by name. Direct insert with deterministic id.
+      // name is required (validator ensures it), so provDecl.name is always set here.
+      const name = provDecl.name!;
+      const provId = configProviderId(name);
+
+      const existingRows = await listLlmProviders(db, orgId);
+      const existing = existingRows.find((r) => r.kind === "openai_compatible" && r.name === name);
+
+      if (existing) {
+        await updateLlmProvider(db, orgId, existing.id, {
+          enabled: declaredEnabled,
+          ...(declaredModels !== undefined ? { models: declaredModels } : {}),
+          ...(provDecl.baseUrl !== undefined ? { baseUrl: provDecl.baseUrl } : {}),
+        });
+      } else {
+        // Direct insert to keep the deterministic id.
+        const now = Date.now();
+        await db.insert(llmProviders).values({
+          id: provId,
+          orgId,
+          kind: "openai_compatible",
+          name,
+          baseUrl: provDecl.baseUrl ?? null,
+          enabled: declaredEnabled,
+          models: declaredModels ?? [],
+          createdAt: now,
+        }).onConflictDoNothing();
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Skill sources pass
+// ---------------------------------------------------------------------------
+
+async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
+  if (!cfg.skillSources) return;
+
+  const org = await ensureOrg(db);
+  const orgId = org.id;
+  const now = Date.now();
+
+  // Build the desired set of managed source ids.
+  const desiredIds = new Set<string>();
+
+  for (const entry of cfg.skillSources) {
+    const parsed = parseRepoInput(entry.repo, { ref: entry.ref, subpath: entry.subpath });
+    const { repoFullName, ref, subpath } = parsed;
+    const desiredId = configSkillSourceId(repoFullName, ref, subpath);
+    desiredIds.add(desiredId);
+
+    // Check if the row already exists with the desired id.
+    const existingById = await db
+      .select({ id: skillSources.id })
+      .from(skillSources)
+      .where(eq(skillSources.id, desiredId))
+      .limit(1);
+
+    if (existingById[0]) {
+      // Already managed — done.
+      continue;
+    }
+
+    // Check for an UNMANAGED row tracking the same (orgId, ownerType, ownerId, repoFullName, subpath).
+    // The unique index is on (orgId, ownerType, ownerId, repoFullName, subpath).
+    const unmanagedRows = await db
+      .select({ id: skillSources.id })
+      .from(skillSources)
+      .where(
+        and(
+          eq(skillSources.orgId, orgId),
+          eq(skillSources.ownerType, "org"),
+          eq(skillSources.ownerId, orgId),
+          eq(skillSources.repoFullName, repoFullName),
+          eq(skillSources.subpath, subpath),
+          notLike(skillSources.id, "skillsrc_cfg_%"),
+        ),
+      )
+      .limit(1);
+
+    if (unmanagedRows[0]) {
+      console.warn(
+        `[config-reconcile] skillSources: unmanaged row already tracks ${repoFullName}/${subpath} — skipping`,
+      );
+      continue;
+    }
+
+    // Insert org-owned skill source with deterministic id.
+    await db.insert(skillSources).values({
+      id: desiredId,
+      orgId,
+      ownerType: "org",
+      ownerId: orgId,
+      repoFullName,
+      ref,
+      subpath,
+      enabled: true,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: now,
+      lastSha: null,
+      lastManifestHash: null,
+      lastSyncedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Delete managed rows no longer in the desired set (two-delete: skills then source).
+  const managedRows = await db
+    .select({ id: skillSources.id })
+    .from(skillSources)
+    .where(
+      and(
+        eq(skillSources.orgId, orgId),
+        like(skillSources.id, "skillsrc_cfg_%"),
+      ),
+    );
+
+  for (const row of managedRows) {
+    if (!desiredIds.has(row.id)) {
+      await db.transaction(async (tx) => {
+        await tx.delete(skills).where(and(eq(skills.sourceId, row.id), eq(skills.origin, "repo")));
+        await tx.delete(skillSources).where(eq(skillSources.id, row.id));
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public reconcile entry point
 // ---------------------------------------------------------------------------
 
@@ -204,7 +471,12 @@ export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: Instance
   // Pass 1: org + members + invites
   await reconcileOrgPass(db, cfg);
 
-  // Pass 2: teams — appended by task 5
-  // Pass 3: llmProviders — appended by task 5
-  // Pass 4: skillSources — appended by task 5
+  // Pass 2: teams
+  await reconcileTeamsPass(db, cfg);
+
+  // Pass 3: llmProviders
+  await reconcileLlmProvidersPass(db, cfg);
+
+  // Pass 4: skillSources
+  await reconcileSkillSourcesPass(db, cfg);
 }

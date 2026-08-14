@@ -4,10 +4,10 @@
  * Harness: shared PGlite AppDb + migrations, mirroring skill-sources.test.ts.
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import { isNull, eq, and } from "drizzle-orm";
+import { isNull, eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { invites, orgMembers, orgs, users } from "../schema/index.js";
+import { invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
 import { ensureOrg } from "./org.js";
 import {
   reconcileInstanceConfig,
@@ -325,5 +325,429 @@ describe("reconcileInstanceConfig — org pass", () => {
       .from(orgMembers)
       .where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.userId, "u1")));
     expect(rows).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Teams pass tests
+// ---------------------------------------------------------------------------
+
+describe("reconcileInstanceConfig — teams pass", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+  });
+
+  it("creates a team with the deterministic id when absent", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const expectedId = configTeamId("Engineering");
+    const rows = await db.select().from(teams).where(eq(teams.id, expectedId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.name).toBe("Engineering");
+  });
+
+  it("adopts an existing UI team without changing its id", async () => {
+    const org = await ensureOrg(db);
+    // Insert a UI team with a different id but the same name.
+    const uiTeamId = "team_ui_deadbeef";
+    await db.insert(teams).values({ id: uiTeamId, orgId: org.id, name: "Engineering", createdAt: Date.now() });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    // The UI team id must be unchanged.
+    const allRows = await db.select().from(teams).where(eq(teams.name, "Engineering"));
+    expect(allRows).toHaveLength(1);
+    expect(allRows[0]!.id).toBe(uiTeamId);
+  });
+
+  it("adds a declared member to an existing team", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u1", "alice@example.com");
+    await db.insert(orgMembers).values({ orgId: org.id, userId: "u1", role: "member", createdAt: Date.now() });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "member" }] }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const teamId = configTeamId("Engineering");
+    const memberRows = await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
+    expect(memberRows).toHaveLength(1);
+    expect(memberRows[0]!.userId).toBe("u1");
+  });
+
+  it("skips member whose email has no user (run succeeds)", async () => {
+    await ensureOrg(db);
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "ghost@example.com", role: "member" }] }],
+    };
+    // Must not throw.
+    await expect(reconcileInstanceConfig(deps(db), cfg)).resolves.toBeUndefined();
+
+    const teamId = configTeamId("Engineering");
+    const memberRows = await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
+    expect(memberRows).toHaveLength(0);
+  });
+
+  it("skips member who is not an org member", async () => {
+    await ensureOrg(db);
+    // User exists but has no org_members row.
+    await seedUser(db, "u1", "alice@example.com");
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "member" }] }],
+    };
+    await expect(reconcileInstanceConfig(deps(db), cfg)).resolves.toBeUndefined();
+
+    const teamId = configTeamId("Engineering");
+    const memberRows = await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
+    expect(memberRows).toHaveLength(0);
+  });
+
+  it("updates an existing team_members role", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u1", "alice@example.com");
+    await db.insert(orgMembers).values({ orgId: org.id, userId: "u1", role: "admin", createdAt: Date.now() });
+
+    // First run: add as member.
+    const cfg1: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "member" }] }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg1);
+
+    // Second run: promote to admin.
+    const cfg2: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "admin" }] }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg2);
+
+    const teamId = configTeamId("Engineering");
+    const memberRows = await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
+    expect(memberRows[0]!.role).toBe("admin");
+  });
+
+  it("second run is idempotent — no duplicate team or member rows", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u1", "alice@example.com");
+    await db.insert(orgMembers).values({ orgId: org.id, userId: "u1", role: "member", createdAt: Date.now() });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "member" }] }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const teamRows = await db.select().from(teams).where(eq(teams.name, "Engineering"));
+    expect(teamRows).toHaveLength(1);
+
+    const teamId = configTeamId("Engineering");
+    const memberRows = await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
+    expect(memberRows).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLM providers pass tests
+// ---------------------------------------------------------------------------
+
+describe("reconcileInstanceConfig — llmProviders pass", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+  });
+
+  it("creates a known-kind provider row on first run", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "anthropic" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.kind, "anthropic"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.enabled).toBe(true);
+    expect(rows[0]!.name).toBe("anthropic");
+  });
+
+  it("updates an existing known-kind provider on second run with changed fields", async () => {
+    const cfg1: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "openai", name: "OpenAI", enabled: true }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg1);
+
+    const cfg2: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "openai", name: "OpenAI Disabled", enabled: false }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg2);
+
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.kind, "openai"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.enabled).toBe(false);
+    expect(rows[0]!.name).toBe("OpenAI Disabled");
+  });
+
+  it("known-kind provider second run is a no-op (same row)", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "google" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.kind, "google"));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("creates openai_compatible provider with deterministic id keyed by name", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [
+        {
+          kind: "openai_compatible",
+          name: "my-llm",
+          baseUrl: "https://api.example.com/v1",
+          models: [{ id: "model-1", name: "Model One" }],
+        },
+      ],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const expectedId = configProviderId("my-llm");
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.id, expectedId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.name).toBe("my-llm");
+    expect(rows[0]!.baseUrl).toBe("https://api.example.com/v1");
+  });
+
+  it("second run on openai_compatible provider with same name is a no-op", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "openai_compatible", name: "my-llm", baseUrl: "https://api.example.com/v1" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const expectedId = configProviderId("my-llm");
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.id, expectedId));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("never deletes a provider row even when removed from config", async () => {
+    const cfg1: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "anthropic" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg1);
+
+    const cfg2: InstanceConfig = { version: 1 };
+    await reconcileInstanceConfig(deps(db), cfg2);
+
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.kind, "anthropic"));
+    expect(rows).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Skill sources pass tests
+// ---------------------------------------------------------------------------
+
+describe("reconcileInstanceConfig — skillSources pass", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+  });
+
+  it("inserts a declared source with org ownership and pending status", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo", ref: "main", subpath: "skills" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const expectedId = configSkillSourceId("owner/repo", "main", "skills");
+    const rows = await db.select().from(skillSources).where(eq(skillSources.id, expectedId));
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.ownerType).toBe("org");
+    expect(row.status).toBe("pending");
+    expect(row.enabled).toBe(true);
+  });
+
+  it("second run on same source is a no-op", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const rows = await db.select().from(skillSources);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("skips and warns when an unmanaged row already tracks the same repo+subpath", async () => {
+    const org = await ensureOrg(db);
+    // Insert an unmanaged (non-cfg_) row for the same repo.
+    await db.insert(skillSources).values({
+      id: "skillsrc_unmanaged_abc",
+      orgId: org.id,
+      ownerType: "org",
+      ownerId: org.id,
+      repoFullName: "owner/repo",
+      ref: "",
+      subpath: "",
+      enabled: true,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      lastSha: null,
+      lastManifestHash: null,
+      lastSyncedAt: null,
+      lastError: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await expect(reconcileInstanceConfig(deps(db), cfg)).resolves.toBeUndefined();
+
+    // Should not have inserted a managed row.
+    const managedRows = await db
+      .select()
+      .from(skillSources)
+      .where(like(skillSources.id, "skillsrc_cfg_%"));
+    expect(managedRows).toHaveLength(0);
+  });
+
+  it("removes a managed source and its repo-origin skills when removed from config", async () => {
+    const org = await ensureOrg(db);
+    const srcId = configSkillSourceId("owner/repo", "", "");
+
+    // Insert the managed source directly.
+    await db.insert(skillSources).values({
+      id: srcId,
+      orgId: org.id,
+      ownerType: "org",
+      ownerId: org.id,
+      repoFullName: "owner/repo",
+      ref: "",
+      subpath: "",
+      enabled: true,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      lastSha: null,
+      lastManifestHash: null,
+      lastSyncedAt: null,
+      lastError: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Insert a mirrored repo skill.
+    await db.insert(skills).values({
+      id: "skill_test_1",
+      orgId: org.id,
+      ownerType: "org",
+      ownerId: org.id,
+      origin: "repo",
+      sourceId: srcId,
+      name: "test-skill",
+      description: "A test skill",
+      content: "content",
+      frontmatter: {},
+      contentSha: "abc123",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Config now declares no skill sources.
+    const cfg: InstanceConfig = { version: 1, skillSources: [] };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    // Source and its skills should be gone.
+    const srcRows = await db.select().from(skillSources).where(eq(skillSources.id, srcId));
+    expect(srcRows).toHaveLength(0);
+
+    const skillRows = await db.select().from(skills).where(eq(skills.sourceId, srcId));
+    expect(skillRows).toHaveLength(0);
+  });
+
+  it("does not remove an unmanaged source even when skillSources is empty", async () => {
+    const org = await ensureOrg(db);
+    // Insert an unmanaged source.
+    await db.insert(skillSources).values({
+      id: "skillsrc_ui_abc123",
+      orgId: org.id,
+      ownerType: "org",
+      ownerId: org.id,
+      repoFullName: "owner/repo2",
+      ref: "",
+      subpath: "",
+      enabled: true,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      lastSha: null,
+      lastManifestHash: null,
+      lastSyncedAt: null,
+      lastError: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const cfg: InstanceConfig = { version: 1, skillSources: [] };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const rows = await db.select().from(skillSources).where(eq(skillSources.id, "skillsrc_ui_abc123"));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("full second run with all three passes is a no-op", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u1", "alice@example.com");
+    await db.insert(orgMembers).values({ orgId: org.id, userId: "u1", role: "member", createdAt: Date.now() });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "member" }] }],
+      llmProviders: [{ kind: "anthropic" }],
+      skillSources: [{ repo: "owner/repo", ref: "main", subpath: "" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const teamRows = await db.select().from(teams);
+    expect(teamRows).toHaveLength(1);
+
+    const providerRows = await db.select().from(llmProviders);
+    expect(providerRows).toHaveLength(1);
+
+    const sourceRows = await db.select().from(skillSources);
+    expect(sourceRows).toHaveLength(1);
   });
 });
