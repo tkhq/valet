@@ -77,10 +77,10 @@ describe("SkillEditor — org scope preselect", () => {
     // First render: org query still in flight → admin unknown → initializer
     // falls back to "You". The reset effect must pick Org once the flag lands.
     orgData = undefined;
-    const { rerender } = render(<SkillEditor defaultScope="org" onSaved={() => {}} />);
+    const { rerender } = render(<SkillEditor defaultScope="org" onSaved={() => {}} onCancel={() => {}} />);
 
     orgData = { callerRole: "admin" };
-    rerender(<SkillEditor defaultScope="org" onSaved={() => {}} />);
+    rerender(<SkillEditor defaultScope="org" onSaved={() => {}} onCancel={() => {}} />);
 
     const select = screen.getByLabelText("Owner") as HTMLSelectElement;
     expect(select.value).toBe("org");
