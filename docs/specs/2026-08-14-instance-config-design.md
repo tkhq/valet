@@ -59,13 +59,22 @@ config/
 ```
 
 ```yaml
-# config/valet.dev.yaml
+# config/valet.prod.yaml (illustrative)
 version: 1
+
+auth:
+  allowedEmailDomains: [turnkey.io]   # replaces AUTH_ALLOWED_EMAIL_DOMAINS
+
+plugins:
+  allow: [plugin-github, plugin-linear]   # replaces VALET_PLUGINS; or `deny:`
 
 org:
   name: Turnkey
   features:
     organizations: true
+  modelPreferences:
+    - anthropic/claude-opus-4
+  bareSkillCommands: true
   members:
     - email: test@valet.test
       role: admin
@@ -78,14 +87,19 @@ skillSources:
 
 Top-level keys in v1:
 
-| Key            | Type   | Reconciles into                          |
-| -------------- | ------ | ---------------------------------------- |
-| `version`      | number | must be `1`; anything else fails boot    |
-| `org`          | object | `orgs`, `org_members`, `invites`         |
-| `skillSources` | list   | `skill_sources` (org-owned)              |
+| Key            | Type   | Consumed by                                        |
+| -------------- | ------ | -------------------------------------------------- |
+| `version`      | number | must be `1`; anything else fails boot              |
+| `auth`         | object | boot config assembly (`loadAuthConfig` merge)      |
+| `plugins`      | object | boot config assembly (plugin filter)               |
+| `org`          | object | DB reconciler → `orgs`, `org_members`, `invites`   |
+| `skillSources` | list   | DB reconciler → `skill_sources` (org-owned)        |
 
-Every key except `version` is optional. An absent key means "this file does
-not manage that section" — the reconciler does not touch those tables.
+Every key except `version` is optional, and so is every subfield —
+`org: { features: { organizations: true } }` alone is a valid file. An
+absent key means "this file does not manage that value" — the reconciler
+does not touch those tables and boot-config assembly falls back to the env
+var or default.
 Unknown top-level keys fail validation (typo protection), matching the
 warn-and-drop precedent in `cli/config.ts` but stricter, because a silently
 dropped section here means silently missing state.
@@ -109,6 +123,30 @@ environment files need comments.
 Validation is a hand-rolled narrow validator in
 `packages/api/src/config/instance-config.ts`, following the
 `cli/config.ts` pattern. No new schema library; the shape is small.
+
+The file has two consumers, so `main.ts` loads and validates it **before**
+`loadAuthConfig`:
+
+1. **Boot config assembly** reads `auth` and `plugins` — these shape the
+   process (admission rule, plugin registry filter) and cannot wait for a
+   DB pass.
+2. **The DB reconciler** reads `org` and `skillSources` after
+   `buildNodeProviders`.
+
+### Migrated env vars
+
+`auth.allowedEmailDomains` replaces `AUTH_ALLOWED_EMAIL_DOMAINS`;
+`plugins.allow`/`plugins.deny` replace `VALET_PLUGINS`. The env vars keep
+working for deployments without a config file. Setting the same value in
+both places **fails boot**:
+`AUTH_ALLOWED_EMAIL_DOMAINS is set and <path> declares auth.allowedEmailDomains. Remove one.`
+Two live sources of truth for admission policy is silent-drift territory;
+better to make the operator pick.
+
+Values that stay in env vars: everything with a secret sibling (OIDC
+issuer/client/secret, `BETTER_AUTH_SECRET`) and everything genuinely
+per-deployment (`AUTH_TRUSTED_ORIGINS`, ports, database URLs,
+`VALET_SANDBOX_IMAGE`, backend selection).
 
 ## Reconciliation
 
@@ -139,11 +177,11 @@ pre-1.0 schema edits to zero for this feature.
 The instance is single-org today (`ensureOrg` in `services/org.ts`). The
 reconciler calls `ensureOrg`, then:
 
-- **`name`, `features`** — overwritten from the file on every boot. The
-  file is the source of truth for the fields it declares; a UI edit to a
-  declared field lasts until the next boot. Feature keys merge through
-  `setOrgFeatures` (partial update), so flags the file does not name keep
-  their DB value.
+- **`name`, `features`, `modelPreferences`, `bareSkillCommands`** —
+  overwritten from the file on every boot. The file is the source of truth
+  for the fields it declares; a UI edit to a declared field lasts until the
+  next boot. Feature keys merge through `setOrgFeatures` (partial update),
+  so flags the file does not name keep their DB value.
 - **`members`** — desired memberships, keyed by email:
   - Email matches an existing user → upsert the `org_members` row to the
     declared role. A demotion that would leave the org with zero admins
@@ -161,6 +199,13 @@ reconciler calls `ensureOrg`, then:
 Under `VALET_LOCAL_AUTH=1` the stub identity is seeded independently
 (`seedLocalIdentity`) and is unaffected; the win in dev is `features` and
 `skillSources` surviving the wipe.
+
+**With an SSO IdP (Keycloak):** `members` is expected to be small or
+absent. `auth.allowedEmailDomains` admits everyone the IdP authenticates
+on the org's domain, always as `member`; the `members` list is then only
+the declarative admin grants. An "admit any SSO-authenticated user"
+option (no domain list) does not exist today and is out of scope here —
+it would be a new auth-config option, not a file concern.
 
 ### `skillSources` section
 
@@ -205,6 +250,7 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
 | `VALET_CONFIG` set, file missing          | Boot fails; message names the path and fix      |
 | YAML parse error / unknown key / bad type | Boot fails; message names the field and fix     |
 | Reconcile DB write fails                  | Boot fails; the config is desired state         |
+| Env var and file both declare a migrated value | Boot fails; message says which one to remove |
 | Demotion would remove the last admin      | Boot fails with the last-admin message          |
 | Declared source duplicates an unmanaged row | Skipped and logged; boot continues            |
 
@@ -215,9 +261,9 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
   that break.
 - **Secrets or env interpolation.** No `${VAR}` substitution. Credentials
   stay in env vars and the credential store.
-- **Moving existing env vars into the file.** `AUTH_ALLOWED_EMAIL_DOMAINS`,
-  `VALET_PLUGINS`, and friends are candidates for later versions, but v1
-  does not relocate anything that already works.
+- **Moving further env vars into the file.** v1 migrates exactly two
+  (`AUTH_ALLOWED_EMAIL_DOMAINS`, `VALET_PLUGINS` — see Migrated env vars).
+  Everything else stays where it is until a concrete need appears.
 - **Image sources / bakes.** The reconcile design
   (2026-08-02) already auto-creates repo sources on bind; declaring extra
   image sources here can come later if a need appears.
