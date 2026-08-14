@@ -1,8 +1,9 @@
 /**
- * Systematic guard against ambient provider env vars (e.g. a real
- * `OPENAI_API_KEY` in the dev shell) leaking into catalog synthesis during
- * tests. Deletes the known provider-key env vars before every test in this
- * project so a test only sees a key when it explicitly `vi.stubEnv`s it —
+ * Systematic guard against ambient env vars (e.g. a real `OPENAI_API_KEY`
+ * or `VALET_PUBLIC_URL` in the dev shell) leaking into catalog synthesis or
+ * webhook URL minting during tests. Deletes the known provider-key and
+ * public-origin env vars before every test in this
+ * project so a test only sees a value when it explicitly `vi.stubEnv`s it —
  * replacing the previous fragile per-test `vi.stubEnv("...", "")` pattern
  * (see `services/model-catalog.ts`'s zero-config env fallback).
  *
@@ -21,6 +22,11 @@ const SCRUBBED_ENV_VARS = [
   "OPENAI_API_KEY",
   "GEMINI_API_KEY",
   "OPENROUTER_API_KEY",
+  // Public-origin vars (see `channels/host.ts`'s `publicUrlFromEnv`): an
+  // ambient value turns path-only webhook URLs absolute in
+  // `workflows/actions.test.ts`.
+  "VALET_PUBLIC_URL",
+  "BETTER_AUTH_URL",
 ] as const;
 
 beforeEach(() => {
