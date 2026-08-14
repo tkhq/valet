@@ -202,6 +202,17 @@ export async function runSend(deps: SendDeps, flags: ParsedFlags): Promise<numbe
   const threadOverride = typeof flags.flags.thread === "string" ? flags.flags.thread : undefined;
 
   const sent = await deps.client.sendPrompt(sessionId, { text, threadId: threadOverride });
+  // A null messageId means the text ran as a slash command: it executed
+  // immediately, took no queue item, and its result arrives as a
+  // command_result entry — there is no turn to follow.
+  if (sent.messageId === null) {
+    if (flags.json) {
+      emitNdjson({ type: "command_accepted", sessionId, threadId: sent.threadId });
+    } else {
+      printLine(`command executed on thread ${sent.threadId}`);
+    }
+    return ExitCode.OK;
+  }
   return consumeSend(deps, {
     sessionId,
     messageId: sent.messageId,

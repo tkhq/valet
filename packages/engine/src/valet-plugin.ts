@@ -14,6 +14,7 @@
  */
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
+import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
 
 /** How the connect UI obtains an oauth2 credential (integration-OAuth design). */
 export type OAuthDeclaration =
@@ -222,6 +223,8 @@ export interface ValetPlugin {
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
   transports?: ChannelTransportFactory[];
+  /** Action-backed slash commands this plugin exposes. */
+  commands?: CommandDef[];
 }
 
 export interface PluginValidationIssue {
@@ -394,6 +397,36 @@ export function validateValetPlugin(
     }
     if (typeof t.create !== "function") {
       issues.push({ path: `${path}.create`, message: "must be a function" });
+    }
+  });
+
+  checkArray(v.commands, "commands", issues, (cmd, path) => {
+    const c = asRecord(cmd, path, issues);
+    if (!c) return;
+    if (typeof c.name !== "string" || !NAME_RE.test(c.name)) {
+      issues.push({ path: `${path}.name`, message: `must match ${NAME_RE.source}` });
+    } else if ((BUILTIN_COMMAND_NAMES as readonly string[]).includes(c.name)) {
+      issues.push({ path: `${path}.name`, message: `"${c.name}" is a reserved built-in command name` });
+    }
+    if (typeof c.description !== "string" || c.description.length === 0) {
+      issues.push({ path: `${path}.description`, message: "must be a non-empty string" });
+    }
+    if (typeof c.mapArgs !== "function") {
+      issues.push({ path: `${path}.mapArgs`, message: "must be a function" });
+    }
+    // Collect all action ids declared in this plugin's actions array.
+    const actionIds = new Set<string>(
+      (Array.isArray(v.actions) ? v.actions : []).flatMap((ap) => {
+        const apRecord = asRecord(ap, "", []);
+        if (!apRecord || !Array.isArray(apRecord.actions)) return [];
+        return apRecord.actions.map((a) => {
+          const aRecord = asRecord(a, "", []);
+          return typeof aRecord?.id === "string" ? aRecord.id : undefined;
+        }).filter((id): id is string => id !== undefined);
+      }),
+    );
+    if (typeof c.action !== "string" || !actionIds.has(c.action)) {
+      issues.push({ path: `${path}.action`, message: "must name an action declared by this plugin" });
     }
   });
 

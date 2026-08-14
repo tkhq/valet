@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { PluginActionContext } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { eq } from "drizzle-orm";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { createTeam } from "./teams.js";
 import { createSkill, listSkills, ownedSkillRow } from "./skills.js";
@@ -263,5 +264,47 @@ describe("skillsActionPlugin", () => {
     expect(skills.map((s) => s.name)).toEqual(["mine", "ours"]);
     // The listing is a catalog, not a read: bodies stay out of the turn.
     expect(skills.every((s) => !("content" in s))).toBe(true);
+  });
+
+  it("create_skill accepts invocation and argHint and list echoes them", async () => {
+    const created = await actionById("skills.create_skill").execute(
+      {
+        name: "standup",
+        description: "Summarize the standup.",
+        content: "Summarize $1",
+        invocation: "prompt",
+        arg_hint: "<topic>",
+      },
+      ctx(),
+    );
+    expect(created.success).toBe(true);
+
+    const listed = await actionById("skills.list_skills").execute({}, ctx());
+    expect(listed.success).toBe(true);
+    const { skills } = listed.data as {
+      skills: Array<{ name: string; invocation?: string; argHint?: string }>;
+    };
+    const row = skills.find((s) => s.name === "standup");
+    expect(row).toMatchObject({ invocation: "prompt", argHint: "<topic>" });
+  });
+
+  it("refuses an org create for a non-admin and names the fix", async () => {
+    const result = await actionById("skills.create_skill").execute(
+      { name: "orgwide", description: "Org policy.", content: BODY, owner_type: "org" },
+      ctx(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("org admin");
+    expect(await listSkills(db, { userId: "u1", orgId: ORG })).toEqual([]);
+  });
+
+  it("creates an org skill when the caller is an org admin", async () => {
+    await db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.userId, "u1"));
+    const result = await actionById("skills.create_skill").execute(
+      { name: "orgwide", description: "Org policy.", content: BODY, owner_type: "org" },
+      ctx(),
+    );
+    expect(result.success).toBe(true);
+    expect((result.data as { ownerType: string }).ownerType).toBe("org");
   });
 });

@@ -155,6 +155,27 @@ export function prepareActionArgs(
 // ── Public API ────────────────────────────────────────────────────
 
 /**
+ * Opaque catalog handle shared by the call_tool tool path and the
+ * slash-command path. Build it once with {@link buildPluginCatalog}, then
+ * pass it to {@link pluginCatalogTools} (LLM tool path) and/or hold it for
+ * {@link invokeAction} (slash-command path). Its internals — the id index and
+ * the dynamic-resolution TTL cache — stay private to this module.
+ */
+export type PluginCatalog = Catalog;
+
+/**
+ * Assemble an in-memory catalog from every ActionPlugin in `plugins`.
+ * Both the LLM `call_tool` path and the slash-command path route through
+ * the SAME catalog so approval policy and arg validation stay identical.
+ */
+export function buildPluginCatalog(
+  plugins: ActionPlugin[],
+  clock?: () => number,
+): PluginCatalog {
+  return buildCatalog(plugins, clock ?? Date.now);
+}
+
+/**
  * Build the [list_tools, call_tool] pair backed by an in-memory catalog
  * assembled from every ActionPlugin in `opts.plugins`.
  */
@@ -162,6 +183,116 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
   const catalog = buildCatalog(opts.plugins, now);
   return [makeListTool(catalog), makeCallTool(catalog)];
+}
+
+/**
+ * Outcome of {@link invokeAction}. The tool path and the slash-command path
+ * both consume this and render it into their own transport shape
+ * (`ToolResult` text vs. a `command_result` markdown output).
+ */
+export type InvokeActionResult =
+  | { kind: "ok"; result: PluginActionResult }
+  | { kind: "unknown"; toolId: string }
+  | { kind: "invalid-args"; error: string }
+  | { kind: "denied-policy" }
+  | { kind: "denied-approval" }
+  | { kind: "pending-approval" }
+  | { kind: "missing-credential"; service: string }
+  | { kind: "error"; message: string }
+  | { kind: "resolve-failed"; service: string; message: string };
+
+/**
+ * The executable core shared by `call_tool` and the slash-command path:
+ * look up the action, apply approval policy (deny / require_approval via
+ * `ctx.requestDecision`), validate + default the args, then run the
+ * action's `execute`. Never duplicated — the call_tool tool wraps this and
+ * renders `InvokeActionResult` into a `ToolResult`, and the command path
+ * renders it into a `command_result` entry.
+ *
+ * `args` are the caller-supplied parameters (already mapped from CLI args on
+ * the command path, or the LLM-supplied `params` on the tool path).
+ * `summary` is the approval-gate body line.
+ */
+export async function invokeAction(
+  catalog: PluginCatalog,
+  actionId: string,
+  args: Record<string, unknown> | undefined,
+  ctx: ToolContext,
+  summary: string,
+): Promise<InvokeActionResult> {
+  let entry = catalog.byId.get(actionId);
+  if (!entry) {
+    const dotIdx = actionId.indexOf(".");
+    if (dotIdx > 0) {
+      const prefix = actionId.slice(0, dotIdx);
+      const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
+      if (plugin) {
+        try {
+          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          entry = resolvedDyn.byId.get(actionId);
+        } catch (err) {
+          return {
+            kind: "resolve-failed",
+            service: prefix,
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    }
+  }
+  if (!entry) return { kind: "unknown", toolId: actionId };
+
+  const approvalMode = approvalModeFor(entry);
+  if (approvalMode === "deny") return { kind: "denied-policy" };
+  if (approvalMode === "require_approval") {
+    const resolution = await ctx.requestDecision({
+      type: "approval",
+      title: `Approve ${entry.action.name}?`,
+      body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+      resumeKey: `${qualifiedId(entry)}:${stableJson(args ?? {})}`,
+      context: {
+        riskLevel: entry.action.riskLevel,
+        service: entry.service,
+        tool_id: actionId,
+        args,
+      },
+    });
+    // No resolution / an explicit "pending" action means the gate has not
+    // yet been decided — distinct from an outright deny.
+    if (resolution.actionId === "pending") return { kind: "pending-approval" };
+    if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+  }
+
+  const prepared = prepareActionArgs(entry.action.parameters, args);
+  if (!prepared.ok) return { kind: "invalid-args", error: prepared.error };
+
+  const credentialService = entry.plugin.credentialService ?? entry.service;
+  const actionCtx: PluginActionContext = {
+    ...ctx,
+    actionId: entry.action.id,
+    service: entry.service,
+    summary,
+    credentials: scopedCredentialProvider(ctx, credentialService),
+  };
+
+  try {
+    const result = await entry.action.execute(
+      prepared.args as Static<typeof entry.action.parameters>,
+      actionCtx,
+    );
+    return { kind: "ok", result };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // A plugin action that needs a credential calls `credentials.request`,
+    // which throws "credential <service> not connected: <reason>" (store
+    // present, no cred) or "credential <service> not available (no store)"
+    // (no store at all). Both mean the same thing to the user — surface a
+    // missing-credential outcome so callers can name the corrective action.
+    if (/credential .* not (connected|available)/.test(message)) {
+      return { kind: "missing-credential", service: credentialService };
+    }
+    return { kind: "error", message };
+  }
 }
 
 // ── Catalog ───────────────────────────────────────────────────────
@@ -415,85 +546,33 @@ function makeCallTool(catalog: Catalog): ToolDef {
         params?: Record<string, unknown>;
         summary: string;
       };
-      let entry = catalog.byId.get(a.tool_id);
-      if (!entry) {
-        const dotIdx = a.tool_id.indexOf(".");
-        if (dotIdx > 0) {
-          const prefix = a.tool_id.slice(0, dotIdx);
-          const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
-          if (plugin) {
-            try {
-              const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-              entry = resolvedDyn.byId.get(a.tool_id);
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              return { text: `error resolving ${prefix} tools: ${message}` };
-            }
-          }
-        }
-      }
-      if (!entry) {
-        return {
-          text: `unknown tool_id: "${a.tool_id}". Use list_tools to find available actions.`,
-        };
-      }
-
-      const approvalMode = approvalModeFor(entry);
-      if (approvalMode === "deny") {
-        return { text: `denied: ${a.tool_id} is blocked by org policy` };
-      }
-      if (approvalMode === "require_approval") {
-        const resolution = await ctx.requestDecision({
-          type: "approval",
-          title: `Approve ${entry.action.name}?`,
-          body: `${a.summary}\n\ntool_id=${a.tool_id}\nargs=${stableJson(a.params ?? {})}`,
-          resumeKey: `${qualifiedId(entry)}:${stableJson(a.params ?? {})}`,
-          context: {
-            riskLevel: entry.action.riskLevel,
-            service: entry.service,
-            tool_id: a.tool_id,
-            args: a.params,
-          },
-        });
-        if (resolution.actionId !== "approve") {
+      const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
+      switch (outcome.kind) {
+        case "ok":
+          return actionResultToToolResult(outcome.result, a.tool_id);
+        case "unknown":
+          return {
+            text: `unknown tool_id: "${a.tool_id}". Use list_tools to find available actions.`,
+          };
+        case "resolve-failed":
+          return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
+        case "denied-policy":
+          return { text: `denied: ${a.tool_id} is blocked by org policy` };
+        // The LLM tool path has no distinct "pending" state — requestDecision
+        // blocks until the gate resolves — so both approval outcomes collapse
+        // to the same "did not approve" text.
+        case "denied-approval":
+        case "pending-approval":
           return { text: `denied: user did not approve ${a.tool_id}` };
-        }
+        case "invalid-args":
+          return { text: `invalid params for ${a.tool_id}: ${outcome.error}` };
+        case "missing-credential":
+          return {
+            text: `${a.tool_id} failed: credential ${outcome.service} not connected`,
+          };
+        case "error":
+          return { text: `error: ${outcome.message}` };
       }
-
-      // Validate (and apply schema defaults to) LLM-supplied params before
-      // they reach the plugin action's execute body — closes the gap where
-      // unvalidated params flowed straight into plugin code.
-      const prepared = prepareActionArgs(entry.action.parameters, a.params);
-      if (!prepared.ok) {
-        return { text: `invalid params for ${a.tool_id}: ${prepared.error}` };
-      }
-
-      // Build the plugin action context. credentialService routing is
-      // per-plugin; the action sees the same ToolContext shape plus
-      // actionId/service/summary, with credentials defaulting to the
-      // plugin's credentialService.
-      const credentialService = entry.plugin.credentialService ?? entry.service;
-      const actionCtx: PluginActionContext = {
-        ...ctx,
-        actionId: entry.action.id,
-        service: entry.service,
-        summary: a.summary,
-        credentials: scopedCredentialProvider(ctx, credentialService),
-      };
-
-      let result: PluginActionResult;
-      try {
-        result = await entry.action.execute(
-          prepared.args as Static<typeof entry.action.parameters>,
-          actionCtx,
-        );
-      } catch (err) {
-        return {
-          text: `error: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-
-      return actionResultToToolResult(result, a.tool_id);
     },
   };
 }

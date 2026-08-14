@@ -35,16 +35,19 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { partitionByName } from "../plugins/assemble.js";
 import {
+  asRecord,
   createSkill,
   deleteSkill,
   listSkills,
   ownedSkillRow,
   SkillNameConflictError,
   SkillNotLocalError,
+  SkillReservedNameError,
   SkillValidationError,
   updateSkill,
   type SkillOwner,
 } from "../services/skills.js";
+import { isOrgAdmin } from "../services/org.js";
 import {
   countSkillsPerSource,
   createSkillSource,
@@ -97,6 +100,9 @@ function toPluginSummary({ plugin, skill }: OwnedSkill): PluginSkillSummary {
 }
 
 function toStoredSummary(row: SkillRow, shadowed: boolean): StoredSkillSummary {
+  const fm = asRecord(row.frontmatter);
+  const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
+  const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
   return {
     name: row.name,
     description: row.description,
@@ -107,8 +113,11 @@ function toStoredSummary(row: SkillRow, shadowed: boolean): StoredSkillSummary {
     shadowed,
     takesArgs: false,
     updatedAt: row.updatedAt,
+    ...(invocation !== undefined ? { invocation } : {}),
+    ...(argHint !== undefined ? { argHint } : {}),
   };
 }
+
 
 function owner(c: { var: { user: { id: string; orgId: string } } }): SkillOwner {
   return { userId: c.var.user.id, orgId: c.var.user.orgId };
@@ -116,6 +125,7 @@ function owner(c: { var: { user: { id: string; orgId: string } } }): SkillOwner 
 
 /** Maps a service error onto its HTTP status. Anything else rethrows. */
 function errorResponse(err: unknown): { body: Record<string, unknown>; status: 400 | 404 | 409 } {
+  if (err instanceof SkillReservedNameError) return { body: { error: err.message }, status: 400 };
   if (err instanceof SkillValidationError) {
     return { body: { error: err.message, errors: err.errors }, status: 400 };
   }
@@ -164,12 +174,31 @@ skillsRouter.post("/", async (c) => {
     return c.json({ error: "content is required" }, 400);
   }
 
+  // Validate invocation when present.
+  if (body.invocation !== undefined && body.invocation !== "context" && body.invocation !== "prompt") {
+    return c.json(
+      { error: `invocation must be "context" or "prompt". Got "${body.invocation}".` },
+      400,
+    );
+  }
+
+  // Org-owned skill: require org admin.
+  if (body.ownerType === "org") {
+    const adminCheck = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+    if (!adminCheck) {
+      return c.json({ error: "org admin required" }, 403);
+    }
+  }
+
   try {
     const row = await createSkill(c.var.providers.db, owner(c), {
       name: body.name,
       description: typeof body.description === "string" ? body.description : "",
       content: body.content,
       teamId: body.teamId,
+      ownerType: body.ownerType,
+      invocation: body.invocation,
+      argHint: typeof body.argHint === "string" ? body.argHint : undefined,
     });
     // A brand-new skill is shadowed exactly when a plugin already ships its
     // name — the author needs to see that immediately, not at the next
@@ -205,11 +234,24 @@ skillsRouter.patch("/stored/:id", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
+  // Validate invocation when present.
+  if (body.invocation !== undefined && body.invocation !== "context" && body.invocation !== "prompt") {
+    return c.json(
+      { error: `invocation must be "context" or "prompt". Got "${body.invocation}".` },
+      400,
+    );
+  }
+
+  const orgAdmin = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+
   try {
     const row = await updateSkill(c.var.providers.db, owner(c), c.req.param("id"), {
       name: body.name,
       description: body.description,
       content: body.content,
+      invocation: body.invocation,
+      argHint: typeof body.argHint === "string" ? body.argHint : undefined,
+      isOrgAdmin: orgAdmin,
     });
     if (!row) return c.json({ error: "skill not found" }, 404);
     const resp: SkillResponse = {
@@ -224,7 +266,8 @@ skillsRouter.patch("/stored/:id", async (c) => {
 });
 
 skillsRouter.delete("/stored/:id", async (c) => {
-  const result = await deleteSkill(c.var.providers.db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+  const result = await deleteSkill(c.var.providers.db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (result === "not_found") return c.json({ error: "skill not found" }, 404);
   if (result === "not_local") {
     return c.json(
@@ -272,6 +315,18 @@ skillsRouter.post("/sources", async (c) => {
   }
 
   const { db, skillSync } = c.var.providers;
+
+  // Org-owned source: require org admin.
+  if (body.ownerType === "org") {
+    const adminCheck = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+    if (!adminCheck) {
+      return c.json(
+        { error: "Only an org admin can add an org source. Ask an admin, or add it as a personal source." },
+        403,
+      );
+    }
+  }
+
   let sourceId: string;
   try {
     const row = await createSkillSource(db, owner(c), {
@@ -279,6 +334,7 @@ skillsRouter.post("/sources", async (c) => {
       ref: body.ref,
       subpath: body.subpath,
       teamId: body.teamId,
+      ownerType: body.ownerType,
     });
     sourceId = row.id;
   } catch (err) {
@@ -294,7 +350,8 @@ skillsRouter.post("/sources", async (c) => {
 
 skillsRouter.post("/sources/:id/sync", async (c) => {
   const { db, skillSync } = c.var.providers;
-  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!row) return c.json({ error: "skill source not found" }, 404);
 
   await markSkillSourceDue(db, row.id);
@@ -304,7 +361,8 @@ skillsRouter.post("/sources/:id/sync", async (c) => {
 
 skillsRouter.delete("/sources/:id", async (c) => {
   const { db } = c.var.providers;
-  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!deleted) return c.json({ error: "skill source not found" }, 404);
   const resp: DeleteSkillSourceResponse = { ok: true };
   return c.json(resp);

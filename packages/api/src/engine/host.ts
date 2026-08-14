@@ -25,7 +25,17 @@ import {
   type ResolvedModel,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import {
+  buildPluginCatalog,
+  type ActionPlugin,
+  type CommandContext,
+  type CommandDef,
+  type PluginCatalog,
+  type Sandbox,
+  type SkillSource,
+} from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
+import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
@@ -37,7 +47,7 @@ import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orchestratorIdentities, users } from "../schema/index.js";
+import { agentSessions, orchestratorIdentities, orgs, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
@@ -432,6 +442,15 @@ export class EngineHost {
             console.error(`EngineHost: onSessionReady failed for session ${sessionId}:`, err),
           );
         }
+        // Prep-completion seam for slash commands (Task 10): repo templates
+        // under `/workspace/.valet/prompts` are only readable once workspace
+        // prep has run, which happens by the time the attachment reaches
+        // `ready`. Refresh the command registry so those templates land. A
+        // no-op when the session has no `workspaceSkillsProvider`. Best-effort — a
+        // refresh failure never breaks the ready transition.
+        Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
+          console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
+        );
       }
     });
   }
@@ -518,6 +537,17 @@ export class EngineHost {
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    // Slash-command options (Task 10). The workspace-skills provider's sandbox
+    // accessor closes over `builtSession` — resolved lazily, so it is safe that
+    // the session doesn't exist yet at this point. `hasPrep` is true only when
+    // a specProvider exists: without prep there is no `/workspace/.valet/prompts`
+    // to scan (skills-as-commands plan, Task 4).
+    const commandOptions = await this.buildCommandOptions(
+      meta.orgId,
+      sessionId,
+      () => builtSession,
+      specProvider !== undefined,
+    );
     // Initial sandbox image: the stock default. The specProvider closure may
     // resolve a prebuild image override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
@@ -546,6 +576,7 @@ export class EngineHost {
             roles: extras.roles.length ? extras.roles : undefined,
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
+            ...(commandOptions ?? {}),
           },
         })
       : await engine.createSession({
@@ -563,6 +594,7 @@ export class EngineHost {
           roles: extras.roles.length ? extras.roles : undefined,
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
+          ...(commandOptions ?? {}),
         });
 
     builtSession = session;
@@ -814,6 +846,113 @@ export class EngineHost {
   }
 
   /**
+   * Assembles the slash-command options for a session build (slash-commands
+   * plan, Task 10; skills-as-commands plan, Task 4): `workspaceSkillsProvider`,
+   * `commandContext`, `bareSkillNames`, and the plugin-command pair
+   * (`pluginCommands` + `pluginCatalog`).
+   *
+   * `getSession` returns the built `Session` once it exists (parked in a local
+   * by the caller, same pattern as `onStartRef`). The workspace-skills
+   * provider's sandbox accessor uses it to reach `session.sandbox` — but ONLY
+   * when the attachment is already `ready`, so listing commands never
+   * provisions a sandbox. Repo prompt skills become readable once workspace
+   * prep finishes; the host calls `session.refreshCommandRegistry()` on each
+   * `ready` transition (see `trackHibernationWake`) so the registry picks them
+   * up then.
+   *
+   * `hasPrep` (skills-as-commands plan, Task 4): the workspace-skills provider
+   * is wired ONLY when the session has a prepared workspace (a `specProvider`
+   * exists). Without prep, `/workspace/.valet/prompts` is meaningless — a
+   * non-isolated, repo-less session (and every sandbox-less orchestrator) execs
+   * against a workspace that no prep ever created — so the provider, and its
+   * `===VALET-TMPL` scan on the `ready` refresh, must not fire. When `hasPrep`
+   * is false, `workspaceSkillsProvider` is omitted and `refreshCommandRegistry`
+   * runs an empty scan. DB-stored prompt skills still reach the session through
+   * `sessionExtras` regardless of prep.
+   *
+   * `bareSkillNames` reads `orgs.bareSkillCommands` (Task 3): when the org sets
+   * it, stored/repo skills also register under their bare name in addition to
+   * the always-present `skill:<name>` entry.
+   *
+   * `pluginCommands` and `pluginCatalog` are wired TOGETHER from the SAME
+   * `ActionPlugin[]` that backs the LLM `call_tool` tool (via
+   * `pluginSessionExtras`) — a command entry resolves through the registry, and
+   * its backing action runs against this catalog, so approval policy and arg
+   * validation stay identical to the tool path. Wiring one without the other
+   * makes every plugin command fail with "no plugin catalog is configured".
+   *
+   * No `commandRequestDecision` is supplied: a slash command is not a claimed
+   * turn, so it cannot suspend one on a decision gate, and the host has no
+   * synchronous approve path (approvals resolve asynchronously over REST).
+   * An approval-requiring plugin command therefore denies by default (Task 7
+   * behavior), which is the safe outcome until a command-scoped async approval
+   * flow exists.
+   *
+   * Returns `undefined` when the host has no `db` (tests that don't wire one) —
+   * the session then builds with no command providers, same as before.
+   */
+  /**
+   * `hasPrep` gates the workspace-skills provider — see the doc block above.
+   * Pass `true` only when the caller wired a `specProvider` for this build.
+   */
+  private async buildCommandOptions(
+    orgId: string,
+    sessionId: string,
+    getSession: () => Session | undefined,
+    hasPrep: boolean,
+  ): Promise<
+    | {
+        workspaceSkillsProvider?: () => Promise<SkillSource[]>;
+        commandContext: CommandContext;
+        bareSkillNames: boolean;
+        pluginCommands: Array<{ pluginName: string; def: CommandDef }>;
+        pluginCatalog: PluginCatalog;
+      }
+    | undefined
+  > {
+    const db = this.opts.db;
+    if (!db) return undefined;
+
+    // Task 3: moved bareSkillCommands to org level; read from orgs table.
+    // (Was per-user users.bareSkillCommands — column removed in that task.)
+    const bareRows = await db
+      .select({ bareSkillCommands: orgs.bareSkillCommands })
+      .from(orgs)
+      .where(eq(orgs.id, orgId))
+      .limit(1);
+    const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
+
+    // Only a prepared workspace has a `/workspace/.valet/prompts` to scan; a
+    // non-isolated repo-less session and every sandbox-less orchestrator have
+    // none, so omit the provider (and its `===VALET-TMPL` exec) for them.
+    const workspaceSkillsProvider = hasPrep
+      ? makeWorkspaceSkillsProvider(() => {
+          const session = getSession();
+          // Only reach for the sandbox once it is provisioned — listing
+          // commands must never trigger a cold start just to read repo prompts.
+          if (!session || session.attachment.state !== "ready") return undefined;
+          return session.sandbox as Sandbox;
+        })
+      : undefined;
+    const commandContext = makeCommandContext(db, this.opts.engineCredentials, orgId, sessionId);
+
+    const plugins = this.opts.plugins ?? [];
+    const pluginCommands = plugins.flatMap((p) =>
+      (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
+    );
+    const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
+    const pluginCatalog = buildPluginCatalog(actionPlugins);
+
+    return {
+      ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
+      commandContext,
+      bareSkillNames,
+      pluginCommands,
+      pluginCatalog,
+    };
+  }
+
+  /**
    * Mints a short-lived service JWT (`{ sub: userId, sid: sessionId }`) for
    * `POST /api/sessions/:id/sandbox-jwt` (Task 8, auth-v2 plan) — the same
    * master/derivation the sandbox's own `VALET_SANDBOX_JWT_SECRET` uses, so
@@ -901,6 +1040,20 @@ export class EngineHost {
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    // Slash-command options: same wiring as the interactive path, so the
+    // orchestrator answers /model and /sessions instead of the no-context
+    // fallback. The getter closes over `builtSession`, assigned below.
+    // Orchestrators are sandbox-less (no specProvider), so `hasPrep` is false —
+    // no `/workspace/.valet/prompts` scan. `bareSkillNames` comes from the org
+    // row; DB-stored skills reach the orchestrator through `sessionExtras`,
+    // scoped by the principal (skills-as-commands plan, Task 4).
+    let builtSession: Session | undefined;
+    const commandOptions = await this.buildCommandOptions(
+      meta.orgId,
+      sessionId,
+      () => builtSession,
+      false,
+    );
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -942,6 +1095,7 @@ export class EngineHost {
       // PolicySandbox attachment's first-touch contract — never a
       // proactive warm-on-claim kick just because a turn was claimed.
       warmSandboxOnClaim: false,
+      ...(commandOptions ?? {}),
     };
 
     const engine = new Engine({
@@ -957,6 +1111,7 @@ export class EngineHost {
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
+    builtSession = session;
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);

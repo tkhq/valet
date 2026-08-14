@@ -167,6 +167,20 @@ You are a careful code reviewer. Always cite file paths.
   });
 });
 
+describe("loadSkillFromMarkdown: invocation and argHint frontmatter", () => {
+  it("reads invocation and argHint", () => {
+    const md = "---\nname: standup\ndescription: d\ninvocation: prompt\nargHint: \"<topic>\"\n---\nBody $1";
+    const s = loadSkillFromMarkdown(md, "user");
+    expect(s.invocation).toBe("prompt");
+    expect(s.argHint).toBe("<topic>");
+  });
+
+  it("rejects an unknown invocation value", () => {
+    const md = "---\nname: x\ndescription: d\ninvocation: sideways\n---\nBody";
+    expect(() => loadSkillFromMarkdown(md, "user")).toThrow(/invocation/);
+  });
+});
+
 describe("thread.skill: render template + submit as a normal prompt", () => {
   it("renders {{var}} placeholders in skill content with provided args", async () => {
     const captured: string[] = [];

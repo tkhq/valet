@@ -53,13 +53,23 @@ function wellKnownUrls(issuer: string, kind: string): string[] {
   return urls;
 }
 
-/** Fetch a well-known document; null on any non-2xx or non-JSON response. */
+/**
+ * Fetch a well-known document; null on any non-2xx or non-JSON response.
+ * A rejected fetch (socket-level failure, not an HTTP status) retries once
+ * after a short delay: a transient ECONNRESET must not read as "this server
+ * publishes no metadata" — that false negative fails the whole discovery.
+ */
 async function fetchWellKnown(url: string): Promise<Record<string, unknown> | null> {
   let res: Response;
   try {
     res = await fetch(url);
   } catch {
-    return null;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    try {
+      res = await fetch(url);
+    } catch {
+      return null;
+    }
   }
   if (!res.ok) return null;
   try {

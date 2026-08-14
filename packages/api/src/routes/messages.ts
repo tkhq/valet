@@ -13,12 +13,16 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray } from "drizzle-orm";
+import { dispatchCommand } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
+import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  ListCommandsResponse,
+  WireCommandInfo,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
@@ -31,7 +35,7 @@ import type {
   ThreadSummary,
   WithdrawDecisionRequest,
 } from "../wire/types.js";
-import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
+import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 
 export const messagesRouter = new Hono<AppEnv>();
@@ -48,7 +52,10 @@ async function loadOwnedSession(c: Context<AppEnv>) {
   return rows[0] ?? null;
 }
 
-function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
+export function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
+  if (e.type === "command_result") {
+    return commandResultEntryToMessage(e, sessionId, threadId);
+  }
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -130,6 +137,48 @@ messagesRouter.get("/:id/threads", async (c) => {
     ),
   );
   const body: ListThreadsResponse = { threads: summaries };
+  return c.json(body);
+});
+
+// ── Commands ────────────────────────────────────────────────────────────────
+//
+// GET /:id/commands — the merged slash-command registry for the session
+// (built-ins + skills + user/repo templates + plugin commands) plus registry
+// diagnostics. Building the session (via `loadEngineSession`) is what wires the
+// host `workspaceSkillsProvider`/`commandContext`; the registry is built lazily and
+// cached on the Session, refreshed after workspace prep.
+messagesRouter.get("/:id/commands", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { engineSession } = result;
+
+  // Refresh before reading so user templates (DB-backed, always available) and
+  // repo templates (readable once the sandbox is ready) land in the registry.
+  // Cheap when nothing changed: one DB read plus, only when the sandbox is
+  // ready, one exec.
+  await engineSession.refreshCommandRegistry();
+  const registry = engineSession.commandRegistry();
+
+  // Attach argument completions for commands whose first argument is
+  // enumerable. Today that is `/model` (the org's active model catalog).
+  // Failure to enumerate degrades to no completions, never a route error.
+  const { db, engineCredentials } = c.var.providers;
+  const commands: WireCommandInfo[] = registry.list();
+  const model = commands.find((cmd) => cmd.source === "builtin" && cmd.name === "model");
+  if (model) {
+    try {
+      const ctx = makeCommandContext(db, engineCredentials, result.session.orgId, result.session.id);
+      const models = await ctx.listModels();
+      model.argOptions = models.map((m) => ({ value: m.id, label: m.name }));
+    } catch (err) {
+      console.error(`GET /commands: model enumeration failed for ${result.session.id}:`, err);
+    }
+  }
+
+  const body: ListCommandsResponse = {
+    commands,
+    diagnostics: registry.diagnostics(),
+  };
   return c.json(body);
 });
 
@@ -264,7 +313,21 @@ messagesRouter.post("/:id/messages", async (c) => {
   const thread = resolveThread(engineSession, body.threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  const receipt = await thread.submitPrompt(body.text, {});
+  // Resolve "/"-text against the registry BEFORE choosing a path, so only
+  // confirmed commands lose thread targeting:
+  // - execute-kind (builtin/plugin) → `session.prompt()`; commands run on
+  //   the default thread (engine invariant).
+  // - expand-kind (skill/template) → expand here, then submit the expanded
+  //   text to the REQUESTED thread like any prompt.
+  // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
+  //   requested thread, text unchanged — never silently rerouted.
+  const outcome = body.text.startsWith("/")
+    ? dispatchCommand(body.text, engineSession.commandRegistry())
+    : null;
+  const receipt =
+    outcome && outcome.kind === "execute"
+      ? await engineSession.prompt(body.text, {})
+      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : body.text, {});
 
   // Touch the session row so list ordering reflects recency.
   await db
@@ -273,8 +336,9 @@ messagesRouter.post("/:id/messages", async (c) => {
     .where(eq(agentSessions.id, session.id));
 
   const resp: SendPromptResponse = {
-    messageId: receipt.queueItemId,
-    threadId: thread.id,
+    // Commands take no queue item; "" would read as a real (broken) id.
+    messageId: receipt.queueItemId || null,
+    threadId: receipt.threadId,
   };
   return c.json(resp, 202);
 });

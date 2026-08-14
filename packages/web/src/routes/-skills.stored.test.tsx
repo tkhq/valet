@@ -108,10 +108,15 @@ describe("SkillsIndexPage with stored skills", () => {
     currentState = { isLoading: false, error: null };
   });
 
-  it("badges each skill with where it came from", () => {
-    render(<SkillsIndexPage />);
-    expect(screen.getAllByText("Plugin").length).toBe(1);
-    expect(screen.getAllByText("Yours").length).toBe(2);
+  it("badges each card with its scope", () => {
+    const { container } = render(<SkillsIndexPage />);
+    // Query inside the grid so the scope-filter dropdown's <option>s do not
+    // count. One plugin skill, two personal stored skills.
+    const grid = container.querySelector(".grid");
+    const badgeText = (label: string) =>
+      Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
+    expect(badgeText("Plugin").length).toBe(1);
+    expect(badgeText("Personal").length).toBe(2);
   });
 
   it("says why a shadowed skill never reaches a session, and how to fix it", () => {

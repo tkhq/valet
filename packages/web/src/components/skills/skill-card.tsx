@@ -25,6 +25,7 @@ import { Badge } from "~/components/primitives";
 import { brandHex } from "~/components/integrations/integration-row";
 import { displayName } from "~/components/integrations/display-name";
 import { cn } from "~/lib/cn";
+import { ScopeBadge, scopeForSkill } from "./scope-badge";
 
 /**
  * What to do about a skill another skill of the same name keeps out of every
@@ -68,9 +69,11 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-ink">{title}</span>
-            <Badge variant={skill.origin === "plugin" ? "neutral" : "accent"}>
-              {originLabel(skill)}
-            </Badge>
+            <ScopeBadge scope={scopeForSkill(skill)} />
+            {skill.origin === "repo" && <Badge variant="neutral">Repo</Badge>}
+            {skill.origin !== "plugin" && skill.invocation === "prompt" && (
+              <Badge variant="neutral">prompt</Badge>
+            )}
           </div>
           {skill.description && (
             <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">

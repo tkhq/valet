@@ -26,7 +26,9 @@ import type {
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import type { SkillRow } from "../schema/index.js";
+import { isOrgAdmin } from "./org.js";
 import {
+  asRecord,
   createSkill,
   deleteSkill,
   listSkills,
@@ -72,6 +74,12 @@ export function skillOwnerFromContext(ctx: PluginActionContext): SkillOwner | nu
 /** A row as the agent sees it. The body stays out: a listing is a catalog,
  * and the `skill` tool is what reads a body into the turn. */
 function toSummary(row: SkillRow): Record<string, unknown> {
+  // `invocation` and `argHint` live in the `frontmatter` jsonb column, same as
+  // `rowToSkillSource` reads them. Both are omitted when absent or the wrong
+  // type, so a plain `"context"` skill lists without either field.
+  const fm = asRecord(row.frontmatter);
+  const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
+  const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
   return {
     skillId: row.id,
     name: row.name,
@@ -80,6 +88,8 @@ function toSummary(row: SkillRow): Record<string, unknown> {
     ownerType: row.ownerType,
     ownerId: row.ownerId,
     updatedAt: row.updatedAt,
+    ...(invocation !== undefined ? { invocation } : {}),
+    ...(argHint !== undefined ? { argHint } : {}),
   };
 }
 
@@ -142,6 +152,24 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
             "Store the skill for a team you belong to instead of for yourself. A team you are not on is reported as not found.",
         }),
       ),
+      owner_type: Type.Optional(
+        Type.Union([Type.Literal("user"), Type.Literal("team"), Type.Literal("org")], {
+          description:
+            'Store the skill for the whole org with "org"; you must be an org admin, or the write is refused.',
+        }),
+      ),
+      invocation: Type.Optional(
+        Type.Union([Type.Literal("context"), Type.Literal("prompt")], {
+          description:
+            'How a session runs the skill: "context" (default) loads the body as reference; "prompt" substitutes args into the body and sends it as the message.',
+        }),
+      ),
+      arg_hint: Type.Optional(
+        Type.String({
+          description:
+            'Palette hint for the first argument of a "prompt" skill, e.g. "<topic>". Ignored for a "context" skill.',
+        }),
+      ),
     }),
   )({
     id: "skills.create_skill",
@@ -157,15 +185,33 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
     // so a silent write would let anything the agent read steer its future
     // turns. Same reasoning that keeps workflows.create_webhook at high.
     riskLevel: "high",
-    execute: async ({ name, description, content, team_id }, ctx) => {
+    execute: async ({ name, description, content, team_id, owner_type, invocation, arg_hint }, ctx) => {
       const owner = skillOwnerFromContext(ctx);
       if (!owner) return NO_OWNER;
+      // An org write needs the org-admin flag, resolved exactly as the route
+      // does. Gate before the write, so a non-admin gets a clear refusal
+      // instead of a silently personal skill.
+      let orgAdmin = false;
+      if (owner_type === "org") {
+        orgAdmin = await isOrgAdmin(db, owner.orgId, owner.userId);
+        if (!orgAdmin) {
+          return {
+            success: false,
+            error:
+              "Only an org admin can store an org-wide skill. Ask an org admin, or omit owner_type to store it for yourself.",
+          };
+        }
+      }
       try {
         const row = await createSkill(db, owner, {
           name,
           description,
           content,
           ...(team_id === undefined ? {} : { teamId: team_id }),
+          ...(owner_type === undefined ? {} : { ownerType: owner_type }),
+          ...(invocation === undefined ? {} : { invocation }),
+          ...(arg_hint === undefined ? {} : { argHint: arg_hint }),
+          isOrgAdmin: orgAdmin,
         });
         return { success: true, data: toSummary(row) };
       } catch (err) {
@@ -180,6 +226,18 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
       name: Type.Optional(Type.String()),
       description: Type.Optional(Type.String()),
       content: Type.Optional(Type.String({ description: "Replaces the whole body." })),
+      invocation: Type.Optional(
+        Type.Union([Type.Literal("context"), Type.Literal("prompt")], {
+          description:
+            'How a session runs the skill: "context" loads the body as reference; "prompt" substitutes args into the body and sends it as the message.',
+        }),
+      ),
+      arg_hint: Type.Optional(
+        Type.String({
+          description:
+            'Palette hint for the first argument of a "prompt" skill, e.g. "<topic>". Ignored for a "context" skill.',
+        }),
+      ),
     }),
   )({
     id: "skills.update_skill",
@@ -192,11 +250,21 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
     // sessions follow, and a rename can move the skill in or out of the
     // shadow of another skill of the same name.
     riskLevel: "high",
-    execute: async ({ skill_id, name, description, content }, ctx) => {
+    execute: async ({ skill_id, name, description, content, invocation, arg_hint }, ctx) => {
       const owner = skillOwnerFromContext(ctx);
       if (!owner) return NO_OWNER;
+      // Resolve the org-admin flag so an org-owned row is editable by an org
+      // admin, matching route behavior; a non-admin still reads not found.
+      const orgAdmin = await isOrgAdmin(db, owner.orgId, owner.userId);
       try {
-        const row = await updateSkill(db, owner, skill_id, { name, description, content });
+        const row = await updateSkill(db, owner, skill_id, {
+          name,
+          description,
+          content,
+          ...(invocation === undefined ? {} : { invocation }),
+          ...(arg_hint === undefined ? {} : { argHint: arg_hint }),
+          isOrgAdmin: orgAdmin,
+        });
         if (!row) return { success: false, error: `skill not found: ${skill_id}` };
         return { success: true, data: toSummary(row) };
       } catch (err) {
@@ -219,7 +287,8 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
     execute: async ({ skill_id }, ctx) => {
       const owner = skillOwnerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const result = await deleteSkill(db, owner, skill_id);
+      const orgAdmin = await isOrgAdmin(db, owner.orgId, owner.userId);
+      const result = await deleteSkill(db, owner, skill_id, { isOrgAdmin: orgAdmin });
       if (result === "not_found") return { success: false, error: `skill not found: ${skill_id}` };
       if (result === "not_local") {
         return {

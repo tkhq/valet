@@ -44,6 +44,9 @@ export const orgs = pgTable("orgs", {
   // — jsonb, mirroring the `features` column above.
   modelPreferences: jsonb("model_preferences").notNull().default([]),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  // Org-level toggle: present skill names as bare slash-commands instead of
+  // prefixed `/skill <name>`. Replaces the deleted per-user `users.bareSkillCommands`.
+  bareSkillCommands: boolean("bare_skill_commands").notNull().default(false),
 });
 
 // better-auth's default model name for the user table is "user" (singular);

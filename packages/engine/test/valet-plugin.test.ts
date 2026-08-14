@@ -307,3 +307,128 @@ describe("validateValetPlugin credential.oauth", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe("validateValetPlugin commands slot", () => {
+  function pluginWithAction(actionId: string): Record<string, unknown> {
+    return {
+      name: "linear",
+      version: "1.0.0",
+      actions: [
+        {
+          service: "linear",
+          actions: [
+            {
+              id: actionId,
+              name: "Create Issue",
+              description: "Creates a Linear issue",
+              riskLevel: "low",
+              parameters: Type.Object({}),
+              execute: async (): Promise<{ success: boolean }> => ({ success: true }),
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it("accepts a valid command referencing an own action", () => {
+    const plugin = {
+      ...pluginWithAction("create-issue"),
+      commands: [
+        {
+          name: "create-issue",
+          description: "Create a Linear issue",
+          action: "create-issue",
+          mapArgs: (a: string[]) => ({ title: a[0] }),
+        },
+      ],
+    };
+    const res = validateValetPlugin(plugin);
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a command naming a missing action", () => {
+    const plugin = {
+      ...pluginWithAction("create-issue"),
+      commands: [
+        { name: "x", description: "d", action: "nope", mapArgs: () => ({}) },
+      ],
+    };
+    const r = validateValetPlugin(plugin);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues[0]?.path).toBe("commands[0].action");
+  });
+
+  it("rejects a reserved built-in name", () => {
+    const plugin = {
+      ...pluginWithAction("create-issue"),
+      commands: [
+        { name: "status", description: "d", action: "create-issue", mapArgs: () => ({}) },
+      ],
+    };
+    const r = validateValetPlugin(plugin);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues.some((i) => i.path === "commands[0].name")).toBe(true);
+  });
+
+  it("rejects a command with an invalid name (not kebab/start with letter)", () => {
+    const plugin = {
+      ...pluginWithAction("create-issue"),
+      commands: [
+        { name: "Bad_Name", description: "d", action: "create-issue", mapArgs: () => ({}) },
+      ],
+    };
+    const r = validateValetPlugin(plugin);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues.some((i) => i.path === "commands[0].name")).toBe(true);
+  });
+
+  it("rejects a command with a missing description", () => {
+    const plugin = {
+      ...pluginWithAction("create-issue"),
+      commands: [
+        { name: "my-cmd", description: "", action: "create-issue", mapArgs: () => ({}) },
+      ],
+    };
+    const r = validateValetPlugin(plugin);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues.some((i) => i.path === "commands[0].description")).toBe(true);
+  });
+
+  it("rejects a command where mapArgs is not a function", () => {
+    const plugin = {
+      ...pluginWithAction("create-issue"),
+      commands: [
+        { name: "my-cmd", description: "desc", action: "create-issue", mapArgs: "not-a-fn" },
+      ],
+    };
+    const r = validateValetPlugin(plugin);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues.some((i) => i.path === "commands[0].mapArgs")).toBe(true);
+  });
+
+  it("rejects non-array commands", () => {
+    const r = validateValetPlugin({ name: "demo", version: "1", commands: "nope" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues.some((i) => i.path === "commands")).toBe(true);
+  });
+
+  it("accepts a plugin without commands (unchanged behavior)", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0" });
+    expect(res.ok).toBe(true);
+  });
+
+  it("reports all builtin names as reserved", () => {
+    const builtins = ["help", "status", "stop", "clear", "model", "compact", "new-thread", "sessions"];
+    for (const name of builtins) {
+      const plugin = {
+        ...pluginWithAction("create-issue"),
+        commands: [
+          { name, description: "d", action: "create-issue", mapArgs: () => ({}) },
+        ],
+      };
+      const r = validateValetPlugin(plugin);
+      expect(r.ok, `expected "${name}" to be rejected`).toBe(false);
+    }
+  });
+});

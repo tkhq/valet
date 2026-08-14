@@ -59,6 +59,7 @@ import {
   isLoadable,
   parseMarkdownArtifact,
   validateSkillFrontmatter,
+  BUILTIN_COMMAND_NAMES,
   type SkillSpecViolation,
 } from "@valet/engine";
 import { isPgUniqueViolation } from "@valet/store-postgres";
@@ -154,15 +155,38 @@ export async function claimDueSkillSources(
   return claimed.map((row) => row.id);
 }
 
+export interface SkillManifestLists {
+  /** Entries from the skill directories (`<root>/<name>/SKILL.md`). */
+  skillEntries: SkillManifestEntry[];
+  /** Entries from the `prompts/` directory (`<root>/prompts/<name>.md`). */
+  promptEntries: SkillManifestEntry[];
+}
+
 /**
- * Hash over the canonical manifest. Entries are sorted by name and rendered
- * as compact JSON, so the hash depends on what the repository holds and not
- * on the order GitHub happened to list it in.
+ * Hash over the canonical manifest. Skill entries and prompt entries are each
+ * sorted by name, then concatenated (skills first, prompts second), and
+ * rendered as compact JSON so the hash depends on content, not listing order.
  */
-export function skillManifestHash(entries: SkillManifestEntry[]): string {
-  const canonical = [...entries]
+export function skillManifestHash(lists: SkillManifestLists): string;
+/** @deprecated Pass a `SkillManifestLists` object instead. */
+export function skillManifestHash(entries: SkillManifestEntry[]): string;
+export function skillManifestHash(arg: SkillManifestEntry[] | SkillManifestLists): string {
+  let skillEntries: SkillManifestEntry[];
+  let promptEntries: SkillManifestEntry[];
+  if (Array.isArray(arg)) {
+    skillEntries = arg;
+    promptEntries = [];
+  } else {
+    skillEntries = arg.skillEntries;
+    promptEntries = arg.promptEntries;
+  }
+  const sortedSkills = [...skillEntries]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((e) => ({ name: e.name, path: e.path, contentSha: e.contentSha }));
+  const sortedPrompts = [...promptEntries]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((e) => ({ name: e.name, path: e.path, contentSha: e.contentSha }));
+  const canonical = [...sortedSkills, ...sortedPrompts];
   return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
 }
 
@@ -244,12 +268,16 @@ export class SkillSyncService {
     const manifest = await this.readManifest(source, headSha);
 
     // Compare 2 — the skills that commit holds.
-    const manifestHash = skillManifestHash(manifest.entries);
+    const manifestHash = skillManifestHash({
+      skillEntries: manifest.skillEntries,
+      promptEntries: manifest.promptEntries,
+    });
     if (manifestHash === source.lastManifestHash) {
       return this.recordSuccess(source, { headSha, manifestHash, changed: false });
     }
 
-    const applied = await this.reconcile(source, manifest.entries, manifest.text);
+    const allEntries = [...manifest.skillEntries, ...manifest.promptEntries];
+    const applied = await this.reconcile(source, allEntries, manifest.text, manifest.promptNames);
     return this.recordSuccess(source, {
       headSha,
       manifestHash,
@@ -258,17 +286,25 @@ export class SkillSyncService {
     });
   }
 
-  /** Lists the skill directories at `headSha` and reads each `SKILL.md`. */
+  /** Lists skill directories and the `prompts/` directory at `headSha`. */
   private async readManifest(
     source: SkillSourceRow,
     headSha: string,
-  ): Promise<{ entries: SkillManifestEntry[]; text: Map<string, string> }> {
+  ): Promise<{
+    skillEntries: SkillManifestEntry[];
+    promptEntries: SkillManifestEntry[];
+    /** Set of names that came from `prompts/`, so reconcile can parse them differently. */
+    promptNames: Set<string>;
+    /** Content keyed by FILE PATH, not by name, to avoid collisions between a
+     * skill directory and a same-named `prompts/<name>.md` file. */
+    text: Map<string, string>;
+  }> {
     const listing = await this.deps.reader.listDirectory(
       source.repoFullName,
       source.subpath,
       headSha,
     );
-    const entries: SkillManifestEntry[] = [];
+    const skillEntries: SkillManifestEntry[] = [];
     const text = new Map<string, string>();
 
     for (const dir of listing.entries) {
@@ -279,10 +315,45 @@ export class SkillSyncService {
       // directory is not a skill.
       const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
       if (content === null) continue;
-      entries.push({ name: dir.name, path, contentSha: fileSha(content) });
-      text.set(dir.name, content);
+      skillEntries.push({ name: dir.name, path, contentSha: fileSha(content) });
+      text.set(path, content);
     }
-    return { entries, text };
+
+    // Scan the `prompts/` directory. A 404 (no such directory) is normal and
+    // produces zero prompt entries. Any other read fault propagates and fails
+    // the whole sync, the same way a SKILL.md read fault does.
+    const promptEntries: SkillManifestEntry[] = [];
+    const promptNames = new Set<string>();
+    const promptsDir = joinPath(source.subpath, "prompts");
+    let promptListing;
+    try {
+      promptListing = await this.deps.reader.listDirectory(
+        source.repoFullName,
+        promptsDir,
+        headSha,
+      );
+    } catch (err) {
+      // SkillRepoNotFoundError means the prompts/ directory does not exist —
+      // zero prompt entries, not a failure. SkillRepoReadError wraps other
+      // non-404 responses, which ARE transport failures and must propagate.
+      if (!(err instanceof SkillRepoNotFoundError)) throw err;
+      promptListing = null;
+    }
+
+    if (promptListing !== null) {
+      for (const file of promptListing.entries) {
+        if (file.type !== "file" || !file.name.endsWith(".md")) continue;
+        const name = file.name.slice(0, -3); // strip .md
+        const path = joinPath(promptsDir, file.name);
+        const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
+        if (content === null) continue;
+        promptEntries.push({ name, path, contentSha: fileSha(content) });
+        promptNames.add(name);
+        text.set(path, content);
+      }
+    }
+
+    return { skillEntries, promptEntries, promptNames, text };
   }
 
   /**
@@ -297,6 +368,7 @@ export class SkillSyncService {
     source: SkillSourceRow,
     entries: SkillManifestEntry[],
     text: Map<string, string>,
+    promptNames: Set<string>,
   ): Promise<{ imported: number; updated: number; deleted: number; warnings: string[] }> {
     const { db } = this.deps;
     const existing = await db
@@ -311,9 +383,14 @@ export class SkillSyncService {
     let updated = 0;
 
     for (const entry of entries) {
-      const raw = text.get(entry.name);
+      // Content is keyed by PATH to prevent a same-named skill directory and
+      // prompt file from silently overwriting each other in the map.
+      const raw = text.get(entry.path);
       if (raw === undefined) continue;
-      const parsed = parseSkillFile(raw, entry.name);
+      const isPrompt = promptNames.has(entry.name);
+      const parsed = isPrompt
+        ? parsePromptFile(raw, entry.name)
+        : parseSkillFile(raw, entry.name);
       if (parsed.violations.length > 0) {
         warnings.push(`${entry.name}: ${parsed.violations.map((v) => v.message).join(" ")}`);
         // An advisory violation is reported but does not stop the mirror.
@@ -326,7 +403,11 @@ export class SkillSyncService {
       if (row === undefined) {
         const wrote = await this.insertMirror(source, entry, parsed);
         if (wrote) imported += 1;
-        else {
+        else if (isPrompt) {
+          warnings.push(
+            `${entry.name}: ${entry.path} collides with an existing skill of the same name. Rename one of them.`,
+          );
+        } else {
           warnings.push(
             `${entry.name}: a skill with this name already exists here. Rename the skill directory, or remove the skill that holds the name.`,
           );
@@ -509,12 +590,88 @@ function parseSkillFile(raw: string, directoryName: string): ParsedSkillFile {
     name: parsed.frontmatter.name ?? directoryName,
   };
   const violations = validateSkillFrontmatter(frontmatter, { directoryName });
+  // Reject reserved builtin names so a repo skill cannot shadow a built-in command.
+  if ((BUILTIN_COMMAND_NAMES as readonly string[]).includes(directoryName)) {
+    violations.push({
+      field: "name",
+      severity: "error",
+      message: `"${directoryName}" is a reserved built-in command name. Rename the skill directory.`,
+    });
+  }
   return {
     name: typeof frontmatter.name === "string" ? frontmatter.name : directoryName,
     description: typeof frontmatter.description === "string" ? frontmatter.description : "",
     body: parsed.body.trimStart(),
     frontmatter,
     violations,
+  };
+}
+
+/**
+ * Parses one `prompts/<name>.md` file. Prompt files differ from `SKILL.md`
+ * in three ways:
+ *
+ * 1. `name` is the filename stem, never a frontmatter field.
+ * 2. `invocation` defaults to `"prompt"` when absent. `"context"` is the only
+ *    other valid value; any other value is an error violation and the file is
+ *    skipped.
+ * 3. `description` is optional (the spec requires it for SKILL.md; prompts
+ *    may omit it).
+ *
+ * Name validation reuses `validateSkillFrontmatter` but only the `name` field
+ * matters — the description-missing violation is suppressed for prompts.
+ */
+function parsePromptFile(raw: string, fileName: string): ParsedSkillFile {
+  const parsed = parseMarkdownArtifact(raw);
+
+  // Validate the name (from the filename) via the skill spec, but skip the
+  // description check — prompts may omit it.
+  const nameViolations = validateSkillFrontmatter(
+    { name: fileName, description: "placeholder" },
+    { directoryName: fileName },
+  ).filter((v) => v.field !== "description");
+
+  // Also reject reserved builtin names.
+  if ((BUILTIN_COMMAND_NAMES as readonly string[]).includes(fileName)) {
+    nameViolations.push({
+      field: "name",
+      severity: "error",
+      message: `"${fileName}" is a reserved built-in command name. Rename the file.`,
+    });
+  }
+
+  // Validate the invocation field.
+  const rawInvocation = parsed.frontmatter.invocation;
+  const invocationViolations: SkillSpecViolation[] = [];
+  let invocation: "prompt" | "context" = "prompt";
+  if (rawInvocation === undefined) {
+    // Default — no violation.
+  } else if (rawInvocation === "prompt" || rawInvocation === "context") {
+    invocation = rawInvocation;
+  } else {
+    invocationViolations.push({
+      field: "invocation",
+      severity: "error",
+      message: `invocation "${String(rawInvocation)}" is not "prompt" or "context". Set invocation to "prompt" or "context".`,
+    });
+  }
+
+  // Only set the resolved `invocation` when it is valid. When the raw value
+  // was invalid, `invocationViolations` carries an error and the file will be
+  // skipped — the frontmatter is never persisted, but returning a misleading
+  // value is still confusing to callers and tests.
+  const frontmatter: Record<string, unknown> = {
+    ...parsed.frontmatter,
+    name: fileName,
+    ...(invocationViolations.length === 0 ? { invocation } : {}),
+  };
+
+  return {
+    name: fileName,
+    description: typeof parsed.frontmatter.description === "string" ? parsed.frontmatter.description : "",
+    body: parsed.body.trimStart(),
+    frontmatter,
+    violations: [...nameViolations, ...invocationViolations],
   };
 }
 
