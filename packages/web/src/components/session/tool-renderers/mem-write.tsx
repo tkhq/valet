@@ -30,7 +30,13 @@ function metaEntries(args: unknown): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   for (const key of META_KEYS) {
     const v = rec[key];
+    // null is a meaningful op (expires: null clears the expiry) but
+    // rendering the literal "null" reads as a bug — show it as "cleared".
     if (v === undefined) continue;
+    if (v === null) {
+      out.push([key, "cleared"]);
+      continue;
+    }
     out.push([key, Array.isArray(v) ? v.join(", ") : String(v)]);
   }
   return out;

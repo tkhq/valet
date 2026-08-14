@@ -29,13 +29,17 @@ function ViewTabs<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="flex items-center gap-0.5 text-[10px] font-mono uppercase tracking-wider">
+    <div
+      role="tablist"
+      className="flex items-center gap-0.5 text-[10px] font-mono uppercase tracking-wider"
+    >
       {options.map((opt) => (
         <button
           key={opt}
           type="button"
+          role="tab"
           onClick={() => onChange(opt)}
-          aria-pressed={value === opt}
+          aria-selected={value === opt}
           className={cn(
             "px-1.5 py-0.5 rounded transition-colors",
             value === opt

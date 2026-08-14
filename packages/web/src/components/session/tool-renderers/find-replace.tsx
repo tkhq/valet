@@ -2,7 +2,7 @@ import { Replace } from "lucide-react";
 import { DiffView, formatDiffStats } from "./diff-view";
 import { ToolBody } from "./tool-shell";
 import { parsedResultData } from "./workflow";
-import type { ToolRenderer } from "./types";
+import { resultText, type ToolRenderer } from "./types";
 
 /**
  * Renderer for plugin find-and-replace actions — currently the
@@ -77,9 +77,9 @@ export const findReplaceRenderer: ToolRenderer = {
             {n} {n === 1 ? "occurrence" : "occurrences"} replaced
           </div>
         )}
-        {status === "error" && error && (
+        {status === "error" && (error || resultText(result)) && (
           <div className="px-3 py-2 border-t border-danger-500/30 bg-danger-500/5 text-[11px] text-danger-700 dark:text-danger-400 font-mono whitespace-pre-wrap">
-            {error}
+            {error || resultText(result)}
           </div>
         )}
       </ToolBody>
