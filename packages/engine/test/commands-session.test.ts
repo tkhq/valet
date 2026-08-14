@@ -73,6 +73,51 @@ describe("Session.prompt command interception", () => {
     expect(events.some((e) => e.event.type === "command_result")).toBe(true);
   });
 
+  it("/status with opts.threadId lands the command_result on that thread", async () => {
+    const faux = registerFauxProvider({ provider: "s-thread" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+    });
+    const defaultThreadId = session.thread().id;
+    const other = session.thread("other");
+    expect(other.id).not.toBe(defaultThreadId);
+
+    const receipt = await session.prompt("/status", { threadId: other.id });
+    expect(receipt.command).toEqual({ name: "status", source: "builtin" });
+    expect(receipt.threadId).toBe(other.id);
+
+    const otherEntries = await store.getEntries(session.id, other.id);
+    expect(otherEntries.at(-1)?.type).toBe("command_result");
+
+    const defaultEntries = await store.getEntries(session.id, defaultThreadId);
+    expect(defaultEntries.some((e) => e.type === "command_result")).toBe(false);
+  });
+
+  it("prompt with an unknown opts.threadId throws a clear error", async () => {
+    const faux = registerFauxProvider({ provider: "s-thread-miss" });
+    cleanups.push(() => faux.unregister());
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+    });
+
+    await expect(session.prompt("/status", { threadId: "th-nope" })).rejects.toThrow(
+      /thread th-nope not found/,
+    );
+  });
+
   it("unknown /word queues as a normal prompt with nearMiss on the receipt", async () => {
     const faux = registerFauxProvider({ provider: "s-nearmiss" });
     faux.setResponses([fauxAssistantMessage("ok")]);

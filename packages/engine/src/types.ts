@@ -255,6 +255,11 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /**
+   * Target thread id. When set, the prompt (or command result) goes to this
+   * thread instead of the session default. Throws if no thread has this id.
+   */
+  threadId?: string;
   author?: PromptAuthor;
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
