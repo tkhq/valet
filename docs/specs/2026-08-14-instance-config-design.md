@@ -67,7 +67,7 @@ org:
   features:
     organizations: true
   members:
-    - email: me@connerswann.me
+    - email: test@valet.test
       role: admin
 
 skillSources:
