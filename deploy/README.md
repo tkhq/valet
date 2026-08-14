@@ -86,6 +86,9 @@ Secrets:
   ```sh
   kubectl --context rancher-desktop -n valet rollout restart deployment/valet-api
   ```
+- To use a pre-existing GitHub App instead of creating one in the web UI,
+  set `api.githubApp.*` + `api.secrets.githubApp*` — see "Pre-existing
+  GitHub App (env fallback)" in `deploy/chart/valet/README.md`.
 
 The api Deployment has an initContainer that blocks on the bundled
 Postgres StatefulSet's readiness, because the api runs migrations at boot.
