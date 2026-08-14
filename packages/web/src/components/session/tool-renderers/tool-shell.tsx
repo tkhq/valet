@@ -63,10 +63,25 @@ const CATEGORY_TEXT: Record<ToolCategory, string> = {
 };
 
 const STATUS_DOT: Record<ToolStatus, string> = {
+  streaming: "bg-current",
   running: "bg-current",
   completed: "bg-success-600 dark:bg-success-500",
   error: "bg-danger-600 dark:bg-danger-500",
 };
+
+/** Header pip label per status. Exported for tests. */
+export function statusLabel(status: ToolStatus): string {
+  switch (status) {
+    case "streaming":
+      return "writing";
+    case "running":
+      return "running";
+    case "completed":
+      return "done";
+    case "error":
+      return "error";
+  }
+}
 
 export function ToolShell({
   toolName,
@@ -150,7 +165,7 @@ export function ToolShell({
           {/* Scanner overlay — only active while running. The gradient sweeps
               left→right behind the header content, low-alpha, in the
               category color via currentColor. */}
-          {status === "running" && (
+          {(status === "running" || status === "streaming") && (
             <span
               aria-hidden
               className={cn(
@@ -207,7 +222,7 @@ function StatusPip({ status }: { status: ToolStatus }) {
     <span
       className={cn(
         "shrink-0 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-medium",
-        status === "running" && "text-muted",
+        (status === "running" || status === "streaming") && "text-muted",
         status === "completed" && "text-success-600 dark:text-success-500",
         status === "error" && "text-danger-600 dark:text-danger-500",
       )}
@@ -217,10 +232,11 @@ function StatusPip({ status }: { status: ToolStatus }) {
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           STATUS_DOT[status],
-          status === "running" && "animate-pulse motion-reduce:animate-none",
+          (status === "running" || status === "streaming") &&
+            "animate-pulse motion-reduce:animate-none",
         )}
       />
-      {status === "running" ? "running" : status === "completed" ? "done" : "error"}
+      {statusLabel(status)}
     </span>
   );
 }

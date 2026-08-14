@@ -35,6 +35,8 @@ export const bashRenderer: ToolRenderer = {
   matches: "bash",
   category: "shell",
   Icon: Terminal,
+  // The command text fills in live while the model writes it.
+  streamsArgs: true,
   formatTarget: (args) => commandExcerpt(getCommand(args)) || undefined,
   formatSummary: (_args, result, status) => {
     if (status !== "completed" && status !== "error") return undefined;
@@ -69,7 +71,7 @@ export const bashRenderer: ToolRenderer = {
         )}
         {/* Output. While running, show a subtle blinking caret. */}
         <div className="px-3 py-2">
-          {status === "running" && !body ? (
+          {(status === "running" || status === "streaming") && !body ? (
             <BlinkingCaret />
           ) : body ? (
             <TruncatedText

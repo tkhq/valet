@@ -4,6 +4,8 @@ import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
 import { pickRenderer, ToolShell } from "./tool-renderers";
+import { showsLiveBody } from "./tool-renderers/types";
+import { ToolBody } from "./tool-renderers/tool-shell";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
@@ -104,12 +106,20 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
       summary={summary}
       status={part.status}
     >
-      <Body
-        args={part.args}
-        result={part.result}
-        status={part.status}
-        error={part.error}
-      />
+      {showsLiveBody(renderer, part.status) ? (
+        <Body
+          args={part.args}
+          result={part.result}
+          status={part.status}
+          error={part.error}
+        />
+      ) : (
+        // Args are still streaming and this renderer didn't opt in — hold
+        // the body until the call is complete, like before streaming existed.
+        <ToolBody className="text-[11px] text-muted italic font-mono">
+          receiving arguments…
+        </ToolBody>
+      )}
     </ToolShell>
   );
 }

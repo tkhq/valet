@@ -25,6 +25,8 @@ export const writeRenderer: ToolRenderer = {
   matches: "write",
   category: "write",
   Icon: FilePlus2,
+  // The content preview fills in live while the model writes the file.
+  streamsArgs: true,
   formatTarget: (args) => getPath(args) || undefined,
   formatSummary: (args, _result, status) => {
     if (status === "running") return undefined;
@@ -47,7 +49,7 @@ export const writeRenderer: ToolRenderer = {
             )}
           </div>
         )}
-        {status === "running" && !content ? (
+        {(status === "running" || status === "streaming") && !content ? (
           <div className="px-3 py-2 text-[11px] text-muted italic font-mono">
             writing…
           </div>

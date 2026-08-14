@@ -15,7 +15,12 @@ export type ToolCategory =
   | "thread" // thread_read, mailbox, inbox — violet
   | "generic"; // unknown plugin tools — neutral
 
-export type ToolStatus = "running" | "completed" | "error";
+/**
+ * `streaming` = the model is still generating this call's args (live-plane
+ * only, synthesized from `tool_call_update` frames). `running` = the tool
+ * is executing with complete args.
+ */
+export type ToolStatus = "streaming" | "running" | "completed" | "error";
 
 export interface ToolRendererProps {
   args: unknown;
@@ -48,6 +53,22 @@ export interface ToolRenderer {
   formatSummary?(args: unknown, result: unknown, status: ToolStatus): string | undefined;
   /** Body view rendered when expanded. */
   Body: FC<ToolRendererProps>;
+  /**
+   * Opt in to rendering the Body while args are still streaming
+   * (`status === "streaming"`, args partial and possibly jagged — every
+   * field may be absent or truncated mid-value). Renderers that leave this
+   * unset hold their body until the args are complete, matching the
+   * pre-streaming behavior.
+   */
+  streamsArgs?: boolean;
+}
+
+/**
+ * Whether the Body should render for this status. The only held state is
+ * `streaming` on a renderer that didn't opt in via `streamsArgs`.
+ */
+export function showsLiveBody(renderer: ToolRenderer, status: ToolStatus): boolean {
+  return status !== "streaming" || renderer.streamsArgs === true;
 }
 
 export function matches(renderer: ToolRenderer, toolName: string, args?: unknown): boolean {
