@@ -12,6 +12,7 @@ import type { ToolCategory, ToolStatus } from "./types";
 const TOOL_LABELS: Record<string, string> = {
   bash: "shell",
   mem_write: "memory write",
+  mem_patch: "memory patch",
   mem_read: "memory read",
   thread_read: "thread read",
 };
