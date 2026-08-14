@@ -461,12 +461,60 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
   }
 }
 
+/**
+ * Stamp the execution OUTCOME onto an existing audit row (workflow path: the
+ * decision row is written by `enforceWorkflowPolicy` BEFORE execution; this
+ * fills in `status`/`result`/`error`/`durationMs` after `action.execute`
+ * settles). Fire-and-forget like `persistInvocationAudit` — never throws. A
+ * replayed node re-stamps the same values; idempotent.
+ */
+export async function updateInvocationOutcome(
+  db: AppDb,
+  invocationId: string,
+  outcome: {
+    status: "completed" | "error";
+    result?: unknown;
+    error?: string;
+    durationMs?: number;
+  },
+): Promise<void> {
+  try {
+    const result = outcome.result === undefined ? null : capAuditField(outcome.result);
+    const error =
+      outcome.error != null && outcome.error.length > POLICY_AUDIT_FIELD_CAP
+        ? outcome.error.slice(0, POLICY_AUDIT_FIELD_CAP)
+        : (outcome.error ?? null);
+    await db
+      .update(actionInvocations)
+      .set({
+        status: outcome.status,
+        result: result ? result.value : null,
+        resultTruncated: result ? result.truncated : null,
+        error,
+        durationMs: outcome.durationMs ?? null,
+      })
+      .where(eq(actionInvocations.invocationId, invocationId));
+  } catch (err) {
+    console.error(`policy audit outcome update failed for invocation ${invocationId}:`, err);
+  }
+}
+
 /** Deterministic audit PK for a gated session invocation — dedup key is
- *  `(sessionId, resumeKey, gateOrdinal)` (binding carry-forward #3): a restart
- *  replay re-emits with the SAME gateOrdinal → same id → no-op; a genuine
- *  repeat mints gateOrdinal+1 → new id. */
-export function gatedAuditId(sessionId: string, resumeKey: string, gateOrdinal: number): string {
-  return `pol:gate:${sessionId}:${resumeKey}:${gateOrdinal}`;
+ *  `(sessionId, queueItemId, resumeKey, gateOrdinal)`: a restart replay
+ *  re-emits with the SAME queueItemId (the suspended turn mirrors it) and the
+ *  SAME gateOrdinal → same id → no-op; a genuine repeat — same turn (ordinal
+ *  increments) or a later turn (queueItemId differs, ordinal resets) — mints
+ *  a new id. `queueItemId` is in the key because `gateOrdinal` is scoped to
+ *  `(queueItemId, resumeKey)` and resets per turn; without it, two turns
+ *  gating on the identical (tool, args) pair collided and the second row was
+ *  silently dropped (spec Deviations T6 #4, fixed). */
+export function gatedAuditId(
+  sessionId: string,
+  queueItemId: string | undefined,
+  resumeKey: string,
+  gateOrdinal: number,
+): string {
+  return `pol:gate:${sessionId}:${queueItemId ?? ""}:${resumeKey}:${gateOrdinal}`;
 }
 
 // ── Engine PolicyResolver ──────────────────────────────────────────
@@ -589,7 +637,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         // fresh id so genuine repeats are all recorded.
         invocationId:
           record.gateOrdinal !== undefined
-            ? gatedAuditId(record.sessionId, record.resumeKey, record.gateOrdinal)
+            ? gatedAuditId(record.sessionId, record.queueItemId, record.resumeKey, record.gateOrdinal)
             : `pol:call:${randomUUID()}`,
         service: record.service,
         actionId: record.actionId,
@@ -604,6 +652,8 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         workflowExecutionId: null,
         userId: record.userId ?? null,
         orgId: record.orgId ?? null,
+        params: record.params,
+        result: record.result,
         error: record.error ?? null,
         durationMs,
         startedAt,

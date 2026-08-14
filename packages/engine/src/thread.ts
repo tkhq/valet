@@ -2631,6 +2631,7 @@ export class Thread {
       config: session.options.toolConfig,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
+      queueItemId: this.runningItem?.id,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,

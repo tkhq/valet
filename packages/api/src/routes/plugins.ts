@@ -51,8 +51,12 @@ pluginsRouter.get("/", async (c) => {
     const actionsByService = new Map<string, PluginActionSummary[]>();
     for (const actionPlugin of actionPlugins) {
       const service = actionPlugin.credentialService ?? actionPlugin.service;
+      // `id` is the fully-qualified fqid (`{plugin service}.{action}`, the
+      // plugin-catalog convention) — the canonical policy-facing id both
+      // invocation paths resolve to, so the Policies UI creates action-scope
+      // rows that actually match at resolution time.
       const summaries: PluginActionSummary[] = actionPlugin.actions.map((a) => ({
-        id: a.id,
+        id: a.id.includes(".") ? a.id : `${actionPlugin.service}.${a.id}`,
         name: a.name,
         riskLevel: a.riskLevel,
       }));

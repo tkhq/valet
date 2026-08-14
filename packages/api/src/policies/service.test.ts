@@ -236,8 +236,8 @@ describe("DB constraints", () => {
 // ── audit sink ─────────────────────────────────────────────────────
 
 describe("persistInvocationAudit", () => {
-  it("dedups a gated replay double-fire (same sessionId/resumeKey/gateOrdinal → one row)", async () => {
-    const id = gatedAuditId(SESSION, "github.create_issue:{}", 0);
+  it("dedups a gated replay double-fire (same sessionId/queueItemId/resumeKey/gateOrdinal → one row)", async () => {
+    const id = gatedAuditId(SESSION, "qi-1", "github.create_issue:{}", 0);
     await persistInvocationAudit(db, { invocationId: id, sessionId: SESSION, status: "completed", resolvedMode: "require_approval" });
     await persistInvocationAudit(db, { invocationId: id, sessionId: SESSION, status: "completed", resolvedMode: "require_approval" });
     const rows = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
@@ -382,13 +382,20 @@ describe("buildPolicyResolver", () => {
       sessionId: SESSION, threadId: "t1", userId: MEMBER, orgId: ORG, appliesIn: "session",
       status: "completed", resolvedMode: "require_approval",
       provenance: { baseMode: "require_approval", source: "risk_default" },
-      resumeKey: "github.create_issue:{}", gateOrdinal: 3, durationMs: 12,
+      resumeKey: "github.create_issue:{}", gateOrdinal: 3, durationMs: 12, queueItemId: "qi-1",
     };
     await resolver.onInvocation?.(record);
     await resolver.onInvocation?.(record); // replay same ordinal → dedup
     const rows = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
     expect(rows).toHaveLength(1);
-    expect(rows[0].invocationId).toBe(gatedAuditId(SESSION, "github.create_issue:{}", 3));
+    expect(rows[0].invocationId).toBe(gatedAuditId(SESSION, "qi-1", "github.create_issue:{}", 3));
+
+    // A LATER turn gating on the identical (tool, args) pair — same
+    // resumeKey, gateOrdinal reset to 0 — is a DIFFERENT decision and gets
+    // its own row (the pre-fix collision: spec Deviations T6 #4).
+    await resolver.onInvocation?.({ ...record, queueItemId: "qi-2", gateOrdinal: 0, status: "rejected" });
+    const rowsAfter = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
+    expect(rowsAfter).toHaveLength(2);
     expect(rows[0].resolvedMode).toBe("require_approval");
     expect(rows[0].baseMode).toBe("require_approval");
   });

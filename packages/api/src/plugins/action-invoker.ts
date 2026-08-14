@@ -45,7 +45,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { actionInvocations } from "../schema/index.js";
 import type { GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { persistInvocationAudit, resolveActionPolicy } from "../policies/service.js";
+import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -220,15 +220,35 @@ async function computeResult(
   // node — the latter with instructive text pointing at the two ways to make
   // it pass (an approval node, or a runtime grant). An exec-scoped grant is
   // consulted transparently by `resolveActionPolicy` (grant rung), so a
-  // covered action resolves straight to `allow`.
-  const denial = await enforceWorkflowPolicy(opts, req, ctx, action.riskLevel, entry.actionPlugin.defaultApprovalMode);
+  // covered action resolves straight to `allow`. The policy-facing actionId
+  // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
+  // canonical id matches both the session and workflow paths.
+  const policyActionId = qualifiedActionId(req.service, action);
+  const audited = Boolean(ctx.orgId && ctx.workflowExecutionId);
+  const denial = await enforceWorkflowPolicy(
+    opts,
+    req,
+    ctx,
+    action.riskLevel,
+    entry.actionPlugin.defaultApprovalMode,
+    policyActionId,
+  );
   if (denial) return denial;
 
   const prepared = prepareActionArgs(action.parameters, req.params);
-  if (!prepared.ok) return { ok: false, error: prepared.error };
+  if (!prepared.ok) {
+    if (audited) {
+      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, {
+        status: "error",
+        error: `invalid params: ${prepared.error}`,
+      });
+    }
+    return { ok: false, error: prepared.error };
+  }
 
   const actionCtx = buildActionContext(req, ctx, credentials, action.id);
 
+  const startedAt = (opts.clock ?? Date.now)();
   let result: PluginActionResult;
   try {
     // `prepared.args` is validated+defaulted against `action.parameters`
@@ -237,7 +257,29 @@ async function computeResult(
     // `call_tool` executor (`plugin-catalog.ts`) uses for this exact call.
     result = await action.execute(prepared.args as Static<typeof action.parameters>, actionCtx);
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    const message = err instanceof Error ? err.message : String(err);
+    if (audited) {
+      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, {
+        status: "error",
+        error: message,
+        durationMs: (opts.clock ?? Date.now)() - startedAt,
+      });
+    }
+    return { ok: false, error: message };
+  }
+
+  // Stamp the execution outcome (status/result/error) onto the decision row
+  // enforceWorkflowPolicy wrote before execution (spec Deviations T6 #6,
+  // fixed: workflow rows now carry the result, size-capped by the updater).
+  // `result` is the full `PluginActionResult` — the same shape the session
+  // path's `PolicyInvocationRecord.result` carries.
+  if (audited) {
+    await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, {
+      status: result.success ? "completed" : "error",
+      result,
+      error: result.success ? undefined : (result.error ?? "failed with no error detail"),
+      durationMs: (opts.clock ?? Date.now)() - startedAt,
+    });
   }
 
   if (!result.success) {
@@ -266,6 +308,7 @@ async function enforceWorkflowPolicy(
   ctx: ActionInvocationContext,
   riskLevel: RiskLevel,
   pluginDefault: ApprovalMode | undefined,
+  policyActionId: string,
 ): Promise<WorkflowInvokeActionResult | null> {
   if (!ctx.orgId || !ctx.workflowExecutionId) return null;
   const now = (opts.clock ?? Date.now)();
@@ -274,7 +317,7 @@ async function enforceWorkflowPolicy(
     orgId: ctx.orgId,
     userId: ctx.userId,
     service: req.service,
-    actionId: req.action,
+    actionId: policyActionId,
     riskLevel,
     params: req.params,
     appliesIn: "workflow",
@@ -287,7 +330,7 @@ async function enforceWorkflowPolicy(
   await persistInvocationAudit(opts.db, {
     invocationId: `pol:wf:${req.invocationId}`,
     service: req.service,
-    actionId: req.action,
+    actionId: policyActionId,
     riskLevel,
     resolvedMode: decision.mode,
     baseMode: decision.provenance.baseMode,
@@ -310,6 +353,14 @@ async function enforceWorkflowPolicy(
     ok: false,
     error: `${req.service}.${req.action} requires an approval node or a runtime grant`,
   };
+}
+
+/** The canonical policy-facing action id: the fully-qualified fqid
+ * (`service.action`), mirroring the plugin-catalog's list_tools convention.
+ * Both invocation paths resolve to this form, so one org policy / override /
+ * grant targets both (spec Deviations T6 #3). */
+function qualifiedActionId(service: string, action: PluginAction): string {
+  return action.id.includes(".") ? action.id : `${service}.${action.id}`;
 }
 
 /** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */

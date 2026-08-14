@@ -122,6 +122,12 @@ export function DecisionGateCard({
         </div>
       )}
 
+      {gate.provenance && (
+        <div className="px-3.5 pb-2 text-[11px] text-muted" data-testid="gate-provenance">
+          {provenanceLine(gate.provenance)}
+        </div>
+      )}
+
       {gate.type === "question" ? (
         <div className="px-3.5 pb-3 flex items-end gap-2">
           <Textarea
@@ -179,6 +185,26 @@ export function DecisionGateCard({
       )}
     </div>
   );
+}
+
+/** One line naming the precedence rung that gated this call. Policy/override
+ * rungs link nowhere from here (the Action Log carries the row links); this
+ * is the live "why" the spec's decision 4 promised. */
+function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
+  switch (p.source) {
+    case "org_policy":
+      return "Gated by an org policy.";
+    case "user_override":
+      return "Gated by your personal policy override.";
+    case "plugin_default":
+      return "Gated by the plugin's default approval mode.";
+    case "risk_default":
+      return "Gated by the action's risk level.";
+    case "resolver_error":
+      return "Policy check failed — approval requested as a safe fallback.";
+    default:
+      return `Gated by policy (${p.source}).`;
+  }
 }
 
 const ICON_FOR_TYPE = {

@@ -490,6 +490,13 @@ export interface ToolContext {
    * Threaded from `CreateSessionOptions.policyResolver` via `buildToolContext`.
    */
   policyResolver?: PolicyResolver;
+  /**
+   * The queue item (turn) this tool call runs under. On a restart replay the
+   * engine reconstructs the running item with the ORIGINAL queueItemId (see
+   * `SuspendedTurnState.queueItemId`), so the value is stable across replay.
+   * Consumed by `call_tool`'s policy audit (`PolicyInvocationRecord.queueItemId`).
+   */
+  queueItemId?: string;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
@@ -774,6 +781,25 @@ export interface PolicyInvocationRecord {
    * record, while a second legitimate identical call mints a new one.
    */
   gateOrdinal?: number;
+  /**
+   * The queue item (turn) this invocation ran under. `gateOrdinal` is scoped
+   * to `(queueItemId, resumeKey)` and resets per turn, so an audit sink MUST
+   * include `queueItemId` in any dedup key built from `(resumeKey,
+   * gateOrdinal)` — without it, two different turns gating on the identical
+   * (tool, args) pair collide. A restart replay reuses the ORIGINAL turn's
+   * queueItemId (the suspended-turn state mirrors it), so replay dedup still
+   * holds. Absent only when a host builds a ToolContext outside the engine's
+   * thread machinery (e.g. hand-assembled in tests).
+   */
+  queueItemId?: string;
+  /**
+   * The invocation's params and the executed action's result, verbatim.
+   * Populated so an audit sink can persist them (size-capping is the sink's
+   * job — the engine does not truncate). `result` is present only for
+   * `completed` dispositions.
+   */
+  params?: Record<string, unknown>;
+  result?: unknown;
 }
 
 /**

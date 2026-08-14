@@ -134,9 +134,14 @@ export interface PolicyDecision {
  * grants — a live grant only ever quiets the one exact action it was
  * minted for. Callers writing `runtime_grants.policyKey` (T3-T5) MUST use
  * this same function so their rows actually match here.
+ *
+ * `actionId` is canonically the fully-qualified `service.action` fqid (the
+ * plugin-catalog convention both invocation paths resolve to); the prefix
+ * check collapses it so the key never double-prefixes
+ * (`github.github.create_issue`). A bare id still composes to the same key.
  */
 export function grantPolicyKey(service: string, actionId: string): string {
-  return `${service}.${actionId}`;
+  return actionId.startsWith(`${service}.`) ? actionId : `${service}.${actionId}`;
 }
 
 interface Targeted {

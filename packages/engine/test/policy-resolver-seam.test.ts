@@ -177,6 +177,37 @@ describe("policyResolver seam: resolve()", () => {
     });
   });
 
+  it("a BARE PluginAction.id resolves to the qualified fqid for policy + audit", async () => {
+    // A plugin may declare bare action ids; the policy-facing actionId is
+    // ALWAYS the fqid so one org policy / override / grant targets both the
+    // session and workflow paths (spec Deviations T6 #3).
+    const { resolver, resolveInputs, invocations } = makeResolver();
+    const [, callTool] = pluginCatalogTools({
+      plugins: [makePlugin(makeAction({ id: "get_issue" }))],
+    });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    expect(resolveInputs[0]?.actionId).toBe("github.get_issue");
+    expect(invocations[0]?.actionId).toBe("github.get_issue");
+  });
+
+  it("records carry queueItemId, params, and (on completion) the result", async () => {
+    const { resolver, invocations } = makeResolver();
+    const [, callTool] = pluginCatalogTools({
+      plugins: [makePlugin(makeAction({ execute: async () => ({ success: true, data: { issue: 42 } }) }))],
+    });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 9 }, summary: "s" },
+      makeCtx({ policyResolver: resolver, queueItemId: "qi-7" }),
+    );
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].queueItemId).toBe("qi-7");
+    expect(invocations[0].params).toEqual({ n: 9 });
+    expect(invocations[0].result).toEqual({ success: true, data: { issue: 42 } });
+  });
+
   it("allow → straight through, one completed record with durationMs + resolvedMode allow", async () => {
     const { resolver, invocations } = makeResolver();
     let executed = false;

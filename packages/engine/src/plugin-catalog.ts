@@ -283,10 +283,16 @@ export async function invokeAction(
     return executeAction(entry, actionId, args, summary, ctx);
   }
 
-  // Present resolver: consult the host policy port.
+  // Present resolver: consult the host policy port. The policy-facing
+  // actionId is ALWAYS the fully-qualified `service.action` id (the same
+  // fqid convention list_tools reports and the workflow path resolves) —
+  // never the plugin's raw `PluginAction.id`, which may be bare. One
+  // canonical form means one actionId an admin can target that matches both
+  // the session and workflow paths.
+  const policyActionId = qualifiedId(entry);
   const input: PolicyResolveInput = {
     service: entry.service,
-    actionId: entry.action.id,
+    actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
     params: args,
     userId: ctx.userId,
@@ -297,7 +303,7 @@ export async function invokeAction(
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
-    actionId: entry.action.id,
+    actionId: policyActionId,
     toolId: actionId,
     riskLevel: entry.action.riskLevel,
     sessionId: ctx.sessionId,
@@ -307,6 +313,8 @@ export async function invokeAction(
     appliesIn: "session",
     summary,
     resumeKey,
+    queueItemId: ctx.queueItemId,
+    params: args,
   };
 
   let decision: PolicyDecision;
@@ -765,6 +773,7 @@ async function executeAction(
         ...audit.record,
         status: "completed",
         durationMs: Date.now() - startedAt,
+        result,
       });
     }
     return { kind: "ok", result };

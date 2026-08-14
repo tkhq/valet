@@ -235,7 +235,12 @@ function findCatalogAction(
   actionId: string,
 ): { service: string; riskLevel: RiskLevel; pluginDefault: ApprovalMode | undefined } | undefined {
   for (const { actionPlugin } of actionPluginByService.values()) {
-    const action = actionPlugin.actions.find((a) => a.id === actionId);
+    // Match raw `a.id` OR its fqid — the canonical policy-facing id is the
+    // fully-qualified `service.action` form (spec T6 #3), but a plugin may
+    // declare bare action ids.
+    const action = actionPlugin.actions.find(
+      (a) => a.id === actionId || (a.id.includes(".") ? a.id : `${actionPlugin.service}.${a.id}`) === actionId,
+    );
     if (action) {
       return { service: actionPlugin.service, riskLevel: action.riskLevel, pluginDefault: actionPlugin.defaultApprovalMode };
     }

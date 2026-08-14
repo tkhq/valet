@@ -785,7 +785,9 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     const fixture = highRiskAction();
     await db.insert(actionPolicies).values({
       id: "pd", orgId: ORG, principalType: "org", principalId: ORG,
-      service: null, actionId: "deploy", riskLevel: null, mode: "deny",
+      // Action-scope policies target the fully-qualified fqid — the ONE
+      // canonical id both invocation paths resolve to (spec T6 #3, fixed).
+      service: null, actionId: "demo.deploy", riskLevel: null, mode: "deny",
       paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
       expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
     });
@@ -808,7 +810,10 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     // The returned data proves the action executed (the grant quieted the gate).
     expect(res).toEqual({ ok: true, result: { deployed: true } });
     const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n3"));
-    expect(audit[0].status).toBe("allowed");
+    // The decision row is stamped with the execution outcome + full
+    // PluginActionResult after execute (spec T6 #6, fixed).
+    expect(audit[0].status).toBe("completed");
+    expect(audit[0].result).toEqual({ success: true, data: { deployed: true } });
     expect(audit[0].matchedGrantId).toBe("gr");
   });
 

@@ -73,6 +73,18 @@ describe("DecisionGateCard — action rendering", () => {
   });
 });
 
+describe("DecisionGateCard — policy provenance", () => {
+  it("renders the why-gated line when the gate carries provenance", () => {
+    renderCard(gate({ provenance: { baseMode: "require_approval", source: "org_policy", matchedPolicyId: "apol_1" } }));
+    expect(screen.getByTestId("gate-provenance").textContent).toBe("Gated by an org policy.");
+  });
+
+  it("renders nothing extra when provenance is absent", () => {
+    renderCard();
+    expect(screen.queryByTestId("gate-provenance")).toBeNull();
+  });
+});
+
 describe("DecisionGateCard — always_allow admin gate", () => {
   it("disables Always allow for a non-admin (orgRole: member)", () => {
     renderCard();

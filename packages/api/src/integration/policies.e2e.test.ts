@@ -41,16 +41,17 @@
  *      the run with the instructive error; an upstream approval node
  *      resolved with "grant the rest of this run" lets a second run pass.
  *
- * Deviation surfaced while writing this test (documented in the spec's
- * Deviations section, not fixed here — see that section for why): the
- * workflow enforcement path (`plugins/action-invoker.ts`) matches org
- * policies/overrides against the BARE `ToolNode.action` id (e.g. `"nuke"`),
- * while the session path (`plugin-catalog.ts`'s `call_tool`) matches
- * against the fully-qualified `PluginAction.id` (e.g. `"widgets.nuke"`).
- * The two paths are internally consistent but use different action-id
- * conventions for "the same" logical action — this test uses the bare id
- * for the workflow-path grant in step (f) and the qualified id everywhere
- * else, deliberately, to match each path's real matching behavior.
+ * Two former deviations this file used to work around are now FIXED and
+ * pinned here instead:
+ *   - Action-id conventions are unified (spec Deviations T6 #3): both the
+ *     session path and the workflow path resolve the policy-facing actionId
+ *     to the fully-qualified fqid (`"widgets.nuke"`), so step (f)'s
+ *     workflow-run grant uses the same qualified id as everything else and
+ *     `grantPolicyKey` collapses to plain `"widgets.nuke"`.
+ *   - `gatedAuditId` now includes `queueItemId` (spec Deviations T6 #4), so
+ *     separate turns that gate on the IDENTICAL (tool, params) pair each get
+ *     their own audit row. Steps (a) and (d) deliberately reuse `{}` params
+ *     across three gated `widgets.nuke` turns to pin exactly that.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -109,18 +110,10 @@ function makePolicyFixturePlugin(): { plugin: ValetPlugin; calls: (actionId: str
       return { success: true, data: { pinged: true } };
     },
   };
-  // `reason` is optional and unused by the action itself — its only job is
-  // to vary the deterministic resumeKey (`tool_id:stableJson(params)`) across
-  // separate gated calls to `nuke` in this test. See this file's module doc:
-  // `gatedAuditId(sessionId, resumeKey, gateOrdinal)` has no `queueItemId` in
-  // its dedup key, so two DIFFERENT turns that open a gate for the exact
-  // same (tool, params) pair mint the exact same audit-row PK — the second
-  // write silently no-ops via `onConflictDoNothing`. Confirmed while writing
-  // this test; documented as a known gap in the spec's Deviations rather
-  // than fixed here (would need a `queueItemId` added to the engine's
-  // `PolicyInvocationRecord`, an adversarial-review-gated contract change
-  // out of this task's scope). Varying `reason` per call sidesteps it so
-  // this test can still assert on every step's audit row.
+  // No param variation needed across gated calls: `gatedAuditId` includes
+  // `queueItemId`, so separate turns gating on the identical (tool, params)
+  // pair each mint a distinct audit row. This test pins that by reusing `{}`
+  // for every gated `widgets.nuke` call (spec Deviations T6 #4, fixed).
   const nukeParams = Type.Object({ reason: Type.Optional(Type.String()) });
   const nuke: PluginAction<typeof nukeParams> = {
     id: "widgets.nuke",
@@ -311,6 +304,9 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       await postPrompt(baseUrl, sessionA, "call nuke");
       const defaultGate = await waitForGate(baseUrl, sessionA);
       expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "approve", "approve_session", "deny"]);
+      // The live gate carries WHY it opened (spec Deviations T6 #5, fixed):
+      // risk default for an unconfigured critical action.
+      expect(defaultGate.provenance).toMatchObject({ baseMode: "require_approval", source: "risk_default" });
       await resolveGate(baseUrl, sessionA, defaultGate.id, "deny");
       const nukeDenyRow = await waitForNewLogRow(baseUrl, "widgets.nuke", before);
       expect(fixture.calls("widgets.nuke")).toBe(0);
@@ -364,13 +360,18 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       queueCallTool(faux, "widgets.deploy", { env: "prod" }, "deploy PROD");
       await postPrompt(baseUrl, sessionA, "deploy prod");
       const matcherGate = await waitForGate(baseUrl, sessionA);
+      expect(matcherGate.provenance).toMatchObject({ source: "org_policy", matchedPolicyId: matcherPolicy.id });
       await resolveGate(baseUrl, sessionA, matcherGate.id, "approve");
       const deployProdRow = await waitForNewLogRow(baseUrl, "widgets.deploy", before);
       expect(deployProdRow).toMatchObject({ resolvedMode: "require_approval", status: "completed", matchedPolicyId: matcherPolicy.id });
+      // Session-path rows now persist params + result (spec Deviations T6
+      // #6, fixed) — the Action Log's expand affordance has real data.
+      expect(deployProdRow.params).toEqual({ env: "prod" });
+      expect(deployProdRow.result).toBeTruthy();
 
       // ── (d) "Approve for this session" grant lifecycle ──────────────────
       before = await knownLogIds(baseUrl, "widgets.nuke");
-      queueCallTool(faux, "widgets.nuke", { reason: "approve-for-session" }, "nuke, approve for session");
+      queueCallTool(faux, "widgets.nuke", {}, "nuke, approve for session");
       await postPrompt(baseUrl, sessionA, "nuke, approve for session");
       const sessionGrantGate = await waitForGate(baseUrl, sessionA);
       await resolveGate(baseUrl, sessionA, sessionGrantGate.id, "approve_session");
@@ -393,7 +394,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const grantsRes = await fetch(`${baseUrl}/api/me/grants`, { headers: HEADERS });
       expect(grantsRes.status).toBe(200);
       const grantsBody = (await grantsRes.json()) as ListGrantsResponse;
-      const nukeGrant = grantsBody.grants.find((g) => g.sessionId === sessionA && g.policyKey === "widgets.widgets.nuke");
+      const nukeGrant = grantsBody.grants.find((g) => g.sessionId === sessionA && g.policyKey === "widgets.nuke");
       expect(nukeGrant, `grants: ${JSON.stringify(grantsBody.grants)}`).toBeDefined();
       expect(nukeGrant?.id).toBe(nukeGrantRow.matchedGrantId);
 
@@ -409,7 +410,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(grantsAfterRevoke.grants.some((g) => g.sessionId === sessionA)).toBe(false);
 
       // Revoked → gates again.
-      queueCallTool(faux, "widgets.nuke", { reason: "after-revoke" }, "nuke after revoke");
+      queueCallTool(faux, "widgets.nuke", {}, "nuke after revoke");
       await postPrompt(baseUrl, sessionA, "nuke after revoke");
       const reGatedNuke = await waitForGate(baseUrl, sessionA);
       // Re-approve for session (grant resurrection after revoke), then stop
@@ -561,13 +562,12 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         15_000,
       );
 
-      // Grant the rest of this run: bare `actionId` matching `ToolNode.action`
-      // (see this file's module doc for why — the workflow path's action-id
-      // convention differs from the session path's).
+      // Grant the rest of this run: the SAME fully-qualified actionId the
+      // session path uses — the conventions are unified (module doc).
       const approveRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/approve`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ approved: true, grantActions: [{ service: "widgets", actionId: "nuke" }] }),
+        body: JSON.stringify({ approved: true, grantActions: [{ service: "widgets", actionId: "widgets.nuke" }] }),
       });
       expect(approveRes.status).toBe(200);
       expect(((await approveRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
@@ -595,7 +595,10 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const wfDeniedRow = wfRows.find((e) => e.workflowExecutionId === runNoGrant);
       expect(wfDeniedRow).toMatchObject({ resolvedMode: "require_approval", status: "denied" });
       const wfAllowedRow = wfRows.find((e) => e.workflowExecutionId === runGrant);
-      expect(wfAllowedRow).toMatchObject({ resolvedMode: "allow", status: "allowed" });
+      expect(wfAllowedRow).toMatchObject({ resolvedMode: "allow", status: "completed" });
+      // The decision row was stamped with the execution outcome + result
+      // (spec Deviations T6 #6, fixed).
+      expect(wfAllowedRow?.result).toEqual({ success: true, data: { nuked: true } });
     },
     60_000,
   );
