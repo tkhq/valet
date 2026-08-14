@@ -662,6 +662,65 @@ describe("ChildWatcher", () => {
     expect(drops).toHaveLength(1);
     expect(drops[0]?.detail).toContain("parent-does-not-exist");
   });
+
+  it("tears down the child's sandbox and evicts its cached session on settle, keeping session data", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-td", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-td", {
+      parentSessionId: "parent-td",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    // Give the child a live sandbox so the teardown has something real to
+    // release.
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    const attachment = child.attachment;
+    expect(attachment.state).toBe("ready");
+
+    const itemId = "qi-td-1";
+    await engineStore.admitSubmission("child-td", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-td", childThread.id, itemId, { outcome: "completed" });
+
+    const watch = {
+      childSessionId: "child-td",
+      queueItemId: itemId,
+      parentSessionId: "parent-td",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-td")).limit(1);
+      return rows[0]?.settled === true;
+    });
+    // Teardown runs after markSettled — wait for the eviction.
+    await waitFor(async () => engineHost.liveSession("child-td") === null);
+
+    // The sandbox is gone (attachment released), but the session data —
+    // what child_read and the Sessions page read — survives.
+    expect(attachment.state).toBe("released");
+    const childData = await engineStore.getSession("child-td");
+    expect(childData).not.toBeNull();
+  });
 });
 
 describe("classifyWatcherError", () => {

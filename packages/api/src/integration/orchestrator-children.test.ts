@@ -63,6 +63,14 @@ describeIfKey("api integration: orchestrator spawns a child via task, receives c
       const watch = rows[0];
       expect(watch.parentSessionId).toBe(sessionId);
 
+      // Depth limit and parent linkage from durable state — the LIVE
+      // depth-limit check (no childSpawner in toolConfig) is pinned by the
+      // ungated unit suite (children.test.ts); a fast child may already be
+      // settled and evicted from the cache by the time driveTurn returns.
+      const childData = await api.providers.engineStore.getSession(watch.childSessionId);
+      expect(childData?.purpose).toBe("child");
+      expect(childData?.parentSessionId).toBe(sessionId);
+
       // The child runs its own real model turn, settles, and the watcher
       // marks the watch settled after admitting the signal to the parent.
       await waitFor(async () => {
@@ -74,11 +82,13 @@ describeIfKey("api integration: orchestrator spawns a child via task, receives c
         return rows[0]?.settled === true;
       }, 90_000);
 
-      // The child session got no spawner (depth limit).
-      const child = api.providers.engineHost.liveSession(watch.childSessionId);
-      expect(child).not.toBeNull();
-      expect(child?.options.toolConfig?.childSpawner).toBeUndefined();
-      expect(child?.options.purpose).toBe("child");
+      // Settle reclaims the child's compute: evicted from the cache, but
+      // its engine-session data (child_read, Sessions page) survives.
+      await waitFor(
+        async () => api!.providers.engineHost.liveSession(watch.childSessionId) === null,
+        10_000,
+      );
+      expect(await api.providers.engineStore.getSession(watch.childSessionId)).not.toBeNull();
 
       // The signal entry lands on the SPAWNING parent thread once the
       // orchestrator claims the signal turn.

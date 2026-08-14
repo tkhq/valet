@@ -354,6 +354,7 @@ export class ChildWatcher {
       }
       console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
       await this.markSettled(watch.childSessionId);
+      await this.teardownChildSandbox(watch.childSessionId);
     }
   }
 
@@ -406,6 +407,7 @@ export class ChildWatcher {
     });
 
     await this.markSettled(watch.childSessionId);
+    await this.teardownChildSandbox(watch.childSessionId);
   }
 
   private async markSettled(childSessionId: string): Promise<void> {
@@ -413,6 +415,27 @@ export class ChildWatcher {
       .update(childWatches)
       .set({ settled: true })
       .where(eq(childWatches.childSessionId, childSessionId));
+  }
+
+  /**
+   * Reclaim a settled child's compute. The orchestrator has no tool to
+   * message an existing child (`task` spawns, `child_read` reads), so once
+   * the settlement signal is admitted the sandbox is dead weight — destroy
+   * it now instead of waiting for the idle sweep (which only truly
+   * hibernates on the kubernetes backend). Session data stays: `child_read`
+   * and the Sessions page keep working, and a user message to the child
+   * cold-starts a fresh sandbox. Best-effort — a teardown failure never
+   * un-settles the watch.
+   */
+  private async teardownChildSandbox(childSessionId: string): Promise<void> {
+    try {
+      const live = this.deps.engineHost.liveSession(childSessionId);
+      if (!live) return;
+      await live.attachment.destroy();
+      this.deps.engineHost.evictCache(childSessionId);
+    } catch (err) {
+      console.error(`ChildWatcher: sandbox teardown failed for settled child ${childSessionId}:`, err);
+    }
   }
 
   /**
