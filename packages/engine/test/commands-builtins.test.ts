@@ -59,7 +59,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("help", [], session, ctx);
+    const r = await executeBuiltin("help", [], session, ctx, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toContain("/status");
     expect(r.output).toContain("/skill:review");
@@ -70,7 +70,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("model", [], session, ctx);
+    const r = await executeBuiltin("model", [], session, ctx, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toContain("claude-opus-4-8");
   });
@@ -80,7 +80,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("model", ["claude-oups"], session, ctx);
+    const r = await executeBuiltin("model", ["claude-oups"], session, ctx, session.thread());
     expect(r.ok).toBe(false);
     expect(r.output).toContain("claude-opus-4-8");
   });
@@ -90,7 +90,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("model", [], session, undefined);
+    const r = await executeBuiltin("model", [], session, undefined, session.thread());
     expect(r.ok).toBe(false);
     expect(r.output).toContain("does not expose");
   });
@@ -102,7 +102,7 @@ describe("executeBuiltin", () => {
 
     // A registry id resolves through the internal resolver; the switch needs
     // no CommandContext — only the no-args listing does.
-    const r = await executeBuiltin("model", ["claude-opus-4-7"], session, undefined);
+    const r = await executeBuiltin("model", ["claude-opus-4-7"], session, undefined, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toContain("Model switched");
   });
@@ -112,7 +112,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("stop", [], session, ctx);
+    const r = await executeBuiltin("stop", [], session, ctx, session.thread());
     expect(r.ok).toBe(false);
     expect(r.output).toContain("No agent turn is running.");
   });
@@ -122,7 +122,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("clear", [], session, ctx);
+    const r = await executeBuiltin("clear", [], session, ctx, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toContain("already empty");
   });
@@ -132,7 +132,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("status", [], session, ctx);
+    const r = await executeBuiltin("status", [], session, ctx, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toContain("Queue");
     expect(r.output).toContain("0 pending");
@@ -143,7 +143,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("sessions", [], session, ctx);
+    const r = await executeBuiltin("sessions", [], session, ctx, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toContain("c1");
     expect(r.output).toContain("child");
@@ -154,7 +154,7 @@ describe("executeBuiltin", () => {
     cleanups.push(() => faux.unregister());
     const session = await makeSession(faux);
 
-    const r = await executeBuiltin("new-thread", [], session, ctx);
+    const r = await executeBuiltin("new-thread", [], session, ctx, session.thread());
     expect(r.ok).toBe(true);
     expect(r.output).toMatch(/th-/);
   });

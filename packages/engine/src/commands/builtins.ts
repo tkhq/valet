@@ -1,4 +1,5 @@
 import type { Session } from "../session.js";
+import type { Thread } from "../thread.js";
 import type { CommandContext } from "./types.js";
 
 /**
@@ -53,20 +54,21 @@ export async function executeBuiltin(
   args: string[],
   session: Session,
   ctx: CommandContext | undefined,
+  thread: Thread,
 ): Promise<BuiltinResult> {
   switch (name) {
     case "help":
       return helpCommand(session);
     case "status":
-      return await statusCommand(session);
+      return await statusCommand(session, thread);
     case "stop":
-      return stopCommand(session);
+      return stopCommand(thread);
     case "clear":
-      return clearCommand(session);
+      return clearCommand(session, thread);
     case "model":
-      return modelCommand(args, session, ctx);
+      return modelCommand(args, session, ctx, thread);
     case "compact":
-      return compactCommand(args, session);
+      return compactCommand(args, thread);
     case "new-thread":
       return newThreadCommand(session);
     case "sessions":
@@ -95,8 +97,7 @@ function helpCommand(session: Session): BuiltinResult {
   return { ok: true, output };
 }
 
-async function statusCommand(session: Session): Promise<BuiltinResult> {
-  const thread = session.thread();
+async function statusCommand(session: Session, thread: Thread): Promise<BuiltinResult> {
   const model =
     thread.modelId() ?? session.options.modelSpec ?? session.options.model.id;
   const state = await thread.currentQueueState();
@@ -109,8 +110,7 @@ async function statusCommand(session: Session): Promise<BuiltinResult> {
   return { ok: true, output: lines.join("\n") };
 }
 
-async function stopCommand(session: Session): Promise<BuiltinResult> {
-  const thread = session.thread();
+async function stopCommand(thread: Thread): Promise<BuiltinResult> {
   if (!thread.hasActiveRun) {
     return { ok: false, output: "No agent turn is running." };
   }
@@ -118,8 +118,8 @@ async function stopCommand(session: Session): Promise<BuiltinResult> {
   return { ok: true, output: "Stopped the current agent turn." };
 }
 
-async function clearCommand(session: Session): Promise<BuiltinResult> {
-  const removed = await session.clearQueue(session.thread().id);
+async function clearCommand(session: Session, thread: Thread): Promise<BuiltinResult> {
+  const removed = await session.clearQueue(thread.id);
   return {
     ok: true,
     output:
@@ -133,6 +133,7 @@ async function modelCommand(
   args: string[],
   session: Session,
   ctx: CommandContext | undefined,
+  thread: Thread,
 ): Promise<BuiltinResult> {
   const target = args[0];
   if (!target) {
@@ -144,7 +145,9 @@ async function modelCommand(
     return { ok: true, output };
   }
   try {
-    const { fromModel, toModel } = await session.setModel(target, "slash_command");
+    // Switch the target thread's model, not the session default — the user
+    // typed the command while standing in this thread.
+    const { fromModel, toModel } = await thread.setModel(target, "slash_command");
     return { ok: true, output: `Model switched from \`${fromModel}\` to \`${toModel}\`.` };
   } catch (err) {
     const models = ctx ? await ctx.listModels() : [];
@@ -166,9 +169,9 @@ async function modelCommand(
   }
 }
 
-async function compactCommand(args: string[], session: Session): Promise<BuiltinResult> {
+async function compactCommand(args: string[], thread: Thread): Promise<BuiltinResult> {
   const instructions = args.join(" ").trim();
-  await session.thread().compactThread({ mode: "manual" });
+  await thread.compactThread({ mode: "manual" });
   return {
     ok: true,
     output: instructions
