@@ -293,6 +293,12 @@ export interface Message {
    * The renderer uses `ok` to show success/failure styling.
    */
   command?: MessageCommand;
+  /**
+   * Model that produced this entry (assistant messages). Gives the reply
+   * visible attribution so a model switch is verifiable in the transcript,
+   * not only in the header picker.
+   */
+  model?: string;
 }
 
 export interface ListMessagesResponse {

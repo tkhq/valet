@@ -21,6 +21,7 @@ import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
+import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { Button, Spinner } from "~/components/primitives";
 
 export type SessionViewVariant = "full" | "panel" | "standalone";
@@ -81,6 +82,9 @@ export function SessionView({
   onTabChange?: (tab: SandboxTabId) => void;
 }) {
   const session = useSession(sessionId);
+  // Keep the header's model picker honest for switches this client did not
+  // make itself (/model command, other tabs, direct API).
+  useInvalidateSessionOnModelSwitch(sessionId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
   const tab = activeTab ?? localTab;
   const setTab = onTabChange ?? setLocalTab;

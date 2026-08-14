@@ -73,6 +73,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     createdAt: Number.isFinite(created) ? created : Date.now(),
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
+    model: e.model,
   };
 }
 
