@@ -3,11 +3,12 @@
  *
  * Harness: shared PGlite AppDb + migrations, mirroring skill-sources.test.ts.
  */
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, beforeEach } from "vitest";
 import { isNull, eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
+import { actionPolicies, invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
 import { ensureOrg } from "./org.js";
 import {
   reconcileInstanceConfig,
@@ -15,6 +16,7 @@ import {
   configSkillSourceId,
   configTeamId,
   configProviderId,
+  configPolicyId,
   type ReconcileDeps,
 } from "./config-reconcile.js";
 import type { InstanceConfig } from "../config/instance-config.js";
@@ -861,5 +863,213 @@ describe("reconcileInstanceConfig — conflict guards", () => {
     expect(rows).toHaveLength(1);
     // The onConflictDoUpdate path (or the select/update path) reconciles the role.
     expect(rows[0]!.role).toBe("admin");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool policies pass tests
+// ---------------------------------------------------------------------------
+
+describe("configPolicyId", () => {
+  it("produces the pol:config: prefix and 12-char hex suffix, keyed by target", () => {
+    const id = configPolicyId("service", "github");
+    expect(id).toMatch(/^pol:config:[0-9a-f]{12}$/);
+    expect(id).toBe(configPolicyId("service", "github"));
+  });
+
+  it("distinguishes dimensions for the same value", () => {
+    expect(configPolicyId("service", "github")).not.toBe(configPolicyId("action", "github"));
+  });
+});
+
+describe("reconcileInstanceConfig — toolPolicies pass", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+  });
+
+  async function orgId(): Promise<string> {
+    return (await ensureOrg(db)).id;
+  }
+
+  it("creates a service-targeted org row with origin/managed_by set", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "deny" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const id = configPolicyId("service", "github");
+    const rows = await db.select().from(actionPolicies).where(eq(actionPolicies.id, id));
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.orgId).toBe(await orgId());
+    expect(row.principalType).toBe("org");
+    expect(row.principalId).toBe(await orgId());
+    expect(row.service).toBe("github");
+    expect(row.actionId).toBeNull();
+    expect(row.riskLevel).toBeNull();
+    expect(row.mode).toBe("deny");
+    expect(row.appliesIn).toBe("any");
+    expect(row.origin).toBe("admin");
+    expect(row.managedBy).toBe("config");
+    expect(row.paramMatchers).toEqual([]);
+    expect(row.expiresAt).toBeNull();
+    expect(row.revokedAt).toBeNull();
+  });
+
+  it("creates an action-targeted row on the action_id column", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      toolPolicies: [{ action: "github.merge_pull_request", mode: "require_approval", appliesIn: "session" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const id = configPolicyId("action", "github.merge_pull_request");
+    const row = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, id)))[0]!;
+    expect(row.actionId).toBe("github.merge_pull_request");
+    expect(row.service).toBeNull();
+    expect(row.riskLevel).toBeNull();
+    expect(row.appliesIn).toBe("session");
+  });
+
+  it("creates a riskLevel-targeted row on the risk_level column", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      toolPolicies: [{ riskLevel: "critical", mode: "deny" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const id = configPolicyId("risk", "critical");
+    const row = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, id)))[0]!;
+    expect(row.riskLevel).toBe("critical");
+    expect(row.service).toBeNull();
+    expect(row.actionId).toBeNull();
+  });
+
+  it("is a no-op on a second run — stable ids, no duplicate rows", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "deny" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const rows = await db
+      .select()
+      .from(actionPolicies)
+      .where(like(actionPolicies.id, "pol:config:%"));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("updates the mode in place when a rule's mode changes", async () => {
+    await reconcileInstanceConfig(deps(db), {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "deny" }],
+    });
+    await reconcileInstanceConfig(deps(db), {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "require_approval" }],
+    });
+
+    const id = configPolicyId("service", "github");
+    const rows = await db.select().from(actionPolicies).where(eq(actionPolicies.id, id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.mode).toBe("require_approval");
+    expect(rows[0]!.revokedAt).toBeNull();
+  });
+
+  it("soft-revokes a removed rule (keeps the row, stamps revoked_at)", async () => {
+    await reconcileInstanceConfig(deps(db), {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "deny" }],
+    });
+    await reconcileInstanceConfig(deps(db), { version: 1, toolPolicies: [] });
+
+    const id = configPolicyId("service", "github");
+    const rows = await db.select().from(actionPolicies).where(eq(actionPolicies.id, id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.revokedAt).not.toBeNull();
+  });
+
+  it("resurrects a previously removed rule by clearing revoked_at", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "deny" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    await reconcileInstanceConfig(deps(db), { version: 1, toolPolicies: [] });
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const id = configPolicyId("service", "github");
+    const rows = await db.select().from(actionPolicies).where(eq(actionPolicies.id, id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.revokedAt).toBeNull();
+    expect(rows[0]!.mode).toBe("deny");
+  });
+
+  it("never touches a UI-created policy row (random id) during the sweep", async () => {
+    const org = await orgId();
+    const now = Date.now();
+    const uiId = randomUUID();
+    await db.insert(actionPolicies).values({
+      id: uiId,
+      orgId: org,
+      principalType: "org",
+      principalId: org,
+      service: "linear",
+      actionId: null,
+      riskLevel: null,
+      mode: "allow",
+      paramMatchers: [],
+      appliesIn: "any",
+      origin: "settings",
+      managedBy: null,
+      expiresAt: null,
+      revokedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // A config run declaring a different target must not revoke the UI row.
+    await reconcileInstanceConfig(deps(db), {
+      version: 1,
+      toolPolicies: [{ service: "github", mode: "deny" }],
+    });
+
+    const uiRows = await db.select().from(actionPolicies).where(eq(actionPolicies.id, uiId));
+    expect(uiRows).toHaveLength(1);
+    expect(uiRows[0]!.revokedAt).toBeNull();
+  });
+
+  it("leaves action_policies untouched when toolPolicies is absent (unmanaged)", async () => {
+    const org = await orgId();
+    const now = Date.now();
+    const uiId = randomUUID();
+    await db.insert(actionPolicies).values({
+      id: uiId,
+      orgId: org,
+      principalType: "org",
+      principalId: org,
+      service: "github",
+      actionId: null,
+      riskLevel: null,
+      mode: "deny",
+      paramMatchers: [],
+      appliesIn: "any",
+      origin: "settings",
+      managedBy: null,
+      expiresAt: null,
+      revokedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await reconcileInstanceConfig(deps(db), { version: 1 });
+
+    const rows = await db.select().from(actionPolicies).where(eq(actionPolicies.id, uiId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.revokedAt).toBeNull();
   });
 });

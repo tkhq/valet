@@ -157,7 +157,8 @@ export interface NodeProviderOpts {
    * Parsed instance config (`valet.yaml`). When present:
    * - `plugins` allow/deny feeds `loadNodeModulesPlugins` instead of
    *   `parseValetPluginsEnv`. Both set simultaneously is an error.
-   * - `toolPolicies` flow into `EngineHost` as `approvalOverrides`.
+   * - `toolPolicies` reconcile into `action_policies` rows (org policies)
+   *   by `reconcileInstanceConfig`; the policy engine reads them at runtime.
    */
   instanceConfig?: InstanceConfig;
 }

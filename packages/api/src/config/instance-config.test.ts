@@ -20,12 +20,13 @@ plugins:
   allow: [plugin-github, plugin-linear]
 
 toolPolicies:
-  - match: "github.merge_pull_request"
+  - action: "github.merge_pull_request"
     mode: deny
-  - match: "linear.*"
+  - service: "linear"
     mode: allow
-  - match: "*"
+  - riskLevel: critical
     mode: require_approval
+    appliesIn: session
 
 org:
   name: Turnkey
@@ -69,9 +70,13 @@ describe("parseInstanceConfig", () => {
     expect(cfg.auth?.allowedEmailDomains).toEqual(["turnkey.io"]);
     expect(cfg.plugins?.allow).toEqual(["plugin-github", "plugin-linear"]);
     expect(cfg.toolPolicies).toHaveLength(3);
-    expect(cfg.toolPolicies?.[0]).toEqual({ match: "github.merge_pull_request", mode: "deny" });
-    expect(cfg.toolPolicies?.[1]).toEqual({ match: "linear.*", mode: "allow" });
-    expect(cfg.toolPolicies?.[2]).toEqual({ match: "*", mode: "require_approval" });
+    expect(cfg.toolPolicies?.[0]).toEqual({ action: "github.merge_pull_request", mode: "deny" });
+    expect(cfg.toolPolicies?.[1]).toEqual({ service: "linear", mode: "allow" });
+    expect(cfg.toolPolicies?.[2]).toEqual({
+      riskLevel: "critical",
+      mode: "require_approval",
+      appliesIn: "session",
+    });
     expect(cfg.org?.name).toBe("Turnkey");
     expect(cfg.org?.features).toEqual({ organizations: true });
     expect(cfg.org?.modelPreferences).toEqual(["anthropic/claude-opus-4"]);
@@ -112,10 +117,52 @@ describe("parseInstanceConfig", () => {
     const yaml = `
 version: 1
 toolPolicies:
-  - match: "github.*"
+  - service: "github"
     mode: auto_approve
 `.trim();
     expect(() => parseInstanceConfig(yaml, path)).toThrow("toolPolicies[0].mode");
+  });
+
+  it("throws when a toolPolicy sets no target dimension", () => {
+    const yaml = `
+version: 1
+toolPolicies:
+  - mode: deny
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "toolPolicies[0] must set exactly one of service, action, riskLevel",
+    );
+  });
+
+  it("throws when a toolPolicy sets more than one target dimension", () => {
+    const yaml = `
+version: 1
+toolPolicies:
+  - service: "github"
+    riskLevel: high
+    mode: deny
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "toolPolicies[0] sets more than one of service, action, riskLevel",
+    );
+  });
+
+  it("throws for an unknown toolPolicy riskLevel", () => {
+    const yaml = `
+version: 1
+toolPolicies:
+  - riskLevel: extreme
+    mode: deny
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow("toolPolicies[0].riskLevel");
+  });
+
+  it("defaults appliesIn to undefined when omitted (reconciler applies \"any\")", () => {
+    const cfg = parseInstanceConfig(
+      "version: 1\ntoolPolicies:\n  - service: github\n    mode: deny",
+      path,
+    );
+    expect(cfg.toolPolicies?.[0]).toEqual({ service: "github", mode: "deny" });
   });
 
   it("throws InstanceConfigError for openai_compatible without name", () => {
@@ -186,7 +233,7 @@ llmProviders:
     const yaml = `
 version: 1
 toolPolicies:
-  match: "*.foo"
+  service: "github"
   mode: deny
 `.trim();
     expect(() => parseInstanceConfig(yaml, path)).toThrow(InstanceConfigError);

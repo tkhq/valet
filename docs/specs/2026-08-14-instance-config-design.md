@@ -5,8 +5,11 @@ Status: implemented (plan: docs/plans/2026-08-14-instance-config.md)
 
 ## Deviations
 
-- Tool-policy globs match the catalog's dot-qualified id (`service.action`),
-  not the slash form an early draft showed.
+- `toolPolicies` no longer runs through an engine-side `ApprovalOverrideRule`
+  layer. After PR #140 merged the action-policies engine, the reconciler writes
+  each rule into `action_policies` as an org policy (`origin: "admin"`,
+  `managed_by: "config"`). Rules now declare exactly one of
+  service/action/riskLevel instead of a glob `match`.
 - The provisioning hook binds config-declared team members by team NAME
   lookup, not by `team_cfg_*` id — the name is the team's identity, so the
   bind works for adopted UI-created teams too.
@@ -81,12 +84,13 @@ plugins:
   allow: [plugin-github, plugin-linear]   # replaces VALET_PLUGINS; or `deny:`
 
 toolPolicies:
-  - match: "github.merge_pull_request"
+  - action: "github.merge_pull_request"   # one target: service | action | riskLevel
     mode: deny
-  - match: "linear.*"
+  - service: "linear"
     mode: allow
-  - match: "*"
+  - riskLevel: critical
     mode: require_approval
+    appliesIn: session                     # optional; default "any"
 
 org:
   name: Turnkey
@@ -128,7 +132,7 @@ Top-level keys in v1:
 | `version`      | number | must be `1`; anything else fails boot              |
 | `auth`         | object | boot config assembly (`loadAuthConfig` merge)      |
 | `plugins`      | object | boot config assembly (plugin filter)               |
-| `toolPolicies` | list   | boot config assembly (plugin catalog)              |
+| `toolPolicies` | list   | DB reconciler → `action_policies` (org policies)   |
 | `org`          | object | DB reconciler → `orgs`, `org_members`, `invites`   |
 | `teams`        | list   | DB reconciler → `teams`, `team_members`            |
 | `llmProviders` | list   | DB reconciler → `llm_providers`                    |
@@ -169,8 +173,8 @@ The file has two consumers, so `main.ts` loads and validates it **before**
 1. **Boot config assembly** reads `auth` and `plugins` — these shape the
    process (admission rule, plugin registry filter) and cannot wait for a
    DB pass.
-2. **The DB reconciler** reads `org` and `skillSources` after
-   `buildNodeProviders`.
+2. **The DB reconciler** reads `org`, `teams`, `llmProviders`,
+   `skillSources`, and `toolPolicies` after `buildNodeProviders`.
 
 ### Migrated env vars
 
@@ -307,36 +311,40 @@ subsystem, it does not replace it.
 
 ## Tool policies
 
-`toolPolicies` declares per-tool approval overrides. Today the mode comes
-from the plugin manifest's `defaultApprovalMode`, else from each action's
-`riskLevel` (low/medium → allow, high/critical → require_approval) —
-`approvalModeFor` in `packages/engine/src/plugin-catalog.ts`. There is no
-instance-level override layer; this section is the first.
+`toolPolicies` declares org-level action policies. The reconciler writes each
+rule into the `action_policies` table — the same engine that backs UI-managed
+policies. See docs/specs/2026-07-16-action-policies-audit-design.md for the
+policy engine.
 
-Each rule:
+Each rule declares exactly one target and a mode:
 
 ```yaml
-- match: "github.merge_pull_request"   # tool id, or a glob on service/action
+- action: "github.merge_pull_request"   # one of: service | action | riskLevel
   mode: deny                            # allow | require_approval | deny
+  appliesIn: any                        # optional; any | session | workflow
 ```
 
-- **Matching** — `match` is a glob over the qualified tool id
-  (`service.action`, per `qualifiedId` in `plugin-catalog.ts`). `github.*`
-  covers a service; `*` is a catch-all.
-- **First match wins.** Order the list from specific to general. A tool
-  with no matching rule keeps its manifest/riskLevel default, so the file
-  can tighten one tool without restating the world.
-- **Consumption** — boot config assembly threads the rules into
-  `PluginCatalog` (a new engine option beside `defaultApprovalMode`). The
-  engine stays HTTP-free; it receives the parsed rules, not the file.
-- **Denied tools** keep the existing behavior: `call_tool` returns the
-  blocked-by-org-policy message; `list_tools` still lists them so the
-  agent can tell the user why an action is unavailable.
+- **Target** — set exactly one of `service`, `action`, or `riskLevel`. Zero
+  targets or more than one is a boot error that names the field. `action` is
+  the fully-qualified `service.action` id (the policy engine's `actionId`).
+  `riskLevel` is one of `low`, `medium`, `high`, `critical`.
+- **`mode`** is required: `allow`, `require_approval`, or `deny`.
+- **`appliesIn`** is optional and defaults to `any`. Use `session` or
+  `workflow` to scope the rule to one invocation context.
+- **Reconciliation** — the reconciler upserts one `action_policies` row per
+  declared target, `origin: "admin"`, `managed_by: "config"`, keyed by a
+  deterministic `pol:config:<hash>` id. Re-running boot is idempotent.
+- **Removal is a soft-revoke.** A rule dropped from the file stamps
+  `revoked_at` on its managed row instead of deleting it, so the action log
+  keeps the provenance. Re-declaring the rule clears `revoked_at`.
+- **UI-created policy rows are never touched** by the reconciler — only rows
+  with the `pol:config:` id prefix.
 
-When UI-managed per-org approval overrides land (in-flight work), the
-standard precedence applies: the file wins for the rules it declares,
-UI overrides cover the rest. The implementation should make the layering
-explicit: file rule → UI override → manifest → riskLevel.
+Precedence is the policy engine's, not this file's. An org `deny` is absolute:
+neither a live runtime grant nor a per-user override can loosen it. Grants and
+personal overrides interact with these rows exactly as the action-policies
+design specifies. A rule with no matching invocation falls through to the
+plugin's `defaultApprovalMode`, then the `riskLevel` default.
 
 ## Dev and prod wiring
 
@@ -375,11 +383,12 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
    org-admin plus control of the approval policy. Gate it like a secret:
    whoever can edit this file can grant themselves admin, add skill sources,
    and disable approval gates.
-2. **A `toolPolicies` typo can disable approval instance-wide.** An `allow`
-   rule downgrades an action whose manifest `riskLevel` demands approval. A
-   single `match: "*", mode: allow` line turns off every approval gate for
-   the whole instance. Review `toolPolicies` changes with the same care as an
-   RBAC change.
+2. **A broad `toolPolicies` allow can disable approval org-wide.** An `allow`
+   rule downgrades an action whose plugin default or `riskLevel` demands
+   approval. A wide target — `riskLevel: critical, mode: allow`, or a
+   high-traffic `service` allow — turns off the approval gate for every action
+   it covers. Review `toolPolicies` changes with the same care as an RBAC
+   change.
 3. **SSO sign-ins ignore `auth.allowedEmailDomains`.** An SSO/IdP sign-in is
    admitted regardless of the domain list (existing auth-v2 behavior). The
    domain list bounds email and social signup only. To bound who the IdP can

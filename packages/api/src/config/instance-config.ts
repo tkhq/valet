@@ -15,8 +15,14 @@ import { parse as parseYaml } from "yaml";
 // ---------------------------------------------------------------------------
 
 export interface ToolPolicyRule {
-  match: string; // glob over qualified tool id "service.action"; "*" matches any chars
+  // Exactly one of service/action/riskLevel names the policy target. `action`
+  // is the fully-qualified `service.action` id (the policy engine's actionId
+  // convention). These reconcile into `action_policies` org rows.
+  service?: string;
+  action?: string;
+  riskLevel?: "low" | "medium" | "high" | "critical";
   mode: "allow" | "require_approval" | "deny";
+  appliesIn?: "any" | "session" | "workflow";
 }
 
 export interface InstanceMemberDecl {
@@ -74,6 +80,10 @@ const KNOWN_TOP_LEVEL_KEYS = new Set<string>([
 ]);
 
 const TOOL_POLICY_MODES = new Set<string>(["allow", "require_approval", "deny"]);
+
+const TOOL_POLICY_RISK_LEVELS = new Set<string>(["low", "medium", "high", "critical"]);
+
+const TOOL_POLICY_APPLIES_IN = new Set<string>(["any", "session", "workflow"]);
 
 const MEMBER_ROLES = new Set<string>(["admin", "member"]);
 
@@ -186,11 +196,24 @@ function validateToolPolicies(
   const arr = assertArray(value, "toolPolicies", path);
   return arr.map((item, i) => {
     const obj = assertRecord(item, `toolPolicies[${i}]`, path);
-    let match: string | undefined;
+    let service: string | undefined;
+    let action: string | undefined;
+    let riskLevel: ToolPolicyRule["riskLevel"] | undefined;
     let mode: string | undefined;
+    let appliesIn: ToolPolicyRule["appliesIn"] | undefined;
     for (const [key, v] of Object.entries(obj)) {
-      if (key === "match") {
-        match = assertString(v, `toolPolicies[${i}].match`, path);
+      if (key === "service") {
+        service = assertString(v, `toolPolicies[${i}].service`, path);
+      } else if (key === "action") {
+        action = assertString(v, `toolPolicies[${i}].action`, path);
+      } else if (key === "riskLevel") {
+        const riskVal = assertString(v, `toolPolicies[${i}].riskLevel`, path);
+        if (!TOOL_POLICY_RISK_LEVELS.has(riskVal)) {
+          err(
+            `${path}: toolPolicies[${i}].riskLevel got "${riskVal}", allowed values are low, medium, high, critical.`,
+          );
+        }
+        riskLevel = riskVal as ToolPolicyRule["riskLevel"];
       } else if (key === "mode") {
         const modeVal = assertString(v, `toolPolicies[${i}].mode`, path);
         if (!TOOL_POLICY_MODES.has(modeVal)) {
@@ -199,13 +222,42 @@ function validateToolPolicies(
           );
         }
         mode = modeVal;
+      } else if (key === "appliesIn") {
+        const appliesVal = assertString(v, `toolPolicies[${i}].appliesIn`, path);
+        if (!TOOL_POLICY_APPLIES_IN.has(appliesVal)) {
+          err(
+            `${path}: toolPolicies[${i}].appliesIn got "${appliesVal}", allowed values are any, session, workflow.`,
+          );
+        }
+        appliesIn = appliesVal as ToolPolicyRule["appliesIn"];
       } else {
         err(`${path}: unknown key "toolPolicies[${i}].${key}". Remove it or check for a typo.`);
       }
     }
-    if (match === undefined) err(`${path}: toolPolicies[${i}].match is required.`);
+
+    // Exactly one target dimension — mirrors policies/admin.ts validateTarget.
+    const targetCount =
+      (service !== undefined ? 1 : 0) +
+      (action !== undefined ? 1 : 0) +
+      (riskLevel !== undefined ? 1 : 0);
+    if (targetCount === 0) {
+      err(
+        `${path}: toolPolicies[${i}] must set exactly one of service, action, riskLevel. Add one target field.`,
+      );
+    }
+    if (targetCount > 1) {
+      err(
+        `${path}: toolPolicies[${i}] sets more than one of service, action, riskLevel. Keep exactly one target field.`,
+      );
+    }
     if (mode === undefined) err(`${path}: toolPolicies[${i}].mode is required.`);
-    return { match, mode: mode as ToolPolicyRule["mode"] };
+
+    const rule: ToolPolicyRule = { mode: mode as ToolPolicyRule["mode"] };
+    if (service !== undefined) rule.service = service;
+    if (action !== undefined) rule.action = action;
+    if (riskLevel !== undefined) rule.riskLevel = riskLevel;
+    if (appliesIn !== undefined) rule.appliesIn = appliesIn;
+    return rule;
   });
 }
 

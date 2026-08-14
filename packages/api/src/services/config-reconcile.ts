@@ -3,8 +3,8 @@
  *
  * `reconcileInstanceConfig` applies the declarative `InstanceConfig` to the
  * live database. It runs sequentially through passes (org, then teams,
- * providers, skillSources — later passes are appended here). Any pass failure
- * throws (boot fails); the function is idempotent.
+ * providers, skillSources, toolPolicies — later passes are appended here). Any
+ * pass failure throws (boot fails); the function is idempotent.
  *
  * Id helpers produce stable, deterministic row ids for config-owned rows so
  * that repeated reconciliations produce the same primary keys and ON CONFLICT
@@ -13,8 +13,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNull, like, notLike } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
-import type { InstanceConfig } from "../config/instance-config.js";
+import { actionPolicies, invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
+import type { InstanceConfig, ToolPolicyRule } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
 import {
   ensureOrg,
@@ -69,6 +69,19 @@ export function configTeamId(name: string): string {
 export function configProviderId(name: string): string {
   const suffix = createHash("sha256").update(name).digest("hex").slice(0, 12);
   return `prov_cfg_${suffix}`;
+}
+
+/** Target dimension of a config-managed action policy. */
+export type PolicyDimension = "service" | "action" | "risk";
+
+/**
+ * Stable id for a config-managed `action_policies` row, keyed by TARGET:
+ * `pol:config:` + sha256(`${dimension}:${value}`).hex.slice(0,12). One managed
+ * row per declared target, so re-declaring the same target upserts in place.
+ */
+export function configPolicyId(dimension: PolicyDimension, value: string): string {
+  const suffix = createHash("sha256").update(`${dimension}:${value}`).digest("hex").slice(0, 12);
+  return `pol:config:${suffix}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,15 +503,111 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
 }
 
 // ---------------------------------------------------------------------------
+// Tool policies pass
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconciles `cfg.toolPolicies` into `action_policies` org rows (PR #140's
+ * policy engine). Each rule declares exactly one target (service/action/
+ * riskLevel); the validator guarantees that shape. One managed row per target
+ * (`pol:config:*` id). Upsert clears `revokedAt`, so re-declaring a removed
+ * rule resurrects it. A managed row whose target is no longer declared is
+ * soft-revoked (stamp `revokedAt`), never deleted — the action log keeps the
+ * provenance. Rows without the `pol:config:` prefix (UI-created) are untouched.
+ *
+ * Runs only when `cfg.toolPolicies` is defined; absent = unmanaged.
+ */
+async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
+  if (!cfg.toolPolicies) return;
+
+  const org = await ensureOrg(db);
+  const orgId = org.id;
+  const now = Date.now();
+
+  const desiredIds = new Set<string>();
+
+  for (const rule of cfg.toolPolicies) {
+    // Exactly one target dimension (validator-guaranteed). `action` maps to the
+    // `actionId` column; the value is the fully-qualified `service.action` id.
+    let id: string;
+    let service: string | null = null;
+    let actionId: string | null = null;
+    let riskLevel: ToolPolicyRule["riskLevel"] | null = null;
+    if (rule.service !== undefined) {
+      id = configPolicyId("service", rule.service);
+      service = rule.service;
+    } else if (rule.action !== undefined) {
+      id = configPolicyId("action", rule.action);
+      actionId = rule.action;
+    } else if (rule.riskLevel !== undefined) {
+      id = configPolicyId("risk", rule.riskLevel);
+      riskLevel = rule.riskLevel;
+    } else {
+      // Unreachable: the validator rejects a rule with no target dimension.
+      throw new InstanceConfigError(
+        "toolPolicies: a rule reached the reconciler with no target dimension. Set exactly one of service, action, riskLevel.",
+      );
+    }
+    desiredIds.add(id);
+
+    await db
+      .insert(actionPolicies)
+      .values({
+        id,
+        orgId,
+        principalType: "org",
+        principalId: orgId,
+        service,
+        actionId,
+        riskLevel,
+        mode: rule.mode,
+        paramMatchers: [],
+        appliesIn: rule.appliesIn ?? "any",
+        origin: "admin",
+        managedBy: "config",
+        expiresAt: null,
+        revokedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: actionPolicies.id,
+        set: {
+          mode: rule.mode,
+          appliesIn: rule.appliesIn ?? "any",
+          // Re-declaring a previously removed rule resurrects it.
+          revokedAt: null,
+          updatedAt: now,
+        },
+      });
+  }
+
+  // Sweep: soft-revoke managed rows whose target is no longer declared. Never
+  // touch rows without the `pol:config:` prefix (UI-created policies).
+  const managedRows = await db
+    .select({ id: actionPolicies.id, revokedAt: actionPolicies.revokedAt })
+    .from(actionPolicies)
+    .where(and(eq(actionPolicies.orgId, orgId), like(actionPolicies.id, "pol:config:%")));
+
+  for (const row of managedRows) {
+    if (!desiredIds.has(row.id) && row.revokedAt === null) {
+      await db
+        .update(actionPolicies)
+        .set({ revokedAt: now, updatedAt: now })
+        .where(eq(actionPolicies.id, row.id));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public reconcile entry point
 // ---------------------------------------------------------------------------
 
 /**
- * Applies org/teams/llmProviders/skillSources from `cfg` to the database.
- * Throws on any failure (boot fails). Idempotent.
+ * Applies org/teams/llmProviders/skillSources/toolPolicies from `cfg` to the
+ * database. Throws on any failure (boot fails). Idempotent.
  *
- * Structured as sequential passes so later tasks can append teams, providers,
- * and skillSources passes here.
+ * Structured as sequential passes so later tasks can append more passes here.
  */
 export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: InstanceConfig): Promise<void> {
   const { db } = deps;
@@ -514,4 +623,7 @@ export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: Instance
 
   // Pass 4: skillSources
   await reconcileSkillSourcesPass(db, cfg);
+
+  // Pass 5: toolPolicies → action_policies
+  await reconcileToolPoliciesPass(db, cfg);
 }

@@ -29,7 +29,6 @@ import type { ValetPlugin } from "@valet/engine";
 import {
   buildPluginCatalog,
   type ActionPlugin,
-  type ApprovalOverrideRule,
   type CommandContext,
   type CommandDef,
   type PluginCatalog,
@@ -228,15 +227,6 @@ export interface EngineHostOpts {
    * `providers/node.ts`, mirroring `resolveImageBuilder`'s own registry env.
    */
   prebuildPreflight?: PrebuildPreflightOpts;
-  /**
-   * Instance-level tool-policy rules (instance-config plan Task 3).
-   * Threaded from `InstanceConfig.toolPolicies` by `buildNodeProviders`.
-   * Forwarded to `pluginCatalogTools` on every session build so the engine's
-   * approval model can deny or require-approval specific tool calls org-wide.
-   * `ToolPolicyRule` is structurally identical to `ApprovalOverrideRule`; no
-   * cast needed.
-   */
-  approvalOverrides?: ApprovalOverrideRule[];
 }
 
 export interface SessionMeta {
@@ -667,14 +657,10 @@ export class EngineHost {
    */
   private async sessionExtras(owner: Principal, orgId: string): Promise<PluginSessionExtras> {
     const plugins = this.opts.plugins ?? [];
-    const overrideOpts = this.opts.approvalOverrides
-      ? { approvalOverrides: this.opts.approvalOverrides }
-      : undefined;
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], overrideOpts);
+    if (!this.opts.db) return pluginSessionExtras(plugins, []);
     return pluginSessionExtras(
       plugins,
       await listSkillSourcesFor(this.opts.db, owner, orgId),
-      overrideOpts,
     );
   }
 
@@ -999,7 +985,7 @@ export class EngineHost {
       (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
     );
     const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
-    const pluginCatalog = buildPluginCatalog(actionPlugins, undefined, this.opts.approvalOverrides);
+    const pluginCatalog = buildPluginCatalog(actionPlugins);
 
     return {
       ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
