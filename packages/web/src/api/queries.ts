@@ -134,6 +134,20 @@ export function usePauseSession(sessionId: string) {
   });
 }
 
+/** POST /:id/sandbox/replace — re-provision the session's sandbox in
+ * place. Threads and history are untouched; the new sandbox's state
+ * arrives over the `sandbox.status` stream, so no query invalidation is
+ * needed beyond the session row. */
+export function useReplaceSandbox(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, void>({
+    mutationFn: () => api.replaceSandbox(sessionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
+  });
+}
+
 export function useCreateThread(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<CreateThreadResponse, Error, CreateThreadRequest | void>({

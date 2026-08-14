@@ -233,6 +233,8 @@ export const api = {
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
   pauseSession: (id: string) =>
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
+  replaceSandbox: (id: string) =>
+    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
   autoTitleSession: (id: string, threadId?: string) => {
     const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
     return request<{ sessionTitle: string | null; threadTitle: string | null }>(
