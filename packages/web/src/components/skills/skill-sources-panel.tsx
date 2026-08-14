@@ -17,7 +17,7 @@ import { useState, type FormEvent } from "react";
 import { Button, Input, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import { OwnerBadge } from "~/components/owner-badge";
-import { OWNER_SELF, OwnerPicker } from "~/components/owner-picker";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -31,17 +31,18 @@ export function SkillSourcesPanel() {
   const sources = data?.sources ?? [];
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
-  const [teamId, setTeamId] = useState(OWNER_SELF);
   const add = useAddSkillSource();
+  // The workspace owns the source. There was an Owner select here, which
+  // asked a second time what the nav's workspace switcher had already
+  // answered — and could disagree with it, so the page could show one
+  // workspace's repositories while the form filed a new one under another.
+  const scope = useWorkspaceScope();
 
   function submit(e: FormEvent) {
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
-    add.mutate(
-      { repo: value, ...(teamId === OWNER_SELF ? {} : { teamId }) },
-      { onSuccess: () => setTeamId(OWNER_SELF) },
-    );
+    add.mutate({ repo: value, ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }) });
     setRepo("");
   }
 
@@ -71,14 +72,6 @@ export function SkillSourcesPanel() {
             <Button type="submit" size="sm" disabled={add.isPending}>
               {add.isPending ? <Spinner size={14} /> : "Import"}
             </Button>
-          </div>
-          <div className="mt-2">
-            <OwnerPicker
-              id="skill-source-owner"
-              value={teamId}
-              onChange={setTeamId}
-              help="A team repository syncs skills for every member's sessions."
-            />
           </div>
           <p className="mt-2 text-xs text-muted">Public repositories only.</p>
           {add.error && <p className="mt-1 text-xs text-danger-500">{add.error.message}</p>}

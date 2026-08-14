@@ -25,14 +25,26 @@ import { cn } from "~/lib/cn";
  * to the conversation that needs you, which switches context on arrival.
  * A badge here would be a second, weaker answer to a question the bell
  * already answers completely.
+ *
+ * Selecting a workspace SETS THE SCOPE, and navigates only from `/chat`.
+ * It used to always navigate to that workspace's default assistant, which
+ * made the control unusable from `/skills` or `/workflows`: choosing a team
+ * threw you into a conversation instead of re-scoping the page you were
+ * reading. Staying put is what Slack, Linear and Notion do — the page you
+ * are on reloads under the new workspace.
+ *
+ * A workspace with no assistant is therefore selectable now. It could not be
+ * before, because the only thing selecting it did was open an assistant that
+ * did not exist. A team with no assistant still owns skills and workflows.
  */
 export interface WorkspaceOption {
   /** `user` for your own, else the team id. Stable across renders. */
   key: string;
   label: string;
   isTeam: boolean;
-  /** Where selecting it goes: that workspace's default assistant. Absent
-   * when the workspace owns none, which makes the option unselectable. */
+  /** That workspace's default assistant. Where selecting it navigates FROM
+   * `/chat`; absent when the workspace owns none, in which case switching
+   * re-scopes without moving. */
   defaultAssistantId?: string;
 }
 
@@ -65,26 +77,17 @@ export function workspaceOptions(
   ];
 }
 
-/**
- * The workspace the current assistant belongs to.
- *
- * Derived from the open assistant rather than held as its own state, so the
- * control cannot disagree with what is on screen. It also means a link into
- * another workspace — a notification, a shared URL, an owner badge — moves
- * the switcher on arrival instead of landing you in a conversation the
- * control claims you are not in.
- */
-export function activeWorkspaceKey(active: AssistantSummary | undefined): string {
-  if (!active) return "user";
-  return active.owner.type === "team" ? active.owner.id : "user";
-}
-
 export function WorkspaceSwitcher({
   options,
   activeKey,
+  onSelect,
+  /** True on `/chat`, where the open conversation must follow the scope. */
+  navigateOnSelect,
 }: {
   options: WorkspaceOption[];
   activeKey: string;
+  onSelect: (key: string) => void;
+  navigateOnSelect: boolean;
 }) {
   const navigate = useNavigate();
 
@@ -118,13 +121,14 @@ export function WorkspaceSwitcher({
         {options.map((o) => (
           <DropdownMenuItem
             key={o.key}
-            disabled={o.defaultAssistantId === undefined}
             onSelect={() => {
-              if (!o.defaultAssistantId) return;
-              // Switching navigates rather than setting state: the open
-              // assistant is what defines the workspace, so moving the
-              // conversation IS the switch, and there is no second copy of
-              // the truth to fall out of step.
+              onSelect(o.key);
+              // From `/chat` the open assistant defines the workspace, so the
+              // conversation has to move with it or the two disagree. From
+              // anywhere else the page simply re-reads the new scope, and
+              // navigating would take the reader somewhere they did not ask
+              // to go.
+              if (!navigateOnSelect || !o.defaultAssistantId) return;
               void navigate({
                 to: "/chat",
                 search: { assistant: o.defaultAssistantId, thread: undefined, child: undefined },

@@ -10,7 +10,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
 import { useCreateWorkflow } from "~/api/workflows";
-import { OWNER_SELF, OwnerPicker } from "~/components/owner-picker";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { createDefaultWorkflowDefinition } from "~/components/workflows/editor-model";
 import { errorText } from "~/lib/error-text";
 
@@ -26,7 +26,9 @@ export function NewWorkflowDialog({
   const navigate = useNavigate();
   const create = useCreateWorkflow();
   const [name, setName] = useState(DEFAULT_NAME);
-  const [teamId, setTeamId] = useState(OWNER_SELF);
+  // The active workspace owns it. An Owner select here duplicated the nav's
+  // workspace switcher and could contradict it.
+  const scope = useWorkspaceScope();
 
   async function submit() {
     const trimmed = name.trim();
@@ -35,7 +37,7 @@ export function NewWorkflowDialog({
       const created = await create.mutateAsync({
         name: trimmed,
         definition: createDefaultWorkflowDefinition(),
-        ...(teamId === OWNER_SELF ? {} : { teamId }),
+        ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
       });
       onOpenChange(false);
       setName(DEFAULT_NAME);
@@ -64,13 +66,6 @@ export function NewWorkflowDialog({
             }}
           />
         </div>
-
-        <OwnerPicker
-          id="workflow-owner"
-          value={teamId}
-          onChange={setTeamId}
-          help="Every member of the owning team can see, edit, and run it."
-        />
 
         {create.error && (
           <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">

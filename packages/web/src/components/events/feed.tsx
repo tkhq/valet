@@ -10,7 +10,7 @@ import {
 import { useEventCatalog, useEvents } from "~/api/events";
 import { EventRow } from "./event-row";
 
-/** Sentinel for "no filter applied" — same convention as `OWNER_SELF`. */
+/** Sentinel for "no filter applied". */
 const ALL = "";
 
 /** The feed API's own page size; the UI has no pagination yet, so a feed

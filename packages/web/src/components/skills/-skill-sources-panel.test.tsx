@@ -52,10 +52,14 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
   ),
+  // The workspace scope reads `?assistant=` so an open assistant can override
+  // the stored workspace. This panel is never rendered with one.
+  useSearch: () => ({}),
 }));
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
 }));
 
 // The badge links by assistant id, so it reads the assistants list to find
@@ -83,17 +87,26 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 });
 
 import { SkillSourcesPanel } from "./skill-sources-panel";
+import { PERSONAL, WorkspaceScopeProvider } from "~/lib/workspace-scope";
 
-function renderPanel() {
+/** `workspace` selects the workspace the panel is being read in — the same
+ * thing the nav's switcher sets. It is seeded through localStorage because
+ * that is where the real scope lives, so these cases exercise the actual
+ * persistence rather than a value handed straight to the component. */
+function renderPanel(workspace = PERSONAL) {
+  window.localStorage.setItem("valet:workspace", workspace);
   return render(
     <TooltipProvider>
-      <SkillSourcesPanel />
+      <WorkspaceScopeProvider>
+        <SkillSourcesPanel />
+      </WorkspaceScopeProvider>
     </TooltipProvider>,
   );
 }
 
 describe("SkillSourcesPanel", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     currentData = { sources: [] };
     currentState = { isLoading: false, error: null };
     addState = { isPending: false, error: null };
@@ -119,20 +132,36 @@ describe("SkillSourcesPanel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(add).toHaveBeenCalledWith({ repo: "https://github.com/tkhq/skills" }, expect.anything());
+    expect(add).toHaveBeenCalledWith({ repo: "https://github.com/tkhq/skills" });
   });
 
-  it("includes the selected team when importing for a team, not just yourself", () => {
+  it("files the import under the workspace being read, with no second question", () => {
+    // There was an Owner select in this form. It asked again what the nav's
+    // workspace switcher had already answered, and the two could disagree —
+    // the panel could list one workspace's repositories while the form filed
+    // a new one under another.
+    renderPanel("team_1");
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", teamId: "team_1" });
+    expect(screen.queryByLabelText("Owner")).toBeNull();
+  });
+
+  it("sends no teamId in your own workspace", () => {
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
 
     fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
       target: { value: "tkhq/skills" },
     });
-    fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "team_1" } });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", teamId: "team_1" }, expect.anything());
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills" });
   });
 
   it("shows the owning team's name on a team-tracked repository", () => {

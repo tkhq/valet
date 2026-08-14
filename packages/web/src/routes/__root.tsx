@@ -4,6 +4,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
+import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { AssistantRail } from "~/components/session/assistant-rail";
 import { useAttentionPing } from "~/lib/use-attention-ping";
 import { unlock } from "~/lib/notification-sound";
@@ -77,12 +78,16 @@ function RootLayout() {
     );
   }
 
+  // Inside the signed-in branch only: the provider reads assistants and
+  // teams, which a signed-out visitor cannot fetch.
   return (
     <TooltipProvider>
-      <SignedInEffects />
-      <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)}>
-        <Outlet />
-      </AppShell>
+      <WorkspaceScopeProvider>
+        <SignedInEffects />
+        <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)}>
+          <Outlet />
+        </AppShell>
+      </WorkspaceScopeProvider>
     </TooltipProvider>
   );
 }

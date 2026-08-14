@@ -19,6 +19,7 @@ import {
 } from "@tanstack/react-router";
 import { TopNav } from "./top-nav";
 import { AppShell } from "./app-shell";
+import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({
@@ -39,17 +40,26 @@ vi.mock("./notifications-bell", () => ({
 }));
 
 function renderNav(opts: { withSidebar?: boolean } = {}) {
+  // The nav reads the workspace scope, which throws outside its provider —
+  // deliberately, so a surface can never silently render another workspace's
+  // data under this one's name. The provider must sit INSIDE the router: it
+  // reads `?assistant=` to let the open assistant win over the stored key.
+  const withScope = (node: React.ReactNode) => (
+    <WorkspaceScopeProvider>{node}</WorkspaceScopeProvider>
+  );
   const rootRoute = createRootRoute({
     component: () =>
       opts.withSidebar === undefined ? (
-        <TopNav />
+        withScope(<TopNav />)
       ) : (
         // The real shell, so the toggle is driven by the state it actually
         // reads — a hand-built context value would prove only that the
         // component renders what it is handed.
-        <AppShell topNav={<TopNav />} sidebar={opts.withSidebar ? <nav /> : undefined}>
-          <div />
-        </AppShell>
+        withScope(
+          <AppShell topNav={<TopNav />} sidebar={opts.withSidebar ? <nav /> : undefined}>
+            <div />
+          </AppShell>,
+        )
       ),
   });
   const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: () => null });

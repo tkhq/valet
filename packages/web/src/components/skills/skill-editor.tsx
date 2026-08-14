@@ -23,7 +23,7 @@ import type { SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
-import { OWNER_SELF, OwnerPicker } from "~/components/owner-picker";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { errorText } from "~/lib/error-text";
 
 export function SkillEditor({
@@ -43,7 +43,9 @@ export function SkillEditor({
   const [name, setName] = useState(skill?.name ?? "");
   const [description, setDescription] = useState(skill?.description ?? "");
   const [content, setContent] = useState(skill?.content ?? "");
-  const [teamId, setTeamId] = useState(OWNER_SELF);
+  // The active workspace owns a new skill. Editing never moved ownership and
+  // still does not — the select was already hidden when editing.
+  const scope = useWorkspaceScope();
 
   const pending = create.isPending || update.isPending;
   const error = create.error ?? update.error;
@@ -57,7 +59,7 @@ export function SkillEditor({
       return;
     }
     create.mutate(
-      { name, description, content, ...(teamId === OWNER_SELF ? {} : { teamId }) },
+      { name, description, content, ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }) },
       { onSuccess: onSaved },
     );
   }
@@ -86,14 +88,6 @@ export function SkillEditor({
           </p>
         </div>
 
-        {!editing && (
-          <OwnerPicker
-            id="skill-owner"
-            value={teamId}
-            onChange={setTeamId}
-            help="A team skill reaches every member's sessions."
-          />
-        )}
       </div>
 
       <div className="space-y-1.5">

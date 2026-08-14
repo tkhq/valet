@@ -47,10 +47,14 @@ vi.mock("@tanstack/react-router", () => ({
   ),
   useNavigate: () => navigate,
   createFileRoute: () => (config: unknown) => config,
+  // The workspace scope reads `?assistant=` so an open assistant can override
+  // the stored workspace. This page is never rendered with one.
+  useSearch: () => ({}),
 }));
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
 }));
 
 // The badge links by assistant id, so it reads the assistants list to find
@@ -86,11 +90,18 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 import { WorkflowsIndexPage } from "./workflows.index";
+import { PERSONAL, WorkspaceScopeProvider } from "~/lib/workspace-scope";
 
-function renderPage() {
+/** `workspace` selects the workspace the page is being read in — what the
+ * nav's switcher sets. Seeded through localStorage, which is where the real
+ * scope lives. */
+function renderPage(workspace = PERSONAL) {
+  window.localStorage.setItem("valet:workspace", workspace);
   return render(
     <TooltipProvider>
-      <WorkflowsIndexPage />
+      <WorkspaceScopeProvider>
+        <WorkflowsIndexPage />
+      </WorkspaceScopeProvider>
     </TooltipProvider>,
   );
 }
@@ -151,16 +162,29 @@ describe("WorkflowsIndexPage — team ownership", () => {
     expect(badge.closest("a")?.getAttribute("to")).toBe("/chat");
   });
 
-  it("posts teamId when a team owner is picked in the New workflow dialog", async () => {
-    renderPage();
+  it("creates the workflow in the workspace being read, with no second question", async () => {
+    // The dialog had an Owner select. It repeated the nav's workspace
+    // switcher and could contradict it, so the list could show one
+    // workspace while Create filed the new workflow under another.
+    renderPage("team_1");
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
 
-    fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "team_1" } });
+    expect(screen.queryByLabelText("Owner")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
     const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string };
     expect(call.teamId).toBe("team_1");
+  });
+
+  it("sends no teamId in your own workspace", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
+    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string };
+    expect(call.teamId).toBeUndefined();
   });
 });
 

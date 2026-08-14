@@ -2,15 +2,17 @@
  * The workspace switcher's two pure parts: what it offers, and which option
  * it shows as current.
  *
- * The rule worth stating once, because both functions exist to hold it: the
- * active workspace is DERIVED from the open assistant, never stored beside
- * it. A second copy could disagree with the conversation on screen, and a
- * link arriving from a notification or a shared URL would land the reader in
- * one workspace while the control claimed another.
+ * The active workspace is no longer derived here. It is held and persisted
+ * by `workspace-scope.tsx`, because deriving it from the open assistant only
+ * ever resolved on `/chat` and left every other surface reading "Personal".
+ * The open assistant still wins where there is one, which keeps the property
+ * this file used to hold on its own: the control cannot disagree with the
+ * conversation on screen. `workspaceOfAssistant` and its tests moved with
+ * it — see `~/lib/workspace-scope.test.ts`.
  */
 import { describe, expect, it } from "vitest";
 import type { AssistantSummary, TeamSummary } from "@valet/api/wire";
-import { activeWorkspaceKey, workspaceOptions } from "./workspace-switcher";
+import { workspaceOptions } from "./workspace-switcher";
 
 function team(id: string, name = id): TeamSummary {
   return { id, orgId: "org_1", name, createdAt: 0, memberCount: 2, callerRole: "member" };
@@ -60,22 +62,5 @@ describe("workspaceOptions", () => {
 
   it("offers Personal alone before the assistants list resolves", () => {
     expect(workspaceOptions(undefined, []).map((o) => o.label)).toEqual(["Personal"]);
-  });
-});
-
-describe("activeWorkspaceKey", () => {
-  it("reads the workspace off the open assistant's owner", () => {
-    expect(activeWorkspaceKey(assistant("p", { type: "team", id: "t1" }))).toBe("t1");
-  });
-
-  it("treats one of your own assistants as Personal, default or not", () => {
-    expect(activeWorkspaceKey(assistant("mine", ME))).toBe("user");
-    expect(activeWorkspaceKey(assistant("mine", ME, true))).toBe("user");
-  });
-
-  it("falls back to Personal when nothing is open", () => {
-    // A bare /chat is your own workspace. Nothing is persisted, so returning
-    // tomorrow cannot silently leave you in a team you last visited.
-    expect(activeWorkspaceKey(undefined)).toBe("user");
   });
 });

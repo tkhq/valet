@@ -109,13 +109,21 @@ vi.mock("./thread-tree", () => ({
 
 import { TooltipProvider } from "~/components/primitives";
 import { AssistantRail, eligibleTeams } from "./assistant-rail";
+import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 
 /** Team rows carry a "shared with N people" tooltip, so the rail needs the
  * provider its real parent (`AppShell`) supplies. */
 function renderRail() {
+  // The rail reads the workspace scope rather than re-deriving it from the
+  // open assistant. The provider is the real one — it runs on the same
+  // mocked `useSearch`/`useAssistants`/`useTeams` these tests already set,
+  // so `searchParams.assistant` still decides the workspace exactly as
+  // before, and these cases keep testing the rail rather than a stub.
   return render(
     <TooltipProvider>
-      <AssistantRail />
+      <WorkspaceScopeProvider>
+        <AssistantRail />
+      </WorkspaceScopeProvider>
     </TooltipProvider>,
   );
 }
@@ -180,6 +188,10 @@ function teamAssistant(over: Partial<AssistantSummary> = {}): AssistantSummary {
 }
 
 beforeEach(() => {
+  // The workspace scope persists, and jsdom shares localStorage across a
+  // file. Without this, whichever test last selected a team would decide the
+  // starting workspace of every test after it.
+  window.localStorage.clear();
   teamsData = { teams: [] };
   orgData = org(true);
   meData = me();

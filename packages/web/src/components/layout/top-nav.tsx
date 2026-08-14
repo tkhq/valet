@@ -1,15 +1,12 @@
-import { Link, useSearch } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { Menu, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 import { useSidebarControls } from "./app-shell";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useAssistants } from "~/api/assistants";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
-import {
-  WorkspaceSwitcher,
-  activeWorkspaceKey,
-  workspaceOptions,
-} from "~/components/layout/workspace-switcher";
+import { WorkspaceSwitcher, workspaceOptions } from "~/components/layout/workspace-switcher";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { PresenceMark } from "~/components/assistant/presence-mark";
 import { NotificationsBell } from "./notifications-bell";
 
@@ -108,12 +105,14 @@ export function TopNav() {
   const assistantsQ = useAssistants();
   const teamsQ = useTeams();
   const orgQ = useOrg();
-  const search = (useSearch({ strict: false }) ?? {}) as { assistant?: string };
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
   const options = workspaceOptions(assistantsQ.data?.assistants, teams);
-  const activeKey = activeWorkspaceKey(
-    (assistantsQ.data?.assistants ?? []).find((a) => a.id === search.assistant),
-  );
+  // The active workspace is no longer derived here from `?assistant=`. That
+  // only ever resolved on `/chat`, so every other page read "Personal"
+  // regardless of the workspace the reader was in. The scope owns it now and
+  // still lets the open assistant win — see `workspace-scope.tsx`.
+  const scope = useWorkspaceScope();
+  const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
 
   // The logo is the PRODUCT (Valet), not the orchestrator — the
   // orchestrator's chosen name shows up in its own title card (session
@@ -136,7 +135,12 @@ export function TopNav() {
 
       {/* Beside the logo, not in the sidebar: it scopes the surfaces below
           rather than filtering one list. */}
-      <WorkspaceSwitcher options={options} activeKey={activeKey} />
+      <WorkspaceSwitcher
+        options={options}
+        activeKey={scope.key}
+        onSelect={scope.setKey}
+        navigateOnSelect={onChat}
+      />
 
       {/*
        * Six labelled links do not fit beside the logo and the icons on a

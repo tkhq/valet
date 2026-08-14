@@ -26,7 +26,7 @@ import {
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { cn } from "~/lib/cn";
-import { activeWorkspaceKey } from "~/components/layout/workspace-switcher";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { ThreadTree } from "./thread-tree";
 
 /**
@@ -82,8 +82,9 @@ export function AssistantRail() {
   const notificationsQ = useNotifications();
   const needsAttention = attentionSessionIds(notificationsQ.data?.notifications);
   // One workspace at a time. The switcher beside the logo chooses it, and
-  // the active assistant is what names it — so the rail draws exactly the
-  // group the open conversation belongs to.
+  // the workspace scope names it — and on `/chat` the scope follows the open
+  // assistant — so the rail draws exactly the group the open conversation
+  // belongs to.
   //
   // This is what retired the row cap. Every owner's assistants used to share
   // this column, so the block grew with the number of teams (42% of the
@@ -91,7 +92,8 @@ export function AssistantRail() {
   // more" control to stay bounded. Scoping to one workspace bounds it by
   // construction: the block is as tall as one owner's assistant list,
   // whether you belong to two teams or twenty.
-  const shown = groups.filter((g) => g.key === activeWorkspaceKey(active));
+  const scope = useWorkspaceScope();
+  const shown = groups.filter((g) => g.key === scope.key);
 
   const [renaming, setRenaming] = useState<AssistantSummary | null>(null);
   const [archiving, setArchiving] = useState<AssistantSummary | null>(null);
