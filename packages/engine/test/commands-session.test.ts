@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@mariozechner/pi-ai";
 import {
   Engine,
@@ -65,12 +65,78 @@ describe("Session.prompt command interception", () => {
     const entries = await store.getEntries(session.id, threadId);
     expect(entries.at(-1)?.type).toBe("command_result");
 
+    // The typed command is echoed as a persisted user message BEFORE the
+    // result — without it, clients render the result above the user's
+    // bubble after any refetch, and reloads lose the command entirely.
+    const echo = entries.at(-2);
+    expect(echo?.type).toBe("message");
+    expect(echo?.type === "message" && echo.role).toBe("user");
+    expect(echo?.type === "message" && echo.content).toBe("/status");
+
     // The queue never took a submission for the command.
     const unsettled = await store.listUnsettledSubmissions(session.id);
     expect(unsettled).toHaveLength(0);
 
     // A command_result event was emitted.
     expect(events.some((e) => e.event.type === "command_result")).toBe(true);
+  });
+
+  it("a builtin runs against the target thread, not the session default", async () => {
+    const faux = registerFauxProvider({ provider: "s-builtin-thread" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+    });
+    const defaultThreadId = session.thread().id;
+    const other = session.thread("other");
+
+    await session.prompt("/status", { threadId: other.id });
+
+    // /status reports the thread it ran against.
+    const entries = await store.getEntries(session.id, other.id);
+    const result = entries.at(-1);
+    expect(result?.type).toBe("command_result");
+    expect(result?.type === "command_result" && result.output).toContain(other.id);
+    expect(result?.type === "command_result" && result.output).not.toContain(defaultThreadId);
+  });
+
+  it("a command_result is stamped strictly after its echo, even within one ms", async () => {
+    const faux = registerFauxProvider({ provider: "s-order" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+    });
+    const threadId = session.thread().id;
+
+    // Freeze the clock so echo and result would collide without a floor.
+    const now = 1_700_000_000_000;
+    const spy = vi.spyOn(Date, "now").mockReturnValue(now);
+    cleanups.push(() => spy.mockRestore());
+
+    await session.prompt("/status");
+
+    const entries = await store.getEntries(session.id, threadId);
+    const echo = entries.find((e) => e.type === "message");
+    const result = entries.find((e) => e.type === "command_result");
+    expect(echo).toBeDefined();
+    expect(result).toBeDefined();
+    // Strictly greater: created_at alone must order the pair on reload, since
+    // the REST read (getEntries) has no reliable id tiebreaker.
+    expect((result as { createdAt: number }).createdAt).toBeGreaterThan(
+      (echo as { createdAt: number }).createdAt,
+    );
   });
 
   it("/status with opts.threadId lands the command_result on that thread", async () => {

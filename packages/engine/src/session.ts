@@ -21,6 +21,7 @@ import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
   CommandResultEntry,
+  MessageEntry,
   CreateSessionOptions,
   CredentialOwner,
   CredentialProvider,
@@ -737,13 +738,31 @@ export class Session {
     args: string[],
     raw: string,
   ): Promise<PromptReceipt> {
+    // Echo the typed command as a persisted user message BEFORE the result.
+    // A command takes no queue item, so nothing else persists the user's
+    // text — without this echo, clients reorder the result above the
+    // command on refetch, and a reload loses the command entirely. Written
+    // first (not raced with the plugin grace window) so the echo always
+    // precedes its result.
+    const echoAt = Date.now();
+    const echo: MessageEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: raw,
+      createdAt: echoAt,
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [echo]);
     let source: CommandSource;
     let name: string;
     let result: { ok: boolean; output: string };
     if (resolved.source === "builtin") {
       source = "builtin";
       name = resolved.name;
-      result = await executeBuiltin(name, args, this, this.options.commandContext);
+      result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
     } else if (resolved.source === "plugin") {
       source = "plugin";
       name = `${resolved.pluginName}:${resolved.def.name}`;
@@ -760,12 +779,15 @@ export class Session {
       if (fast === null) {
         const bgName = name;
         void pending
-          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r))
+          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r, echoAt))
           .catch((err: unknown) =>
-            this.persistCommandResult(thread, bgName, "plugin", {
-              ok: false,
-              output: err instanceof Error ? err.message : String(err),
-            }),
+            this.persistCommandResult(
+              thread,
+              bgName,
+              "plugin",
+              { ok: false, output: err instanceof Error ? err.message : String(err) },
+              echoAt,
+            ),
           );
         return {
           sessionId: this.id,
@@ -781,7 +803,7 @@ export class Session {
       throw new Error(`executeCommand: unexpected source ${resolved.source}`);
     }
 
-    await this.persistCommandResult(thread, name, source, result);
+    await this.persistCommandResult(thread, name, source, result, echoAt);
 
     return {
       sessionId: this.id,
@@ -792,12 +814,19 @@ export class Session {
     };
   }
 
-  /** Persist a command_result entry and emit its live event. */
+  /**
+   * Persist a command_result entry and emit its live event. `notBefore` is
+   * the echo entry's timestamp; the result is stamped strictly after it so
+   * `created_at` alone orders the pair on reload — the REST read
+   * (`getEntries`) has no reliable id tiebreaker (uid counters are
+   * variable-length base36, so lexical id order is not insertion order).
+   */
   private async persistCommandResult(
     thread: Thread,
     name: string,
     source: CommandSource,
     result: { ok: boolean; output: string },
+    notBefore: number,
   ): Promise<void> {
     const entry: CommandResultEntry = {
       id: uid("e"),
@@ -809,7 +838,7 @@ export class Session {
       source,
       ok: result.ok,
       output: result.output,
-      createdAt: Date.now(),
+      createdAt: Math.max(Date.now(), notBefore + 1),
     };
     await this.providers.store.appendEntries(this.id, thread.id, [entry]);
     await this.emit({ type: "command_result", threadId: thread.id, entry });
