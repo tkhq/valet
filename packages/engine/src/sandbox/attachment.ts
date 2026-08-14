@@ -281,7 +281,11 @@ export class SandboxAttachment {
       ).catch(() => {});
     }
     this.kickProvision();
-    if (this.inFlight) await this.inFlight.catch(() => {});
+    // Re-widen: the guard above narrowed `this.inFlight` to null and TS
+    // keeps that narrowing across the kickProvision() call that re-set it
+    // (same limitation the doReconcile state re-read works around).
+    const pending = this.inFlight as Promise<void> | null;
+    if (pending) await pending.catch(() => {});
   }
 
   /**
