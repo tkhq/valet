@@ -23,6 +23,13 @@ import type { Providers } from "./providers/types.js";
 import { authModeConflict, loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
 import { buildAuth } from "./auth/index.js";
+import {
+  loadInstanceConfig,
+  resolveAllowedEmailDomains,
+  InstanceConfigError,
+  type InstanceConfig,
+} from "./config/instance-config.js";
+import { reconcileInstanceConfig } from "./services/config-reconcile.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -142,11 +149,46 @@ if (authConflict) {
 
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;
 
+// Instance config (`valet.yaml`): load and validate before anything else
+// so a misconfigured file fails boot loudly instead of silently degrading.
+// Fail-fast: print the message only (no stack spam for config mistakes),
+// then exit. `InstanceConfigError` carries a corrective-action message.
+let instanceConfig: InstanceConfig | null;
+try {
+  instanceConfig = loadInstanceConfig(process.env);
+} catch (e) {
+  if (e instanceof InstanceConfigError) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  throw e;
+}
+
 // Real auth (auth-v2 design): only wired when BETTER_AUTH_SECRET resolves a
 // config. Absent → stub-only mode. Loaded before `buildNodeProviders` so
 // `EngineHost` can be constructed with the sandbox JWT master / API base
 // URL it needs at session-provision time — not after boot.
 const authConfig = loadAuthConfig(process.env);
+
+// Both-set guard + merge for allowedEmailDomains. Must run after authConfig
+// is loaded (we need the env-parsed domains) and after instanceConfig
+// (we need the config-declared domains). Throws InstanceConfigError with
+// the corrective-action message if both sources are set simultaneously.
+if (authConfig) {
+  try {
+    authConfig.allowedEmailDomains = resolveAllowedEmailDomains(
+      instanceConfig,
+      process.env,
+      authConfig.allowedEmailDomains,
+    );
+  } catch (e) {
+    if (e instanceof InstanceConfigError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
 
 // The URL injected into every sandbox as `VALET_API_URL` (Task 8, auth-v2
 // plan) must be reachable FROM the sandbox, which `BETTER_AUTH_URL` is not
@@ -182,6 +224,7 @@ const providers = await buildNodeProviders({
   // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
   // here — the boot check above refuses that pair.
   seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
+  instanceConfig: instanceConfig ?? undefined,
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
@@ -261,6 +304,14 @@ const rotateSweep: RotateSweepHandle = startRotateSweep({
   db: providers.db,
 });
 
+// Instance config reconciliation: apply the declarative config to the live
+// database (org name, members, teams, skill sources, etc.). Runs after all
+// boot-restore passes so the db is settled before we write to it. Failure
+// here fails boot — a half-reconciled config is worse than no config.
+if (instanceConfig) {
+  await reconcileInstanceConfig({ db: providers.db }, instanceConfig);
+}
+
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
 const authWiring: AuthWiring = authConfig
@@ -268,7 +319,12 @@ const authWiring: AuthWiring = authConfig
       auth: buildAuth({
         db: providers.db,
         cfg: authConfig,
-        hooks: buildAuthHooks({ db: providers.db, cfg: authConfig, credentialStore: providers.engineCredentials }),
+        hooks: buildAuthHooks({
+          db: providers.db,
+          cfg: authConfig,
+          credentialStore: providers.engineCredentials,
+          instanceConfig,
+        }),
       }),
       authConfig,
     }
@@ -307,6 +363,7 @@ const server = startListening({
     console.log(
       `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
     );
+    console.log(`  config:   ${process.env.VALET_CONFIG ?? "none (VALET_CONFIG unset)"}`);
     console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
   },
 });
