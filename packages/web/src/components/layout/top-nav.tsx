@@ -1,5 +1,6 @@
 import { Link, useSearch } from "@tanstack/react-router";
-import { Settings } from "lucide-react";
+import { Menu, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
+import { useSidebarControls } from "./app-shell";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useAssistants } from "~/api/assistants";
 import { useOrg, useTeams } from "~/api/settings";
@@ -47,6 +48,57 @@ function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
   );
 }
 
+/**
+ * The sidebar toggle, at the nav's left edge — the first thing in the row,
+ * ahead of the logo, which is where Linear, Notion and VS Code put it.
+ *
+ * It lives here rather than floating over the sidebar so that it occupies
+ * layout instead of overlapping it; the old floated version covered the
+ * assistants rail's "New assistant" button. See `SidebarControls`.
+ *
+ * Two buttons, not one, because they do different things and must say so:
+ * on mobile the sidebar is out of the flow and opens as a drawer, while on
+ * desktop it collapses in place. One button with a width-dependent label
+ * would announce the wrong action to a screen reader at one of the two
+ * widths.
+ *
+ * Renders nothing when there is no sidebar to control, including outside an
+ * `AppShell` entirely.
+ */
+function SidebarToggle() {
+  const controls = useSidebarControls();
+  if (controls === null || !controls.present) return null;
+
+  const buttonClass =
+    "shrink-0 rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="Open threads"
+        onClick={controls.openDrawer}
+        className={`md:hidden inline-flex ${buttonClass}`}
+      >
+        <Menu className="h-4 w-4" aria-hidden />
+      </button>
+      <button
+        type="button"
+        aria-label={controls.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!controls.collapsed}
+        onClick={controls.toggleCollapsed}
+        className={`hidden md:inline-flex ${buttonClass}`}
+      >
+        {controls.collapsed ? (
+          <PanelLeftOpen className="h-4 w-4" aria-hidden />
+        ) : (
+          <PanelLeftClose className="h-4 w-4" aria-hidden />
+        )}
+      </button>
+    </>
+  );
+}
+
 export function TopNav() {
   const info = useOrchestratorInfo();
   const presence = info.data?.presence ?? "idle";
@@ -69,6 +121,8 @@ export function TopNav() {
   // orchestrator's live state at a glance from anywhere in the app.
   return (
     <header className="h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-2 px-3 sm:gap-4">
+      <SidebarToggle />
+
       <Link
         to="/"
         className="flex shrink-0 items-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash"

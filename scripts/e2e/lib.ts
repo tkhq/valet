@@ -70,10 +70,12 @@ const MIN = 60_000;
  * file (the live block self-gates). lib.test.ts asserts the union of these
  * lists + dedicated rows covers the whole integration dir. */
 const INTEGRATION_CORE_FILES = [
+  "src/integration/assistants.test.ts",
   "src/integration/auth.e2e.test.ts",
   "src/integration/memory-routes.test.ts",
   "src/integration/memory-tree.test.ts",
   "src/integration/sessions-list-filter.test.ts",
+  "src/integration/sessions-run-state.test.ts",
   "src/integration/reload-tool-rendering.test.ts",
   "src/integration/workflow-engine-deps.test.ts",
   "src/integration/orchestrator-info.test.ts",
