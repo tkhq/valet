@@ -88,6 +88,23 @@ describe("collectDirectoryEntries", () => {
     expect(fixture?.calls[0]?.query.per_page).toBe("100");
   });
 
+  // The live contents endpoint ignores `page`: a request for page 2 of a
+  // 150-entry directory answers with the same 150 entries. Reading that as a
+  // second page collects the same names over and over until the cap, and
+  // reports a whole directory as incomplete.
+  it("stops when the endpoint ignores the page parameter", async () => {
+    const whole = Array.from({ length: 150 }, (_, i) => dirEntry(`skill-${i}`, "dir"));
+    const request = await requestAgainst(() => ({ body: whole }));
+
+    const listing = await collectDirectoryEntries(request, PARAMS, MAX_DIRECTORY_ENTRIES);
+
+    expect(listing.kind).toBe("directory");
+    if (listing.kind !== "directory") return;
+    expect(listing.entries).toHaveLength(150);
+    expect(listing.complete).toBe(true);
+    expect(fixture?.calls).toHaveLength(2);
+  });
+
   it("caps the listing and reports it as incomplete", async () => {
     const page = Array.from({ length: 100 }, (_, i) => dirEntry(`skill-${i}`, "dir"));
     const request = await requestAgainst(() => ({ body: page }));

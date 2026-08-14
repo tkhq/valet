@@ -11,6 +11,7 @@ import {
   PublicSkillRepoReader,
   SkillRepoNotFoundError,
   SkillRepoReadError,
+  SkillRepoTimeoutError,
 } from "./skill-repo-reader.js";
 
 let fixture: GithubFixture | undefined;
@@ -66,6 +67,26 @@ describe("PublicSkillRepoReader", () => {
     const err = await reader.headSha("tkhq/skills", "").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SkillRepoReadError);
     expect(err).not.toBeInstanceOf(SkillRepoNotFoundError);
+  });
+
+  it("gives up on a request that never answers", async () => {
+    // The hang this timeout exists for: a connection that stays open and
+    // sends nothing. The reader's own signal is the only thing that ends it,
+    // so this fetch settles only when that signal aborts.
+    const hang: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+    const reader = new PublicSkillRepoReader({
+      apiUrl: "https://api.github.test",
+      fetchImpl: hang,
+      timeoutMs: 10,
+    });
+
+    const err = await reader.headSha("tkhq/skills", "").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SkillRepoTimeoutError);
+    expect((err as Error).message).toContain("tkhq/skills@HEAD");
+    expect((err as Error).message).toContain("status page");
   });
 
   it("lists one level of the root at a pinned commit", async () => {

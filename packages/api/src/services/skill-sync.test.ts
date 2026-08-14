@@ -482,6 +482,55 @@ Read the reference.
     expect(row?.lastSha).toBe("commit-1");
   });
 
+  it("keeps every mirrored skill when GitHub returns part of the listing", async () => {
+    const repo: FakeRepo = {
+      sha: "commit-1",
+      skills: { deploy: skillMd("deploy", "Deploy it."), "on-call": skillMd("on-call", "Answer.") },
+    };
+    const f = serve(repo);
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    await serviceFor(f).syncOnce(source.id);
+    const before = await db.select().from(skills).orderBy(skills.name);
+    expect(before.map((r) => r.name)).toEqual(["deploy", "on-call"]);
+    await f.close();
+
+    // The directory now holds more entries than the reader collects. GitHub
+    // answers a listing whole, so the over-long directory arrives in one
+    // response and the reader keeps the first 500 entries of it. Everything
+    // past the cut is missing from what the reader returns, and missing is
+    // what reconcile reads as deleted upstream.
+    const oversized = Array.from({ length: 600 }, (_v, i) => entry(`skill-${i}`, "dir"));
+    fixture = startGithubFixture({
+      getCommit: () => ({ body: { sha: "commit-2" } }),
+      getContents: (_o, _r, path) => {
+        if (path !== "") return { status: 404, body: { message: "Not Found" } };
+        return { body: oversized };
+      },
+    });
+    const outcome = await serviceFor(fixture).syncOnce(source.id);
+
+    expect(outcome?.status).toBe("error");
+    expect(outcome?.deleted).toBe(0);
+    expect(outcome?.error).toContain("part of its listing");
+    expect(outcome?.imported).toBe(0);
+    expect(outcome?.updated).toBe(0);
+    // Both rows are still there, and neither was rewritten.
+    const after = await db.select().from(skills).orderBy(skills.name);
+    expect(after.map((r) => r.name)).toEqual(["deploy", "on-call"]);
+    expect(after.map((r) => r.updatedAt)).toEqual(before.map((r) => r.updatedAt));
+    expect(after.map((r) => r.contentSha)).toEqual(before.map((r) => r.contentSha));
+    // The sync stopped at the listing: no SKILL.md was read.
+    expect(fixture.calls.filter((call) => call.path.endsWith("/SKILL.md"))).toHaveLength(0);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    expect(row?.status).toBe("error");
+    expect(row?.attempts).toBe(1);
+    // The commit is NOT recorded, so the next poll reads the repository again.
+    expect(row?.lastSha).toBe("commit-1");
+    // The message names the fix, which is to re-import a smaller directory.
+    expect(row?.lastError).toContain("Remove this repository");
+  });
+
   it("returns null for a source that is gone", async () => {
     fixture = startGithubFixture({});
     expect(await serviceFor(fixture).syncOnce("skillsrc_missing")).toBeNull();
