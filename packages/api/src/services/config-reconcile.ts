@@ -11,9 +11,21 @@
  * logic can upsert safely.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull, like, notLike } from "drizzle-orm";
+import { and, eq, isNull, like, notLike, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { actionPolicies, invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
+import {
+  actionPolicies,
+  invites,
+  llmProviders,
+  orgMembers,
+  orgs,
+  skillSources,
+  skills,
+  teams,
+  teamMembers,
+  users,
+  type TeamRow,
+} from "../schema/index.js";
 import type { InstanceConfig, ToolPolicyRule } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
 import {
@@ -38,6 +50,20 @@ import { parseRepoInput } from "./skill-sources.js";
 
 export interface ReconcileDeps {
   db: AppDb;
+  /**
+   * Path of the file `cfg` was read from. Named in the messages a team
+   * collision or a promotion prints, so the reader knows which file to edit.
+   */
+  configPath?: string;
+}
+
+/**
+ * Names the instance config file in a message. The reader must be able to
+ * open the file the message tells them to edit, so the fallback names the
+ * variable that points at it.
+ */
+function configFileLabel(configPath: string | undefined): string {
+  return configPath ?? "the instance config file (VALET_CONFIG)";
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +85,15 @@ export function configSkillSourceId(repo: string, ref: string, subpath: string):
   return `skillsrc_cfg_${suffix}`;
 }
 
-/** Stable id for a config-managed team: `team_cfg_` + sha256(name).hex.slice(0,12) */
+/**
+ * Stable id for a config-managed team: `team_cfg_` + sha256(name).hex.slice(0,12)
+ *
+ * Cosmetic, unlike the invite and skill-source ids above. Those prefixes ARE
+ * the ownership filter their prune loops select on. This one is only a
+ * legible id for a row the reconciler happens to create: `teams.origin` is
+ * the provenance marker, and a team adopted from the UI keeps the id it was
+ * born with. Never match on this prefix.
+ */
 export function configTeamId(name: string): string {
   const suffix = createHash("sha256").update(name).digest("hex").slice(0, 12);
   return `team_cfg_${suffix}`;
@@ -224,36 +258,191 @@ async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
 // Teams pass
 // ---------------------------------------------------------------------------
 
-async function reconcileTeamsPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
+/** Identity is the name within the org, so every lookup here keys on it. */
+async function findTeamByName(
+  db: AppDb,
+  orgId: string,
+  name: string,
+): Promise<{ id: string; name: string; origin: TeamRow["origin"]; externalId: string | null } | undefined> {
+  const rows = await db
+    .select({ id: teams.id, name: teams.name, origin: teams.origin, externalId: teams.externalId })
+    .from(teams)
+    .where(and(eq(teams.orgId, orgId), eq(teams.name, name)))
+    .limit(1);
+  return rows[0];
+}
+
+/**
+ * The refusal both collision checks below raise, so one wording covers both.
+ *
+ * The row's own spelling is named only when it differs from the declared
+ * name. `teams_org_name` compares byte for byte, so `Platform` and
+ * `platform` are two rows, and a reader told to rename "the team" has to
+ * know which of the two holds the name.
+ */
+function idpCollisionError(
+  declaredName: string,
+  existing: { name: string; externalId: string | null },
+  configPath: string | undefined,
+): InstanceConfigError {
+  const heldBy = existing.name === declaredName ? "" : ` Team "${existing.name}" holds that name.`;
+  return new InstanceConfigError(
+    `teams[].name "${declaredName}" is already the mirror of identity provider group ` +
+      `"${existing.externalId ?? declaredName}".${heldBy} Rename the team in ` +
+      `${configFileLabel(configPath)}, or rename the group in the identity provider and restart.`,
+  );
+}
+
+/**
+ * Fails boot when a mirrored team already holds the declared name in ANY
+ * letter case.
+ *
+ * The exact-match path below refuses the same collision, but Postgres lets
+ * the near miss through: `teams_org_name` compares byte for byte, so a file
+ * that declares `Platform` beside a mirror of `/platform` would insert a
+ * second row instead. The org would then hold two teams that read as one,
+ * each asserted by a different writer, and no log line makes that visible.
+ *
+ * Case folding here only, not in the adoption lookup: promoting a `local`
+ * team whose case differs would change which row the file owns, which is a
+ * decision for the file's own semantics rather than a collision to refuse.
+ */
+async function assertNoIdpNearName(
+  db: AppDb,
+  orgId: string,
+  name: string,
+  configPath: string | undefined,
+): Promise<void> {
+  const rows = await db
+    .select({ name: teams.name, externalId: teams.externalId })
+    .from(teams)
+    .where(
+      and(eq(teams.orgId, orgId), eq(teams.origin, "idp"), sql`lower(${teams.name}) = lower(${name})`),
+    )
+    .limit(1);
+  const clash = rows[0];
+  if (clash) throw idpCollisionError(name, clash, configPath);
+}
+
+/**
+ * Decides what the file may do with a team row that already holds the
+ * declared name. Adoption is not free: after it, the file asserts that team's
+ * members at every boot, so `origin` must name the reconciler as the writer
+ * or it stops answering "who reasserts this row".
+ *
+ * An `idp` row is the one case that must fail boot. Adopting it would hand a
+ * group's membership to the file while the login sync still removes everybody
+ * the claim omits — the two writers would fight over the same rows, once per
+ * boot and once per login. An operator cannot see that from a log line, so
+ * the api refuses to start and names both fixes.
+ */
+async function adoptTeamForConfig(
+  db: AppDb,
+  existing: { id: string; name: string; origin: TeamRow["origin"]; externalId: string | null },
+  name: string,
+  configPath: string | undefined,
+): Promise<string> {
+  switch (existing.origin) {
+    case "idp":
+      throw idpCollisionError(name, existing, configPath);
+    case "local":
+      // Promote. The file now owns which members this team asserts, and a UI
+      // demotion of a declared member is overwritten at the next boot, so a
+      // row left at `local` would make `origin` a lie for every reader — the
+      // badge in the teams panel, the delete guard, a future rename route.
+      await db.update(teams).set({ origin: "config" }).where(eq(teams.id, existing.id));
+      console.warn(
+        `[config-reconcile] team "${name}" existed in Valet and is now declared in ` +
+          `${configFileLabel(configPath)}. The file asserts its members from now on. To hand it back, ` +
+          `remove it from the teams: list in that file and restart.`,
+      );
+      return existing.id;
+    case "config":
+      return existing.id;
+  }
+}
+
+/**
+ * Finds or creates the config-owned team for one declared name.
+ *
+ * The mirrored-name check runs FIRST, before the exact-match lookup. A file
+ * that declares `Platform` beside a mirror of `/platform` must fail the same
+ * way it fails on the exact name, and an exact-match `local` row would
+ * otherwise be promoted while the near-name mirror stayed in place.
+ *
+ * The insert is followed by a second read through the same origin guard, not
+ * by trusting the id it just wrote. `onConflictDoNothing` hides a lost race:
+ * a login that mirrored a group of this name between the two statements would
+ * otherwise slip an `idp` row into the resolved id and take its members.
+ */
+async function resolveConfigTeam(
+  db: AppDb,
+  orgId: string,
+  name: string,
+  configPath: string | undefined,
+): Promise<string | undefined> {
+  await assertNoIdpNearName(db, orgId, name, configPath);
+
+  const existing = await findTeamByName(db, orgId, name);
+  if (existing) return adoptTeamForConfig(db, existing, name, configPath);
+
+  await db
+    .insert(teams)
+    .values({ id: configTeamId(name), orgId, name, origin: "config", createdAt: Date.now() })
+    .onConflictDoNothing();
+
+  const after = await findTeamByName(db, orgId, name);
+  if (!after) return undefined;
+  return adoptTeamForConfig(db, after, name, configPath);
+}
+
+/**
+ * Hands back every team the file used to declare and no longer does.
+ *
+ * Demotion, never deletion. The file releases ownership; the people in the
+ * team keep it. This is what makes `origin` recomputed state the reconciler
+ * owns, so it stays true across edits to the file instead of recording only
+ * how a row was born.
+ *
+ * An absent `teams:` key means this instance does not manage teams, so
+ * nothing here runs — the same rule every other pass follows for its own
+ * section. An EMPTY `teams: []` is a declaration of none, and it demotes all.
+ */
+async function demoteUndeclaredConfigTeams(
+  db: AppDb,
+  orgId: string,
+  declaredNames: Set<string>,
+  configPath: string | undefined,
+): Promise<void> {
+  const configTeams = await db
+    .select({ id: teams.id, name: teams.name })
+    .from(teams)
+    .where(and(eq(teams.orgId, orgId), eq(teams.origin, "config")));
+
+  for (const row of configTeams) {
+    if (declaredNames.has(row.name)) continue;
+    await db.update(teams).set({ origin: "local" }).where(eq(teams.id, row.id));
+    console.warn(
+      `[config-reconcile] team "${row.name}" is no longer declared in ${configFileLabel(configPath)}. ` +
+        `Valet owns it again and keeps its members. To delete it, use the teams page.`,
+    );
+  }
+}
+
+async function reconcileTeamsPass(
+  db: AppDb,
+  cfg: InstanceConfig,
+  configPath: string | undefined,
+): Promise<void> {
   if (!cfg.teams) return;
 
   const org = await ensureOrg(db);
+  const declaredNames = new Set<string>();
 
   for (const teamDecl of cfg.teams) {
-    const teamId = configTeamId(teamDecl.name);
+    declaredNames.add(teamDecl.name);
 
-    // Insert the team if it does not already exist (keyed by name within the org).
-    const existingTeam = await db
-      .select({ id: teams.id })
-      .from(teams)
-      .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
-      .limit(1);
-
-    if (!existingTeam[0]) {
-      // Insert with the deterministic id only if no team with this name exists.
-      await db
-        .insert(teams)
-        .values({ id: teamId, orgId: org.id, name: teamDecl.name, createdAt: Date.now() })
-        .onConflictDoNothing();
-    }
-
-    // Resolve the actual team id (may differ from configTeamId if a UI team was adopted).
-    const teamRows = await db
-      .select({ id: teams.id })
-      .from(teams)
-      .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
-      .limit(1);
-    const resolvedTeamId = teamRows[0]?.id;
+    const resolvedTeamId = await resolveConfigTeam(db, org.id, teamDecl.name, configPath);
     if (!resolvedTeamId) continue;
 
     // Members
@@ -311,6 +500,8 @@ async function reconcileTeamsPass(db: AppDb, cfg: InstanceConfig): Promise<void>
       }
     }
   }
+
+  await demoteUndeclaredConfigTeams(db, org.id, declaredNames, configPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -610,13 +801,13 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig): Promis
  * Structured as sequential passes so later tasks can append more passes here.
  */
 export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: InstanceConfig): Promise<void> {
-  const { db } = deps;
+  const { db, configPath } = deps;
 
   // Pass 1: org + members + invites
   await reconcileOrgPass(db, cfg);
 
   // Pass 2: teams
-  await reconcileTeamsPass(db, cfg);
+  await reconcileTeamsPass(db, cfg, configPath);
 
   // Pass 3: llmProviders
   await reconcileLlmProvidersPass(db, cfg);

@@ -110,6 +110,33 @@ export class IdpManagedTeamError extends Error {
   }
 }
 
+/**
+ * Thrown when a delete targets a team declared in `valet.yaml`.
+ *
+ * Only delete. The file asserts its declared members at every boot and never
+ * removes one, so a membership edit through the API is real work that lasts
+ * until the next restart — refusing it would be stricter than the file's own
+ * rule. A delete is the case the file cannot express: the next boot would
+ * recreate the team empty, and an operator reading the teams page would see
+ * the team return with nobody in it.
+ *
+ * The message names the environment variable, not a resolved path, because
+ * this service reads no environment. `VALET_CONFIG` identifies the file
+ * without ambiguity.
+ */
+export class ConfigManagedTeamError extends Error {
+  readonly code = "team_config_managed";
+  readonly statusCode = 409;
+  constructor(name: string) {
+    super(
+      `team '${name}' is declared in the instance config file (VALET_CONFIG) — ` +
+        `remove it from the teams: list in that file, then restart. ` +
+        `Valet recreates a declared team at every boot.`,
+    );
+    this.name = "ConfigManagedTeamError";
+  }
+}
+
 /** Thrown when targeting a user who isn't a member of the team. */
 export class NotTeamMemberError extends NotFoundError {
   constructor(teamId: string, userId: string) {
@@ -450,6 +477,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
   const team = teamRows[0];
   if (!team) throw new NotFoundError("team", opts.teamId);
   if (team.origin === "idp") throw new IdpManagedTeamError(team, "delete");
+  if (team.origin === "config") throw new ConfigManagedTeamError(team.name);
 
   await db.transaction(async (tx) => {
     await lockTeamForOwnership(tx, opts.teamId);

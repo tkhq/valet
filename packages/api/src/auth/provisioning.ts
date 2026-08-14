@@ -109,6 +109,11 @@ export interface ProvisioningDeps {
   cfg: AuthConfig;
   credentialStore: CredentialStore;
   instanceConfig?: InstanceConfig | null;
+  /**
+   * Path of the instance config file. Named in the message a group/team name
+   * collision prints, so the reader knows which file to edit.
+   */
+  configPath?: string;
 }
 
 /** Google plugins' credential-read keys (`ActionPlugin.service`, underscored —
@@ -157,6 +162,23 @@ function readInviteCode(body: Record<string, unknown> | null | undefined): strin
  * fires on user CREATION only — none of them re-runs on a repeat sign-in,
  * and team sync must run on every one.
  *
+ * ## Two team writers, one order, and why the order does not matter
+ *
+ * A first single-sign-on login runs three of these in sequence. The sso
+ * plugin calls `handleOAuthUserInfo` — which runs the `databaseHooks` — and
+ * only then `provisionUser`, both awaited, before it sets the session cookie
+ * (`@better-auth/sso/dist/index.mjs`, both callback paths). So the order is:
+ * admission (`user.create.before`), then org membership and the
+ * config-declared team bind (`user.create.after`), then the identity-provider
+ * team sync (`provisionUser`). Every later login runs `provisionUser` alone.
+ *
+ * Correctness must NOT rest on that order, because a plugin upgrade can
+ * change it. It rests on the two writers touching disjoint rows: the bind
+ * below reads `origin = 'config'` and the sync reads `origin = 'idp'`, and
+ * the boot reconciler fails the api rather than let one name hold both. The
+ * order is recorded here only because both paths call `ensureOrg`, and a
+ * later edit that widens either scope would reintroduce the overlap.
+ *
  * `user.create.before` and `.after` run within the same request but as
  * separate calls with no shared parameter — `admission`'s resolved invite
  * (if any) rides a module-scoped map keyed by lowercased email between
@@ -169,7 +191,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   databaseHooks: BetterAuthOptions["databaseHooks"];
   provisionUser: (data: SsoProvisionData) => Promise<void>;
 } {
-  const { db, cfg, credentialStore, instanceConfig } = deps;
+  const { db, cfg, credentialStore, instanceConfig, configPath } = deps;
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
@@ -227,6 +249,13 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     // this email. Team rows are resolved by name within the org — if a team
     // is missing (e.g. config edited after boot), skip silently; the next
     // boot's reconciler recreates it.
+    //
+    // `origin = 'config'` is part of that lookup because a team the file does
+    // not own is not the file's to write. A same-named `idp` row belongs to
+    // the login sync, which removes whoever the group claim omits, so binding
+    // to it would add a member the next claim takes away. The reconciler
+    // refuses that collision at boot; this scope is what holds until a boot
+    // happens.
     const userEmail = keyForEmail(user.email);
     for (const teamDecl of instanceConfig?.teams ?? []) {
       const match = (teamDecl.members ?? []).find((m) => m.email === userEmail);
@@ -235,7 +264,13 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       const teamRows = await db
         .select({ id: teams.id })
         .from(teams)
-        .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
+        .where(
+          and(
+            eq(teams.orgId, org.id),
+            eq(teams.name, teamDecl.name),
+            eq(teams.origin, "config"),
+          ),
+        )
         .limit(1);
       const teamRow = teamRows[0];
       if (!teamRow) continue;
@@ -317,6 +352,8 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
         userId: data.user.id,
         claim,
         adminGroupName: oidc.teamAdminGroup,
+        mirroredGroups: oidc.teamGroups,
+        configPath,
       });
     } catch (err) {
       console.error(`team sync: reconcile failed for user ${data.user.id}:`, err);

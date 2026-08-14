@@ -12,7 +12,12 @@ Status: implemented (plan: docs/plans/2026-08-14-instance-config.md)
   service/action/riskLevel instead of a glob `match`.
 - The provisioning hook binds config-declared team members by team NAME
   lookup, not by `team_cfg_*` id — the name is the team's identity, so the
-  bind works for adopted UI-created teams too.
+  bind works for adopted UI-created teams too. The lookup is additionally
+  scoped to `origin = 'config'`: a same-named team the identity provider
+  owns is not the file's to write.
+- Teams mark ownership with the `teams.origin` column, not an id prefix.
+  The prefix cannot survive adoption, and teams are the one table a second
+  subsystem also reconciles. See "Ownership marking" below.
 - Known-kind llm providers are updated through the existing
   `updateLlmProvider`; only `openai_compatible` rows get deterministic
   `prov_cfg_*` ids (known kinds keep their natural per-org-singleton
@@ -186,6 +191,39 @@ both places **fails boot**:
 Two live sources of truth for admission policy is silent-drift territory;
 better to make the operator pick.
 
+`auth.sso.teams` replaces the three team-sync claim names —
+`AUTH_OIDC_TEAM_CLAIM`, `AUTH_OIDC_TEAM_ASSERTED_CLAIM` and
+`AUTH_OIDC_TEAM_ADMIN_GROUP`. They qualify on every test above: non-secret,
+identical across replicas, and they change the shape of instance state. The
+both-set guard is **per field**, not per section, because the three are
+independent and an operator may reasonably move two into the file and leave
+the third in the environment.
+
+```yaml
+auth:
+  sso:
+    teams:
+      claim: groups                   # AUTH_OIDC_TEAM_CLAIM
+      assertedClaim: groups_asserted  # AUTH_OIDC_TEAM_ASSERTED_CLAIM
+      adminSubGroup: admins           # AUTH_OIDC_TEAM_ADMIN_GROUP
+      groups: [/platform, /research]  # optional; no env equivalent
+```
+
+`groups` is new, and optional. Omitted, the sync mirrors every top-level
+group the claim carries, which is what a deployment with no file does today.
+Declared, it is an allowlist, and it gives the validator the one thing a
+runtime check cannot have: the set of team names the identity provider will
+ask for, before any row exists. Making it required would silently stop
+mirroring groups an existing deployment relies on, so it stays optional; a
+future `version: 2` could reconsider.
+
+The validator rejects four shapes that would otherwise be inert or unsafe at
+run time, none of which produces a visible symptom: a `claim` equal to
+`assertedClaim` (which collapses the absent-versus-empty test the sync's
+whole safety property rests on), a `/` inside `adminSubGroup` (ambiguous
+paths — see `docs/environment-variables.md`), a `groups` entry that is not a
+top-level path (the sync mirrors nothing deeper), and a blank value.
+
 Values that stay in env vars: everything with a secret sibling (OIDC
 issuer/client/secret, `BETTER_AUTH_SECRET`) and everything genuinely
 per-deployment (`AUTH_TRUSTED_ORIGINS`, ports, database URLs,
@@ -214,6 +252,27 @@ Config-created rows carry a recognizable id prefix instead of a new
 The reconciler owns exactly the rows matching these prefixes. UI-created
 rows (`skillsrc_<uuid>`, `invite_<uuid>`) are never touched. This keeps the
 pre-1.0 schema edits to zero for this feature.
+
+**Teams are the exception, and use a column.** `teams.origin` already exists
+with values `local | idp`, because the identity-provider team sync needs to
+know which rows it owns. Teams gain a third value, `config`, rather than a
+second, parallel provenance mechanism. Two reasons make the column
+unavoidable here where a prefix suffices elsewhere:
+
+1. A prefix cannot survive adoption. The reconciler adopts a same-named
+   team created in the UI, which keeps its original id — so the id can never
+   answer "who owns this row" for exactly the rows where the question
+   matters. `configTeamId` still mints `team_cfg_<hash>` for a team the
+   reconciler creates, because a legible id is free, but nothing keys on it.
+2. A third writer already exists. Teams are the one table two subsystems
+   reconcile, and the rule that keeps them apart has to be readable by both.
+
+`invites` and `skill_sources` keep their prefixes. There the prefix IS the
+prune predicate, it works, and changing it would mean a schema edit plus a
+rewrite of two prune loops for no gain. The repo already runs both
+conventions side by side — `skills.origin` is `local | repo` while
+`skill_sources` config rows are prefix-marked. That inconsistency predates
+this file and is deliberately left alone.
 
 ### `org` section
 
@@ -257,10 +316,22 @@ it would be a new auth-config option, not a file concern.
 A team's identity is its name — `teams` has a unique (org, name) index, so
 the reconciler keys by name and no id-prefix marking is needed:
 
-- A declared team that does not exist → created (id `team_cfg_<hash>` for
-  traceability; identity remains the name).
-- A declared team that exists (either origin) → adopted; the reconciler
-  asserts the declared members on it.
+- A declared team that does not exist → created with `origin: config` (id
+  `team_cfg_<hash>` for traceability; identity remains the name).
+- A declared team that exists with `origin: local` → adopted **and promoted
+  to `config`**. After adoption the file is what asserts that team's members
+  at every boot, so a row left at `local` would make `origin` answer the
+  wrong question for every reader of it — the teams-page badge, the delete
+  guard, a future rename route.
+- A declared team that exists with `origin: idp` → **fails boot.** See
+  "Collisions with the identity-provider sync" below.
+- A team that `origin` says is `config` but the file no longer declares →
+  **demoted back to `local`**, members intact. That is a release of
+  ownership, not a destruction, so it stays inside "assert, don't destroy".
+  It also makes `origin` recomputed state the reconciler owns, which is the
+  only way it stays true across edits to the file. An absent `teams:` key
+  means this instance does not manage teams and nothing is demoted; an empty
+  `teams: []` is a declaration of none, and demotes all.
 - **`members`** — same email semantics as `org.members`: an existing user
   is upserted into `team_members` at the declared role. A declared member
   with no user yet is bound by the provisioning hook at first sign-in —
@@ -270,6 +341,61 @@ the reconciler keys by name and no id-prefix marking is needed:
   sign-in, so a post-admission bind suffices.)
 - The section only asserts. It never deletes a team or removes a member —
   those stay UI actions; the reconciler logs divergence.
+
+The API keeps membership on a `config` team editable, and refuses only
+DELETE (`ConfigManagedTeamError`, 409). Refusing membership edits would be
+stricter than this section's own rule: the file adds and never removes, so a
+UI addition survives every boot and a UI removal survives until the next
+restart. A delete is the one change the file cannot express — the next boot
+recreates the team empty, which reads as data loss. The teams page therefore
+keeps the member controls on a declared team, drops the delete item, and
+shows a note that a restart puts the declared members back.
+
+#### Collisions with the identity-provider team sync
+
+Teams are reconciled by two subsystems: this file at boot, and
+`services/team-sync.ts` at every single-sign-on login. The invariant that
+keeps them apart is one sentence:
+
+> A team's `origin` names exactly one writer of its `team_members` rows.
+
+`config` rows are written only by the teams pass and by the first-sign-in
+bind, and neither ever deletes. `idp` rows are written only by the sync,
+which adds, changes role, and removes — removal is what offboarding means.
+`local` rows are written only by the teams routes. No row has two writers,
+so no membership has two opinions, and nothing can oscillate.
+
+Without that scope the two passes flap. The reconciler would find an `idp`
+team by name, adopt it, and assert the declared members onto it; the next
+login would remove every one of them that the group claim omits; the next
+boot would add them back. One write per restart, one per sign-in, forever.
+
+Both sources want a name — `teams[].name: platform` and a group `/platform`
+— is therefore an error, never a merge. It is caught in three places, in
+this order:
+
+1. **Statically, in the validator**, when `auth.sso.teams.groups` is
+   declared. The check is **case-insensitive** although `teams_org_name` is
+   not, and that is the point: `Platform` and `/platform` do NOT collide in
+   Postgres, so they would create two rows that read as one team in the
+   teams page. A near-collision nobody can see is worse than one that fails
+   loudly. Making the index case-insensitive instead would be a migration
+   plus a behavior change for teams that already exist.
+2. **At boot, in the reconciler**, when a declared name is already held by
+   an `origin: idp` row. This is the ordering that loses data — the group
+   was mirrored first, then somebody added the team to the file — so the api
+   refuses to start and names both fixes.
+3. **At run time, in the sync**, for a group the file never listed. The sync
+   skips the group and leaves the declared team untouched
+   (`name_taken_by_config_team`). Skipping loses a team nobody has yet;
+   adopting would lose access people already have. It is also the rule the
+   sync already applies to `local` teams — *the sync never takes over a team
+   it did not create* — rather than a second rule.
+
+The corrective action differs per origin, so `reportCollision` switches
+exhaustively on it. The `local` branch's advice ("rename or delete that
+team") is wrong for a `config` team and would loop: delete it, the next boot
+recreates it, the same warning returns.
 
 ### `llmProviders` section
 
@@ -420,3 +546,17 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
    an existing admin)? v1 says no — the file only asserts what it declares.
 2. Does prod want reconcile-on-SIGHUP or a `/api/admin` re-apply endpoint
    instead of restart-to-apply? Deferred until it hurts.
+3. Should `teams[]` gain an explicit stable key (`id:`) so a rename in the
+   file tracks the same row? Under name-as-identity, renaming a team in the
+   file today orphans the old row and creates a second team beside it. That
+   is a real gap, but name-as-identity was a deliberate choice and changing
+   it is wider than the collision work that prompted the question. The door
+   stays open at zero cost: `teams_org_external` is keyed on
+   `(org_id, origin, external_id)`, so `external_id` is already a
+   per-origin namespace that such a key could occupy without colliding with
+   the group paths the sync stores there. Until then `external_id` is NULL
+   for a `config` team — the file identifies a team by `teams[].name`, which
+   `teams_org_name` already keeps unique, and a second column holding a copy
+   of the first would buy no constraint.
+4. Should `auth.sso.teams.groups` become required? Not in v1 — see
+   "Migrated env vars". A `version: 2` could revisit it.

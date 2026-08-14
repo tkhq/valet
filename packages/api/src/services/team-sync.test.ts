@@ -8,7 +8,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { orgMembers, orgs, teamMembers, teams, users, type TeamRow } from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "./teams.js";
 import { desiredTeamsFromPaths, readTeamClaim, reconcileIdpTeams } from "./team-sync.js";
 
@@ -22,7 +22,7 @@ async function seedUser(db: AppDb, id: string) {
 
 interface Membership {
   team: string;
-  origin: "local" | "idp";
+  origin: TeamRow["origin"];
   externalId: string | null;
   role: "admin" | "member";
 }
@@ -211,6 +211,44 @@ describe("desiredTeamsFromPaths", () => {
       expect(wanted.size).toBe(0);
       expect(ignored).toEqual([path]);
     }
+  });
+
+  it("mirrors every top-level group when no allowlist is given", () => {
+    const { teams: wanted } = desiredTeamsFromPaths(["/platform", "/research"], ADMIN_GROUP);
+    expect([...wanted.keys()]).toEqual(["/platform", "/research"]);
+  });
+
+  it("mirrors only the listed groups when an allowlist is given", () => {
+    const { teams: wanted } = desiredTeamsFromPaths(
+      ["/platform", "/research", "/finance"],
+      ADMIN_GROUP,
+      ["/platform", "/finance"],
+    );
+    expect([...wanted.keys()]).toEqual(["/platform", "/finance"]);
+  });
+
+  it("keeps the admin sub-group of a listed group", () => {
+    // The allowlist names parents, and admin arrives on a child path. A
+    // filter on the whole path would silently drop every admin grant.
+    const { teams: wanted } = desiredTeamsFromPaths(["/platform/admins"], ADMIN_GROUP, ["/platform"]);
+    expect(wanted.get("/platform")?.role).toBe("admin");
+  });
+
+  it("says nothing about a group the allowlist excludes", () => {
+    // Exclusion is a choice the operator made. A warning would repeat on
+    // every login of every user for as long as the group exists.
+    const { teams: wanted, ignored } = desiredTeamsFromPaths(
+      ["/finance", "/finance/leads"],
+      ADMIN_GROUP,
+      ["/platform"],
+    );
+    expect(wanted.size).toBe(0);
+    expect(ignored).toEqual([]);
+  });
+
+  it("mirrors nothing when the allowlist is empty", () => {
+    const { teams: wanted } = desiredTeamsFromPaths(["/platform"], ADMIN_GROUP, []);
+    expect(wanted.size).toBe(0);
   });
 });
 

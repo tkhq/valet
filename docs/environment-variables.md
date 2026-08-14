@@ -29,9 +29,9 @@ stub applies. Provider variable pairs are all-or-none.
 | `AUTH_TRUSTED_ORIGINS` | Extra CORS/trusted origins (`http://localhost:5173` is always included) |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Comma-separated signup domain allowlist |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
-| `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below |
-| `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`) |
-| `AUTH_OIDC_TEAM_ADMIN_GROUP` | Sub-group that grants admin on its parent team (default `admins`) |
+| `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below. Prefer `auth.sso.teams.claim` in `valet.yaml` |
+| `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`). Prefer `auth.sso.teams.assertedClaim` |
+| `AUTH_OIDC_TEAM_ADMIN_GROUP` | Sub-group that grants admin on its parent team (default `admins`). Prefer `auth.sso.teams.adminSubGroup` |
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | GitHub social login |
 | `VALET_LOCAL_AUTH` | `1` → stub identity for local dev. Mutually exclusive with `BETTER_AUTH_SECRET` — the server refuses to boot when both are set |
@@ -102,6 +102,42 @@ A provider that names these claims differently needs no code change. Set
 `AUTH_OIDC_TEAM_CLAIM` and `AUTH_OIDC_TEAM_ASSERTED_CLAIM` to the names it
 sends, and `AUTH_OIDC_TEAM_ADMIN_GROUP` to the sub-group that grants admin.
 A provider that sends neither claim changes no team membership at all.
+
+#### Declare the mapping in `valet.yaml` instead
+
+The three variables above still work, but `valet.yaml` is the preferred home
+for them. They are not secrets, they are the same on every replica, and they
+change the shape of instance state — which is what the file is for. The
+issuer, the client id and the client secret stay in the environment.
+
+```yaml
+auth:
+  sso:
+    teams:
+      claim: groups                   # AUTH_OIDC_TEAM_CLAIM
+      assertedClaim: groups_asserted  # AUTH_OIDC_TEAM_ASSERTED_CLAIM
+      adminSubGroup: admins           # AUTH_OIDC_TEAM_ADMIN_GROUP
+      groups:                         # optional allowlist, no env equivalent
+        - /platform
+        - /research
+```
+
+If you set an environment variable and declare the matching key, the api
+refuses to start and names both. Remove one. The check is per field, so you
+can declare two keys in the file and set the third variable.
+
+`groups` limits the sync to the groups you list. Omit it and Valet mirrors
+every top-level group the claim carries, which is the behavior of a
+deployment with no file. Each entry must be a top-level path such as
+`/platform`; the admin sub-group of a listed group is still read.
+
+Do not give a team in `teams:` the same name as a group in
+`auth.sso.teams.groups`. The api refuses to start on that pair, and it
+compares the two without case, because `Platform` and `/platform` would
+otherwise make two teams that look like one in the teams page. A declared
+team and a mirrored group cannot share a name: each owns its members, and
+sharing one row would make the file add a member at every boot that the sync
+removes at the next sign-in.
 
 ## Sandboxes
 

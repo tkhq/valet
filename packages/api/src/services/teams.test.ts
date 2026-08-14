@@ -4,6 +4,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import {
   addMember,
+  ConfigManagedTeamError,
   createTeam,
   deleteTeam,
   IdpManagedTeamError,
@@ -264,6 +265,47 @@ describe("teams service", () => {
 
       await deleteTeam(db, { teamId: local.id });
       expect(await listTeamsForUser(db, "u9")).toHaveLength(0);
+    });
+  });
+
+  describe("config-declared teams", () => {
+    /**
+     * Seeds a team the way the boot reconciler does: `origin: "config"` and
+     * no external id. `createTeam` always writes `local`, so it cannot
+     * produce one.
+     */
+    async function seedConfigTeam(): Promise<string> {
+      const id = "team_cfg_seed";
+      await db.insert(teams).values({ id, orgId, name: "declared", origin: "config", createdAt: Date.now() });
+      await db.insert(teamMembers).values({ teamId: id, userId: "u1", role: "admin" });
+      await db.insert(teamMembers).values({ teamId: id, userId: "u2", role: "member" });
+      return id;
+    }
+
+    it("deleteTeam refuses and names the file to edit", async () => {
+      const teamId = await seedConfigTeam();
+      await expect(deleteTeam(db, { teamId })).rejects.toThrow(ConfigManagedTeamError);
+      // Naming the refusal is not enough — the reader needs the file, because
+      // the next boot recreates a team deleted anywhere else.
+      await expect(deleteTeam(db, { teamId })).rejects.toThrow(/VALET_CONFIG/);
+      expect(await listTeamsForUser(db, "u1")).toHaveLength(1);
+    });
+
+    it("membership stays editable, unlike a mirrored team's", async () => {
+      // The file only asserts members, so an edit here is real work that
+      // lasts until the next restart. Refusing it would be stricter than the
+      // file's own rule.
+      const teamId = await seedConfigTeam();
+
+      await addMember(db, { teamId, userId: "u3", role: "member" });
+      expect(await listTeamMembers(db, teamId)).toHaveLength(3);
+
+      await setRole(db, { teamId, userId: "u2", role: "admin" });
+      const members = await listTeamMembers(db, teamId);
+      expect(members.find((m) => m.userId === "u2")?.role).toBe("admin");
+
+      await removeMember(db, { teamId, userId: "u3" });
+      expect(await listTeamMembers(db, teamId)).toHaveLength(2);
     });
   });
 

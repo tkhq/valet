@@ -46,6 +46,18 @@ function idpManagedNote(externalId: string | null): string {
 }
 
 /**
+ * Says what a declared team's controls do and do not survive.
+ *
+ * The member controls stay live here, unlike a mirrored team's, because the
+ * config file only adds. The reader still needs the half that does not last:
+ * a person removed here comes back at the next restart if the file still
+ * declares them.
+ */
+const CONFIG_MANAGED_NOTE =
+  "This team is declared in valet.yaml. You can change its members here, but a restart adds the " +
+  "declared members back. Edit the file to change that list, or to delete the team.";
+
+/**
  * Organization · Teams — the first-ever teams management UI over the
  * existing `/api/teams` router. List with inline create, per-team expand
  * revealing the member roster + add/remove/role-toggle, and delete-via-
@@ -59,6 +71,13 @@ function idpManagedNote(externalId: string | null): string {
  * disabling them, and shows `idpManagedNote` where they would have been. A
  * disabled control the reader cannot explain is worse than no control.
  * Creating a team is untouched: every team made here is `local`.
+ *
+ * A team with `origin === "config"` is declared in `valet.yaml`, and it is
+ * deliberately treated differently. The file only asserts members, so the
+ * member controls keep working and the panel keeps them. Only delete goes,
+ * because the API refuses it: the next boot would recreate the team empty.
+ * `CONFIG_MANAGED_NOTE` states the half a reader cannot see — that a restart
+ * puts the declared members back.
  */
 export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
   const teamsQ = useTeams();
@@ -159,6 +178,7 @@ function TeamRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteTeam = useDeleteTeam();
   const managed = team.origin === "idp";
+  const declared = team.origin === "config";
 
   return (
     <div className="py-3">
@@ -183,6 +203,13 @@ function TeamRow({
               Identity provider
             </Badge>
           )}
+          {declared && (
+            // `neutral`, not the mirrored team's `accent`: this team's
+            // controls still work, so it must not read as equally locked.
+            <Badge variant="neutral" className="shrink-0" title={CONFIG_MANAGED_NOTE}>
+              Declared in valet.yaml
+            </Badge>
+          )}
           <span className="shrink-0 text-xs text-muted">
             {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
           </span>
@@ -191,8 +218,9 @@ function TeamRow({
           Created {formatDate(team.createdAt)}
         </span>
         {/* Delete is the only item in this menu, and the API refuses it on a
-            mirrored team. An empty menu is worse than no menu. */}
-        {!managed && (
+            mirrored team and on a declared one — the next boot would recreate
+            a declared team empty. An empty menu is worse than no menu. */}
+        {!managed && !declared && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -251,6 +279,7 @@ function TeamMembers({ team, orgMembers }: { team: TeamSummary; orgMembers: OrgM
   const teamId = team.id;
   const teamName = team.name;
   const managed = team.origin === "idp";
+  const declared = team.origin === "config";
   const membersQ = useTeamMembers(teamId);
   const setRole = useSetTeamMemberRole();
   const removeMember = useRemoveTeamMember();
@@ -264,8 +293,11 @@ function TeamMembers({ team, orgMembers }: { team: TeamSummary; orgMembers: OrgM
   return (
     <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
       {/* Sits above the roster, where the add/remove controls would be, so a
-          reader finds the reason in the place they look for the control. */}
+          reader finds the reason in the place they look for the control. The
+          declared note sits in the same place although its controls stay:
+          they work, and what the reader needs is how long the change lasts. */}
       {managed && <p className="pt-1 text-xs text-muted">{idpManagedNote(team.externalId)}</p>}
+      {declared && <p className="pt-1 text-xs text-muted">{CONFIG_MANAGED_NOTE}</p>}
 
       {membersQ.isLoading && (
         <div className="flex items-center gap-2 py-2 text-xs text-muted">

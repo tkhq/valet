@@ -12,6 +12,16 @@
  * Every write and every delete below is scoped by `origin='idp'`, the same
  * way `skill-sync.ts` scopes its writes by `origin='repo'`.
  *
+ * A third origin joins the same rule. A team declared in `valet.yaml` carries
+ * `origin='config'`, and the boot reconciler
+ * (`services/config-reconcile.ts`) is its only writer. The sync must not
+ * touch one, for the reason that makes adoption dangerous everywhere in this
+ * file, but sharper: the file asserts its declared members at every boot and
+ * the sync removes everybody the claim omits, so a shared row would add and
+ * remove the same person forever — one write per boot, one per login. The
+ * two writers therefore hold disjoint row sets, and the order they run in
+ * stops mattering.
+ *
  * ## A missing claim is not an empty claim
  *
  * Membership arrives in a token claim. That claim can be missing for
@@ -60,11 +70,17 @@
  * file mirrors a group that nobody manages by hand.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
-import { teamMembers, teams } from "../schema/index.js";
+import { teamMembers, teams, type TeamRow } from "../schema/index.js";
 import type { TeamRole } from "./teams.js";
+
+/**
+ * Where a team row came from. Read off the column, so a new origin cannot
+ * reach the collision report below without a compile error.
+ */
+type TeamOrigin = TeamRow["origin"];
 
 /**
  * What the token said about this user's groups.
@@ -96,6 +112,7 @@ export interface DesiredTeams {
 export type SkipReason =
   | "path_not_mirrored"
   | "name_taken_by_local_team"
+  | "name_taken_by_config_team"
   | "name_taken_by_other_group"
   | "team_unavailable";
 
@@ -124,6 +141,25 @@ export interface ReconcileOptions {
   claim: TeamClaim;
   /** Sub-group name that grants admin on the parent team, e.g. `admins`. */
   adminGroupName: string;
+  /**
+   * Top-level group paths this instance mirrors, from
+   * `auth.sso.teams.groups`. Absent means every top-level group in the claim.
+   */
+  mirroredGroups?: string[];
+  /**
+   * Path of the instance config file, named in the message a config-team
+   * collision prints. Absent when the deployment declares no file.
+   */
+  configPath?: string;
+}
+
+/**
+ * Names the instance config file in a message. The reader must be able to
+ * open the file the message tells them to edit, so the fallback names the
+ * variable that points at it.
+ */
+function configFileLabel(configPath: string | undefined): string {
+  return configPath ?? "the instance config file (VALET_CONFIG)";
 }
 
 const NOTHING: ReconcileResult = {
@@ -219,16 +255,33 @@ export function readTeamClaim(
  * Admin always wins the merge, so the order of the claim cannot change the
  * result: `["/platform", "/platform/admins"]` and its reverse both give
  * admin on `platform`.
+ *
+ * `mirroredGroups` is the optional allowlist from
+ * `auth.sso.teams.groups`. Absent, every top-level group in the claim is
+ * mirrored, which is the behaviour of a deployment that declares no file.
+ * Present, a group outside it is dropped in silence: it was excluded on
+ * purpose, and a warning for a deliberate choice would repeat on every login
+ * of every user for as long as the group exists. The unreadable and
+ * unmirrorable paths below are different — nobody chose those.
  */
-export function desiredTeamsFromPaths(paths: string[], adminGroupName: string): DesiredTeams {
+export function desiredTeamsFromPaths(
+  paths: string[],
+  adminGroupName: string,
+  mirroredGroups?: string[],
+): DesiredTeams {
   const wanted = new Map<string, DesiredTeam>();
   const ignored: string[] = [];
+  const allowed = mirroredGroups === undefined ? undefined : new Set(mirroredGroups);
 
   for (const raw of paths) {
     const segments = raw.trim().split("/").filter((segment) => segment.length > 0);
     const parent = segments[0];
     const isParent = segments.length === 1;
     const isAdminSubGroup = segments.length === 2 && segments[1] === adminGroupName;
+
+    // The allowlist is checked before the shape, so an excluded group's path
+    // never reaches the "not mirrored" warning either.
+    if (allowed !== undefined && (parent === undefined || !allowed.has(`/${parent}`))) continue;
 
     if (parent === undefined || !(isParent || isAdminSubGroup)) {
       ignored.push(raw);
@@ -249,13 +302,13 @@ type ResolveOutcome = { ok: true; teamId: string; created: boolean } | { ok: fal
 /**
  * Finds the mirror for one group path.
  *
- * `origin = 'idp'` is part of the search, not a formality. A local team
- * carries no `external_id` today, so the filter changes no result now. It
- * decides what happens the day something else writes that column: without it
- * the sync would ADOPT the local row, and the next claim that omits the group
- * would empty a team the sync never made. With it, the same row reaches the
- * name check instead and the group is skipped, which is the answer a
- * collision must always get.
+ * `origin = 'idp'` is part of the search, not a formality. Neither a local
+ * nor a config team carries an `external_id` today, so the filter changes no
+ * result now. It decides what happens the day something else writes that
+ * column: without it the sync would ADOPT that row, and the next claim that
+ * omits the group would empty a team the sync never made. With it, the same
+ * row reaches the name check instead and the group is skipped, which is the
+ * answer a collision must always get.
  */
 async function findByExternalId(
   db: AppDb,
@@ -270,15 +323,30 @@ async function findByExternalId(
   return rows[0];
 }
 
+/**
+ * Finds the team that holds a name, in any letter case.
+ *
+ * The fold is the point. `teams_org_name` compares byte for byte, so team
+ * `Platform` and group `/platform` do NOT collide in Postgres: an exact
+ * match would find nothing, the sync would create a second row, and the org
+ * would hold two teams that read as one in every list. Neither source could
+ * then tell which row it owns. A near-collision nobody can see is worse than
+ * one that is reported, so the fold turns it into the skip that every other
+ * name collision gets.
+ *
+ * Only the create path reaches this. `findByExternalId` answers first for a
+ * group that already has a mirror, so an existing pair of case-variant teams
+ * keeps working exactly as before.
+ */
 async function findByName(
   db: AppDb,
   orgId: string,
   name: string,
-): Promise<{ id: string; origin: "local" | "idp"; externalId: string | null } | undefined> {
+): Promise<{ id: string; name: string; origin: TeamOrigin; externalId: string | null } | undefined> {
   const rows = await db
-    .select({ id: teams.id, origin: teams.origin, externalId: teams.externalId })
+    .select({ id: teams.id, name: teams.name, origin: teams.origin, externalId: teams.externalId })
     .from(teams)
-    .where(and(eq(teams.orgId, orgId), eq(teams.name, name)))
+    .where(and(eq(teams.orgId, orgId), sql`lower(${teams.name}) = lower(${name})`))
     .limit(1);
   return rows[0];
 }
@@ -293,24 +361,46 @@ async function findByName(
  * must not cost people their team. A rename is no better — it invents a
  * name that is no longer the group's, and the collision returns the moment
  * anybody renames anything.
+ *
+ * Each origin gets its own corrective action, because each has a different
+ * fix. The `switch` is exhaustive on purpose: a new origin cannot reach a
+ * default branch and print advice that does not apply to it.
+ *
+ * Every message names the team by the spelling the row holds, not by the
+ * spelling the group asked for. The two differ when only letter case
+ * separates them, and the reader has to find the team to rename it.
  */
 function reportCollision(
-  existing: { origin: "local" | "idp"; externalId: string | null },
+  existing: { name: string; origin: TeamOrigin; externalId: string | null },
   want: DesiredTeam,
+  configPath: string | undefined,
 ): SkipReason {
-  if (existing.origin === "local") {
-    console.warn(
-      `team sync: group '${want.path}' was skipped. A team named '${want.name}' already exists in this ` +
-        `organization, and somebody created it in Valet. Rename or delete that team, then sign in again.`,
-    );
-    return "name_taken_by_local_team";
+  switch (existing.origin) {
+    case "local":
+      console.warn(
+        `team sync: group '${want.path}' was skipped. A team named '${existing.name}' already exists in ` +
+          `this organization, and somebody created it in Valet. Rename or delete that team, then sign in ` +
+          `again.`,
+      );
+      return "name_taken_by_local_team";
+    case "config":
+      // "Delete that team" is the wrong instruction here and it loops: the
+      // next boot recreates the team from the file and this warning returns.
+      // The file is the only place the fix holds.
+      console.warn(
+        `team sync: group '${want.path}' was skipped. Team '${existing.name}' is declared in ` +
+          `${configFileLabel(configPath)}. Remove it from the teams: list in that file and restart, ` +
+          `or rename the group in the identity provider.`,
+      );
+      return "name_taken_by_config_team";
+    case "idp":
+      console.warn(
+        `team sync: group '${want.path}' was skipped. Team '${existing.name}' already mirrors group ` +
+          `'${existing.externalId ?? "unknown"}'. Rename one of the two groups in the identity provider, ` +
+          `then sign in again.`,
+      );
+      return "name_taken_by_other_group";
   }
-  console.warn(
-    `team sync: group '${want.path}' was skipped. Team '${want.name}' already mirrors group ` +
-      `'${existing.externalId ?? "unknown"}'. Rename one of the two groups in the identity provider, ` +
-      `then sign in again.`,
-  );
-  return "name_taken_by_other_group";
 }
 
 /**
@@ -318,13 +408,18 @@ function reportCollision(
  * one group that cannot be resolved must not cost the user their other
  * teams, so every failure here becomes a skip and the sync continues.
  */
-async function resolveIdpTeam(db: AppDb, orgId: string, want: DesiredTeam): Promise<ResolveOutcome> {
+async function resolveIdpTeam(
+  db: AppDb,
+  orgId: string,
+  want: DesiredTeam,
+  configPath: string | undefined,
+): Promise<ResolveOutcome> {
   try {
     const mirror = await findByExternalId(db, orgId, want.path);
     if (mirror) return { ok: true, teamId: mirror.id, created: false };
 
     const holder = await findByName(db, orgId, want.name);
-    if (holder) return { ok: false, reason: reportCollision(holder, want) };
+    if (holder) return { ok: false, reason: reportCollision(holder, want, configPath) };
 
     const id = newTeamId();
     // Not `createTeam`: that admits the creator as admin, so the first
@@ -348,7 +443,7 @@ async function resolveIdpTeam(db: AppDb, orgId: string, want: DesiredTeam): Prom
       const mirror = await findByExternalId(db, orgId, want.path);
       if (mirror) return { ok: true, teamId: mirror.id, created: false };
       const holder = await findByName(db, orgId, want.name);
-      if (holder) return { ok: false, reason: reportCollision(holder, want) };
+      if (holder) return { ok: false, reason: reportCollision(holder, want, configPath) };
     }
     console.warn(
       `team sync: group '${want.path}' was skipped because its team could not be read or created. ` +
@@ -371,7 +466,11 @@ export async function reconcileIdpTeams(db: AppDb, opts: ReconcileOptions): Prom
   // and information we do not have cannot authorise a write.
   if (!opts.claim.present) return { ...NOTHING, skipped: [] };
 
-  const { teams: wanted, ignored } = desiredTeamsFromPaths(opts.claim.paths, opts.adminGroupName);
+  const { teams: wanted, ignored } = desiredTeamsFromPaths(
+    opts.claim.paths,
+    opts.adminGroupName,
+    opts.mirroredGroups,
+  );
   const skipped: SkippedGroup[] = [];
 
   for (const path of ignored) {
@@ -387,7 +486,7 @@ export async function reconcileIdpTeams(db: AppDb, opts: ReconcileOptions): Prom
   let createdTeams = 0;
 
   for (const want of wanted.values()) {
-    const outcome = await resolveIdpTeam(db, opts.orgId, want);
+    const outcome = await resolveIdpTeam(db, opts.orgId, want, opts.configPath);
     if (!outcome.ok) {
       skipped.push({ groupPath: want.path, reason: outcome.reason });
       continue;
@@ -396,10 +495,11 @@ export async function reconcileIdpTeams(db: AppDb, opts: ReconcileOptions): Prom
     roleByTeamId.set(outcome.teamId, want.role);
   }
 
-  // `origin = 'idp'` is what protects user data here. A local team can
-  // never enter the removal set. This is a scoping predicate on the rows
-  // the sync owns, not an authorisation check — authorisation stays in the
-  // routes.
+  // `origin = 'idp'` is what protects user data here. A local team and a
+  // config team can never enter the removal set — which is also what stops
+  // the sync from undoing, at each login, what the boot reconciler asserted.
+  // This is a scoping predicate on the rows the sync owns, not an
+  // authorisation check — authorisation stays in the routes.
   const current = await db
     .select({ teamId: teamMembers.teamId, role: teamMembers.role, externalId: teams.externalId })
     .from(teamMembers)

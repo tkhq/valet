@@ -21,8 +21,18 @@
  *
  * Origin-gated: those same four routes refuse a team whose `origin` is
  * `idp`. Such a team mirrors an identity-provider group, and the login-time
- * sync owns it. There is no rename route today; whoever adds one must add
- * the same refusal to it.
+ * sync owns it.
+ *
+ * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
+ * file asserts its declared members at each boot but never removes anybody,
+ * so a membership edit here is real work that survives until the next
+ * restart, and refusing it would be stricter than the file's own semantics.
+ * A delete is different: the next boot recreates the team empty, which reads
+ * as data loss, so the route refuses it and names the file instead.
+ *
+ * There is no rename route today. Whoever adds one must refuse BOTH `idp`
+ * and `config`: the reconciler identifies a declared team by name, so a
+ * rename orphans the row and the next boot creates a second team beside it.
  */
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
@@ -33,6 +43,7 @@ import { teamMembers, teams, type TeamRow } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
   addMember,
+  ConfigManagedTeamError,
   createTeam,
   deleteTeam,
   IdpManagedTeamError,
@@ -102,13 +113,28 @@ function idpManagedRefusal(row: TeamRow, mutation: IdpManagedMutation): { error:
   return { error: err.message, code: err.code };
 }
 
+/**
+ * Builds the refusal body for a DELETE of a team declared in `valet.yaml`,
+ * or null for any other team.
+ *
+ * Delete only. Membership on a config team stays editable — see the file
+ * header. Same 409 reasoning as `idpManagedRefusal`, and the message comes
+ * from the class the service throws for the same reason.
+ */
+function configManagedDeleteRefusal(row: TeamRow): { error: string; code: string } | null {
+  if (row.origin !== "config") return null;
+  const err = new ConfigManagedTeamError(row.name);
+  return { error: err.message, code: err.code };
+}
+
 /** Maps service errors to the route's JSON error response. Rethrows unknowns. */
 function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 404 | 409 } | null {
   if (
     err instanceof TeamNameConflictError ||
     err instanceof LastAdminError ||
     err instanceof TeamOwnsWorkflowsError ||
-    err instanceof IdpManagedTeamError
+    err instanceof IdpManagedTeamError ||
+    err instanceof ConfigManagedTeamError
   ) {
     return { body: { error: err.message, code: err.code }, status: 409 };
   }
@@ -246,7 +272,7 @@ teamsRouter.delete("/:id", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
-  const refusal = idpManagedRefusal(team, "delete");
+  const refusal = idpManagedRefusal(team, "delete") ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
 
   try {

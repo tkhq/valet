@@ -266,7 +266,7 @@ CREATE TABLE "teams" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
 --> statement-breakpoint
-CREATE UNIQUE INDEX "teams_org_external" ON "teams" ("org_id","external_id");
+CREATE UNIQUE INDEX "teams_org_external" ON "teams" ("org_id","origin","external_id");
 --> statement-breakpoint
 CREATE TABLE "team_members" (
 	"team_id" text NOT NULL,
