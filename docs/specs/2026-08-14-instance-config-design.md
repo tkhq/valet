@@ -68,6 +68,14 @@ auth:
 plugins:
   allow: [plugin-github, plugin-linear]   # replaces VALET_PLUGINS; or `deny:`
 
+toolPolicies:
+  - match: "github/merge_pull_request"
+    mode: deny
+  - match: "linear/*"
+    mode: allow
+  - match: "*"
+    mode: require_approval
+
 org:
   name: Turnkey
   features:
@@ -92,6 +100,7 @@ Top-level keys in v1:
 | `version`      | number | must be `1`; anything else fails boot              |
 | `auth`         | object | boot config assembly (`loadAuthConfig` merge)      |
 | `plugins`      | object | boot config assembly (plugin filter)               |
+| `toolPolicies` | list   | boot config assembly (plugin catalog)              |
 | `org`          | object | DB reconciler → `orgs`, `org_members`, `invites`   |
 | `skillSources` | list   | DB reconciler → `skill_sources` (org-owned)        |
 
@@ -223,6 +232,38 @@ subsystem, it does not replace it.
   human created.
 - Repo addresses are validated with the same parser the route uses
   (`parseRepoInput`), so the file rejects the same inputs the UI rejects.
+
+## Tool policies
+
+`toolPolicies` declares per-tool approval overrides. Today the mode comes
+from the plugin manifest's `defaultApprovalMode`, else from each action's
+`riskLevel` (low/medium → allow, high/critical → require_approval) —
+`approvalModeFor` in `packages/engine/src/plugin-catalog.ts`. There is no
+instance-level override layer; this section is the first.
+
+Each rule:
+
+```yaml
+- match: "github/merge_pull_request"   # tool id, or a glob on service/action
+  mode: deny                            # allow | require_approval | deny
+```
+
+- **Matching** — `match` is a glob over the qualified tool id
+  (`service/action`). `github/*` covers a service; `*` is a catch-all.
+- **First match wins.** Order the list from specific to general. A tool
+  with no matching rule keeps its manifest/riskLevel default, so the file
+  can tighten one tool without restating the world.
+- **Consumption** — boot config assembly threads the rules into
+  `PluginCatalog` (a new engine option beside `defaultApprovalMode`). The
+  engine stays HTTP-free; it receives the parsed rules, not the file.
+- **Denied tools** keep the existing behavior: `call_tool` returns the
+  blocked-by-org-policy message; `list_tools` still lists them so the
+  agent can tell the user why an action is unavailable.
+
+When UI-managed per-org approval overrides land (in-flight work), the
+standard precedence applies: the file wins for the rules it declares,
+UI overrides cover the rest. The implementation should make the layering
+explicit: file rule → UI override → manifest → riskLevel.
 
 ## Dev and prod wiring
 
