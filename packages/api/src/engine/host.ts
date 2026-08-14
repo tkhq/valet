@@ -38,8 +38,12 @@ import {
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import type { RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
-import { GitHubAuthError } from "../services/github-tokens.js";
-import { resolveSessionGitHubToken } from "../services/session-github-token.js";
+import {
+  GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
+  GitHubAuthError,
+  resolveInstallationApiToken,
+} from "../services/github-tokens.js";
+import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -810,6 +814,9 @@ export class EngineHost {
    *    unchanged — the engine surfaces it as the tool's error result, hint
    *    text intact. Synthesizes a `StoredCredential` the engine's
    *    `credentialProvider` maps to `{ accessToken }`.
+   *  - `github:installation` → `resolveInstallationApiToken`, the explicit
+   *    installation-tier request (the binding's owner, else the org's sole
+   *    installation). `null` when no installation resolves.
    *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
    *    read, byte-identical to the engine's default (store-backed) path.
    *
@@ -858,6 +865,29 @@ export class EngineHost {
     const credentials = this.opts.engineCredentials;
     if (!tokenDeps || !db) return undefined;
     return async (owner, service) => {
+      if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
+        // Explicit installation-tier request (github.list_repos with
+        // `scope: "installation"`): mint the App installation token directly
+        // instead of reusing whatever tier default `github` resolution
+        // picked — a user token 403s on `GET /installation/repositories`.
+        // `null` (no installation) stays `null`; the action names the
+        // corrective step in its own error.
+        const binding = await primaryRepoBinding(db, sessionId);
+        const token = await resolveInstallationApiToken(
+          {
+            db,
+            credentials,
+            key: tokenDeps.key,
+            apiUrl: tokenDeps.apiUrl,
+            githubUrl: tokenDeps.githubUrl,
+            fetchImpl: tokenDeps.fetchImpl,
+            now: tokenDeps.now,
+          },
+          orgId,
+          binding?.repo.owner,
+        );
+        return token === null ? null : { type: "app_install", accessToken: token };
+      }
       if (service !== "github") {
         // Byte-identical to the engine's default store-backed read.
         return credentials.get(owner, service);

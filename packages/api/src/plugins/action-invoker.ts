@@ -43,7 +43,11 @@ import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@v
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { actionInvocations } from "../schema/index.js";
-import type { GitHubTokenDeps } from "../services/github-tokens.js";
+import {
+  GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
+  resolveInstallationApiToken,
+  type GitHubTokenDeps,
+} from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
 
@@ -435,12 +439,16 @@ function buildGithubCredentialProvider(
 ): CredentialProvider {
   return {
     async get(service?: string): Promise<Credential | null> {
-      // A bare `.get()` or `.get("github")` is the only shape the
-      // plugin-github actions use; an explicit different service falls back
+      // A bare `.get()`, `.get("github")`, or `.get("github:installation")`
+      // are the only shapes the plugin-github actions use; any other service falls back
       // to a plain store read (byte-identical to non-github services) —
       // no plugin known to this codebase does this today, but the contract
       // shouldn't silently reinterpret an unrelated service as "github".
-      if (service !== undefined && service !== "github") {
+      if (
+        service !== undefined &&
+        service !== "github" &&
+        service !== GITHUB_INSTALLATION_CREDENTIAL_SERVICE
+      ) {
         return buildCredentialProvider(opts.credentials, owner, service).get(service);
       }
       const tokenDeps = opts.githubTokenDeps;
@@ -456,6 +464,15 @@ function buildGithubCredentialProvider(
         fetchImpl: tokenDeps.fetchImpl,
         now: tokenDeps.now,
       };
+      if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
+        // Explicit installation-tier request (github.list_repos with
+        // `scope: "installation"`). The action's own `owner` parameter picks
+        // the installation when present; otherwise the org's sole
+        // installation applies. Same org-scoped lookup as the `"app"`
+        // selection below — no cross-tenant reach.
+        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
+        return token === null ? null : { accessToken: token };
+      }
       const selection = req.credential ?? "auto";
       // `params` are template-rendered, so a webhook payload can choose this
       // repo. That is safe only because `mintInstallationToken` looks an

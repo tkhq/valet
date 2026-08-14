@@ -65,6 +65,18 @@ import { resolveGithubUrl } from "./github-env.js";
 import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
 
 const GITHUB_CREDENTIAL_SERVICE = "github";
+/**
+ * Virtual credential service a plugin action requests when it needs the
+ * org's GitHub App INSTALLATION token specifically, regardless of which
+ * credential tier default `github` resolution would pick. `github.list_repos`
+ * with `scope: "installation"` is the consumer: `GET /installation/repositories`
+ * accepts installation tokens exclusively, so a resolved user token 403s
+ * there no matter what the endpoint choice is. The credential resolvers
+ * (`engine/host.ts`, `plugins/action-invoker.ts`) answer this service via
+ * `resolveInstallationApiToken`; the plugin keeps its own copy of the
+ * literal (it cannot import from `@valet/api`).
+ */
+export const GITHUB_INSTALLATION_CREDENTIAL_SERVICE = "github:installation";
 /** Same 5-minute liveness margin the installation-token cache uses. */
 const STALE_MARGIN_MS = 5 * 60 * 1000;
 
@@ -411,6 +423,28 @@ async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
   if (rows.length !== 1) return null;
   return mintInstallation(deps, orgId, rows[0].accountLogin);
+}
+
+/**
+ * Resolves the org's installation token for an explicit installation-tier
+ * request (`GITHUB_INSTALLATION_CREDENTIAL_SERVICE`). Prefers `repoOwner`'s
+ * installation when one is given (the session's primary repo binding, or a
+ * workflow action's own `owner` parameter), then the org's sole
+ * non-suspended installation. `null` when neither resolves — the caller
+ * (the plugin action) names the corrective step; a minting failure still
+ * throws `GitHubAuthError` via `mintInstallation`.
+ */
+export async function resolveInstallationApiToken(
+  deps: GitHubTokenDeps,
+  orgId: string,
+  repoOwner?: string,
+): Promise<string | null> {
+  await ensureInstallationsSynced(deps, orgId);
+  if (repoOwner) {
+    const token = await mintInstallation(deps, orgId, repoOwner);
+    if (token) return token;
+  }
+  return resolveSoleInstallationToken(deps, orgId);
 }
 
 // ── Lazy installation sync ──────────────────────────────────────────────

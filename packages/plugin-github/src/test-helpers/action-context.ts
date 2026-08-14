@@ -7,7 +7,16 @@
  */
 import type { Credential, PluginActionContext } from "@valet/engine";
 
-export function fakeActionContext(accessToken: string | null): PluginActionContext {
+export function fakeActionContext(
+  accessToken: string | null,
+  /**
+   * Credentials for explicit `.get(service)` reads, keyed by service name
+   * (e.g. `"github:installation"`). A service absent from the map resolves
+   * `null`, like a host without that resolver seam. A bare `.get()` or
+   * `.get("github")` returns the default `accessToken` credential.
+   */
+  serviceCredentials: Record<string, string> = {},
+): PluginActionContext {
   const notImplemented = (): never => {
     throw new Error("not implemented in the plugin-github test fixture");
   };
@@ -21,7 +30,11 @@ export function fakeActionContext(accessToken: string | null): PluginActionConte
     sessionId: "session-1",
     threadId: "thread-1",
     credentials: {
-      get: async () => credential,
+      get: async (service?: string) => {
+        if (service === undefined || service === "github") return credential;
+        const token = serviceCredentials[service];
+        return token === undefined ? null : { accessToken: token };
+      },
       request: async () => notImplemented(),
     },
     sandbox: {
