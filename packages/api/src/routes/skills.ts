@@ -38,8 +38,10 @@ import {
   asRecord,
   createSkill,
   deleteSkill,
+  isAuthorizedFor,
   listSkills,
   ownedSkillRow,
+  readableSkillRow,
   SkillNameConflictError,
   SkillNotLocalError,
   SkillReservedNameError,
@@ -206,7 +208,12 @@ skillsRouter.post("/", async (c) => {
     const takenByPlugin = ownedSkills(c.var.providers.plugins).some(
       (entry) => entry.skill.name === row.name,
     );
-    const resp: SkillResponse = { ...toStoredSummary(row, takenByPlugin), content: row.content };
+    // The caller just created this row, so they may edit it.
+    const resp: SkillResponse = {
+      ...toStoredSummary(row, takenByPlugin),
+      content: row.content,
+      editable: true,
+    };
     return c.json(resp, 201);
   } catch (err) {
     const { body: errBody, status } = errorResponse(err);
@@ -217,11 +224,20 @@ skillsRouter.post("/", async (c) => {
 // ── Stored skills, by row id ──────────────────────────────────────────────
 
 skillsRouter.get("/stored/:id", async (c) => {
-  const row = await ownedSkillRow(c.var.providers.db, owner(c), c.req.param("id"));
+  // A member may READ any org row in their own org, so this uses the
+  // read-scoped lookup — `ownedSkillRow` would 404 an org row for a non-admin
+  // and break the detail page. Writes stay on `ownedSkillRow`.
+  const row = await readableSkillRow(c.var.providers.db, owner(c), c.req.param("id"));
   if (!row) return c.json({ error: "skill not found" }, 404);
+  // `editable`: a user/team row follows ownership; an org row needs org admin.
+  const orgAdmin = row.ownerType === "org"
+    ? await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id)
+    : false;
+  const editable = await isAuthorizedFor(c.var.providers.db, owner(c), row, { isOrgAdmin: orgAdmin });
   const resp: SkillResponse = {
     ...toStoredSummary(row, isShadowed(c.var.providers.plugins, row)),
     content: row.content,
+    editable,
   };
   return c.json(resp);
 });
@@ -254,9 +270,11 @@ skillsRouter.patch("/stored/:id", async (c) => {
       isOrgAdmin: orgAdmin,
     });
     if (!row) return c.json({ error: "skill not found" }, 404);
+    // The PATCH succeeded, so the caller may write this row.
     const resp: SkillResponse = {
       ...toStoredSummary(row, isShadowed(c.var.providers.plugins, row)),
       content: row.content,
+      editable: true,
     };
     return c.json(resp);
   } catch (err) {
