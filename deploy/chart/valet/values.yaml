@@ -47,6 +47,19 @@ api:
     trustedOrigins: ""
     allowedEmailDomains: ""
 
+  # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
+  # env fallback). Set these three plus the api.secrets.githubApp* values
+  # to make the deployment GitHub-capable without running the in-app
+  # manifest flow. Nothing is written to the database; the env is the
+  # config. An org that later completes the manifest flow shadows this.
+  # The app's webhook URL must point at
+  # {public URL}/webhooks/github-app. See
+  # docs/specs/2026-07-16-github-repo-integration-design.md.
+  githubApp:
+    appId: ""
+    slug: ""
+    clientId: ""
+
   # Secret values. Leave blank to have the chart generate-and-retain them
   # (see templates/secret.yaml's lookup-based retain guard) — regenerating
   # BETTER_AUTH_SECRET on every `helm upgrade` would invalidate every
@@ -61,6 +74,14 @@ api:
     oidcClientSecret: ""
     googleClientSecret: ""
     githubClientSecret: ""
+    # Secret half of api.githubApp (the `GITHUB_APP_*` env fallback).
+    # githubAppPrivateKey takes the app's PEM, raw or base64-encoded.
+    # githubAppWebhookSecret is optional (leave blank for a webhook-less
+    # app). These are never chart-generated — set them, or deliver them
+    # via api.extraEnvFrom (e.g. External Secrets Operator).
+    githubAppPrivateKey: ""
+    githubAppClientSecret: ""
+    githubAppWebhookSecret: ""
 
   # Optional instance config file content (multiline YAML string). Supply via
   # --set-file api.instanceConfig=config/valet.prod.yaml on helm install/upgrade.

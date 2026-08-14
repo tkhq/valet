@@ -577,11 +577,89 @@ CREATE TABLE "mcp_oauth_clients" (
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "action_policies" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"principal_type" text NOT NULL,
+	"principal_id" text NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"mode" text NOT NULL,
+	"param_matchers" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"applies_in" text DEFAULT 'any' NOT NULL,
+	"origin" text NOT NULL,
+	"managed_by" text,
+	"expires_at" bigint,
+	"revoked_at" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	CONSTRAINT "action_policies_one_of_target" CHECK ((("service" IS NOT NULL)::int + ("action_id" IS NOT NULL)::int + ("risk_level" IS NOT NULL)::int) = 1)
+);
+--> statement-breakpoint
+CREATE INDEX "action_policies_org_revoked" ON "action_policies" ("org_id","revoked_at");
+--> statement-breakpoint
+CREATE TABLE "runtime_grants" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"session_id" text,
+	"workflow_execution_id" text,
+	"policy_key" text NOT NULL,
+	"mode" text DEFAULT 'allow' NOT NULL,
+	"granted_by" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"revoked_at" bigint,
+	CONSTRAINT "runtime_grants_one_of_scope" CHECK ((("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int) = 1)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "runtime_grants_session_policy_key" ON "runtime_grants" ("org_id","session_id","policy_key") WHERE "session_id" IS NOT NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("org_id","workflow_execution_id","policy_key") WHERE "workflow_execution_id" IS NOT NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE TABLE "action_policy_overrides" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"mode" text NOT NULL,
+	"param_matchers" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	CONSTRAINT "action_policy_overrides_one_of_target" CHECK ((("service" IS NOT NULL)::int + ("action_id" IS NOT NULL)::int + ("risk_level" IS NOT NULL)::int) = 1)
+);
+--> statement-breakpoint
+CREATE INDEX "action_policy_overrides_org_user" ON "action_policy_overrides" ("org_id","user_id");
+--> statement-breakpoint
 CREATE TABLE "action_invocations" (
 	"invocation_id" text PRIMARY KEY NOT NULL,
-	"result" jsonb NOT NULL,
-	"created_at" bigint NOT NULL
+	"result" jsonb,
+	"result_truncated" boolean,
+	"created_at" bigint NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"resolved_mode" text,
+	"base_mode" text,
+	"matched_policy_id" text,
+	"matched_grant_id" text,
+	"matched_override_id" text,
+	"status" text,
+	"session_id" text,
+	"workflow_execution_id" text,
+	"user_id" text,
+	"org_id" text,
+	"params" jsonb,
+	"params_truncated" boolean,
+	"duration_ms" bigint,
+	"error" text,
+	"started_at" bigint
 );
+--> statement-breakpoint
+CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "action_invocations_org_created" ON "action_invocations" ("org_id","created_at");
 --> statement-breakpoint
 CREATE TABLE "llm_providers" (
 	"id" text PRIMARY KEY NOT NULL,

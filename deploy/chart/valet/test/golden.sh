@@ -379,5 +379,29 @@ grep -q 'checksum/instance-config:' "$TMP_DIR/instance-config.yaml" \
   || fail "instance-config render: pod template missing checksum/instance-config — a config edit would not roll the pod"
 pass "instance-config render: pod template carries checksum/instance-config"
 
+# --- GitHub App env fallback: secret/non-secret split --------------------
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set api.githubApp.appId="123456" \
+  --set api.githubApp.slug="valet-app" \
+  --set api.githubApp.clientId="Iv1.abc" \
+  --set api.secrets.githubAppPrivateKey="base64pem" \
+  --set api.secrets.githubAppClientSecret="cs" \
+  --set api.secrets.githubAppWebhookSecret="whs" \
+  > "$TMP_DIR/github-app.yaml"
+GH_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/github-app.yaml")
+for key in GITHUB_APP_ID GITHUB_APP_SLUG GITHUB_APP_CLIENT_ID; do
+  echo "$GH_CONFIGMAP" | grep -q "$key" || fail "ConfigMap missing $key"
+done
+for key in GITHUB_APP_PRIVATE_KEY GITHUB_APP_CLIENT_SECRET GITHUB_APP_WEBHOOK_SECRET; do
+  if echo "$GH_CONFIGMAP" | grep -q "$key"; then
+    fail "ConfigMap leaks secret key: $key"
+  fi
+  grep -q "$key" "$TMP_DIR/github-app.yaml" || fail "Secret missing $key"
+done
+if grep -qE 'GITHUB_APP_' "$TMP_DIR/bundled.yaml"; then
+  fail "default render carries GITHUB_APP_* keys — the fallback must be opt-in"
+fi
+pass "GitHub App env fallback: non-secret half in ConfigMap, secret half in Secret, opt-in"
+
 echo
 echo "All golden assertions passed."

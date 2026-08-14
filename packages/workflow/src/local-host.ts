@@ -58,7 +58,7 @@ import { detachedFromTrace } from '@valet/engine';
 
 import { driveUntilPark } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
-import type { NodeExecutorRegistry, OnApprovalPending } from './nodes/index.js';
+import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending } from './nodes/index.js';
 import type { RunParams, RunParkState, RunWaitCondition, WorkflowStore } from './store.js';
 
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
@@ -88,6 +88,7 @@ export interface LocalRunHostDeps {
   executors?: NodeExecutorRegistry;
   clock?: () => number;
   onApprovalPending?: OnApprovalPending;
+  onApprovalGrant?: OnApprovalGrant;
   /** Max concurrently-driven runs. Default 4 (decision 16). */
   concurrency?: number;
   /** Poll interval in ms. Default 1000 (decision 16). */
@@ -114,6 +115,7 @@ export class LocalRunHost implements RunHost {
   private readonly executors?: NodeExecutorRegistry;
   private readonly clock: () => number;
   private readonly onApprovalPending?: OnApprovalPending;
+  private readonly onApprovalGrant?: OnApprovalGrant;
   private readonly concurrency: number;
   private readonly pollMs: number;
   private readonly leaseMs: number;
@@ -146,6 +148,7 @@ export class LocalRunHost implements RunHost {
     this.executors = deps.executors;
     this.clock = deps.clock ?? (() => Date.now());
     this.onApprovalPending = deps.onApprovalPending;
+    this.onApprovalGrant = deps.onApprovalGrant;
     this.concurrency = deps.concurrency ?? 4;
     this.pollMs = deps.pollMs ?? 1_000;
     this.leaseMs = deps.leaseMs ?? 30_000;
@@ -288,6 +291,7 @@ export class LocalRunHost implements RunHost {
         clock: this.clock,
         executors: this.executors,
         onApprovalPending: this.onApprovalPending,
+        onApprovalGrant: this.onApprovalGrant,
         onBeginTerminalize:
           this.crashAt === 'terminalizing'
             ? () => {

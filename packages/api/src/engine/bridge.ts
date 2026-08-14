@@ -8,6 +8,7 @@ import type {
 } from "@valet/engine";
 import type {
   DecisionGate as WireDecisionGate,
+  DecisionGateProvenance,
   DecisionResolution as WireDecisionResolution,
   Message,
   MessagePart as WireMessagePart,
@@ -17,10 +18,14 @@ import type {
 
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
- * (origin/refs/context) — the UI doesn't render those today, and surfacing
- * them now would commit us to a contract before we know what we want.
+ * (origin/refs, and `context` as a whole — surfacing the raw bag would
+ * commit us to a contract before we know what we want). The ONE typed
+ * extraction is `context.provenance` (policy gates, action-policies spec
+ * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
+ * surfaces can render WHY the gate opened.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
+  const provenance = gateProvenance(g.context);
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -33,6 +38,30 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     status: g.status,
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
+    ...(provenance ? { provenance } : {}),
+  };
+}
+
+const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
+
+/** Narrow the engine gate's untyped `context.provenance` into the wire's
+ * `DecisionGateProvenance`. Fail-soft: any shape surprise → undefined (the
+ * gate still renders, just without the "why" line). */
+function gateProvenance(context: Record<string, unknown> | undefined): DecisionGateProvenance | undefined {
+  const p = context?.provenance;
+  if (p === null || p === undefined || typeof p !== "object") return undefined;
+  const prov = p as Record<string, unknown>;
+  const { baseMode, source } = prov;
+  if (typeof baseMode !== "string" || !WIRE_APPROVAL_MODES.has(baseMode) || typeof source !== "string") {
+    return undefined;
+  }
+  return {
+    // Narrowed by the WIRE_APPROVAL_MODES membership check above.
+    baseMode: baseMode as DecisionGateProvenance["baseMode"],
+    source,
+    ...(typeof prov.matchedPolicyId === "string" ? { matchedPolicyId: prov.matchedPolicyId } : {}),
+    ...(typeof prov.matchedGrantId === "string" ? { matchedGrantId: prov.matchedGrantId } : {}),
+    ...(typeof prov.matchedOverrideId === "string" ? { matchedOverrideId: prov.matchedOverrideId } : {}),
   };
 }
 

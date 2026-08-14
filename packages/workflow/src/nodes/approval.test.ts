@@ -331,3 +331,65 @@ describe('createDefaultNodeExecutors', () => {
     expect(registry.wait).toBeDefined();
   });
 });
+
+// ─── grant-the-rest-of-this-run (action-policies T3) ─────────────────────────
+
+describe('executeApproval: onApprovalGrant', () => {
+  it('calls onApprovalGrant with the authorized actions when approved with grantActions', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock(1_000);
+    const engine = makeFakeEngineDeps();
+    const onApprovalGrant = vi.fn();
+    await store.createRun('run-g1', runParams(), approvalDefinition(), 'v1');
+    const a1 = await claimAttempt(store, 'run-g1');
+    await driveUntilPark('run-g1', a1, { store, engine, clock: clock.now, onApprovalGrant });
+
+    await store.insertSignal({
+      runId: 'run-g1',
+      signalId: 'approval:ap:resolution',
+      signalType: 'approval:ap',
+      payload: {
+        approved: true,
+        resolvedBy: 'alice',
+        grantActions: [{ service: 'github', actionId: 'create_issue' }],
+      },
+      createdAt: clock.now(),
+    });
+
+    const a2 = await claimAttempt(store, 'run-g1', 'owner-2');
+    const park = await driveUntilPark('run-g1', a2, { store, engine, clock: clock.now, onApprovalGrant });
+    expect(park.status).toBe('settled');
+    expect(onApprovalGrant).toHaveBeenCalledTimes(1);
+    expect(onApprovalGrant).toHaveBeenCalledWith({
+      runId: 'run-g1',
+      resolvedBy: 'alice',
+      grants: [{ service: 'github', actionId: 'create_issue' }],
+    });
+  });
+
+  it('does NOT call onApprovalGrant on a denial, even if grantActions are present', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock(1_000);
+    const engine = makeFakeEngineDeps();
+    const onApprovalGrant = vi.fn();
+    await store.createRun('run-g2', runParams(), approvalDefinition({ onDeny: 'skip' }), 'v1');
+    const a1 = await claimAttempt(store, 'run-g2');
+    await driveUntilPark('run-g2', a1, { store, engine, clock: clock.now, onApprovalGrant });
+
+    await store.insertSignal({
+      runId: 'run-g2',
+      signalId: 'approval:ap:resolution',
+      signalType: 'approval:ap',
+      payload: {
+        approved: false,
+        resolvedBy: 'bob',
+        grantActions: [{ service: 'github', actionId: 'create_issue' }],
+      },
+      createdAt: clock.now(),
+    });
+
+    const a2 = await claimAttempt(store, 'run-g2', 'owner-2');
+    await driveUntilPark('run-g2', a2, { store, engine, clock: clock.now, onApprovalGrant });
+    expect(onApprovalGrant).not.toHaveBeenCalled();
+  });
+});

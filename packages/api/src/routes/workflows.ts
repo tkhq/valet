@@ -262,12 +262,25 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (typeof body.approved !== "boolean") {
     return c.json({ error: "approved is required" }, 400);
   }
+  let grantActions: Array<{ service: string; actionId: string }> | undefined;
+  if (body.grantActions !== undefined) {
+    if (
+      !Array.isArray(body.grantActions) ||
+      !body.grantActions.every(
+        (g) => g && typeof g === "object" && typeof g.service === "string" && typeof g.actionId === "string",
+      )
+    ) {
+      return c.json({ error: "grantActions must be an array of { service, actionId }" }, 400);
+    }
+    grantActions = body.grantActions;
+  }
 
   const result = await resolveWorkflowApproval(deps, owner, {
     runId,
     nodeId,
     approved: body.approved,
     note: body.note,
+    grantActions,
   });
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
 

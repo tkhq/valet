@@ -17,8 +17,10 @@ import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
   discoverInstallations,
   loadAppConfig,
+  loadAppConfigWithSource,
   mintAppJwt,
   mintInstallationToken,
+  resolveGithubAppEnvConfig,
   saveAppConfig,
   type GithubAppConfig,
   type GithubAppDeps,
@@ -140,6 +142,97 @@ describe("github-app service", () => {
         oauthClientId: baseConfig.oauthClientId,
         htmlUrl: baseConfig.htmlUrl,
       });
+    });
+  });
+
+  describe("resolveGithubAppEnvConfig", () => {
+    const fullEnv: NodeJS.ProcessEnv = {
+      GITHUB_APP_ID: "654321",
+      GITHUB_APP_SLUG: "valet-env-app",
+      GITHUB_APP_CLIENT_ID: "Iv1.env123",
+      GITHUB_APP_CLIENT_SECRET: "env-client-secret",
+      GITHUB_APP_WEBHOOK_SECRET: "env-webhook-secret",
+      GITHUB_APP_PRIVATE_KEY: privateKeyPem,
+    };
+
+    it("returns null when no GITHUB_APP_* variable is set", () => {
+      expect(resolveGithubAppEnvConfig({})).toBeNull();
+    });
+
+    it("builds a full config from the env, deriving htmlUrl from the slug", () => {
+      const config = resolveGithubAppEnvConfig(fullEnv);
+      expect(config).toEqual({
+        appId: "654321",
+        appSlug: "valet-env-app",
+        oauthClientId: "Iv1.env123",
+        htmlUrl: "https://github.com/apps/valet-env-app",
+        oauthClientSecret: "env-client-secret",
+        webhookSecret: "env-webhook-secret",
+        privateKeyPem,
+      });
+    });
+
+    it("accepts a base64-encoded private key PEM", () => {
+      const env = { ...fullEnv, GITHUB_APP_PRIVATE_KEY: Buffer.from(privateKeyPem, "utf8").toString("base64") };
+      expect(resolveGithubAppEnvConfig(env)?.privateKeyPem).toBe(privateKeyPem);
+    });
+
+    it("defaults the webhook secret to empty when GITHUB_APP_WEBHOOK_SECRET is unset", () => {
+      const { GITHUB_APP_WEBHOOK_SECRET: _omitted, ...rest } = fullEnv;
+      expect(resolveGithubAppEnvConfig(rest)?.webhookSecret).toBe("");
+    });
+
+    it("derives htmlUrl from GITHUB_URL for GitHub Enterprise hosts", () => {
+      const env = { ...fullEnv, GITHUB_URL: "https://github.example.com" };
+      expect(resolveGithubAppEnvConfig(env)?.htmlUrl).toBe("https://github.example.com/apps/valet-env-app");
+    });
+
+    it("throws and names the missing variables when the env config is partial", () => {
+      const env: NodeJS.ProcessEnv = { GITHUB_APP_ID: "654321" };
+      expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_PRIVATE_KEY/);
+      expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_CLIENT_SECRET/);
+    });
+
+    it("throws when ONLY the optional webhook secret is set (a stray var is a misconfiguration, not 'unset')", () => {
+      const env: NodeJS.ProcessEnv = { GITHUB_APP_WEBHOOK_SECRET: "stray" };
+      expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_ID/);
+    });
+
+    it("throws with a corrective message when the private key is neither PEM nor base64 PEM", () => {
+      const env = { ...fullEnv, GITHUB_APP_PRIVATE_KEY: "not-a-key" };
+      expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_PRIVATE_KEY/);
+    });
+  });
+
+  describe("loadAppConfig env fallback", () => {
+    const envConfig: NodeJS.ProcessEnv = {
+      GITHUB_APP_ID: "654321",
+      GITHUB_APP_SLUG: "valet-env-app",
+      GITHUB_APP_CLIENT_ID: "Iv1.env123",
+      GITHUB_APP_CLIENT_SECRET: "env-client-secret",
+      GITHUB_APP_WEBHOOK_SECRET: "env-webhook-secret",
+      GITHUB_APP_PRIVATE_KEY: privateKeyPem,
+    };
+
+    it("falls back to the env config when the org has no github_app credential row", async () => {
+      const config = await loadAppConfig({ credentials, env: envConfig }, orgId);
+      expect(config?.appId).toBe("654321");
+      expect(config?.privateKeyPem).toBe(privateKeyPem);
+    });
+
+    it("prefers the stored credential row over the env fallback", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      const config = await loadAppConfig({ credentials, env: envConfig }, orgId);
+      expect(config).toEqual(baseConfig);
+    });
+
+    it("reports the config source alongside the config", async () => {
+      const fromEnv = await loadAppConfigWithSource({ credentials, env: envConfig }, orgId);
+      expect(fromEnv?.source).toBe("environment");
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      const fromRow = await loadAppConfigWithSource({ credentials, env: envConfig }, orgId);
+      expect(fromRow?.source).toBe("org");
+      expect(await loadAppConfigWithSource({ credentials, env: {} }, orgId)).toEqual(fromRow);
     });
   });
 

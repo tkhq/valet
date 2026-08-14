@@ -80,3 +80,12 @@ data:
   {{- if .Values.api.auth.allowedEmailDomains }}
   AUTH_ALLOWED_EMAIL_DOMAINS: {{ .Values.api.auth.allowedEmailDomains | quote }}
   {{- end }}
+  {{- if .Values.api.githubApp.appId }}
+  GITHUB_APP_ID: {{ .Values.api.githubApp.appId | quote }}
+  {{- end }}
+  {{- if .Values.api.githubApp.slug }}
+  GITHUB_APP_SLUG: {{ .Values.api.githubApp.slug | quote }}
+  {{- end }}
+  {{- if .Values.api.githubApp.clientId }}
+  GITHUB_APP_CLIENT_ID: {{ .Values.api.githubApp.clientId | quote }}
+  {{- end }}

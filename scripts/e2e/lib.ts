@@ -85,6 +85,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/workflow-engine-deps.test.ts",
   "src/integration/orchestrator-info.test.ts",
   "src/integration/command-route.test.ts",
+  "src/integration/policies.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
   "src/integration/usage-summary.test.ts",
