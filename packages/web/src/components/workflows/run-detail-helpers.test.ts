@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { WorkflowPendingGate } from "@valet/api/wire";
 import {
   findApprovalPrompt,
   findPendingApproval,
   jsonPreview,
+  runNeedsApproval,
   statusByNodeId,
 } from "./run-detail-helpers";
 
@@ -88,6 +90,27 @@ describe("findApprovalPrompt", () => {
   it("returns undefined for a malformed definition", () => {
     expect(findApprovalPrompt(null, "deploy")).toBeUndefined();
     expect(findApprovalPrompt({ nodes: "not-an-array" }, "deploy")).toBeUndefined();
+  });
+});
+
+describe("runNeedsApproval", () => {
+  const gate: WorkflowPendingGate = { nodeId: "deploy", kind: "approval" };
+
+  it("returns true when status is parked and there is at least one pending gate", () => {
+    expect(runNeedsApproval({ status: "parked" }, [gate])).toBe(true);
+  });
+
+  it("returns false when parked but no pending gates", () => {
+    expect(runNeedsApproval({ status: "parked" }, [])).toBe(false);
+  });
+
+  it("returns false when parked but pendingGates is undefined", () => {
+    expect(runNeedsApproval({ status: "parked" }, undefined)).toBe(false);
+  });
+
+  it("returns false when status is not parked even with gates", () => {
+    expect(runNeedsApproval({ status: "running" }, [gate])).toBe(false);
+    expect(runNeedsApproval({ status: "settled" }, [gate])).toBe(false);
   });
 });
 

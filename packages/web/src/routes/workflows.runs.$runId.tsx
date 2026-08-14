@@ -11,6 +11,7 @@ import {
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { Badge, Button, Spinner } from "~/components/primitives";
+import { OUTCOME_VARIANT } from "~/components/workflows/run-status-chip";
 
 /**
  * `/workflows/runs/$runId` — status header, checkpoint list, pending-
@@ -20,12 +21,6 @@ import { Badge, Button, Spinner } from "~/components/primitives";
 export const Route = createFileRoute("/workflows/runs/$runId")({
   component: RunDetailPage,
 });
-
-const OUTCOME_VARIANT = {
-  completed: "success",
-  failed: "danger",
-  cancelled: "neutral",
-} as const;
 
 function RunDetailPage() {
   const { runId } = Route.useParams();

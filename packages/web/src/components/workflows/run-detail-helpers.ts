@@ -117,6 +117,28 @@ export function statusByNodeId(run: RunLike, checkpoints: RunCheckpointLike[]): 
   return { status, badges };
 }
 
+// ─── pending-gate helpers ─────────────────────────────────────────────────────
+
+import type { WorkflowPendingGate } from "@valet/api/wire";
+
+/**
+ * Re-export so consumers importing from this module can use the wire type
+ * without a second import path.
+ */
+export type { WorkflowPendingGate };
+export type PendingGateLike = WorkflowPendingGate;
+
+/**
+ * Returns true only when the run is parked AND at least one pending gate
+ * exists (meaning human action is required before the run can continue).
+ */
+export function runNeedsApproval(
+  run: { status: string },
+  pendingGates: WorkflowPendingGate[] | undefined,
+): boolean {
+  return run.status === "parked" && Array.isArray(pendingGates) && pendingGates.length > 0;
+}
+
 /** Truncated JSON preview for a checkpoint's `result`, mono-block friendly. */
 export function jsonPreview(value: unknown, max = 400): string {
   if (value === undefined) return "";
