@@ -33,6 +33,14 @@ export function MessageItem({
             </span>
             <span>•</span>
             <span>{formatTime(message.createdAt)}</span>
+            {message.role === "assistant" && message.model && (
+              <span
+                className="font-mono text-[10px] text-muted opacity-80"
+                title={message.model}
+              >
+                {shortModelLabel(message.model)}
+              </span>
+            )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
           </div>
           <div className="space-y-2">
@@ -136,4 +144,14 @@ function SettledBadge({ outcome }: { outcome: SettledOutcome }) {
 function formatTime(ts: number): string {
   const d = new Date(ts);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/**
+ * Compact model label for the message header: strips a provider prefix
+ * ("anthropic/claude-haiku-4-5" → "claude-haiku-4-5"). Full id stays in the
+ * title tooltip.
+ */
+function shortModelLabel(model: string): string {
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(slash + 1) : model;
 }
