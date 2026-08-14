@@ -112,6 +112,7 @@ export { executeLlm, llmUsageSpanAttributes } from './llm.js';
 export { executeTool } from './tool.js';
 export { executeOrchestrator } from './orchestrator.js';
 export { executeForeach } from './foreach.js';
+export { executeWorkflowCall, deriveChildRunId } from './workflow-call.js';
 
 import { executeTrigger } from './trigger.js';
 import { executeSet } from './set.js';
@@ -124,6 +125,7 @@ import { executeLlm } from './llm.js';
 import { executeTool } from './tool.js';
 import { executeOrchestrator } from './orchestrator.js';
 import { executeForeach } from './foreach.js';
+import { executeWorkflowCall } from './workflow-call.js';
 
 /** The pure executors plus `wait`/`approval`/`session`/`llm`/`tool`/`orchestrator`/`foreach` (Tasks 5, 7, 3, 4, 5, 6). */
 export function createDefaultNodeExecutors(): NodeExecutorRegistry {
@@ -139,5 +141,6 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     tool: { execute: executeTool },
     orchestrator: { execute: executeOrchestrator },
     foreach: { execute: executeForeach },
+    workflow: { execute: executeWorkflowCall },
   };
 }

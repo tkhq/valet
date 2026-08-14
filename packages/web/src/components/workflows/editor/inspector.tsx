@@ -26,6 +26,7 @@ import {
   type TriggerNode,
   type WaitNode,
   type WorkflowNode,
+  WorkflowCallNode,
 } from "@valet/workflow";
 import { Button } from "~/components/primitives";
 import { JsonTextarea, LabeledInput, LabeledTextarea, NumberField, SelectField } from "./fields";
@@ -88,6 +89,8 @@ function NodeForm({ node, onChange }: { node: WorkflowNode; onChange: (patch: Re
       return <OrchestratorForm node={node} onChange={onChange} />;
     case "tool":
       return <ToolForm node={node} onChange={onChange} />;
+    case "workflow":
+      return <WorkflowCallForm node={node} onChange={onChange} />;
   }
 }
 
@@ -408,9 +411,32 @@ function ToolForm({ node, onChange }: { node: ToolNode; onChange: (patch: Record
   );
 }
 
+function WorkflowCallForm({
+  node,
+  onChange,
+}: {
+  node: WorkflowCallNode;
+  onChange: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <LabeledInput
+        label="Workflow id"
+        value={node.workflowId}
+        onChange={(value) => onChange({ workflowId: value })}
+      />
+      <JsonTextarea
+        label="Input (JSON, template-rendered)"
+        value={node.input ?? {}}
+        onChange={(value) => onChange({ input: value && typeof value === "object" ? value : undefined })}
+      />
+    </div>
+  );
+}
+
 // ─── foreach (+ nested body sub-form) ──────────────────────────────────────
 
-const FOREACH_BODY_TYPES: ForeachBodyNode["type"][] = ["llm", "tool", "set", "orchestrator", "session"];
+const FOREACH_BODY_TYPES: ForeachBodyNode["type"][] = ["llm", "tool", "set", "orchestrator", "session", "workflow"];
 
 function ForeachForm({ node, onChange }: { node: ForeachNode; onChange: (patch: Record<string, unknown>) => void }) {
   return (
@@ -503,6 +529,8 @@ function BodyNodeForm({ node, onChange }: { node: ForeachBodyNode; onChange: (pa
       return <OrchestratorForm node={node} onChange={onChange} />;
     case "session":
       return <SessionForm node={node} onChange={onChange} />;
+    case "workflow":
+      return <WorkflowCallForm node={node} onChange={onChange} />;
   }
 }
 
@@ -518,5 +546,7 @@ function defaultForeachBody(type: ForeachBodyNode["type"], id: string): ForeachB
       return { id, type: "orchestrator", prompt: "" };
     case "session":
       return { id, type: "session", mode: "start", prompt: "" };
+    case "workflow":
+      return { id, type: "workflow", workflowId: "" };
   }
 }

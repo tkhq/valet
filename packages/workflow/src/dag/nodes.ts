@@ -155,12 +155,31 @@ export interface ToolNode {
 }
 
 /**
+ * Sub-workflow call (batch-fanout design decision 1). Starts a child run
+ * of the referenced definition and parks until it settles. The child run
+ * records `parentRunId`/`parentNodeId`/`parentIteration` in its params, so
+ * each batch item is a real run with its own per-node status. Nesting
+ * depth is 1: a definition that runs AS a child may not contain `workflow`
+ * nodes (rejected at dispatch, and at validation when the reference
+ * resolves).
+ */
+export interface WorkflowCallNode {
+  id: string;
+  type: 'workflow';
+  /** The called workflow's id. Must belong to the same owner as the calling run. */
+  workflowId: string;
+  /** Template-rendered, becomes the child trigger payload's `data`. */
+  input?: unknown;
+}
+
+/**
  * Body of a foreach is restricted — no nested foreach, no if/approval
  * (control flow lives at the DAG level), no stop (stopping a run from
  * inside a loop iteration interacts badly with the wave model). The
- * runtime executes one body per item.
+ * runtime executes one body per item. A `workflow` body starts one child
+ * run per item (the per-item sub-DAG shape).
  */
-export type ForeachBodyNode = LlmNode | ToolNode | SetNode | OrchestratorNode | SessionNode;
+export type ForeachBodyNode = LlmNode | ToolNode | SetNode | OrchestratorNode | SessionNode | WorkflowCallNode;
 
 export interface ForeachNode {
   id: string;
@@ -187,6 +206,7 @@ export type WorkflowNode =
   | ForeachNode
   | LlmNode
   | OrchestratorNode
-  | ToolNode;
+  | ToolNode
+  | WorkflowCallNode;
 
 export type DagNodeType = WorkflowNode['type'];

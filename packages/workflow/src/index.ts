@@ -23,6 +23,7 @@ export type {
   OrchestratorNode,
   ToolNode,
   ToolCredentialMode,
+  WorkflowCallNode,
 } from './dag/nodes.js';
 
 export {

@@ -169,4 +169,19 @@ export interface WorkflowEngineDeps {
    * `dispatchId` gives the session executor.
    */
   invokeAction(req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult>;
+
+  /**
+   * The `workflow` node's definition lookup (batch-fanout design decision
+   * 1). Resolves `workflowId` to its current definition snapshot ONLY when
+   * the workflow belongs to `owner` — an id belonging to someone else
+   * resolves `null`, indistinguishable from a missing one. Optional
+   * because definition storage lives host-side: a host that does not wire
+   * it gets a loud per-node failure from the executor, never a silent
+   * skip. Starting the child run needs no engine method — the executor
+   * enqueues durably through the `WorkflowStore` itself.
+   */
+  resolveWorkflow?(
+    workflowId: string,
+    owner: { ownerType: string; ownerId: string } | undefined,
+  ): Promise<{ definition: unknown; definitionVersionId: string } | null>;
 }

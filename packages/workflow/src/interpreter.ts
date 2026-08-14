@@ -184,20 +184,28 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // own outcome.
     let sawFailure = [...cpAll.values()].some((cp) => cp.status === 'failed');
 
-    for (const node of runnable) {
-      const existingCheckpoint = cpAll.get(node.id);
-      const argsBase: Omit<NodeExecutorArgs, 'node'> = {
-        run,
-        attempt,
-        iteration: ITERATION,
-        templateContext,
-        existingCheckpoint,
-        store,
-        clock,
-        engine,
-        onApprovalPending,
-      };
-      const outcome = await invokeExecutorTraced(node, executors, argsBase);
+    // Execute the wave's runnable nodes concurrently, bounded (batch-fanout
+    // design decision 2). Same-wave nodes never feed each other — the
+    // template context and runnable set were computed before the wave, and
+    // each executor writes only its own checkpoint row — so concurrency
+    // changes wall-clock, not semantics. Outcomes are aggregated in
+    // definition order below, preserving the sequential loop's
+    // deterministic terminate selection.
+    const outcomes = await executeWave(runnable, executors, (node) => ({
+      run,
+      attempt,
+      iteration: ITERATION,
+      templateContext,
+      existingCheckpoint: cpAll.get(node.id),
+      store,
+      clock,
+      engine,
+      onApprovalPending,
+    }));
+
+    for (let i = 0; i < runnable.length; i++) {
+      const node = runnable[i];
+      const outcome = outcomes[i];
 
       if (outcome.status === 'failed') sawFailure = true;
 
@@ -220,7 +228,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome, onBeginTerminalize);
+      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome, onBeginTerminalize, clock);
     }
     if (waitingOn.length > 0) {
       const wakeAt = earliestTimerWake(waitingOn);
@@ -252,13 +260,27 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
 async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, onBeginTerminalize } = deps;
+  const { store, engine, clock, onBeginTerminalize } = deps;
   for (const wait of run.waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
     }
+    if (wait.kind === 'run') {
+      await cancelChildRun(store, wait.runId, clock);
+    }
   }
   return await twoPhaseSettle(store, run.runId, attempt, 'cancelled', onBeginTerminalize);
+}
+
+/** Cancel propagation to a sub-workflow run: same durable signal + wake the host's own `terminate()` writes. */
+async function cancelChildRun(store: WorkflowStore, childRunId: string, clock: () => number): Promise<void> {
+  await store.insertSignal({
+    runId: childRunId,
+    signalId: 'cancel',
+    signalType: 'cancel',
+    createdAt: clock(),
+  });
+  await store.requestWake(childRunId);
 }
 
 /**
@@ -274,6 +296,7 @@ async function resumeTerminalize(store: WorkflowStore, run: WorkflowRun): Promis
   }
   // Terminal cleanup hook: no-op this task. See `twoPhaseSettle`.
   await store.settleRun(run.runId, run.outcome);
+  await wakeParentRun(store, run.runId);
   return await mustGetParkState(store, run.runId);
 }
 
@@ -292,10 +315,14 @@ async function terminateSettle(
   waitingOn: RunWaitCondition[],
   outcome: 'completed' | 'failed',
   onBeginTerminalize: (() => void | Promise<void>) | undefined,
+  clock: () => number,
 ): Promise<RunParkState> {
   for (const wait of waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
+    }
+    if (wait.kind === 'run') {
+      await cancelChildRun(store, wait.runId, clock);
     }
   }
   return await twoPhaseSettle(store, runId, attempt, outcome, onBeginTerminalize);
@@ -319,7 +346,21 @@ async function twoPhaseSettle(
   // teardown, trace finalization) run here, between reserving the
   // outcome and finalizing it.
   await store.settleRun(runId, outcome);
+  await wakeParentRun(store, runId);
   return await mustGetParkState(store, runId);
+}
+
+/**
+ * A sub-workflow run's settlement is its parent's wake signal (batch-
+ * fanout design decision 1): request a wake on `params.parentRunId` so the
+ * parked `workflow` node re-drives promptly. Best-effort — the host's
+ * lost-wake sweep independently wakes parents whose `run` wait names a
+ * settled child, so a crash right here loses nothing.
+ */
+async function wakeParentRun(store: WorkflowStore, runId: string): Promise<void> {
+  const run = await store.getRun(runId);
+  const parentRunId = run?.params.parentRunId;
+  if (parentRunId !== undefined) await store.requestWake(parentRunId);
 }
 
 async function parkAndReturn(
@@ -354,6 +395,39 @@ function earliestTimerWake(waitingOn: RunWaitCondition[]): number | undefined {
     min = min === undefined ? wait.wakeAt : Math.min(min, wait.wakeAt);
   }
   return min;
+}
+
+// ─── Wave execution ──────────────────────────────────────────────────────────
+
+/** Concurrent executors per wave. Bounds fan-in load, not correctness. */
+const WAVE_CONCURRENCY = 5;
+
+/**
+ * Runs every node's executor with bounded concurrency and returns their
+ * outcomes indexed like `runnable`. An executor throw (fence error,
+ * contract violation) propagates — after every in-flight executor has
+ * settled, so no write from this wave is left mid-air when the drive
+ * aborts.
+ */
+async function executeWave(
+  runnable: WorkflowNode[],
+  executors: NodeExecutorRegistry,
+  argsFor: (node: WorkflowNode) => Omit<NodeExecutorArgs, 'node'>,
+): Promise<NodeExecuteResult[]> {
+  const outcomes: NodeExecuteResult[] = new Array<NodeExecuteResult>(runnable.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(WAVE_CONCURRENCY, runnable.length) }, async () => {
+    while (true) {
+      const idx = next++;
+      if (idx >= runnable.length) return;
+      const node = runnable[idx];
+      outcomes[idx] = await invokeExecutorTraced(node, executors, argsFor(node));
+    }
+  });
+  const settled = await Promise.allSettled(workers);
+  const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  return outcomes;
 }
 
 // ─── Executor dispatch ───────────────────────────────────────────────────────
@@ -438,6 +512,8 @@ async function invokeExecutor(
       return requireExecutor(executors.orchestrator, node).execute({ ...argsBase, node });
     case 'tool':
       return requireExecutor(executors.tool, node).execute({ ...argsBase, node });
+    case 'workflow':
+      return requireExecutor(executors.workflow, node).execute({ ...argsBase, node });
   }
 }
 

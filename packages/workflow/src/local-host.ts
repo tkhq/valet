@@ -372,6 +372,7 @@ export class LocalRunHost implements RunHost {
       if (this.hasDueTimerWait(run.waitingOn, now)) shouldWake = true;
       if (!shouldWake && (await this.hasUnconsumedCancelOrMatchingSignal(run.runId, run.waitingOn))) shouldWake = true;
       if (!shouldWake && (await this.hasSettledSubmissionWait(run.waitingOn))) shouldWake = true;
+      if (!shouldWake && (await this.hasSettledRunWait(run.waitingOn))) shouldWake = true;
       if (!shouldWake && (await this.reconcileUncheckpointedConsumption(run.runId))) shouldWake = true;
 
       if (shouldWake) await this.wake(run.runId);
@@ -405,6 +406,20 @@ export class LocalRunHost implements RunHost {
     for (const wait of waitingOn) {
       if (wait.kind !== 'submission') continue;
       if (await this.engine.isSettled(wait.sessionId, wait.queueItemId)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The `run` wait's lost-wake backstop: a parked parent whose sub-workflow
+   * run has settled is woken even when the settle-time `requestWake` on the
+   * parent was lost (crash between the child's `settleRun` and the wake).
+   */
+  private async hasSettledRunWait(waitingOn: RunWaitCondition[]): Promise<boolean> {
+    for (const wait of waitingOn) {
+      if (wait.kind !== 'run') continue;
+      const child = await this.store.getRun(wait.runId);
+      if (child?.status === 'settled') return true;
     }
     return false;
   }
