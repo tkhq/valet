@@ -193,6 +193,11 @@ describe("github-app service", () => {
       expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_CLIENT_SECRET/);
     });
 
+    it("throws when ONLY the optional webhook secret is set (a stray var is a misconfiguration, not 'unset')", () => {
+      const env: NodeJS.ProcessEnv = { GITHUB_APP_WEBHOOK_SECRET: "stray" };
+      expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_ID/);
+    });
+
     it("throws with a corrective message when the private key is neither PEM nor base64 PEM", () => {
       const env = { ...fullEnv, GITHUB_APP_PRIVATE_KEY: "not-a-key" };
       expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_PRIVATE_KEY/);

@@ -524,7 +524,10 @@ githubAppWebhookRouter.post("/", async (c) => {
   const { db, engineCredentials, encryptionKey } = c.var.providers;
   // Prefer a credential-row app; with none anywhere, fall back to the
   // `GITHUB_APP_*` env config. The webhook secret is App-level either way,
-  // so signature verification never needs the org first.
+  // so signature verification never needs the org first. In the orgId
+  // branch, `loadAppConfig` reads `process.env` if the row vanished
+  // between the scan and here — the same deployment-wide fallback the
+  // null branch uses, so the race changes nothing.
   let orgId = await findGithubAppOrgId(db);
   const config = orgId
     ? await loadAppConfig({ credentials: engineCredentials }, orgId)
