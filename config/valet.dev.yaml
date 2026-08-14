@@ -1,0 +1,18 @@
+# Instance config for local dev (`make dev-local`).
+# Spec: docs/specs/2026-08-14-instance-config-design.md
+# The api reconciles this into the database at boot. After you wipe
+# ~/.valet/pg, the next boot restores this state. No secrets in this file.
+version: 1
+
+org:
+  name: Turnkey
+  features:
+    organizations: true
+  members:
+    - email: me@connerswann.me
+      role: admin
+
+skillSources:
+  - repo: obra/superpowers
+    ref: main
+    subpath: skills
