@@ -724,6 +724,12 @@ export class Session {
    * `command_result` entry, emit `command_result`, and return a
    * command-shaped receipt. Never touches queue admission — a command runs
    * even while a turn streams.
+   *
+   * `PromptOptions` other than `threadId` (resolved by the caller) are
+   * intentionally not forwarded: they shape queue submissions (author,
+   * channel, queueMode, model, ...) and a command takes no queue item. If a
+   * future option must reach the command path, add a parameter here so the
+   * dependency is explicit.
    */
   private async executeCommand(
     thread: Thread,
