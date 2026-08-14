@@ -58,6 +58,19 @@ describe("STEPS", () => {
     for (const s of STEPS) expect(Object.keys(s.env ?? {})).not.toContain("CI");
   });
 
+  // vitest silently drops every argument after a bare "--" and runs the FULL
+  // suite. A step that means to run 2 files instead reruns all ~180. Guard
+  // the whole table: no command may contain "--", including inside bash -c
+  // strings ("pnpm ... test -- <files>").
+  it("no step command smuggles args past a bare -- separator", () => {
+    for (const s of STEPS) {
+      expect(s.command, s.id).not.toContain("--");
+      for (const part of s.command) {
+        expect(part, `${s.id}: ${part}`).not.toMatch(/ test -- /);
+      }
+    }
+  });
+
   it("plugins-unit filter list matches the plugin packages that have tests", () => {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
     const pkgs = join(root, "packages");

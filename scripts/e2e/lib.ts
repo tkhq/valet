@@ -119,12 +119,13 @@ const TESTED_PLUGINS = [
   "@valet/plugin-telegram",
 ];
 
+// No "--" before the file filters: vitest silently drops every argument
+// after a bare "--" and runs the FULL suite (guarded by lib.test.ts).
 const apiTest = (...files: string[]): string[] => [
   "pnpm",
   "--filter",
   "@valet/api",
   "test",
-  "--",
   ...files,
 ];
 
@@ -144,12 +145,12 @@ export const STEPS: StepDef[] = [
   { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
   { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
   { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
   { id: "store-postgres-unit", group: "static", title: "store-postgres PGlite tests (no docker)", command: ["pnpm", "--filter", "@valet/store-postgres", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
   { id: "web-build", group: "static", title: "web production build (vite)", command: ["pnpm", "--filter", "@valet/web", "build"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test -- src/bundle-guard"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
+  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test src/bundle-guard"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
   { id: "helm-golden", group: "static", title: "helm chart lint + golden templates", command: ["bash", "deploy/chart/valet/test/golden.sh"], needs: ["helm"], scrubKeys: true, timeoutMs: 5 * MIN },
-  { id: "sandbox-docker-unit", group: "static", title: "sandbox-docker unit tests (no daemon)", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "--", "test/run-args.test.ts"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
+  { id: "sandbox-docker-unit", group: "static", title: "sandbox-docker unit tests (no daemon)", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/run-args.test.ts"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
   // Regenerate the plugin registry and fail on drift; the pre-drift file is
   // restored so the runner never leaves the tree dirty.
   { id: "registry-drift", group: "static", title: "plugin registry matches plugin.yaml manifests", command: ["bash", "-c", "set -e; f=packages/api/src/plugins/registry.gen.ts; pnpm tsx scripts/generate-v2-registry.ts >/dev/null; if ! git diff --quiet -- \"$f\"; then git checkout -- \"$f\"; echo \"registry.gen.ts is out of date - run 'make generate-registries' and commit\"; exit 1; fi"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
