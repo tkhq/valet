@@ -1,7 +1,19 @@
 # Instance config file (`valet.yaml`) — design
 
 Date: 2026-08-14
-Status: proposed
+Status: implemented (plan: docs/plans/2026-08-14-instance-config.md)
+
+## Deviations
+
+- Tool-policy globs match the catalog's dot-qualified id (`service.action`),
+  not the slash form an early draft showed.
+- The provisioning hook binds config-declared team members by team NAME
+  lookup, not by `team_cfg_*` id — the name is the team's identity, so the
+  bind works for adopted UI-created teams too.
+- Known-kind llm providers are updated through the existing
+  `updateLlmProvider`; only `openai_compatible` rows get deterministic
+  `prov_cfg_*` ids (known kinds keep their natural per-org-singleton
+  identity).
 
 ## Problem
 
