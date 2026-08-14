@@ -4,6 +4,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mario
 import {
   pluginCatalogTools,
   prepareActionArgs,
+  matchesToolPattern,
   RESOLVE_TTL_MS,
   Engine,
   InMemoryCredentialStore,
@@ -11,6 +12,7 @@ import {
   InMemorySessionStore,
   VirtualSandboxProvider,
   type ActionPlugin,
+  type ApprovalOverrideRule,
   type BusEvent,
   type Credential,
   type CredentialProvider,
@@ -775,5 +777,108 @@ describe("prepareActionArgs", () => {
     const result = prepareActionArgs(schema, params);
     expect(result.ok).toBe(true);
     expect(params).toEqual({});
+  });
+});
+
+describe("matchesToolPattern", () => {
+  it("* matches any qualified id", () => {
+    expect(matchesToolPattern("*", "github.merge_pull_request")).toBe(true);
+    expect(matchesToolPattern("*", "linear.create_issue")).toBe(true);
+    expect(matchesToolPattern("*", "svc.act")).toBe(true);
+  });
+
+  it("github.* matches github service tools and not others", () => {
+    expect(matchesToolPattern("github.*", "github.merge_pull_request")).toBe(true);
+    expect(matchesToolPattern("github.*", "github.get_issue")).toBe(true);
+    expect(matchesToolPattern("github.*", "linear.create_issue")).toBe(false);
+  });
+
+  it("exact id match", () => {
+    expect(matchesToolPattern("github.create_issue", "github.create_issue")).toBe(true);
+    expect(matchesToolPattern("github.create_issue", "github.delete_repo")).toBe(false);
+  });
+
+  it("dot in pattern is literal — github.x does not match githubax", () => {
+    expect(matchesToolPattern("github.x", "githubax")).toBe(false);
+  });
+
+  it("a.b*c does not treat . as regex-any", () => {
+    // The pattern a.b*c should match a.bXXXc but not a_bXXXc (dot is literal)
+    expect(matchesToolPattern("a.b*c", "a.bXXXc")).toBe(true);
+    expect(matchesToolPattern("a.b*c", "aXbXXXc")).toBe(false);
+  });
+
+  it("wildcard matches across dots", () => {
+    expect(matchesToolPattern("github.*", "github.some.deeply.nested")).toBe(true);
+  });
+});
+
+describe("pluginCatalogTools: approval overrides", () => {
+  function makeLowRiskPlugin(): ActionPlugin {
+    return {
+      service: "svc",
+      actions: [
+        {
+          id: "svc.act",
+          name: "Act",
+          description: "a low-risk action",
+          riskLevel: "low",
+          parameters: Type.Object({}),
+          execute: async () => ({ success: true, data: { ran: true } }),
+        },
+      ],
+    };
+  }
+
+  it("wildcard deny rule blocks a low-risk (default allow) action", async () => {
+    const plugin = makeLowRiskPlugin();
+    const overrides: ApprovalOverrideRule[] = [{ match: "*", mode: "deny" }];
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin], approvalOverrides: overrides });
+
+    const result = await callTool.execute(
+      { tool_id: "svc.act", params: {}, summary: "test" },
+      makeCtx(),
+    );
+    expect(result.text).toContain("blocked by org policy");
+  });
+
+  it("non-matching deny rule leaves the action allowed", async () => {
+    const plugin = makeLowRiskPlugin();
+    const overrides: ApprovalOverrideRule[] = [{ match: "svc.other", mode: "deny" }];
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin], approvalOverrides: overrides });
+
+    const result = await callTool.execute(
+      { tool_id: "svc.act", params: {}, summary: "test" },
+      makeCtx(),
+    );
+    expect(result.text).toContain("ran");
+    expect(result.text).not.toContain("blocked");
+  });
+
+  it("first-match-wins: allow before wildcard deny lets specific action through", async () => {
+    const plugin = makeLowRiskPlugin();
+    const overrides: ApprovalOverrideRule[] = [
+      { match: "svc.act", mode: "allow" },
+      { match: "*", mode: "deny" },
+    ];
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin], approvalOverrides: overrides });
+
+    const result = await callTool.execute(
+      { tool_id: "svc.act", params: {}, summary: "test" },
+      makeCtx(),
+    );
+    expect(result.text).toContain("ran");
+    expect(result.text).not.toContain("blocked");
+  });
+
+  it("no override → existing riskLevel default applies (low → allow)", async () => {
+    const plugin = makeLowRiskPlugin();
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+
+    const result = await callTool.execute(
+      { tool_id: "svc.act", params: {}, summary: "test" },
+      makeCtx(),
+    );
+    expect(result.text).toContain("ran");
   });
 });

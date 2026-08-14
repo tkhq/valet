@@ -117,10 +117,19 @@ export interface ActionPlugin {
   resolveActions?: (ctx: { credentials: CredentialProvider }) => Promise<PluginAction[]>;
 }
 
+/** One tool-approval override rule. First match wins over riskLevel defaults. */
+export interface ApprovalOverrideRule {
+  /** Glob pattern matched against the tool's qualifiedId. `*` matches any run of characters. */
+  match: string;
+  mode: ApprovalMode;
+}
+
 export interface PluginCatalogOptions {
   plugins: ActionPlugin[];
   /** Clock used for the dynamic-action-resolution TTL cache. Default: Date.now. */
   clock?: () => number;
+  /** Instance-level approval overrides. First matching rule wins; no match → riskLevel default. */
+  approvalOverrides?: ApprovalOverrideRule[];
 }
 
 /** TTL for the dynamic `resolveActions` cache, keyed per plugin service. */
@@ -171,8 +180,9 @@ export type PluginCatalog = Catalog;
 export function buildPluginCatalog(
   plugins: ActionPlugin[],
   clock?: () => number,
+  approvalOverrides?: ApprovalOverrideRule[],
 ): PluginCatalog {
-  return buildCatalog(plugins, clock ?? Date.now);
+  return buildCatalog(plugins, clock ?? Date.now, approvalOverrides);
 }
 
 /**
@@ -181,7 +191,7 @@ export function buildPluginCatalog(
  */
 export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
-  const catalog = buildCatalog(opts.plugins, now);
+  const catalog = buildCatalog(opts.plugins, now, opts.approvalOverrides);
   return [makeListTool(catalog), makeCallTool(catalog)];
 }
 
@@ -242,7 +252,7 @@ export async function invokeAction(
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
 
-  const approvalMode = approvalModeFor(entry);
+  const approvalMode = approvalModeFor(entry, catalog.approvalOverrides);
   if (approvalMode === "deny") return { kind: "denied-policy" };
   if (approvalMode === "require_approval") {
     const resolution = await ctx.requestDecision({
@@ -317,6 +327,8 @@ interface Catalog {
   /** TTL cache of resolved dynamic actions, keyed by plugin service. */
   resolved: Map<string, ResolvedDynamic>;
   now: () => number;
+  /** Instance-level approval override rules. First match wins. */
+  approvalOverrides: ApprovalOverrideRule[];
 }
 
 function buildEntries(
@@ -337,7 +349,11 @@ function buildEntries(
   return { entries, byId };
 }
 
-function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
+function buildCatalog(
+  plugins: ActionPlugin[],
+  now: () => number,
+  approvalOverrides: ApprovalOverrideRule[] = [],
+): Catalog {
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   const dynamicPlugins: ActionPlugin[] = [];
@@ -352,7 +368,7 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), now };
+  return { entries, byId, dynamicPlugins, resolved: new Map(), now, approvalOverrides };
 }
 
 /**
@@ -579,7 +595,22 @@ function makeCallTool(catalog: Catalog): ToolDef {
 
 // ── helpers ──────────────────────────────────────────────────────
 
-function approvalModeFor(entry: CatalogEntry): ApprovalMode {
+/**
+ * Test whether a glob `pattern` matches `qualifiedId`. `*` matches any run of
+ * characters including `.`; all other regex metacharacters in the pattern are
+ * treated as literals.
+ */
+export function matchesToolPattern(pattern: string, qualifiedId: string): boolean {
+  // Escape all regex special chars, then un-escape \* back to .*
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(qualifiedId);
+}
+
+function approvalModeFor(entry: CatalogEntry, overrides: ApprovalOverrideRule[] = []): ApprovalMode {
+  const id = qualifiedId(entry);
+  for (const rule of overrides) {
+    if (matchesToolPattern(rule.match, id)) return rule.mode;
+  }
   if (entry.plugin.defaultApprovalMode) return entry.plugin.defaultApprovalMode;
   switch (entry.action.riskLevel) {
     case "low":
