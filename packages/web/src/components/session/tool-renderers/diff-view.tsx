@@ -19,6 +19,14 @@ const CONTEXT_LINES = 3;
 /** Collapse an unchanged run only when it hides more lines than this. */
 const MIN_GAP = 2;
 
+/**
+ * `stripTrailingCr` keeps CRLF input from leaving a literal `\r` on each
+ * line (a `\r` inside `<pre>` garbles the row). `ignoreNewlineAtEof` stops
+ * a trailing-newline-only difference from rendering as a phantom
+ * remove/add pair of visually identical lines.
+ */
+const DIFF_OPTIONS = { ignoreNewlineAtEof: true, stripTrailingCr: true } as const;
+
 function splitLines(value: string): string[] {
   const lines = value.split("\n");
   // A change value ends with "\n" unless it's the file's last line; drop
@@ -38,7 +46,7 @@ export function computeDiffRows(
   context = CONTEXT_LINES,
 ): DiffRow[] {
   const flat: Array<{ kind: "add" | "remove" | "context"; line: string }> = [];
-  for (const change of diffLines(before, after)) {
+  for (const change of diffLines(before, after, DIFF_OPTIONS)) {
     const kind = change.added ? "add" : change.removed ? "remove" : "context";
     for (const line of splitLines(change.value)) flat.push({ kind, line });
   }
@@ -76,7 +84,7 @@ export function computeDiffRows(
 export function diffStats(before: string, after: string): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
-  for (const change of diffLines(before, after)) {
+  for (const change of diffLines(before, after, DIFF_OPTIONS)) {
     const n = splitLines(change.value).length;
     if (change.added) added += n;
     else if (change.removed) removed += n;

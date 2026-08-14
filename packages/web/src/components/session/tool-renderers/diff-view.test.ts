@@ -84,6 +84,18 @@ describe("computeDiffRows", () => {
     const rows = computeDiffRows("a\n", "b\n");
     expect(render(rows)).toEqual(["−a", "+b"]);
   });
+
+  it("ignores a trailing-newline-only difference", () => {
+    // Without ignoreNewlineAtEof, jsdiff reports "b" → "b\n" as a
+    // remove/add pair of visually identical lines.
+    expect(render(computeDiffRows("a\nb", "a\nb\n"))).toEqual([" a", " b"]);
+    expect(diffStats("a\nb", "a\nb\n")).toEqual({ added: 0, removed: 0 });
+  });
+
+  it("strips carriage returns from CRLF input", () => {
+    const rows = computeDiffRows("a\r\nb\r\n", "a\r\nc\r\n");
+    expect(render(rows)).toEqual([" a", "−b", "+c"]);
+  });
 });
 
 describe("diffStats", () => {
