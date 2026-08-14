@@ -1,0 +1,10 @@
+{{- if .Values.api.instanceConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valet.fullname" . }}-instance-config
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+data:
+  valet.yaml: {{ .Values.api.instanceConfig | quote }}
+{{- end }}
