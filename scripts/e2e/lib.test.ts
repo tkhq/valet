@@ -11,6 +11,7 @@ import {
   missingNeeds,
   needHint,
   parseEnvFile,
+  partitionWaves,
   renderScorecard,
   selectSteps,
   toJsonReport,
@@ -97,6 +98,40 @@ describe("STEPS", () => {
     if (!step) throw new Error("plugins-unit step missing");
     const filters = step.command.filter((_, i) => step.command[i - 1] === "--filter").sort();
     expect(filters).toEqual(withTests.sort());
+  });
+});
+
+describe("partitionWaves", () => {
+  it("splits steps into pre-serial, parallel, and serial waves preserving order", () => {
+    const waves = partitionWaves(STEPS);
+    // Steps that write files other steps read run alone, first: typecheck
+    // (tsc --build re-emits shared/sdk dist) and registry-drift (temporarily
+    // rewrites a tracked source file).
+    expect(waves.pre.map((s) => s.id)).toEqual(["typecheck", "registry-drift"]);
+    // Every parallel step is static-group and flagged parallelSafe.
+    for (const s of waves.parallel) {
+      expect(s.group, s.id).toBe("static");
+      expect(s.parallelSafe, s.id).toBe(true);
+    }
+    expect(waves.parallel.map((s) => s.id)).toContain("unit");
+    expect(waves.parallel.map((s) => s.id)).toContain("plugins-unit");
+    expect(waves.parallel.map((s) => s.id)).toContain("web-build");
+    // Everything with daemons, ports, keys, or clusters stays serial, in
+    // table order.
+    const serialIds = waves.serial.map((s) => s.id);
+    expect(serialIds).toContain("integration-agent");
+    expect(serialIds).toContain("store-postgres");
+    expect(serialIds).toContain("fullstack-docker");
+    expect(serialIds).not.toContain("unit");
+    // The three waves cover every step exactly once.
+    const all = [...waves.pre, ...waves.parallel, ...waves.serial].map((s) => s.id).sort();
+    expect(all).toEqual(STEPS.map((s) => s.id).sort());
+  });
+
+  it("non-static steps are never parallelSafe", () => {
+    for (const s of STEPS) {
+      if (s.group !== "static") expect(s.parallelSafe, s.id).toBeUndefined();
+    }
   });
 });
 
