@@ -661,6 +661,12 @@ describe("ChildWatcher", () => {
     // double-log an already-logged permanent denial.
     expect(drops).toHaveLength(1);
     expect(drops[0]?.detail).toContain("parent-does-not-exist");
+
+    // A permanent denial is a FAILURE, not a completed run: the parent
+    // never received the settlement, so keep the child's sandbox and
+    // cached session for debugging. The idle sweep owns the reclaim.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(engineHost.liveSession("child-real-denial")).not.toBeNull();
   });
 
   it("tears down the child's sandbox and evicts its cached session on settle, keeping session data", async () => {

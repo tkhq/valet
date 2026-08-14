@@ -263,9 +263,10 @@ orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
     );
   }
 
-  // Repeat the ownership predicate in the UPDATE itself (house pattern:
-  // guarded updates carry their own WHERE, e.g. `writeHibernated`) so the
-  // invariant doesn't live only in the SELECT above.
+  // The UPDATE carries the full invariant, not just ownership (house
+  // pattern: guarded updates own their WHERE, e.g. `writeHibernated`):
+  // settled — never hide a row that flipped back to running; dismissedAt
+  // IS NULL — a repeat dismiss is a no-op that keeps the first timestamp.
   await db
     .update(childWatches)
     .set({ dismissedAt: Date.now() })
@@ -273,6 +274,8 @@ orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
       and(
         eq(childWatches.childSessionId, childSessionId),
         eq(childWatches.parentSessionId, sessionId),
+        eq(childWatches.settled, true),
+        isNull(childWatches.dismissedAt),
       ),
     );
   return c.json({ ok: true });

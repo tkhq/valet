@@ -83,6 +83,35 @@ describe("POST /api/orchestrator/children/:childSessionId/dismiss", () => {
     expect(sessionRows[0]?.status).toBe("active");
   });
 
+  it("a second dismiss is idempotent: the first dismissedAt timestamp survives", async () => {
+    api = await bootTestApi();
+    await insertChild({ id: "child-twice", settled: true });
+
+    const first = await fetch(
+      `${api.baseUrl}/api/orchestrator/children/child-twice/dismiss`,
+      { method: "POST" },
+    );
+    expect(first.status).toBe(200);
+    const rowsAfterFirst = await api.providers.db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-twice"));
+    const stamp = rowsAfterFirst[0]?.dismissedAt;
+    expect(typeof stamp).toBe("number");
+
+    await new Promise((r) => setTimeout(r, 10));
+    const second = await fetch(
+      `${api.baseUrl}/api/orchestrator/children/child-twice/dismiss`,
+      { method: "POST" },
+    );
+    expect(second.status).toBe(200);
+    const rowsAfterSecond = await api.providers.db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-twice"));
+    expect(rowsAfterSecond[0]?.dismissedAt).toBe(stamp);
+  });
+
   it("refuses to dismiss a child that has not settled", async () => {
     api = await bootTestApi();
     await insertChild({ id: "child-b", settled: false });

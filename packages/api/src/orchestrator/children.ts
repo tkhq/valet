@@ -355,7 +355,11 @@ export class ChildWatcher {
       }
       console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
       await this.markSettled(watch.childSessionId);
-      await this.teardownChildSandbox(watch.childSessionId);
+      // No sandbox teardown here, deliberately: a permanent denial means
+      // the parent never received the settlement, so keep the sandbox and
+      // cached session around for debugging. The idle sweep owns the
+      // eventual reclaim. Only the delivered-settlement path (attempt)
+      // tears down eagerly.
     }
   }
 
