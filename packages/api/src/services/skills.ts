@@ -140,21 +140,40 @@ export async function ownedSkillRow(
  * session, because a skill name is the `skill` tool's lookup key.
  * `listSkillSourcesFor` keeps the first of a repeated name, so this order is
  * what makes "my own copy wins" true.
+ *
+ * `scope` narrows the answer to ONE owner, for a client that shows one
+ * workspace at a time. It replaces the union rather than adding to it: a
+ * person who asks for a team's skills must not also get their own. The
+ * caller decides whether `scope` may be reached BEFORE calling this — an
+ * ownerId off a query string proves nothing, so `routes/skills.ts` runs it
+ * through `isAuthorizedFor` first.
  */
-export async function listSkills(db: AppDb, owner: SkillOwner): Promise<SkillRow[]> {
-  const teamIds = (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
+export async function listSkills(
+  db: AppDb,
+  owner: SkillOwner,
+  scope?: Principal,
+): Promise<SkillRow[]> {
+  // No team read when `scope` already names the one owner to list.
+  const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
   const ownerMatch = and(eq(skills.ownerType, "user"), eq(skills.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(skills.ownerType, "team"), inArray(skills.ownerId, teamIds))
       : undefined;
+  const reach = scope
+    ? and(eq(skills.ownerType, scope.type), eq(skills.ownerId, scope.id))
+    : teamMatch
+      ? or(ownerMatch, teamMatch)
+      : ownerMatch;
 
   const rows = await db
     .select()
     .from(skills)
-    .where(and(eq(skills.orgId, owner.orgId), teamMatch ? or(ownerMatch, teamMatch) : ownerMatch))
+    .where(and(eq(skills.orgId, owner.orgId), reach))
     .orderBy(asc(skills.name));
 
+  // One owner's rows are all one owner type, so this reorder only does
+  // anything for the union above.
   return [...rows.filter((r) => r.ownerType === "user"), ...rows.filter((r) => r.ownerType !== "user")];
 }
 

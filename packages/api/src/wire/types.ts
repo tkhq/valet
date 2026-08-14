@@ -770,7 +770,9 @@ export interface MemoryTreeEntry {
 
 // ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────
 //
-// Own-rows-only, same owner-scoping convention as sessions (decision 18).
+// Owner-scoped exactly like sessions (decision 18): the list returns the
+// caller's own rows plus their teams', `?ownerType=&ownerId=` narrows it to
+// one owner, and an owner the caller cannot reach 404s.
 
 export interface WorkflowDefinitionSummary {
   id: string;
@@ -1061,6 +1063,14 @@ export interface StoredSkillSummary extends SkillSummaryBase {
 
 export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
 
+/**
+ * `GET /api/skills`, optionally filtered to one workspace with
+ * `?ownerType=&ownerId=`. Send both parameters or neither; an owner the
+ * caller cannot reach answers 404, the same as an owner that does not exist.
+ *
+ * A filtered listing carries that owner's stored skills only. Plugin skills
+ * belong to no owner, so they appear in the unfiltered listing alone.
+ */
 export interface ListSkillsResponse {
   skills: SkillSummary[];
 }
@@ -1126,6 +1136,11 @@ export interface SkillSourceSummary {
   lastMessage: string | null;
 }
 
+/**
+ * `GET /api/skills/sources`, taking the same `?ownerType=&ownerId=` filter
+ * `ListSkillsResponse` documents, with the same rules: both parameters or
+ * neither, and 404 for an owner the caller cannot reach.
+ */
 export interface ListSkillSourcesResponse {
   sources: SkillSourceSummary[];
 }

@@ -15,6 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, or } from "drizzle-orm";
+import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
@@ -226,21 +227,35 @@ export async function ownedSkillSourceRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
-/** Every source the caller can reach, sorted by repository name. */
-export async function listSkillSources(db: AppDb, owner: SkillOwner): Promise<SkillSourceRow[]> {
-  const teamIds = (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
+/**
+ * Every source the caller can reach, sorted by repository name.
+ *
+ * `scope` narrows the answer to ONE owner, and replaces the union rather
+ * than adding to it — the same rule, and the same reason, as `listSkills`.
+ * Reaching `scope` is the caller's question to answer first: `routes/skills.ts`
+ * runs the query string through `isAuthorizedFor` before it gets here.
+ */
+export async function listSkillSources(
+  db: AppDb,
+  owner: SkillOwner,
+  scope?: Principal,
+): Promise<SkillSourceRow[]> {
+  const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
   const ownerMatch = and(eq(skillSources.ownerType, "user"), eq(skillSources.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(skillSources.ownerType, "team"), inArray(skillSources.ownerId, teamIds))
       : undefined;
+  const reach = scope
+    ? and(eq(skillSources.ownerType, scope.type), eq(skillSources.ownerId, scope.id))
+    : teamMatch
+      ? or(ownerMatch, teamMatch)
+      : ownerMatch;
 
   return db
     .select()
     .from(skillSources)
-    .where(
-      and(eq(skillSources.orgId, owner.orgId), teamMatch ? or(ownerMatch, teamMatch) : ownerMatch),
-    )
+    .where(and(eq(skillSources.orgId, owner.orgId), reach))
     .orderBy(asc(skillSources.repoFullName), asc(skillSources.subpath));
 }
 

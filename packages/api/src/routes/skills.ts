@@ -26,10 +26,14 @@
  * routes are owner-scoped the same way, and both the create route and the
  * "sync now" route call the one `SkillSyncService.syncOnce` the background
  * sweep calls (`services/skill-sync.ts`).
+ *
+ * Both listings take the same optional `?ownerType=&ownerId=` filter, for a
+ * client that shows one workspace at a time. `readOwnerScope` reads it for
+ * both, so the two pages cannot answer a bad filter differently.
  */
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
-import type { SkillSource, ValetPlugin } from "@valet/engine";
+import type { Principal, SkillSource, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -37,6 +41,7 @@ import { partitionByName } from "../plugins/assemble.js";
 import {
   createSkill,
   deleteSkill,
+  isAuthorizedFor,
   listSkills,
   ownedSkillRow,
   SkillNameConflictError,
@@ -114,6 +119,61 @@ function owner(c: { var: { user: { id: string; orgId: string } } }): SkillOwner 
   return { userId: c.var.user.id, orgId: c.var.user.orgId };
 }
 
+// ── The `?ownerType=&ownerId=` filter ─────────────────────────────────────
+
+const OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
+
+function isOwnerType(value: string): value is Principal["type"] {
+  return OWNER_TYPES.has(value);
+}
+
+/** The one workspace to list, the response to send instead, or neither. */
+type OwnerScope =
+  | { ok: true; scope?: Principal }
+  | { ok: false; error: string; status: 400 | 404 };
+
+/**
+ * Reads the workspace filter both listings take — the same shape, and the
+ * same two messages, `GET /api/workflows`, `GET /api/sessions` and
+ * `GET /api/assistants` take, so one client builds one query for all of
+ * them. Absent is an answer too: no parameters means the caller's whole
+ * reach, exactly as before this filter existed.
+ *
+ * A query string names an owner; it never proves the caller may read that
+ * owner. `isAuthorizedFor` decides that here, in application code, against
+ * the caller's OWN org — the same rule every row-level read of these two
+ * tables goes through, so a filter can never surface what an unfiltered list
+ * hides. An `ownerType=org` filter therefore always fails: no rule admits
+ * anybody to an org-owned skill yet.
+ */
+async function readOwnerScope(
+  db: AppDb,
+  caller: SkillOwner,
+  ownerType: string | undefined,
+  ownerId: string | undefined,
+): Promise<OwnerScope> {
+  if (ownerType === undefined && ownerId === undefined) return { ok: true };
+  if (ownerType === undefined || ownerId === undefined) {
+    return {
+      ok: false,
+      error: "Filter by owner with both ownerType and ownerId, or send neither.",
+      status: 400,
+    };
+  }
+  if (!isOwnerType(ownerType)) {
+    return { ok: false, error: "ownerType must be 'user', 'team' or 'org'.", status: 400 };
+  }
+  const reachable = await isAuthorizedFor(db, caller, {
+    orgId: caller.orgId,
+    ownerType,
+    ownerId,
+  });
+  // 404, and a message that repeats nothing back: an owner the caller cannot
+  // reach must read exactly like an owner that does not exist.
+  if (!reachable) return { ok: false, error: "owner not found", status: 404 };
+  return { ok: true, scope: { type: ownerType, id: ownerId } };
+}
+
 /** Maps a service error onto its HTTP status. Anything else rethrows. */
 function errorResponse(err: unknown): { body: Record<string, unknown>; status: 400 | 404 | 409 } {
   if (err instanceof SkillValidationError) {
@@ -128,23 +188,46 @@ function errorResponse(err: unknown): { body: Record<string, unknown>; status: 4
 // ── Catalog ───────────────────────────────────────────────────────────────
 
 skillsRouter.get("/", async (c) => {
+  const { db } = c.var.providers;
+  const caller = owner(c);
+  const filter = await readOwnerScope(db, caller, c.req.query("ownerType"), c.req.query("ownerId"));
+  if (!filter.ok) return c.json({ error: filter.error }, filter.status);
+
   const pluginSkills = ownedSkills(c.var.providers.plugins);
-  const rows = await listSkills(c.var.providers.db, owner(c));
-  const { kept, shadowed } = partitionByName(
+  const rows = await listSkills(db, caller, filter.scope);
+
+  // Shadowing is a property of the caller's whole reach, never of the page
+  // being read. `listSkills` returns personal rows before team rows and the
+  // first of a repeated name is the one that reaches a session, so judging a
+  // filtered page against itself drops the very row that wins: a team page
+  // would report a team skill live while a personal copy of the same name
+  // silently beat it everywhere. Judge against the unfiltered set, then show
+  // only the rows this page asked for.
+  const judged = filter.scope === undefined ? rows : await listSkills(db, caller);
+  const { shadowed } = partitionByName(
     pluginSkills.map((entry) => entry.skill.name),
-    rows,
+    judged,
   );
   const shadowedIds = new Set(shadowed.map((row) => row.id));
+  const onPage = new Set(rows.map((row) => row.id));
+  const kept = rows.filter((row) => !shadowedIds.has(row.id));
+  const shadowedOnPage = shadowed.filter((row) => onPage.has(row.id));
 
   // Both kinds, in one list. A reader of this page asks "what can the
   // assistant read", and the answer includes the skills the installed
   // plugins ship — which is also the only way a shadow warning makes sense,
   // since the skill doing the shadowing is usually one of them.
+  //
+  // A filtered listing drops them: the filter selects rows BY owner, and a
+  // plugin skill has no owner to select it by. It still shadows, and so does
+  // a stored row from another workspace — see the `judged` set above, which
+  // is why a filtered page can flag a row shadowed by something it does not
+  // itself list.
   const resp: ListSkillsResponse = {
     skills: [
-      ...pluginSkills.map(toPluginSummary),
+      ...(filter.scope ? [] : pluginSkills.map(toPluginSummary)),
       // Listing order matches delivery order, so the `kept` rows come first.
-      ...[...kept, ...shadowed].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
+      ...[...kept, ...shadowedOnPage].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
     ],
   };
   return c.json(resp);
@@ -249,7 +332,11 @@ skillsRouter.delete("/stored/:id", async (c) => {
 
 skillsRouter.get("/sources", async (c) => {
   const { db } = c.var.providers;
-  const rows = await listSkillSources(db, owner(c));
+  const caller = owner(c);
+  const filter = await readOwnerScope(db, caller, c.req.query("ownerType"), c.req.query("ownerId"));
+  if (!filter.ok) return c.json({ error: filter.error }, filter.status);
+
+  const rows = await listSkillSources(db, caller, filter.scope);
   const counts = await countSkillsPerSource(
     db,
     rows.map((row) => row.id),
