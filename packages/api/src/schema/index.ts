@@ -388,6 +388,17 @@ export const messages = pgTable(
 // Names unique per org; last-admin guards on role change/removal and
 // creator-auto-admin live in service code (`services/teams.ts`), inside one
 // transaction — not expressible as table constraints.
+//
+// `origin` records where a row came from, as `skills.origin` does below. An
+// `idp` team MIRRORS an identity-provider group: the login-time sync owns its
+// membership. A `local` team belongs to the people who made it, and the sync
+// must never touch one — every sync write is scoped by `origin = 'idp'`.
+//
+// `external_id` holds the full group path (`/platform`). The path is what the
+// token claim carries, it survives a realm re-import, and it stays legible in
+// a query result. It is NULL for a local team. Postgres treats NULLs as
+// distinct, so `teams_org_external` constrains the mirrored rows only, and
+// local rows never collide in it.
 
 export const teams = pgTable(
   "teams",
@@ -395,9 +406,18 @@ export const teams = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     name: text("name").notNull(),
+    /** `local` = created in Valet. `idp` = mirrored from an identity-provider group. */
+    origin: text("origin", { enum: ["local", "idp"] })
+      .notNull()
+      .default("local"),
+    /** Full identity-provider group path this team mirrors. Null for a local team. */
+    externalId: text("external_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [uniqueIndex("teams_org_name").on(t.orgId, t.name)],
+  (t) => [
+    uniqueIndex("teams_org_name").on(t.orgId, t.name),
+    uniqueIndex("teams_org_external").on(t.orgId, t.externalId),
+  ],
 );
 
 export const teamMembers = pgTable(

@@ -18,6 +18,11 @@
  * if they're not on it). A caller who fails that check gets 404, same as a
  * caller outside the org — existence-hiding applies to authz, not just org
  * membership.
+ *
+ * Origin-gated: those same four routes refuse a team whose `origin` is
+ * `idp`. Such a team mirrors an identity-provider group, and the login-time
+ * sync owns it. There is no rename route today; whoever adds one must add
+ * the same refusal to it.
  */
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
@@ -30,6 +35,8 @@ import {
   addMember,
   createTeam,
   deleteTeam,
+  IdpManagedTeamError,
+  type IdpManagedMutation,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -58,16 +65,51 @@ async function rowToSummary(
   row: TeamRow,
 ): Promise<TeamSummary> {
   const memberCount = (await listTeamMembers(db, row.id)).length;
-  return { id: row.id, orgId: row.orgId, name: row.name, createdAt: row.createdAt, memberCount };
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    name: row.name,
+    origin: row.origin,
+    externalId: row.externalId,
+    createdAt: row.createdAt,
+    memberCount,
+  };
 }
 
 function isTeamRole(v: unknown): v is TeamRole {
   return v === "admin" || v === "member";
 }
 
+/**
+ * Builds the refusal body for a mutation on a team that mirrors an
+ * identity-provider group, or null when the team is Valet's own.
+ *
+ * The status is 409, not 403 and not 404. The caller has already passed both
+ * the org gate and the team-admin gate, and the team plainly exists — what
+ * stops the write is the team's own state, exactly like `team_name_conflict`
+ * and `team_owns_workflows` above it. 403 in this API means "your role is too
+ * low", which is not the problem and would send an admin looking for a
+ * permission to grant. 404 is reserved for cross-org and unauthorized
+ * callers, where hiding existence is the point; here the caller may see the
+ * team, so a 404 would be a lie they cannot act on.
+ *
+ * The message comes from `IdpManagedTeamError`, the same class the service
+ * throws, so the route and the service never word the fix differently.
+ */
+function idpManagedRefusal(row: TeamRow, mutation: IdpManagedMutation): { error: string; code: string } | null {
+  if (row.origin !== "idp") return null;
+  const err = new IdpManagedTeamError(row, mutation);
+  return { error: err.message, code: err.code };
+}
+
 /** Maps service errors to the route's JSON error response. Rethrows unknowns. */
 function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 404 | 409 } | null {
-  if (err instanceof TeamNameConflictError || err instanceof LastAdminError || err instanceof TeamOwnsWorkflowsError) {
+  if (
+    err instanceof TeamNameConflictError ||
+    err instanceof LastAdminError ||
+    err instanceof TeamOwnsWorkflowsError ||
+    err instanceof IdpManagedTeamError
+  ) {
     return { body: { error: err.message, code: err.code }, status: 409 };
   }
   if (err instanceof NotTeamMemberError || err instanceof NotFoundError) {
@@ -204,6 +246,9 @@ teamsRouter.delete("/:id", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
+  const refusal = idpManagedRefusal(team, "delete");
+  if (refusal) return c.json(refusal, 409);
+
   try {
     await deleteTeam(db, { teamId: id });
     return c.json({ ok: true });
@@ -224,6 +269,9 @@ teamsRouter.post("/:id/members", async (c) => {
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+
+  const refusal = idpManagedRefusal(team, "membership");
+  if (refusal) return c.json(refusal, 409);
 
   let body: AddTeamMemberRequest;
   try {
@@ -260,6 +308,9 @@ teamsRouter.patch("/:id/members/:userId", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
+  const refusal = idpManagedRefusal(team, "membership");
+  if (refusal) return c.json(refusal, 409);
+
   let body: SetTeamMemberRoleRequest;
   try {
     body = (await c.req.json()) as SetTeamMemberRoleRequest;
@@ -291,6 +342,9 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+
+  const refusal = idpManagedRefusal(team, "membership");
+  if (refusal) return c.json(refusal, 409);
 
   try {
     await removeMember(db, { teamId: id, userId: targetUserId });

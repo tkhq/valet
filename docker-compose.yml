@@ -18,6 +18,10 @@ services:
   # Local Keycloak for testing the auth-v2 OIDC/SSO path (make dev-keycloak).
   # Imports the `valet` realm (client `valet` / secret `valet-dev-secret`,
   # users alice@valet.test + bob@valet.test, password `password`).
+  # The realm also seeds the groups that drive Valet teams, and the client
+  # mappers that put them in the token — see docs/environment-variables.md.
+  # Keycloak imports a realm only when that realm is absent, so an edit to the
+  # realm file needs `make dev-keycloak-down && make dev-keycloak`.
   # Admin console: http://localhost:8081 (admin / admin).
   keycloak:
     image: quay.io/keycloak/keycloak:26.2

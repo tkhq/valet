@@ -36,12 +36,29 @@ function formatDate(ts: number): string {
 }
 
 /**
+ * Says why a mirrored team has no controls, in the same words the API uses
+ * when it refuses the same change. A reader must not have to press a button
+ * to find out that it cannot work.
+ */
+function idpManagedNote(externalId: string | null): string {
+  const source = externalId ? `identity provider group ${externalId}` : "your identity provider";
+  return `Membership comes from ${source}. Add or remove people there, then ask them to sign in again.`;
+}
+
+/**
  * Organization · Teams — the first-ever teams management UI over the
  * existing `/api/teams` router. List with inline create, per-team expand
  * revealing the member roster + add/remove/role-toggle, and delete-via-
  * confirm. All member display data (name/email/avatar) is cross-referenced
  * against `useOrgMembers()` since `TeamMemberSummary` on the wire is only
  * `{userId, role}`.
+ *
+ * A team with `origin === "idp"` mirrors an identity-provider group, and the
+ * API refuses every mutation on it. This panel therefore renders none of
+ * those controls — no delete, no role menu, no remove, no add — rather than
+ * disabling them, and shows `idpManagedNote` where they would have been. A
+ * disabled control the reader cannot explain is worse than no control.
+ * Creating a team is untouched: every team made here is `local`.
  */
 export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
   const teamsQ = useTeams();
@@ -141,6 +158,7 @@ function TeamRow({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteTeam = useDeleteTeam();
+  const managed = team.origin === "idp";
 
   return (
     <div className="py-3">
@@ -157,6 +175,14 @@ function TeamRow({
             aria-hidden
           />
           <span className="truncate text-sm font-medium text-ink">{team.name}</span>
+          {managed && (
+            // `title` carries the reason to a reader who never expands the
+            // row. The expanded body states it in full, so this is a second
+            // channel, not the only one.
+            <Badge variant="accent" className="shrink-0" title={idpManagedNote(team.externalId)}>
+              Identity provider
+            </Badge>
+          )}
           <span className="shrink-0 text-xs text-muted">
             {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
           </span>
@@ -164,29 +190,33 @@ function TeamRow({
         <span className="hidden shrink-0 text-xs text-muted sm:block">
           Created {formatDate(team.createdAt)}
         </span>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={`${team.name} actions`}
-            >
-              <MoreHorizontal className="h-4 w-4" aria-hidden />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              className="text-danger-500"
-              onSelect={() => setConfirmDelete(true)}
-            >
-              Delete team
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* Delete is the only item in this menu, and the API refuses it on a
+            mirrored team. An empty menu is worse than no menu. */}
+        {!managed && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={`${team.name} actions`}
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                className="text-danger-500"
+                onSelect={() => setConfirmDelete(true)}
+              >
+                Delete team
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
 
-      {open && <TeamMembers teamId={team.id} teamName={team.name} orgMembers={orgMembers} />}
+      {open && <TeamMembers team={team} orgMembers={orgMembers} />}
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent
@@ -217,15 +247,10 @@ function TeamRow({
   );
 }
 
-function TeamMembers({
-  teamId,
-  teamName,
-  orgMembers,
-}: {
-  teamId: string;
-  teamName: string;
-  orgMembers: OrgMemberWire[];
-}) {
+function TeamMembers({ team, orgMembers }: { team: TeamSummary; orgMembers: OrgMemberWire[] }) {
+  const teamId = team.id;
+  const teamName = team.name;
+  const managed = team.origin === "idp";
   const membersQ = useTeamMembers(teamId);
   const setRole = useSetTeamMemberRole();
   const removeMember = useRemoveTeamMember();
@@ -238,6 +263,10 @@ function TeamMembers({
 
   return (
     <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
+      {/* Sits above the roster, where the add/remove controls would be, so a
+          reader finds the reason in the place they look for the control. */}
+      {managed && <p className="pt-1 text-xs text-muted">{idpManagedNote(team.externalId)}</p>}
+
       {membersQ.isLoading && (
         <div className="flex items-center gap-2 py-2 text-xs text-muted">
           <Spinner size={12} /> Loading members…
@@ -259,45 +288,55 @@ function TeamMembers({
             <span className="min-w-0 flex-1 truncate text-sm text-ink">
               {identity?.name ?? identity?.email ?? member.userId}
             </span>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="secondary" size="sm">
-                  <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
-                    {member.role === "admin" ? "Admin" : "Member"}
-                  </Badge>
+            {managed ? (
+              // The role follows the identity provider's sub-group, so it is
+              // a fact to read here, not a control.
+              <Badge variant={member.role === "admin" ? "accent" : "neutral"}>
+                {member.role === "admin" ? "Admin" : "Member"}
+              </Badge>
+            ) : (
+              <>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="secondary" size="sm">
+                      <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
+                        {member.role === "admin" ? "Admin" : "Member"}
+                      </Badge>
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
+                      }
+                    >
+                      Admin
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
+                      }
+                    >
+                      Member
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
+                  onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden />
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onSelect={() =>
-                    setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
-                  }
-                >
-                  Admin
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
-                  }
-                >
-                  Member
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
-              onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
-            >
-              <X className="h-3.5 w-3.5" aria-hidden />
-            </Button>
+              </>
+            )}
           </div>
         );
       })}
 
-      {addable.length > 0 && (
+      {!managed && addable.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button type="button" variant="ghost" size="sm" className="gap-1.5">

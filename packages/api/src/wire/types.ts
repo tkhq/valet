@@ -625,10 +625,24 @@ export interface ForceSettleResponse {
 
 export type TeamRole = "admin" | "member";
 
+/**
+ * Where a team came from. `local` teams are created in Valet and Valet owns
+ * them. `idp` teams mirror an identity-provider group: the client shows them
+ * as read-only, and the API refuses to mutate them.
+ */
+export type TeamOrigin = "local" | "idp";
+
 export interface TeamSummary {
   id: string;
   orgId: string;
   name: string;
+  origin: TeamOrigin;
+  /**
+   * The identity-provider group path this team mirrors, e.g. `/platform`.
+   * Null for a local team. The client shows it, so a reader knows which
+   * group to change.
+   */
+  externalId: string | null;
   createdAt: number;
   memberCount: number;
 }

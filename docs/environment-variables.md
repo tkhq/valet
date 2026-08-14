@@ -29,11 +29,79 @@ stub applies. Provider variable pairs are all-or-none.
 | `AUTH_TRUSTED_ORIGINS` | Extra CORS/trusted origins (`http://localhost:5173` is always included) |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Comma-separated signup domain allowlist |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
+| `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below |
+| `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`) |
+| `AUTH_OIDC_TEAM_ADMIN_GROUP` | Sub-group that grants admin on its parent team (default `admins`) |
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | GitHub social login |
 | `VALET_LOCAL_AUTH` | `1` → stub identity for local dev. Mutually exclusive with `BETTER_AUTH_SECRET` — the server refuses to boot when both are set |
 | `VALET_SANDBOX_JWT_MASTER` | Master key for per-session sandbox gateway JWT secrets (falls back to `BETTER_AUTH_SECRET`) |
 | `VALET_INTERNAL_TOKEN` | Token for the server's internal self-calls (generated if unset) |
+
+### Group claims from the identity provider
+
+Valet maps identity-provider groups to teams, so the provider must send group
+membership in the token. The local Keycloak realm
+(`docker/keycloak/valet-realm.json`, started by `make dev-keycloak`) carries
+two protocol mappers on the `valet` client for this. Both are client-dedicated
+mappers, so they apply to every sign-in and need no extra scope.
+
+| Claim | Mapper | Value |
+|-------|--------|-------|
+| `groups` | Group membership, full path on | Every group the user is in, as full paths: `["/platform/admins"]` |
+| `groups_asserted` | Hardcoded claim | The string `"true"`, on every response, for every user |
+
+The second mapper looks redundant and is not. Keycloak omits the `groups`
+claim completely for a user who is in no group — it does not send an empty
+array. So an absent `groups` claim alone is ambiguous: it means either "this
+user is in no group" or "no group information reached us", which is what a
+missing mapper, a dropped scope, or a different provider produces. Those two
+cases need opposite handling. `groups_asserted` separates them: it proves the
+mapper set ran. Present marker plus absent `groups` means the user is in no
+group. An absent marker means Valet learned nothing about groups and must
+change no membership.
+
+The seeded realm puts `alice` in `/platform/admins`, and `bob` in `/platform`
+and `/research`, so the two dev users have different membership shapes.
+
+#### Keep the two mappers together
+
+The marker gives the group claim its meaning, so the two mappers must always
+agree. Two edits break that agreement, and both remove every mirrored team
+from every user at the next sign-in:
+
+1. If you delete the group mapper, delete the marker mapper in the same
+   change. A marker without a group claim states that every user is in no
+   group.
+2. Enable both mappers on the same tokens. Valet reads the claims from the
+   UserInfo response, because OIDC discovery gives the provider a UserInfo
+   endpoint. A marker on the UserInfo response and a group claim on the ID
+   token only is the same failure as case 1.
+
+To turn the sync off, delete both mappers. Valet then learns nothing about
+groups and changes no team.
+
+#### Do not put a slash in a group name
+
+A group name must not contain `/`. Keycloak accepts such a name and builds an
+ambiguous path from it. A top-level group named `platform/admins` reports the
+path `/platform/admins`, which is the path of the `admins` sub-group of
+`platform`. The two are identical in the claim, and Valet reads the path to
+decide who administers a team. A member of the flat group therefore becomes an
+administrator of the team that mirrors `/platform`, although that member is in
+no group under `/platform`.
+
+Nothing in the token separates the two cases, so Valet cannot detect this. If
+you delegate group creation in the identity provider, restrict the names that
+the delegates can use.
+
+Keycloak imports a realm only when that realm is absent. If you edit the realm
+file, run `make dev-keycloak-down && make dev-keycloak` to import it again.
+
+A provider that names these claims differently needs no code change. Set
+`AUTH_OIDC_TEAM_CLAIM` and `AUTH_OIDC_TEAM_ASSERTED_CLAIM` to the names it
+sends, and `AUTH_OIDC_TEAM_ADMIN_GROUP` to the sub-group that grants admin.
+A provider that sends neither claim changes no team membership at all.
 
 ## Sandboxes
 

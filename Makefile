@@ -146,6 +146,12 @@ dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO p
 	@echo "$(YELLOW)Comment out VALET_LOCAL_AUTH in .env first$(NC) — the stub identity is an admin, so"
 	@echo "the api refuses to boot with real auth and the stub together."
 	@echo "Test users: alice@valet.test / bob@valet.test, password 'password'"
+	@echo "No extra variables are needed for teams: the realm emits group membership"
+	@echo "as the 'groups' claim, plus a 'groups_asserted' marker claim."
+	@echo "  alice -> /platform/admins      = member and admin of team 'platform'"
+	@echo "  bob   -> /platform, /research  = member of both teams"
+	@echo "$(YELLOW)Keycloak imports a realm only when that realm is absent. After you edit"
+	@echo "docker/keycloak/valet-realm.json, run 'make dev-keycloak-down && make dev-keycloak'.$(NC)"
 
 dev-keycloak-down: ## Stop the local Keycloak container
 	$(DOCKER_COMPOSE) --profile keycloak down keycloak

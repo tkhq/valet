@@ -3,7 +3,7 @@
  * that wire it into signup/social/SSO flows and post-create bookkeeping.
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { APIError, type AuthMiddleware } from "better-auth/api";
 import type { Account, BetterAuthOptions, User } from "better-auth";
 import type { CredentialStore } from "@valet/engine";
@@ -492,6 +492,93 @@ describe("buildAuthHooks", () => {
         .from(teamMembers)
         .where(eq(teamMembers.userId, "u-missing-team"));
       expect(rows).toHaveLength(0);
+    });
+  });
+
+  describe("provisionUser (team sync)", () => {
+    const ssoUser = { id: "existing", email: "existing@x.test" };
+
+    function ssoConfig(): AuthConfig {
+      return baseConfig({
+        oidc: {
+          issuer: "https://idp.test/realms/valet",
+          clientId: "valet",
+          clientSecret: "shh",
+          name: "SSO",
+          domain: "idp.test",
+          teamClaim: "groups",
+          teamAssertedClaim: "groups_asserted",
+          teamAdminGroup: "admins",
+        },
+      });
+    }
+
+    async function teamsOf(userId: string): Promise<Array<{ team: string; role: string }>> {
+      return db
+        .select({ team: teams.name, role: teamMembers.role })
+        .from(teamMembers)
+        .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+        .where(eq(teamMembers.userId, userId))
+        .orderBy(teams.name);
+    }
+
+    it("mirrors the group claim into teams on a sign-in", async () => {
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform/admins", "/research"], groups_asserted: "true" },
+      });
+
+      expect(await teamsOf("existing")).toEqual([
+        { team: "platform", role: "admin" },
+        { team: "research", role: "member" },
+      ]);
+    });
+
+    it("changes nothing when the group claim is missing", async () => {
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+      await provisionUser({ user: ssoUser, userInfo: { groups: ["/platform"], groups_asserted: "true" } });
+
+      // Same user, next sign-in, mapper no longer configured.
+      await provisionUser({ user: ssoUser, userInfo: { email: ssoUser.email } });
+
+      expect(await teamsOf("existing")).toEqual([{ team: "platform", role: "member" }]);
+    });
+
+    it("empties the mirrored teams when the marker arrives without groups", async () => {
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+      await provisionUser({ user: ssoUser, userInfo: { groups: ["/platform"], groups_asserted: "true" } });
+
+      await provisionUser({ user: ssoUser, userInfo: { groups_asserted: "true" } });
+
+      expect(await teamsOf("existing")).toEqual([]);
+    });
+
+    it("does nothing when no OIDC provider is configured", async () => {
+      const { provisionUser } = buildAuthHooks({ db, cfg: baseConfig(), credentialStore });
+
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform"], groups_asserted: "true" },
+      });
+
+      expect(await teamsOf("existing")).toEqual([]);
+    });
+
+    it("swallows a database fault instead of blocking the sign-in", async () => {
+      // The plugin awaits this hook BEFORE it sets the session cookie, so an
+      // exception here locks everybody out. Dropping the table the reconcile
+      // reads first is the fault; the next test re-applies the migrations.
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+      await db.execute(sql`DROP TABLE "teams" CASCADE`);
+
+      await expect(
+        provisionUser({
+          user: ssoUser,
+          userInfo: { groups: ["/platform"], groups_asserted: "true" },
+        }),
+      ).resolves.toBeUndefined();
     });
   });
 });

@@ -219,6 +219,39 @@ describe("loadAuthConfig", () => {
     });
   });
 
+  it("defaults the team-sync claim names", () => {
+    const result = loadAuthConfig({
+      BETTER_AUTH_SECRET: "secret",
+      AUTH_OIDC_ISSUER: "https://oidc.example.com",
+      AUTH_OIDC_CLIENT_ID: "client-id",
+      AUTH_OIDC_CLIENT_SECRET: "client-secret",
+    });
+
+    expect(result?.oidc).toMatchObject({
+      teamClaim: "groups",
+      teamAssertedClaim: "groups_asserted",
+      teamAdminGroup: "admins",
+    });
+  });
+
+  it("overrides the team-sync claim names, ignoring whitespace-only values", () => {
+    const result = loadAuthConfig({
+      BETTER_AUTH_SECRET: "secret",
+      AUTH_OIDC_ISSUER: "https://oidc.example.com",
+      AUTH_OIDC_CLIENT_ID: "client-id",
+      AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_OIDC_TEAM_CLAIM: "  valet_teams  ",
+      AUTH_OIDC_TEAM_ASSERTED_CLAIM: "valet_teams_sent",
+      AUTH_OIDC_TEAM_ADMIN_GROUP: "   ",
+    });
+
+    expect(result?.oidc).toMatchObject({
+      teamClaim: "valet_teams",
+      teamAssertedClaim: "valet_teams_sent",
+      teamAdminGroup: "admins",
+    });
+  });
+
   it("uses AUTH_OIDC_NAME when set, otherwise defaults to SSO", () => {
     const withName = loadAuthConfig({
       BETTER_AUTH_SECRET: "secret",
@@ -382,6 +415,9 @@ describe("loadAuthConfig", () => {
         clientSecret: "oidc-secret",
         name: "Corporate SSO",
         domain: "corp.example.com",
+        teamClaim: "groups",
+        teamAssertedClaim: "groups_asserted",
+        teamAdminGroup: "admins",
       },
       social: {
         google: {

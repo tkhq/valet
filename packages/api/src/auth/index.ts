@@ -206,6 +206,11 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
     plugins: [
       sso({
         trustEmailVerified: true,
+        // The team sync must see every sign-in, not only the first one:
+        // group membership changes long after the account exists, and
+        // better-auth's `databaseHooks` all fire on user creation only.
+        provisionUser: hooks.provisionUser,
+        provisionUserOnEveryLogin: true,
         ...(cfg.oidc
           ? {
               defaultSSO: [
@@ -218,6 +223,18 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
                     issuer: cfg.oidc.issuer,
                     pkce: true,
                     discoveryEndpoint: `${cfg.oidc.issuer}/.well-known/openid-configuration`,
+                    // The plugin passes a fixed whitelist of claims to
+                    // `provisionUser` — id, email, emailVerified, name,
+                    // image — plus whatever `extraFields` names. Without
+                    // these two entries the group claims are invisible to
+                    // the sync, whatever the identity provider sends. Key =
+                    // the name in `userInfo`, value = the claim name.
+                    mapping: {
+                      extraFields: {
+                        [cfg.oidc.teamClaim]: cfg.oidc.teamClaim,
+                        [cfg.oidc.teamAssertedClaim]: cfg.oidc.teamAssertedClaim,
+                      },
+                    },
                   },
                 },
               ],
