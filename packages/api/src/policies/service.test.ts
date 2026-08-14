@@ -26,6 +26,7 @@ import {
   resolveActionPolicy,
   revokeExecutionGrants,
   revokeSessionGrants,
+  updateInvocationOutcome,
   writeAlwaysAllowPolicy,
   writeExecutionGrant,
   writeSessionGrant,
@@ -273,6 +274,46 @@ describe("persistInvocationAudit", () => {
     const allowed = { status: "completed" as const, resolvedMode: "allow" as const };
     expect(approved.status).toBe(allowed.status);
     expect(approved.resolvedMode).not.toBe(allowed.resolvedMode);
+  });
+});
+
+// ── updateInvocationOutcome ───────────────────────────────────────
+
+describe("updateInvocationOutcome", () => {
+  it("stamps resolvedBy on a row when provided", async () => {
+    // Seed an invocation row
+    await persistInvocationAudit(db, { invocationId: "inv1", orgId: ORG, status: "pending" });
+    // Update it with a resolved_by value
+    await updateInvocationOutcome(db, "inv1", ORG, { status: "approved", resolvedBy: "u1" });
+    // Read it back and verify both fields
+    const row = (await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "inv1")))[0];
+    expect(row).toBeDefined();
+    expect(row.status).toBe("approved");
+    expect(row.resolvedBy).toBe("u1");
+  });
+
+  it("updates status to timeout without resolvedBy", async () => {
+    // Seed an invocation row
+    await persistInvocationAudit(db, { invocationId: "inv2", orgId: ORG, status: "pending" });
+    // Update it with timeout status, no resolvedBy
+    await updateInvocationOutcome(db, "inv2", ORG, { status: "timeout" });
+    // Read it back and verify
+    const row = (await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "inv2")))[0];
+    expect(row).toBeDefined();
+    expect(row.status).toBe("timeout");
+    expect(row.resolvedBy).toBeNull();
+  });
+
+  it("updates status to cancelled with resolvedBy", async () => {
+    // Seed an invocation row
+    await persistInvocationAudit(db, { invocationId: "inv3", orgId: ORG, status: "pending" });
+    // Update it with cancelled status and resolvedBy
+    await updateInvocationOutcome(db, "inv3", ORG, { status: "cancelled", resolvedBy: "u2" });
+    // Read it back and verify
+    const row = (await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "inv3")))[0];
+    expect(row).toBeDefined();
+    expect(row.status).toBe("cancelled");
+    expect(row.resolvedBy).toBe("u2");
   });
 });
 

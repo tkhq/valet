@@ -287,7 +287,7 @@ policiesRouter.post("/preview", async (c) => {
 // ── GET /api/org/action-log — keyset-paginated read ──────────────────────
 
 function isActionInvocationStatus(v: string): v is NonNullable<ActionInvocationRow["status"]> {
-  return ["pending", "allowed", "denied", "approved", "rejected", "error", "completed"].includes(v);
+  return ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"].includes(v);
 }
 
 actionLogRouter.get("/", async (c) => {
@@ -330,7 +330,7 @@ actionLogRouter.get("/", async (c) => {
   const status = c.req.query("status");
   if (status !== undefined) {
     if (!isActionInvocationStatus(status)) {
-      return c.json({ error: "status must be one of pending|allowed|denied|approved|rejected|error|completed" }, 400);
+      return c.json({ error: "status must be one of pending|allowed|denied|approved|rejected|error|completed|cancelled|timeout" }, 400);
     }
     filters.status = status;
   }

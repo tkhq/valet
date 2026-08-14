@@ -473,10 +473,11 @@ export async function updateInvocationOutcome(
   invocationId: string,
   orgId: string,
   outcome: {
-    status: "completed" | "error";
+    status: "completed" | "error" | "approved" | "denied" | "cancelled" | "timeout";
     result?: unknown;
     error?: string;
     durationMs?: number;
+    resolvedBy?: string;
   },
 ): Promise<void> {
   try {
@@ -493,6 +494,7 @@ export async function updateInvocationOutcome(
         resultTruncated: result ? result.truncated : null,
         error,
         durationMs: outcome.durationMs ?? null,
+        ...(outcome.resolvedBy !== undefined ? { resolvedBy: outcome.resolvedBy } : {}),
       })
       // Org-scoped: `invocationId` embeds the workflow node id, which the
       // workflow AUTHOR controls — without the orgId predicate a crafted

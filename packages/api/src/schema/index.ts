@@ -1061,7 +1061,7 @@ export const actionInvocations = pgTable(
     matchedGrantId: text("matched_grant_id"),
     matchedOverrideId: text("matched_override_id"),
     status: text("status", {
-      enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed"],
+      enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"],
     }),
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
@@ -1072,6 +1072,7 @@ export const actionInvocations = pgTable(
     durationMs: bigint("duration_ms", { mode: "number" }),
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }),
+    resolvedBy: text("resolved_by"),
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),
