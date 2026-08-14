@@ -44,6 +44,7 @@ class FakeProvider implements SandboxProvider {
   createCalls = 0;
   destroyCalls: string[] = [];
   releaseCalls: string[] = [];
+  suspend?: (id: string) => Promise<void>;
   private nextId = 1;
 
   capabilities(): SandboxCapabilities {
@@ -128,5 +129,27 @@ describe("SandboxAttachment.replace", () => {
     const attachment = await readyAttachment(provider);
     await attachment.destroy();
     await expect(attachment.replace()).rejects.toThrow(/destroyed/);
+  });
+
+  it("a suspend() superseded by a replace() mid-await abandons its transition", async () => {
+    const provider = new FakeProvider();
+    let resolveSuspend!: () => void;
+    provider.suspend = () =>
+      new Promise<void>((res) => {
+        resolveSuspend = res;
+      });
+    const attachment = await readyAttachment(provider);
+
+    // Pause route calls suspend(); while provider.suspend is in flight, a
+    // replace() bumps the epoch and re-provisions.
+    const suspendPromise = attachment.suspend();
+    await attachment.replace();
+    expect(attachment.state).toBe("ready");
+
+    resolveSuspend();
+    await suspendPromise;
+
+    // The stale suspend must NOT mark the fresh sandbox suspended.
+    expect(attachment.state).toBe("ready");
   });
 });

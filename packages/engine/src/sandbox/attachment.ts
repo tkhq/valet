@@ -235,10 +235,17 @@ export class SandboxAttachment {
     if (!provider.suspend) {
       throw new Error("provider does not support hibernation");
     }
+    const startEpoch = this._epoch;
     // On rejection: state is untouched (still `ready`) and the error propagates.
     await provider.suspend(sandbox.id);
     // A concurrent destroy() during the await wins — do not resurrect it.
     if (this.destroyed) return;
+    // A concurrent replace()/re-provision during the await also wins: the
+    // epoch moved (or the handle changed), so the sandbox this suspend
+    // targeted is gone. Marking the FRESH sandbox `suspended` would make the
+    // next wake `resume()` a never-suspended sandbox (same stale-transition
+    // guard doResume uses).
+    if (this._epoch !== startEpoch || this._sandbox !== sandbox || this._state !== "ready") return;
     // Bump the suspend/resume cycle counter BEFORE emitting so this `suspended`
     // event and the wake's re-emitted `provisioning`/`ready` all carry a
     // wake-tag that disambiguates them from the cold-boot status events on the

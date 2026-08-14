@@ -242,7 +242,15 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
               active={t.id === activeThreadId}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
-              onArchive={(threadId) => void setArchived.mutateAsync({ threadId, archived: true })}
+              onArchive={(threadId) => {
+                void setArchived.mutateAsync({ threadId, archived: true });
+                // Archiving the thread you're looking at would strand the
+                // view on a thread absent from the list — return to the
+                // default thread.
+                if (threadId === activeThreadId) {
+                  navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+                }
+              }}
               onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
             />

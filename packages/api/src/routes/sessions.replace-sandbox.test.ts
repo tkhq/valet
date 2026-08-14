@@ -102,6 +102,35 @@ describe("POST /api/sessions/:id/sandbox/replace", () => {
     expect(session.attachment.currentEpoch()).toBe(oldEpoch);
   });
 
+  it("502s when the re-provision ends in error instead of reporting ok", async () => {
+    const { VirtualSandboxProvider } = await import("@valet/engine");
+    const base = new VirtualSandboxProvider();
+    let createCalls = 0;
+    const provider = new Proxy(base, {
+      get(target, prop, receiver) {
+        if (prop === "create") {
+          return async (...args: Parameters<typeof base.create>) => {
+            createCalls++;
+            if (createCalls > 1) throw new Error("provider quota exhausted");
+            return base.create(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = "replace-error";
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await warmSession(api, { id: sessionId, userId: "local-user" });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/sandbox/replace`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/retry/i);
+  });
+
   it("404s for an unknown session", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/sessions/nope/sandbox/replace`, {

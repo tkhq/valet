@@ -34,6 +34,7 @@ import { agentSessions, childWatches, type ChildWatchRow } from "../schema/index
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
+import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
@@ -431,8 +432,17 @@ export class ChildWatcher {
     try {
       const live = this.deps.engineHost.liveSession(childSessionId);
       if (!live) return;
+      // A user can wake a settled child from the Sessions page. A prompt
+      // admitted between the settle and this teardown must not lose its
+      // sandbox mid-turn — skip and let the idle sweep own the reclaim.
+      const unsettled = await this.deps.engineStore.listUnsettledSubmissions(childSessionId);
+      if (unsettled.length > 0) return;
       await live.attachment.destroy();
       this.deps.engineHost.evictCache(childSessionId);
+      // The sandbox bearer token outlives the container on backends whose
+      // creds live outside it (docker host-dir mount) — revoke like
+      // `EngineHost.destroy` does.
+      await revokeSandboxTokens(this.deps.db, childSessionId);
     } catch (err) {
       console.error(`ChildWatcher: sandbox teardown failed for settled child ${childSessionId}:`, err);
     }

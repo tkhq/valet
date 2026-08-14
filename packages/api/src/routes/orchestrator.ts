@@ -263,9 +263,17 @@ orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
     );
   }
 
+  // Repeat the ownership predicate in the UPDATE itself (house pattern:
+  // guarded updates carry their own WHERE, e.g. `writeHibernated`) so the
+  // invariant doesn't live only in the SELECT above.
   await db
     .update(childWatches)
     .set({ dismissedAt: Date.now() })
-    .where(eq(childWatches.childSessionId, childSessionId));
+    .where(
+      and(
+        eq(childWatches.childSessionId, childSessionId),
+        eq(childWatches.parentSessionId, sessionId),
+      ),
+    );
   return c.json({ ok: true });
 });

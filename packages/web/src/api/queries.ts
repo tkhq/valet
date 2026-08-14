@@ -82,7 +82,7 @@ export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsRespons
 /** Archived threads (`GET /threads?archived=1`) — display state only; an
  * archived thread's history is intact and unarchive restores it to the
  * default list. */
-export function useArchivedThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>) {
+export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<ListThreadsResponse>>) {
   return useQuery<ListThreadsResponse>({
     queryKey: qk.threadsArchived(id),
     queryFn: () => api.listThreads(id, { archived: true }),

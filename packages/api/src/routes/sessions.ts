@@ -512,10 +512,29 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
   }
 
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+
+  // Re-check immediately before replacing — a submission admitted while
+  // sessionFor built the session wins (same TOCTOU rule as the idle
+  // sweep's re-check before suspend).
+  const recheck = await engineStore.listUnsettledSubmissions(id);
+  if (recheck.length > 0) {
+    return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
+  }
+
   try {
     await session.attachment.replace();
   } catch (err) {
     return c.json({ error: (err as Error).message }, 409);
+  }
+
+  // `replace()` resolves once the re-provision settles, but a provision
+  // that fails lands in `error` state without throwing — don't report ok
+  // for a sandbox that never came up.
+  if (session.attachment.state !== "ready") {
+    return c.json(
+      { error: "sandbox replacement failed to provision. Check the sandbox backend, then retry." },
+      502,
+    );
   }
 
   return c.json({ ok: true }, 200);

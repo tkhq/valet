@@ -23,7 +23,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, childWatches, eventDropLog } from "../schema/index.js";
+import { agentSessions, childWatches, eventDropLog, sandboxTokens } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -720,6 +720,124 @@ describe("ChildWatcher", () => {
     expect(attachment.state).toBe("released");
     const childData = await engineStore.getSession("child-td");
     expect(childData).not.toBeNull();
+  });
+
+  it("teardown revokes the settled child's sandbox tokens", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-tok", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-tok", {
+      parentSessionId: "parent-tok",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+
+    // A live bearer token, as minted for the child's sandbox env.
+    await db.insert(sandboxTokens).values({
+      id: "tok-child-tok",
+      tokenHash: "hash-child-tok",
+      sessionId: "child-tok",
+      userId: "local-user",
+      orgId: "local-org",
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 3_600_000),
+    });
+
+    const itemId = "qi-tok-1";
+    await engineStore.admitSubmission("child-tok", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-tok", childThread.id, itemId, { outcome: "completed" });
+
+    const watch = {
+      childSessionId: "child-tok",
+      queueItemId: itemId,
+      parentSessionId: "parent-tok",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => engineHost.liveSession("child-tok") === null);
+
+    const tokens = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "child-tok"));
+    expect(tokens[0]?.revokedAt).not.toBeNull();
+  });
+
+  it("skips teardown while the child still has an unsettled submission (a user woke it)", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-busy", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-busy", {
+      parentSessionId: "parent-busy",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    // Keep the child's queue from running the extra item into failure.
+    await child.pause();
+
+    const itemId = "qi-busy-1";
+    await engineStore.admitSubmission("child-busy", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-busy", childThread.id, itemId, { outcome: "completed" });
+    // A user prompt admitted before the watcher fires — must NOT lose its
+    // sandbox to the settle teardown.
+    await engineStore.admitSubmission(
+      "child-busy",
+      childThread.id,
+      queuedItem("qi-busy-user", childThread.id, "follow-up"),
+    );
+
+    const watch = {
+      childSessionId: "child-busy",
+      queueItemId: itemId,
+      parentSessionId: "parent-busy",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-busy")).limit(1);
+      return rows[0]?.settled === true;
+    });
+    // Give any (buggy) teardown a chance to run, then assert it did not.
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(engineHost.liveSession("child-busy")).not.toBeNull();
+    expect(child.attachment.state).toBe("ready");
   });
 });
 

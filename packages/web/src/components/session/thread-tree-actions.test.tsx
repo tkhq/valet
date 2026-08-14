@@ -109,6 +109,40 @@ describe("ThreadTree — thread context menu", () => {
     expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
   });
 
+  it("archiving the ACTIVE thread navigates back to the default thread", async () => {
+    // No `thread` search param → the newest thread (thread-1) is active.
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
+
+    expect(navigate).toHaveBeenCalledTimes(1);
+    const call = navigate.mock.calls[0]?.[0] as {
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.search({ thread: "thread-1", child: "c" })).toEqual({
+      thread: undefined,
+      child: undefined,
+    });
+  });
+
+  it("archiving a NON-active thread does not navigate", async () => {
+    threads = [
+      thread({ id: "thread-newest", title: "Newest", createdAt: Date.now() }),
+      thread({ id: "thread-1", title: "Plan the launch", createdAt: Date.now() - 1000 }),
+    ];
+    const user = userEvent.setup();
+    renderTree();
+
+    // thread-newest is active (newest, no search param); archive thread-1.
+    await user.click(screen.getByRole("button", { name: /thread menu: plan the launch/i }));
+    await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
+
+    expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("offers a session-wide Replace sandbox action", async () => {
     const user = userEvent.setup();
     renderTree();
