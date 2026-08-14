@@ -346,6 +346,25 @@ async function enforceWorkflowPolicy(
     if (req.approval) {
       // Human approval is the authorization — proceed even though the
       // resolver could not be consulted. The signal is the authority.
+      // Write a best-effort audit row so the approved execution is
+      // auditable even when the policy store was unreachable.
+      await persistInvocationAudit(opts.db, {
+        invocationId: `pol:wf:${req.invocationId}`,
+        service: req.service,
+        actionId: policyActionId,
+        riskLevel,
+        resolvedMode: "require_approval",
+        baseMode: "require_approval",
+        matchedPolicyId: null,
+        matchedGrantId: null,
+        matchedOverrideId: null,
+        status: "approved",
+        workflowExecutionId: ctx.workflowExecutionId,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        params: req.params,
+        createdAt: now,
+      });
       return null;
     }
     return { ok: false, requiresApproval: true, provenance: "resolver_error" };

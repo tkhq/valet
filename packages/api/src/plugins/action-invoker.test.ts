@@ -948,6 +948,17 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     // Resolver error + approval set → human resolution authorizes execution
     expect(res).toEqual({ ok: true, result: { deployed: true } });
     expect(fixture.calls()).toBe(1);
+    // The resolver_error path writes a best-effort audit row before returning
+    // null. Use the real db (not failingDb) to query — the proxy only
+    // intercepts selects, but this verifies the insert/update went through
+    // on the real backing store.
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n8"));
+    expect(audit).toHaveLength(1);
+    // updateInvocationOutcome stamps the final execution outcome after the
+    // action runs, so the row ends as "completed" even though the audit
+    // insert wrote "approved".
+    expect(audit[0].status).toBe("completed");
+    expect(audit[0].resolvedMode).toBe("require_approval");
   });
 
   it("parseStoredResult rejects a stored requiresApproval row (defensive: such rows must never exist)", async () => {
