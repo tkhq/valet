@@ -2925,6 +2925,19 @@ export class Thread {
             threadId: this.id,
             text: ev.delta,
           });
+        } else if (ev.type === "toolcall_start" || ev.type === "toolcall_delta") {
+          // Live-only args streaming: forward the raw JSON chunk keyed by
+          // callId so clients can render the tool call before it executes.
+          const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "toolCall") {
+            await this.session.emit({
+              type: "tool_call_update",
+              threadId: this.id,
+              callId: block.id,
+              toolName: block.name,
+              argsDelta: ev.type === "toolcall_delta" ? ev.delta : "",
+            });
+          }
         } else if (ev.type === "toolcall_end") {
           const part: MessagePart = {
             type: "tool_call",
