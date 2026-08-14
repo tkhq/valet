@@ -233,7 +233,8 @@ CREATE TABLE "session_threads" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
 	"title" text,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"archived_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");
@@ -293,7 +294,8 @@ CREATE TABLE "child_watches" (
 	"actor_user_id" text NOT NULL,
 	"org_id" text NOT NULL,
 	"settled" boolean DEFAULT false NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"dismissed_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");

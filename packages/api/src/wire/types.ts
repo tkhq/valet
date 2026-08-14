@@ -178,6 +178,8 @@ export interface ThreadSummary {
   createdAt: number;
   /** Thread-level model override. Falls back to the session default when undefined. */
   model?: string;
+  /** Set when the thread is archived (display state; history is intact). */
+  archivedAt?: number;
   /**
    * The engine thread key — encodes the thread's ORIGIN by convention:
    * `web:{nonce}` (created from the UI), `events` (event-subscription
@@ -201,11 +203,13 @@ export interface CreateThreadRequest {
 export type CreateThreadResponse = ThreadSummary;
 
 /**
- * Patch a thread's settings. Currently only `model` is mutable; pass
- * `null` to clear the override and fall back to the session default.
+ * Patch a thread's settings. Pass `model: null` to clear the override and
+ * fall back to the session default. `archived` toggles app-side display
+ * state — an archived thread leaves the default GET /threads list.
  */
 export interface PatchThreadRequest {
   model?: string | null;
+  archived?: boolean;
 }
 
 export type PatchThreadResponse = ThreadSummary;

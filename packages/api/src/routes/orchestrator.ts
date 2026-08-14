@@ -10,7 +10,7 @@
  * (Task 8+) and aren't reachable through this route.
  */
 import { Hono } from "hono";
-import { and, count, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { orchestratorSessionId, type Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -221,7 +221,7 @@ orchestratorRouter.get("/children", async (c) => {
     })
     .from(childWatches)
     .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
-    .where(eq(childWatches.parentSessionId, sessionId))
+    .where(and(eq(childWatches.parentSessionId, sessionId), isNull(childWatches.dismissedAt)))
     .orderBy(desc(childWatches.createdAt));
 
   const children: OrchestratorChildSummary[] = rows.map((r) => ({
@@ -234,4 +234,38 @@ orchestratorRouter.get("/children", async (c) => {
 
   const body: GetOrchestratorChildrenResponse = { children };
   return c.json(body);
+});
+
+/** POST /children/:childSessionId/dismiss — hide a settled child from the
+ * tree. Display state only: the watch row gets `dismissed_at`, the child
+ * session and its history stay reachable from the Sessions page. */
+orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const sessionId = orchestratorSessionId(userPrincipal(user.id));
+  const childSessionId = c.req.param("childSessionId");
+
+  const rows = await db
+    .select({ settled: childWatches.settled })
+    .from(childWatches)
+    .where(
+      and(
+        eq(childWatches.childSessionId, childSessionId),
+        eq(childWatches.parentSessionId, sessionId),
+      ),
+    )
+    .limit(1);
+  if (!rows[0]) return c.json({ error: "child not found" }, 404);
+  if (!rows[0].settled) {
+    return c.json(
+      { error: "child is still running. Wait for it to settle, then dismiss it." },
+      409,
+    );
+  }
+
+  await db
+    .update(childWatches)
+    .set({ dismissedAt: Date.now() })
+    .where(eq(childWatches.childSessionId, childSessionId));
+  return c.json({ ok: true });
 });

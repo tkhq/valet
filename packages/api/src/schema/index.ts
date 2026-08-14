@@ -353,6 +353,9 @@ export const sessionThreads = pgTable(
     sessionId: text("session_id").notNull(),
     title: text("title"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Display-state only: an archived thread leaves the default sidebar
+    // list. The engine thread and its history are untouched.
+    archivedAt: bigint("archived_at", { mode: "number" }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
@@ -459,6 +462,9 @@ export const childWatches = pgTable(
     orgId: text("org_id").notNull(),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Display-state only: a dismissed watch leaves the thread tree. The
+    // child session row and its history stay reachable from Sessions.
+    dismissedAt: bigint("dismissed_at", { mode: "number" }),
   },
   (t) => [
     index("child_watches_parent").on(t.parentSessionId),
