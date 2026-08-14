@@ -114,16 +114,35 @@ describe("evaluateAdmission", () => {
     expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "admin" });
   });
 
-  it("precedence: domain match beats invite", async () => {
+  it("precedence: an admin invite beats an allowlisted domain (invite role wins, inviteId set)", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
     const { invite } = await createInvite(db, { email: "person@example.com", role: "admin", createdBy: "admin1" });
-    // Domain match resolves to "member" even though an admin invite also matches this email.
+    // The invite rule runs before the domain rule, so a declared admin whose
+    // domain is also allowlisted is admitted as admin, not downgraded to member.
     const result = await evaluateAdmission(db, cfg, "person@example.com");
-    expect(result).toEqual({ allowed: true, role: "member" });
-    // The invite itself is untouched (evaluateAdmission never mutates).
+    expect(result).toEqual({ allowed: true, role: "admin", inviteId: invite.id });
+    // evaluateAdmission never mutates — the invite stays unaccepted until acceptInvite runs.
     const rows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
     expect(rows[0]?.acceptedBy).toBeNull();
+  });
+
+  it("an allowlisted-domain email with NO invite falls through to the domain rule as member", async () => {
+    await seedUser(db, "u1", "existing@x.test");
+    const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
+    // No invite for this email — the domain rule is the fallback and grants member.
+    expect(await evaluateAdmission(db, cfg, "nobody@example.com")).toEqual({ allowed: true, role: "member" });
+  });
+
+  it("a non-allowlisted email with an invite gets the invite's role (domain rule irrelevant)", async () => {
+    await seedUser(db, "u1", "existing@x.test");
+    const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
+    const { invite } = await createInvite(db, { email: "outsider@other.test", role: "member", createdBy: "admin1" });
+    expect(await evaluateAdmission(db, cfg, "outsider@other.test")).toEqual({
+      allowed: true,
+      role: "member",
+      inviteId: invite.id,
+    });
   });
 
   it("an invalid/expired code falls back to an email-matched invite", async () => {

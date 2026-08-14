@@ -68,6 +68,18 @@ export function parseValetPluginsEnv(
   return {};
 }
 
+/**
+ * True only when the config's `plugins` block actually declares an allow or
+ * deny list. An empty `plugins: {}` block (both keys undefined) does NOT count
+ * as "config declares plugins": it neither trips the VALET_PLUGINS both-set
+ * guard nor suppresses env parsing. `null`/absent config → false.
+ */
+export function configDeclaresPlugins(
+  plugins: InstanceConfig["plugins"] | undefined,
+): boolean {
+  return plugins !== undefined && (plugins.allow !== undefined || plugins.deny !== undefined);
+}
+
 export interface NodeProviderOpts {
   /**
    * Postgres connection string. Set (typically `DATABASE_URL`) → connects
@@ -266,13 +278,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
   // the operator must remove one to avoid ambiguity.
   const configPlugins = opts.instanceConfig?.plugins;
-  if (configPlugins && process.env.VALET_PLUGINS) {
+  const configHasPlugins = configDeclaresPlugins(configPlugins);
+  if (configHasPlugins && process.env.VALET_PLUGINS) {
     throw new InstanceConfigError(
       "VALET_PLUGINS is set and the config file declares plugins. Remove one.",
     );
   }
-  const { allowlist, denylist } = configPlugins
-    ? { allowlist: configPlugins.allow, denylist: configPlugins.deny }
+  const { allowlist, denylist } = configHasPlugins
+    ? { allowlist: configPlugins!.allow, denylist: configPlugins!.deny }
     : parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])

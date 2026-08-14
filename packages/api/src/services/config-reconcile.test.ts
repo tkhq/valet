@@ -175,7 +175,7 @@ describe("reconcileInstanceConfig — org pass", () => {
       org: { members: [{ email: "alice@example.com", role: "member" }] },
     };
     await expect(reconcileInstanceConfig(deps(db), cfg)).rejects.toThrow(
-      "an organization needs at least one admin",
+      "org.members would leave the organization with no admin",
     );
   });
 
@@ -761,5 +761,105 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
 
     const sourceRows = await db.select().from(skillSources);
     expect(sourceRows).toHaveLength(1);
+  });
+
+  it("URL-variant duplicate (raw strings differ, same repo+subpath) throws a clean error with no partial insert", async () => {
+    await ensureOrg(db);
+    // `obra/superpowers` and its full https .git URL normalize to the same
+    // (repoFullName, subpath) but differ as raw strings, so the validator's
+    // raw-string dedupe misses them. The reconciler must reject before insert.
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [
+        { repo: "obra/superpowers", subpath: "skills" },
+        { repo: "https://github.com/obra/superpowers.git", subpath: "skills" },
+      ],
+    };
+    await expect(reconcileInstanceConfig(deps(db), cfg)).rejects.toThrow(
+      "a source can track only one ref",
+    );
+
+    // No partial write — neither entry landed a row.
+    const rows = await db.select().from(skillSources).where(like(skillSources.id, "skillsrc_cfg_%"));
+    expect(rows).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conflict guards — partial prior run / concurrent boot
+// ---------------------------------------------------------------------------
+
+describe("reconcileInstanceConfig — conflict guards", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+  });
+
+  it("succeeds when an org_members row for a declared member already exists (partial prior run)", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u1", "alice@example.com");
+    // Simulate a prior partial reconcile: the org_members row is already
+    // present at the same declared role.
+    await db.insert(orgMembers).values({ orgId: org.id, userId: "u1", role: "admin", createdAt: Date.now() });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      org: { members: [{ email: "alice@example.com", role: "admin" }] },
+    };
+    await expect(reconcileInstanceConfig(deps(db), cfg)).resolves.toBeUndefined();
+
+    const rows = await db
+      .select()
+      .from(orgMembers)
+      .where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.userId, "u1")));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.role).toBe("admin");
+  });
+
+  it("succeeds when a team_members row for a declared member already exists (partial prior run)", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u1", "alice@example.com");
+    await db.insert(orgMembers).values({ orgId: org.id, userId: "u1", role: "member", createdAt: Date.now() });
+
+    // Pre-create the team and the team_members row at the declared role.
+    const teamId = configTeamId("Engineering");
+    await db.insert(teams).values({ id: teamId, orgId: org.id, name: "Engineering", createdAt: Date.now() });
+    await db.insert(teamMembers).values({ teamId, userId: "u1", role: "member" });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "member" }] }],
+    };
+    await expect(reconcileInstanceConfig(deps(db), cfg)).resolves.toBeUndefined();
+
+    const rows = await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("succeeds when a config invite row already exists at the declared id (partial prior run)", async () => {
+    await ensureOrg(db);
+    const inviteId = configInviteId("newcomer@example.com");
+    // Pre-insert a config invite row with a stale role.
+    await db.insert(invites).values({
+      id: inviteId,
+      codeHash: "deadbeef",
+      email: "newcomer@example.com",
+      role: "member",
+      createdBy: "config",
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 3600_000),
+    });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      org: { members: [{ email: "newcomer@example.com", role: "admin" }] },
+    };
+    await expect(reconcileInstanceConfig(deps(db), cfg)).resolves.toBeUndefined();
+
+    const rows = await db.select().from(invites).where(eq(invites.id, inviteId));
+    expect(rows).toHaveLength(1);
+    // The onConflictDoUpdate path (or the select/update path) reconciles the role.
+    expect(rows[0]!.role).toBe("admin");
   });
 });

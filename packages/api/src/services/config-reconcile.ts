@@ -15,6 +15,7 @@ import { and, eq, isNull, like, notLike } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
 import type { InstanceConfig } from "../config/instance-config.js";
+import { InstanceConfigError } from "../config/instance-config.js";
 import {
   ensureOrg,
   renameOrg,
@@ -131,17 +132,22 @@ async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
           if (memberRows[0].role !== decl.role) {
             const result = await setOrgMemberRole(db, org.id, existingUser.id, decl.role);
             if (!result.ok && result.reason === "last_admin") {
-              throw new Error(LAST_ADMIN_ERROR);
+              throw new InstanceConfigError(
+                `org.members would leave the organization with no admin: ${LAST_ADMIN_ERROR}. Keep at least one org.members entry with role: admin in the config file.`,
+              );
             }
           }
         } else {
-          // No membership row — insert.
+          // No membership row — insert. A prior partial reconcile or a
+          // concurrent boot may have inserted it since the select above, so
+          // ignore a conflict: the existing row's role is already reconciled
+          // by the select/update path.
           await db.insert(orgMembers).values({
             orgId: org.id,
             userId: existingUser.id,
             role: decl.role,
             createdAt: Date.now(),
-          });
+          }).onConflictDoNothing();
         }
       } else {
         // User does not exist — upsert config invite row.
@@ -168,6 +174,9 @@ async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
           // codeHash: sha256 of a random UUID — never redeemable by code;
           // admission matches by email via findValidInviteByEmail.
           const codeHash = createHash("sha256").update(randomUUID()).digest("hex");
+          // On conflict (a prior partial reconcile or concurrent boot already
+          // inserted this id) update role + expiresAt, mirroring the update
+          // path above.
           await db.insert(invites).values({
             id: inviteId,
             codeHash,
@@ -176,6 +185,9 @@ async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
             createdBy: "config",
             createdAt: now,
             expiresAt,
+          }).onConflictDoUpdate({
+            target: invites.id,
+            set: { role: decl.role, expiresAt },
           });
         }
       }
@@ -275,11 +287,14 @@ async function reconcileTeamsPass(db: AppDb, cfg: InstanceConfig): Promise<void>
             .where(and(eq(teamMembers.teamId, resolvedTeamId), eq(teamMembers.userId, foundUser.id)));
         }
       } else {
+        // A prior partial reconcile or concurrent boot may have inserted this
+        // row since the select above; the existing row's role is already
+        // reconciled by the select/update path, so ignore a conflict.
         await db.insert(teamMembers).values({
           teamId: resolvedTeamId,
           userId: foundUser.id,
           role: memberDecl.role,
-        });
+        }).onConflictDoNothing();
       }
     }
   }
@@ -370,6 +385,25 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
   // Build the desired set of managed source ids.
   const desiredIds = new Set<string>();
 
+  // Normalized dedupe: two entries can differ in raw repo string (e.g.
+  // `obra/superpowers` vs `https://github.com/obra/superpowers.git`) or in ref
+  // only yet still resolve to the same (repoFullName, subpath) pair, which
+  // collides on the DB unique index. The validator's raw-string check misses
+  // these variants, so normalize with `parseRepoInput` and reject the collision
+  // here with a clean error BEFORE any insert (no partial write).
+  const seenPairs = new Map<string, string>();
+  for (const entry of cfg.skillSources) {
+    const parsed = parseRepoInput(entry.repo, { ref: entry.ref, subpath: entry.subpath });
+    const pairKey = `${parsed.repoFullName}|${parsed.subpath}`;
+    const priorRepo = seenPairs.get(pairKey);
+    if (priorRepo !== undefined) {
+      throw new InstanceConfigError(
+        `skillSources: "${priorRepo}" and "${entry.repo}" resolve to the same repository "${parsed.repoFullName}" and subpath "${parsed.subpath}". Remove one; a source can track only one ref.`,
+      );
+    }
+    seenPairs.set(pairKey, entry.repo);
+  }
+
   for (const entry of cfg.skillSources) {
     const parsed = parseRepoInput(entry.repo, { ref: entry.ref, subpath: entry.subpath });
     const { repoFullName, ref, subpath } = parsed;
@@ -431,7 +465,7 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
       lastError: null,
       createdAt: now,
       updatedAt: now,
-    });
+    }).onConflictDoNothing();
   }
 
   // Delete managed rows no longer in the desired set (two-delete: skills then source).

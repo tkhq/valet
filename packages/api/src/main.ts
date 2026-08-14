@@ -209,23 +209,35 @@ const sandboxApiUrl = process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl;
 const telemetry = initTelemetry();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
 
-const providers = await buildNodeProviders({
-  databaseUrl,
-  pgDataDir,
-  blobsRoot,
-  encryptionKey,
-  anthropicApiKey,
-  apiBaseUrl: `http://127.0.0.1:${port}`,
-  workflowCrashAt,
-  sandboxJwtMaster: authConfig?.sandboxJwtMaster,
-  sandboxApiUrl,
-  // Real auth configured → skip seeding the local-dev identity so the
-  // "zero users → first signup becomes admin" provisioning rule can fire
-  // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
-  // here — the boot check above refuses that pair.
-  seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
-  instanceConfig: instanceConfig ?? undefined,
-});
+// `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins
+// both-set guard). Fail boot with the corrective-action message only — no
+// stack spam for a config mistake. Rethrow anything else.
+let providers: Awaited<ReturnType<typeof buildNodeProviders>>;
+try {
+  providers = await buildNodeProviders({
+    databaseUrl,
+    pgDataDir,
+    blobsRoot,
+    encryptionKey,
+    anthropicApiKey,
+    apiBaseUrl: `http://127.0.0.1:${port}`,
+    workflowCrashAt,
+    sandboxJwtMaster: authConfig?.sandboxJwtMaster,
+    sandboxApiUrl,
+    // Real auth configured → skip seeding the local-dev identity so the
+    // "zero users → first signup becomes admin" provisioning rule can fire
+    // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
+    // here — the boot check above refuses that pair.
+    seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
+    instanceConfig: instanceConfig ?? undefined,
+  });
+} catch (e) {
+  if (e instanceof InstanceConfigError) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  throw e;
+}
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
 // escalation and child-session decision_gate → approval onto the shared
@@ -309,7 +321,18 @@ const rotateSweep: RotateSweepHandle = startRotateSweep({
 // boot-restore passes so the db is settled before we write to it. Failure
 // here fails boot — a half-reconciled config is worse than no config.
 if (instanceConfig) {
-  await reconcileInstanceConfig({ db: providers.db }, instanceConfig);
+  // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
+  // no admin, or duplicate skill sources). Fail boot with the
+  // corrective-action message only — no stack spam. Rethrow anything else.
+  try {
+    await reconcileInstanceConfig({ db: providers.db }, instanceConfig);
+  } catch (e) {
+    if (e instanceof InstanceConfigError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
 }
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs

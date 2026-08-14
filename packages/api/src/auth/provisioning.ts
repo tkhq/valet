@@ -32,10 +32,15 @@ function domainOf(email: string): string | undefined {
  * The single admission rule, used by both the signup invite gate and the
  * OAuth/SSO creation gate. Order (first match wins):
  *   1. zero users in the db → admin (bootstraps the first operator)
- *   2. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
+ *   2. a valid invite matching by code, else by email → the invite's role
+ *   3. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
  *      no subdomain match) → member
- *   3. a valid invite matching by code, else by email → the invite's role
  *   4. otherwise → denied
+ *
+ * The invite rule precedes the domain rule so a config-declared admin whose
+ * email domain is also allowlisted is admitted as admin (the invite's role),
+ * not silently downgraded to member. An allowlisted email WITHOUT an invite
+ * still falls through to the domain rule → member.
  */
 export async function evaluateAdmission(
   db: AppQueryable,
@@ -47,14 +52,14 @@ export async function evaluateAdmission(
     return { allowed: true, role: "admin" };
   }
 
-  const domain = domainOf(email);
-  if (domain && cfg.allowedEmailDomains.includes(domain)) {
-    return { allowed: true, role: "member" };
-  }
-
   const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
+  }
+
+  const domain = domainOf(email);
+  if (domain && cfg.allowedEmailDomains.includes(domain)) {
+    return { allowed: true, role: "member" };
   }
 
   return { allowed: false };

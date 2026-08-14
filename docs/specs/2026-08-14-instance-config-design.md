@@ -227,9 +227,11 @@ reconciler calls `ensureOrg`, then:
     fails reconcile (and boot) with the existing last-admin message.
   - No user with that email yet → upsert a config-managed invite
     (`invite_cfg_*`, email-bound, declared role, 10-year expiry). The
-    existing admission rule (`evaluateAdmission`, rule 3: valid invite by
-    email) then admits them with the right role at first sign-in. No new
-    admission path.
+    existing admission rule (`evaluateAdmission`, rule 2: valid invite by
+    code or email) then admits them with the right role at first sign-in.
+    The invite rule runs before the domain rule, so a declared admin whose
+    email domain is also allowlisted gets the invite's admin role, not a
+    domain-rule member downgrade. No new admission path.
   - An email removed from the file → its unaccepted `invite_cfg_*` row is
     deleted. An existing membership is **not** removed — removal of a real
     member is a destructive act that stays in the UI. The reconciler logs
@@ -365,6 +367,27 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
 | Env var and file both declare a migrated value | Boot fails; message says which one to remove |
 | Demotion would remove the last admin      | Boot fails with the last-admin message          |
 | Declared source duplicates an unmanaged row | Skipped and logged; boot continues            |
+
+## Security notes
+
+1. **Write access to the config is a privilege boundary.** Write access to
+   the `VALET_CONFIG` file (or the Helm ConfigMap that renders it) equals
+   org-admin plus control of the approval policy. Gate it like a secret:
+   whoever can edit this file can grant themselves admin, add skill sources,
+   and disable approval gates.
+2. **A `toolPolicies` typo can disable approval instance-wide.** An `allow`
+   rule downgrades an action whose manifest `riskLevel` demands approval. A
+   single `match: "*", mode: allow` line turns off every approval gate for
+   the whole instance. Review `toolPolicies` changes with the same care as an
+   RBAC change.
+3. **SSO sign-ins ignore `auth.allowedEmailDomains`.** An SSO/IdP sign-in is
+   admitted regardless of the domain list (existing auth-v2 behavior). The
+   domain list bounds email and social signup only. To bound who the IdP can
+   admit, configure the IdP, not this file.
+4. **Declared `org.members` roles reassert on every boot.** A UI demotion of
+   a declared member is overwritten at the next boot, because the file is the
+   source of truth for the roles it declares. To stop managing a member's
+   role from the file, remove that member from the file.
 
 ## Non-goals (v1)
 

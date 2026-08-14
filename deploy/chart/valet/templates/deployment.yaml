@@ -112,8 +112,12 @@ spec:
             {{- end }}
           {{- if .Values.api.instanceConfig }}
           volumeMounts:
+            # subPath mounts the single valet.yaml file, not the directory —
+            # a directory mount at /etc/valet would shadow anything else the
+            # image places there.
             - name: instance-config
-              mountPath: /etc/valet
+              mountPath: /etc/valet/valet.yaml
+              subPath: valet.yaml
               readOnly: true
           {{- end }}
           resources:

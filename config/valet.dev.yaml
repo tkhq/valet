@@ -8,6 +8,9 @@ org:
   name: Turnkey
   features:
     organizations: true
+  # Under VALET_LOCAL_AUTH=1 the stub identity (local@dev) is seeded
+  # separately; this members entry only matters when you run dev with real
+  # auth (BETTER_AUTH_SECRET set, stub rung off).
   members:
     - email: test@valet.test
       role: admin
