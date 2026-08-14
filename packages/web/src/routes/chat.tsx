@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useEnsureOrchestrator, useOrchestratorInfo } from "~/api/orchestrator";
@@ -63,6 +63,19 @@ function ChatPage() {
   const navigate = useNavigate({ from: Route.fullPath });
   const ensure = useEnsureOrchestrator();
   const ensureAssistantSession = useEnsureAssistantSession();
+  // Session ids this page has confirmed exist, so it never mounts the
+  // conversation on one that is still being created. `POST /api/assistants`
+  // writes no session, so the read below would 404 and `SessionView` renders
+  // that as a terminal "Failed to load session" with no retry — the first
+  // thing you see after creating an assistant. Nothing recovers it, because
+  // the read already resolved; only a reload does. Waiting for the ensure is
+  // deterministic where invalidating after the fact is a race.
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const markOpened = useCallback(
+    ({ sessionId: id }: { sessionId: string }) =>
+      setOpened((prev) => (prev.has(id) ? prev : new Set(prev).add(id))),
+    [],
+  );
 
   // Only an assistant the caller can reach may be opened. An id that names
   // an archived assistant, a team you left, or nothing at all resolves to
@@ -104,8 +117,8 @@ function ChatPage() {
   // `GET /info` knows the caller's own session.
   const activeId = active?.id ?? ownDefault?.id;
   useEffect(() => {
-    if (activeId) ensureAssistantSession.mutate(activeId);
-    else if (personalSessionId) ensure.mutate();
+    if (activeId) ensureAssistantSession.mutate(activeId, { onSuccess: markOpened });
+    else if (personalSessionId) ensure.mutate(undefined, { onSuccess: markOpened });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, personalSessionId]);
 
@@ -157,6 +170,16 @@ function ChatPage() {
   }
 
   if (!sessionId) return null;
+
+  // The ensure for this session has not come back yet. A spinner for the few
+  // milliseconds it takes beats an error the page cannot clear.
+  if (!opened.has(sessionId)) {
+    return (
+      <div className="flex-1 grid place-items-center text-sm text-muted">
+        <Spinner /> Opening…
+      </div>
+    );
+  }
 
   return (
     <>

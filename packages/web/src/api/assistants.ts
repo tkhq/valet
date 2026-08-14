@@ -23,6 +23,7 @@ import type {
   PatchAssistantResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
+import { qk } from "./queries";
 
 export const qkAssistants = {
   list: () => ["assistants"] as const,
@@ -104,7 +105,17 @@ export function useArchiveAssistant() {
  * list's contents do not change, only the session behind one of its rows.
  */
 export function useEnsureAssistantSession() {
+  const qc = useQueryClient();
   return useMutation<EnsureAssistantSessionResponse, Error, string>({
     mutationFn: (assistantId) => api.ensureAssistantSession(assistantId),
+    onSuccess: ({ sessionId }) => {
+      // The session query almost certainly ran first and 404'd: the chat page
+      // knows the session id from the assistants list and mounts on it while
+      // this call is still in flight. On a first-ever load nothing has
+      // created the row yet, so that read fails and the page shows "Failed
+      // to load session" — the one screen a brand-new install opens on.
+      // Invalidating here makes the read retry the moment the row exists.
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
   });
 }
