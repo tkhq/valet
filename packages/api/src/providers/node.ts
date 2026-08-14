@@ -380,7 +380,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         {
           kind: "approval",
           owner,
-          title: info.summary ?? info.prompt,
+          title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
           body: info.summary ? info.prompt : undefined,
           href: `/workflows/runs/${info.runId}`,
           dedupeKey: `${info.runId}:${info.nodeId}`,

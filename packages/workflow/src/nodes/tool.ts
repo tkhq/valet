@@ -89,7 +89,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
   }
 
   if (!response.ok) {
-    return await fail(args, invocationId, response.error);
+    return await fail(args, invocationId, 'error' in response ? response.error : 'requires approval');
   }
 
   return await complete(args, invocationId, response.result);

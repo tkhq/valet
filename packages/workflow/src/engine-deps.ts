@@ -102,9 +102,16 @@ export interface WorkflowInvokeActionRequest {
    * a person's credential would make the action act as that person.
    */
   credential?: ToolCredentialMode;
+  /** Host-internal single-invocation authorization (spec §1). Set by the
+   * tool executor only when it holds an approved, unconsumed resolution
+   * signal for exactly this invocation. Never crosses an HTTP boundary. */
+  approval?: { resolvedBy: string; note?: string };
 }
 
-export type WorkflowInvokeActionResult = { ok: true; result: unknown } | { ok: false; error: string };
+export type WorkflowInvokeActionResult =
+  | { ok: true; result: unknown }
+  | { ok: false; error: string }
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel
