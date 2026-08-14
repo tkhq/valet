@@ -1,6 +1,6 @@
 import { Pencil } from "lucide-react";
+import { DiffView, formatDiffStats } from "./diff-view";
 import { PathLabel, ToolBody } from "./tool-shell";
-import { DiffLine } from "./write";
 import { resultText, type ToolRenderer } from "./types";
 
 interface EditArgs {
@@ -45,9 +45,7 @@ export const editRenderer: ToolRenderer = {
   formatTarget: (args) => getPath(args) || undefined,
   formatSummary: (args, _result, status) => {
     if (status === "running") return undefined;
-    const oldLines = getOld(args).split("\n").length;
-    const newLines = getNew(args).split("\n").length;
-    return `−${oldLines} +${newLines}`;
+    return formatDiffStats(getOld(args), getNew(args));
   },
   Body: ({ args, status, result, error }) => {
     const path = getPath(args);
@@ -72,16 +70,7 @@ export const editRenderer: ToolRenderer = {
         {status === "running" ? (
           <div className="px-3 py-2 text-[11px] text-muted italic font-mono">editing…</div>
         ) : (
-          <div className="font-mono text-[12px] leading-[1.55] py-1">
-            <pre className="whitespace-pre overflow-x-auto">
-              {before.split("\n").map((line, i) => (
-                <DiffLine key={`o-${i}`} kind="remove" line={line} />
-              ))}
-              {after.split("\n").map((line, i) => (
-                <DiffLine key={`n-${i}`} kind="add" line={line} />
-              ))}
-            </pre>
-          </div>
+          <DiffView before={before} after={after} />
         )}
         {failed && resultText(result) && (
           <div className="px-3 py-2 border-t border-danger-500/30 bg-danger-500/5 text-[11px] text-danger-700 dark:text-danger-400 font-mono">
