@@ -13,6 +13,13 @@
  * The page loop is manual. `octokit.paginate` needs the `Link` response
  * header, which the contents endpoint does not always send, so this asks
  * for the next page until a short page arrives or the cap is reached.
+ *
+ * That endpoint also ignores `page` on a directory of any size: it answers
+ * every request with the same listing, up to its own limit of 1000 entries.
+ * The loop therefore stops as soon as a page adds no entry the earlier pages
+ * did not hold. Without that stop, a directory of 100 entries or more looks
+ * endless — the same names accumulate until the cap, and the listing reports
+ * itself as incomplete when it is whole.
  */
 
 /** Entries returned in one call. A skills directory is small; this cap
@@ -113,6 +120,9 @@ export async function collectDirectoryEntries(
   maxEntries: number,
 ): Promise<DirectoryListing> {
   const entries: DirectoryEntry[] = [];
+  // Paths already collected. One directory level holds each path once, so a
+  // repeat means the endpoint answered with a page it already sent.
+  const seen = new Set<string>();
   let truncated = false;
 
   for (let page = 1; ; page += 1) {
@@ -130,19 +140,26 @@ export async function collectDirectoryEntries(
       return { kind: "not_directory", type: contentsKind(data) };
     }
 
+    let added = 0;
     for (const raw of data) {
       if (entries.length >= maxEntries) {
         truncated = true;
         break;
       }
       const entry = toEntry(raw);
-      if (entry) entries.push(entry);
+      if (!entry || seen.has(entry.path)) continue;
+      seen.add(entry.path);
+      entries.push(entry);
+      added += 1;
     }
 
     if (truncated) break;
     // A page shorter than the page size is the last page. The contents
     // endpoint sends no reliable `Link` header, so this is the signal.
     if (data.length < PER_PAGE) break;
+    // A full page that repeats what the earlier pages held is the endpoint
+    // ignoring `page`, not a longer directory. The level ends here.
+    if (added === 0) break;
   }
 
   return { kind: "directory", entries, complete: !truncated };

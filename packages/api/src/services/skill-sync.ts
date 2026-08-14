@@ -45,6 +45,11 @@
  * other than "not there", the whole sync fails and NOTHING is reconciled —
  * otherwise a GitHub outage would read as "every skill was deleted upstream".
  *
+ * A partial directory listing fails the sync for the same reason. The reader
+ * keeps a fixed number of entries per directory, and the entries past that
+ * cut cannot be told apart from skills the repository no longer holds, so
+ * sync refuses to reconcile from a listing it knows is partial.
+ *
  * ## The sweep
  *
  * `pollOnce` claims due sources with the same single-statement CAS
@@ -66,7 +71,11 @@ import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { skills, skillSources, type SkillRow, type SkillSourceRow } from "../schema/index.js";
 import { newSkillId, skillContentSha } from "./skills.js";
-import { SkillRepoNotFoundError, type SkillRepoReader } from "./skill-repo-reader.js";
+import {
+  SkillRepoListingTruncatedError,
+  SkillRepoNotFoundError,
+  type SkillRepoReader,
+} from "./skill-repo-reader.js";
 
 /** How long a healthy source waits before its next poll. Unauthenticated
  * GitHub allows 60 requests per hour per IP, and an unchanged source costs
@@ -304,6 +313,13 @@ export class SkillSyncService {
       source.subpath,
       headSha,
     );
+    // A partial listing must fail here, before reconcile reads it as a
+    // delete list. `complete: false` says the listing holds fewer entries
+    // than the directory does, and every entry past the cut would look
+    // deleted.
+    if (!listing.complete) {
+      throw new SkillRepoListingTruncatedError(source.repoFullName, source.subpath);
+    }
     const skillEntries: SkillManifestEntry[] = [];
     const text = new Map<string, string>();
 
@@ -341,6 +357,9 @@ export class SkillSyncService {
     }
 
     if (promptListing !== null) {
+      if (!promptListing.complete) {
+        throw new SkillRepoListingTruncatedError(source.repoFullName, promptsDir);
+      }
       for (const file of promptListing.entries) {
         if (file.type !== "file" || !file.name.endsWith(".md")) continue;
         const name = file.name.slice(0, -3); // strip .md

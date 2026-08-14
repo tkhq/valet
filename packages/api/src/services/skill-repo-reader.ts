@@ -57,6 +57,35 @@ export class SkillRepoReadError extends Error {
   }
 }
 
+/** Thrown when a directory holds more entries than the reader collects. Its
+ * own class because the reader can name the cut and the caller cannot: skill
+ * sync reads "absent from the listing" as "deleted upstream", so it must fail
+ * here rather than mirror from a partial listing. */
+export class SkillRepoListingTruncatedError extends Error {
+  readonly code = "skill_repo_listing_truncated";
+  readonly statusCode = 400;
+  constructor(repoFullName: string, path: string) {
+    const where = path.length > 0 ? `${repoFullName}/${path}` : repoFullName;
+    super(
+      `${where} holds ${MAX_DIRECTORY_ENTRIES} entries or more, so Valet read part of its listing. Nothing was imported, updated, or deleted: the entries left out look exactly like skills removed from the repository. Remove this repository, then import the /tree/ URL of the directory that holds the skill directories.`,
+    );
+    this.name = "SkillRepoListingTruncatedError";
+  }
+}
+
+/** Thrown when a request passed `REQUEST_TIMEOUT_MS`. Separate from
+ * `SkillRepoReadError` because no response arrived to carry a status. */
+export class SkillRepoTimeoutError extends Error {
+  readonly code = "skill_repo_timeout";
+  readonly statusCode = 504;
+  constructor(what: string, timeoutMs: number) {
+    super(
+      `GitHub did not answer for ${what} within ${timeoutMs} ms. The sync stopped, and the next poll reads the repository again. If every sync times out, check GitHub's status page.`,
+    );
+    this.name = "SkillRepoTimeoutError";
+  }
+}
+
 export interface SkillDirectoryListing {
   entries: DirectoryEntry[];
   /** False when the directory holds more entries than one read returns. */
@@ -80,6 +109,8 @@ export interface PublicSkillRepoReaderOptions {
   apiUrl?: string;
   /** Injected for tests that need to fail the transport itself. */
   fetchImpl?: typeof fetch;
+  /** Deadline for one request. Defaults to `REQUEST_TIMEOUT_MS`. */
+  timeoutMs?: number;
 }
 
 /**
@@ -89,13 +120,23 @@ export interface PublicSkillRepoReaderOptions {
  */
 const DEFAULT_REF = "HEAD";
 
+/**
+ * Deadline for one GitHub request. A hung connection must not pin the sweep:
+ * `SkillSyncService.pollOnce` holds its `draining` flag for a whole pass, so
+ * one stalled read stops every other source from syncing until the socket
+ * gives up on its own.
+ */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 export class PublicSkillRepoReader implements SkillRepoReader {
   private readonly apiUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(opts: PublicSkillRepoReaderOptions = {}) {
     this.apiUrl = (opts.apiUrl ?? resolveGithubApiUrl(process.env)).replace(/\/+$/, "");
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
   }
 
   async headSha(repoFullName: string, ref: string): Promise<string> {
@@ -136,9 +177,10 @@ export class PublicSkillRepoReader implements SkillRepoReader {
 
   async readFile(repoFullName: string, path: string, ref: string): Promise<string | null> {
     const url = this.contentsUrl(repoFullName, path, { ref });
-    const res = await this.fetchImpl(url, { headers: HEADERS });
+    const what = `${repoFullName}/${path}`;
+    const res = await this.get(url, what);
     if (res.status === 404) return null;
-    const data = await this.readBody(res, repoFullName, `${repoFullName}/${path}`);
+    const data = await this.readBody(res, repoFullName, what);
     if (!isRecord(data) || data.type !== "file") return null;
     const raw = typeof data.content === "string" ? data.content : "";
     if (data.encoding !== "base64") return raw;
@@ -154,8 +196,9 @@ export class PublicSkillRepoReader implements SkillRepoReader {
         per_page: String(params.per_page),
         page: String(params.page),
       });
-      const res = await this.fetchImpl(url, { headers: HEADERS });
-      const data = await this.readBody(res, repoFullName, `${repoFullName}/${params.path}`);
+      const what = `${repoFullName}/${params.path}`;
+      const res = await this.get(url, what);
+      const data = await this.readBody(res, repoFullName, what);
       return { data };
     };
   }
@@ -175,8 +218,25 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   }
 
   private async getJson(url: string, repoFullName: string, what: string): Promise<unknown> {
-    const res = await this.fetchImpl(url, { headers: HEADERS });
+    const res = await this.get(url, what);
     return this.readBody(res, repoFullName, what);
+  }
+
+  /** The one place a request leaves this reader, so every read carries the
+   * timeout. This reader owns the only signal on the request, which is why
+   * an abort here can only be that timeout. */
+  private async get(url: string, what: string): Promise<Response> {
+    try {
+      return await this.fetchImpl(url, {
+        headers: HEADERS,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new SkillRepoTimeoutError(what, this.timeoutMs);
+      }
+      throw err;
+    }
   }
 
   private async readBody(res: Response, repoFullName: string, what: string): Promise<unknown> {
