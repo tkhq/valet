@@ -112,6 +112,9 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
     ...wellKnownUrls(issuer, 'openid-configuration'),
     `${base}/.well-known/oauth-authorization-server`,
   ]);
+  const optStr = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  const optStrArr = (v: unknown): string[] | undefined =>
+    Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : undefined;
   for (const url of candidates) {
     const meta = await fetchWellKnown(url);
     if (
@@ -119,7 +122,17 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
       typeof meta.authorization_endpoint === 'string' &&
       typeof meta.token_endpoint === 'string'
     ) {
-      return meta as unknown as AuthServerMetadata;
+      return {
+        authorization_endpoint: meta.authorization_endpoint,
+        token_endpoint: meta.token_endpoint,
+        registration_endpoint: optStr(meta.registration_endpoint),
+        scopes_supported: optStrArr(meta.scopes_supported),
+        code_challenge_methods_supported: optStrArr(meta.code_challenge_methods_supported),
+        grant_types_supported: optStrArr(meta.grant_types_supported),
+        token_endpoint_auth_methods_supported: optStrArr(
+          meta.token_endpoint_auth_methods_supported,
+        ),
+      };
     }
   }
 

@@ -11,6 +11,7 @@ import {
   missingNeeds,
   needHint,
   parseEnvFile,
+  partitionWaves,
   renderScorecard,
   selectSteps,
   toJsonReport,
@@ -58,6 +59,27 @@ describe("STEPS", () => {
     for (const s of STEPS) expect(Object.keys(s.env ?? {})).not.toContain("CI");
   });
 
+  // vitest silently drops every argument after a bare "--" and runs the FULL
+  // suite. A step that means to run 2 files instead reruns all ~180. Guard
+  // the whole table: no command may contain "--", including inside bash -c
+  // strings ("pnpm ... test -- <files>").
+  it("no step command smuggles args past a bare -- separator", () => {
+    for (const s of STEPS) {
+      // Case 1: "--" as its own argv element (the direct-spawn / apiTest
+      // case). Element equality, so "--filter"/"--exclude" don't match.
+      expect(s.command, s.id).not.toContain("--");
+      // Case 2: " -- " inside a test-running arg — the `bash -c "…"` case.
+      // Scoped to vitest/pnpm-test invocations so an unrelated command's
+      // legitimate `-- <pathspec>` (git's, e.g. registry-drift's
+      // `git diff --quiet -- "$f"`) is not flagged. Catches every test
+      // command word: `pnpm … test -- foo`, `vitest -- foo`, `run test -- foo`.
+      for (const part of s.command) {
+        const isTestCmd = /\bvitest\b|\btest\b/.test(part);
+        if (isTestCmd) expect(part, `${s.id}: ${part}`).not.toContain(" -- ");
+      }
+    }
+  });
+
   it("plugins-unit filter list matches the plugin packages that have tests", () => {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
     const pkgs = join(root, "packages");
@@ -84,6 +106,40 @@ describe("STEPS", () => {
     if (!step) throw new Error("plugins-unit step missing");
     const filters = step.command.filter((_, i) => step.command[i - 1] === "--filter").sort();
     expect(filters).toEqual(withTests.sort());
+  });
+});
+
+describe("partitionWaves", () => {
+  it("splits steps into pre-serial, parallel, and serial waves preserving order", () => {
+    const waves = partitionWaves(STEPS);
+    // Steps that write files other steps read run alone, first: typecheck
+    // (tsc --build re-emits shared/sdk dist) and registry-drift (temporarily
+    // rewrites a tracked source file).
+    expect(waves.pre.map((s) => s.id)).toEqual(["typecheck", "registry-drift"]);
+    // Every parallel step is static-group and flagged parallelSafe.
+    for (const s of waves.parallel) {
+      expect(s.group, s.id).toBe("static");
+      expect(s.parallelSafe, s.id).toBe(true);
+    }
+    expect(waves.parallel.map((s) => s.id)).toContain("unit");
+    expect(waves.parallel.map((s) => s.id)).toContain("plugins-unit");
+    expect(waves.parallel.map((s) => s.id)).toContain("web-build");
+    // Everything with daemons, ports, keys, or clusters stays serial, in
+    // table order.
+    const serialIds = waves.serial.map((s) => s.id);
+    expect(serialIds).toContain("integration-agent");
+    expect(serialIds).toContain("store-postgres");
+    expect(serialIds).toContain("fullstack-docker");
+    expect(serialIds).not.toContain("unit");
+    // The three waves cover every step exactly once.
+    const all = [...waves.pre, ...waves.parallel, ...waves.serial].map((s) => s.id).sort();
+    expect(all).toEqual(STEPS.map((s) => s.id).sort());
+  });
+
+  it("non-static steps are never parallelSafe", () => {
+    for (const s of STEPS) {
+      if (s.group !== "static") expect(s.parallelSafe, s.id).toBeUndefined();
+    }
   });
 });
 

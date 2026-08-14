@@ -32,6 +32,13 @@ export interface StepDef {
   scrubKeys?: boolean;
   /** Runner-side pre-hook id (only "keycloak" today). */
   preHook?: "keycloak";
+  /**
+   * Safe to run concurrently with other parallelSafe steps: no daemons, no
+   * fixed ports, and no writes to files another step reads. Static-group
+   * only. typecheck (tsc --build re-emits shared/sdk dist) and
+   * registry-drift (temporarily rewrites a tracked file) stay serial.
+   */
+  parallelSafe?: true;
   timeoutMs: number;
 }
 
@@ -119,12 +126,13 @@ const TESTED_PLUGINS = [
   "@valet/plugin-telegram",
 ];
 
+// No "--" before the file filters: vitest silently drops every argument
+// after a bare "--" and runs the FULL suite (guarded by lib.test.ts).
 const apiTest = (...files: string[]): string[] => [
   "pnpm",
   "--filter",
   "@valet/api",
   "test",
-  "--",
   ...files,
 ];
 
@@ -133,23 +141,23 @@ export const STEPS: StepDef[] = [
   { id: "typecheck", group: "static", title: "root typecheck (all packages)", command: ["pnpm", "typecheck"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
   // Recurring review rules as executable checks (CLAUDE.md type-safety +
   // ws-types gotchas) — see scripts/e2e/conventions.ts.
-  { id: "conventions", group: "static", title: "code conventions (banned casts, ws @types)", command: ["pnpm", "exec", "tsx", "scripts/check-conventions.ts"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
+  { id: "conventions", group: "static", title: "code conventions (banned casts, ws @types)", command: ["pnpm", "exec", "tsx", "scripts/check-conventions.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
   // Advisory STE prose lint over maintained docs (CLAUDE.md "Writing").
   // Soft-skips when python3 is absent rather than failing the scorecard.
-  { id: "docs-lint", group: "static", title: "STE prose lint (maintained docs)", command: ["bash", "-c", "command -v python3 >/dev/null || { echo 'python3 not found - skipping'; exit 0; }; python3 scripts/docs/docs_lint.py"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
-  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
-  { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
-  { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "store-postgres-unit", group: "static", title: "store-postgres PGlite tests (no docker)", command: ["pnpm", "--filter", "@valet/store-postgres", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "web-build", group: "static", title: "web production build (vite)", command: ["pnpm", "--filter", "@valet/web", "build"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
-  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test -- src/bundle-guard"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
-  { id: "helm-golden", group: "static", title: "helm chart lint + golden templates", command: ["bash", "deploy/chart/valet/test/golden.sh"], needs: ["helm"], scrubKeys: true, timeoutMs: 5 * MIN },
-  { id: "sandbox-docker-unit", group: "static", title: "sandbox-docker unit tests (no daemon)", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "--", "test/run-args.test.ts"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
+  { id: "docs-lint", group: "static", title: "STE prose lint (maintained docs)", command: ["bash", "-c", "command -v python3 >/dev/null || { echo 'python3 not found - skipping'; exit 0; }; python3 scripts/docs/docs_lint.py"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
+  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "store-postgres-unit", group: "static", title: "store-postgres PGlite tests (no docker)", command: ["pnpm", "--filter", "@valet/store-postgres", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "web-build", group: "static", title: "web production build (vite)", command: ["pnpm", "--filter", "@valet/web", "build"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test src/bundle-guard"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "helm-golden", group: "static", title: "helm chart lint + golden templates", command: ["bash", "deploy/chart/valet/test/golden.sh"], needs: ["helm"], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
+  { id: "sandbox-docker-unit", group: "static", title: "sandbox-docker unit tests (no daemon)", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/run-args.test.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
   // Regenerate the plugin registry and fail on drift; the pre-drift file is
   // restored so the runner never leaves the tree dirty.
   { id: "registry-drift", group: "static", title: "plugin registry matches plugin.yaml manifests", command: ["bash", "-c", "set -e; f=packages/api/src/plugins/registry.gen.ts; pnpm tsx scripts/generate-v2-registry.ts >/dev/null; if ! git diff --quiet -- \"$f\"; then git checkout -- \"$f\"; echo \"registry.gen.ts is out of date - run 'make generate-registries' and commit\"; exit 1; fi"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
@@ -179,6 +187,24 @@ export const STEPS: StepDef[] = [
   { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts"), needs: ["githubLive"], timeoutMs: 10 * MIN },
   { id: "openai", group: "live", title: "OpenAI provider path", command: apiTest("src/integration/llm-providers.e2e.test.ts"), needs: ["openai"], timeoutMs: 10 * MIN },
 ];
+
+export interface Waves {
+  /** Serial, before everything: steps that write files others read. */
+  pre: StepDef[];
+  /** Concurrent pool: parallelSafe static steps. */
+  parallel: StepDef[];
+  /** Serial, after the pool: daemons, ports, keys, clusters. */
+  serial: StepDef[];
+}
+
+/** Split steps into execution waves (order preserved within each wave). */
+export function partitionWaves(steps: StepDef[]): Waves {
+  return {
+    pre: steps.filter((s) => s.group === "static" && !s.parallelSafe),
+    parallel: steps.filter((s) => s.parallelSafe === true),
+    serial: steps.filter((s) => s.group !== "static"),
+  };
+}
 
 /** Needs not satisfied by the current probes ([] ⇒ armed). */
 export function missingNeeds(step: StepDef, probes: Probes): Need[] {

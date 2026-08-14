@@ -497,7 +497,7 @@ test-pg: ## Run store-postgres conformance suite against a dockerized postgres:1
 	done
 	@TEST_DATABASE_URL=postgres://valet:valet@localhost:5433/valet_test $(PNPM) --filter @valet/store-postgres test; \
 		status=$$?; \
-		TEST_DATABASE_URL=postgres://valet:valet@localhost:5433/valet_test $(PNPM) --filter @valet/api test -- pg-store credential-store; \
+		TEST_DATABASE_URL=postgres://valet:valet@localhost:5433/valet_test $(PNPM) --filter @valet/api test pg-store credential-store; \
 		status2=$$?; \
 		echo "$(GREEN)Stopping postgres:17...$(NC)"; \
 		docker stop valet-test-pg >/dev/null 2>&1 || true; \

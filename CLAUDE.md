@@ -20,7 +20,8 @@ While iterating:
 
 ```bash
 pnpm typecheck                                  # all packages (worker excluded)
-pnpm --filter @valet/<pkg> test [-- <filter>]   # targeted suites for what you touched
+pnpm --filter @valet/<pkg> test [<filter>]      # targeted suites (NO "--" before the filter
+                        #   - vitest drops args after "--" and runs the FULL suite)
 make smoke-orchestrator                         # fastest agent-loop-alive check (real Anthropic, no Docker)
 ```
 
@@ -83,7 +84,7 @@ We've broken tool-call rendering on reload three times; the root cause is always
 3. REST reads: `entryToMessage` (`packages/api/src/routes/messages.ts`). If REST drops `parts`, the UI looks fine live and breaks on reload.
 4. Frontend extracts: `resultText` (`packages/web/src/components/session/tool-renderers/types.ts`) must handle `{ text }`, pi-agent-core's `{ content: [{ type: "text", text }] }`, and bare `string`.
 
-Regression suites (run before claiming done): `pnpm --filter @valet/engine test -- happy-path`, `-- in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
+Regression suites (run before claiming done): `pnpm --filter @valet/engine test happy-path`, `pnpm --filter @valet/engine test in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
 
 "(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
 
