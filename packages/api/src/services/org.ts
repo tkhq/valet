@@ -62,6 +62,16 @@ export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string
   return rows[0]?.role === "admin";
 }
 
+/** True when `userId` has any `org_members` row in `orgId` (any role). */
+export async function isOrgMember(db: AppQueryable, orgId: string, userId: string): Promise<boolean> {
+  const rows = await db
+    .select({ userId: orgMembers.userId })
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
 /** Reads `orgs.features` (jsonb); an absent `organizations` key reads as false. */
 export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<OrgFeatures> {
   const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);

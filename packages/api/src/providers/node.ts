@@ -12,10 +12,11 @@ import {
   LocalRunHost,
   type OnApprovalGrant,
   type OnApprovalPending,
+  type OnGateResolved,
 } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
-import { writeExecutionGrant } from "../policies/service.js";
+import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildReader,
@@ -383,7 +384,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
           title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
           body: info.summary ? info.prompt : undefined,
           href: `/workflows/runs/${info.runId}`,
-          dedupeKey: `${info.runId}:${info.nodeId}`,
+          dedupeKey: `${info.runId}:${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`,
         },
       );
     } catch (err) {
@@ -422,12 +423,36 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     }
   };
 
+  const onGateResolved: OnGateResolved = async (info) => {
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.params.workflowId) return;
+      const defRows = await db
+        .select({ orgId: workflowDefinitions.orgId })
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.params.workflowId))
+        .limit(1);
+      const orgId = defRows[0]?.orgId;
+      if (!orgId) return;
+      const suffix = info.iteration > 0 ? `:${info.iteration}` : "";
+      await updateInvocationOutcome(
+        db,
+        `pol:wf:workflow:${info.runId}:${info.nodeId}${suffix}`,
+        orgId,
+        { status: info.outcome, resolvedBy: info.resolvedBy },
+      );
+    } catch (err) {
+      console.error(`workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
+    }
+  };
+
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
     onApprovalGrant,
+    onGateResolved,
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };

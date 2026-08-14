@@ -262,17 +262,12 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (typeof body.approved !== "boolean") {
     return c.json({ error: "approved is required" }, 400);
   }
-  let grantActions: Array<{ service: string; actionId: string }> | undefined;
-  if (body.grantActions !== undefined) {
-    if (
-      !Array.isArray(body.grantActions) ||
-      !body.grantActions.every(
-        (g) => g && typeof g === "object" && typeof g.service === "string" && typeof g.actionId === "string",
-      )
-    ) {
-      return c.json({ error: "grantActions must be an array of { service, actionId }" }, 400);
-    }
-    grantActions = body.grantActions;
+  // Reject legacy grantActions field — scope replaces it.
+  if ("grantActions" in body) {
+    return c.json({ error: "grantActions is no longer supported; use scope instead" }, 400);
+  }
+  if (body.scope !== undefined && !["once", "run", "always"].includes(body.scope)) {
+    return c.json({ error: "scope must be one of: once, run, always" }, 400);
   }
 
   const result = await resolveWorkflowApproval(deps, owner, {
@@ -280,9 +275,18 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
     nodeId,
     approved: body.approved,
     note: body.note,
-    grantActions,
+    scope: body.scope,
+    iteration: body.iteration,
+    via: "web",
   });
+
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "not_parked") return c.json({ error: "run is not parked on this approval gate" }, 409);
+  if (result === "already_resolved") return c.json({ error: "this approval gate has already been resolved" }, 409);
+  if (result === "timed_out") return c.json({ error: "this approval gate has timed out" }, 409);
+  if (result === "forbidden_always") return c.json({ error: "scope=always requires an org admin" }, 403);
+  if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
+  if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);

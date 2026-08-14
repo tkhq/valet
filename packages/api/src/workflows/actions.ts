@@ -313,6 +313,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ run_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
+      // Self-invocation guard: a workflow session must not cancel runs.
+      const sessionId = (ctx as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
+        return { success: false, error: "A workflow cannot cancel runs. Request cancellation through the web UI or API." };
+      }
       const result = await cancelWorkflowRun(getDeps(), owner, run_id);
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       return { success: true, data: { runId: run_id, cancelled: true } };
@@ -325,26 +330,41 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       node_id: Type.String(),
       approved: Type.Boolean(),
       note: Type.Optional(Type.String()),
+      iteration: Type.Optional(Type.Number()),
     }),
   )({
     id: "workflows.resolve_approval",
     name: "Resolve workflow approval",
     description:
-      "Approve or deny a run's pending approval gate. Approval gates exist for HUMANS — " +
+      "Approve or deny a run's pending approval-node gate. Approval gates exist for HUMANS — " +
       "only call this when the user has explicitly told you their decision in this " +
       "conversation; never resolve a gate on your own judgment. (This action itself " +
-      "requires the user's confirmation.)",
+      "requires the user's confirmation.) Policy gates on tool nodes must be resolved " +
+      "from the run page, not via this action.",
     riskLevel: "high",
-    execute: async ({ run_id, node_id, approved, note }, ctx) => {
+    execute: async ({ run_id, node_id, approved, note, iteration }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
+      // Self-invocation guard: a workflow session must not resolve approval gates.
+      const sessionId = (ctx as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
+        return { success: false, error: "A workflow cannot resolve approval gates. A human must resolve this gate from the run page." };
+      }
       const result = await resolveWorkflowApproval(getDeps(), owner, {
         runId: run_id,
         nodeId: node_id,
         approved,
         note,
+        iteration,
+        via: "agent",
       });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
+      if (result === "not_parked") return { success: false, error: `run ${run_id} is not parked on approval gate ${node_id}` };
+      if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
+      if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
+      if (result === "human_only") return { success: false, error: "A human must resolve this policy gate from the run page." };
+      if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
+      if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
       return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
     },
   });

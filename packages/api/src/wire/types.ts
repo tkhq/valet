@@ -834,11 +834,13 @@ export type GetWorkflowRunResponse = WorkflowRunDetail;
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
   note?: string;
-  /** "Grant the rest of this run" (action-policies plan, Task 3/6): exact
-   *  `(service, actionId)` pairs to authorize for the remainder of the run
-   *  via an exec-scoped runtime grant. Only consulted by the approval node
-   *  executor when `approved` is `true`; ignored on a denial. */
-  grantActions?: Array<{ service: string; actionId: string }>;
+  /** Approve scope (policy gates): 'once' (default) authorizes only this
+   * invocation; 'run' writes a run-scoped grant for the gated action;
+   * 'always' (org admin only) writes a durable org allow policy. Ignored on
+   * approval-node gates and on denials. */
+  scope?: "once" | "run" | "always";
+  /** Foreach-iteration disambiguation; omit or 0 for top-level nodes. */
+  iteration?: number;
 }
 
 export interface ResolveWorkflowApprovalResponse {

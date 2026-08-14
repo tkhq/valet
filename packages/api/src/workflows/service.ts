@@ -4,7 +4,7 @@
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
-import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   validateWorkflowDefinition,
   type RunParams,
@@ -17,9 +17,16 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
+import { actionInvocations, workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
+import { isOrgMember } from "../services/org.js";
+import {
+  writeExecutionGrant,
+  writeAlwaysAllowPolicy,
+  AlwaysAllowNotAdminError,
+  updateInvocationOutcome,
+} from "../policies/service.js";
 import type {
   GetWorkflowRunResponse,
   WorkflowDefinitionSummary,
@@ -454,6 +461,37 @@ async function ownedRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: 
   return run;
 }
 
+export type ResolveApprovalOutcome =
+  | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
+  | "forbidden_always" | "org_mismatch" | "human_only";
+
+/** Scan `definition` (unknown at runtime) for the node with `nodeId`. */
+function findNodeInDefinition(definition: unknown, nodeId: string): Record<string, unknown> | undefined {
+  if (typeof definition !== "object" || definition === null) return undefined;
+  const def = definition as Record<string, unknown>;
+  if (!Array.isArray(def.nodes)) return undefined;
+  for (const node of def.nodes) {
+    if (typeof node !== "object" || node === null) continue;
+    const n = node as Record<string, unknown>;
+    if (n.id === nodeId) return n;
+    // foreach body node
+    if (n.type === "foreach" && typeof n.body === "object" && n.body !== null) {
+      const body = n.body as Record<string, unknown>;
+      if (body.id === nodeId) return body;
+    }
+  }
+  return undefined;
+}
+
+async function definitionOrgId(db: AppDb, workflowId: string): Promise<string | null> {
+  const rows = await db
+    .select({ orgId: workflowDefinitions.orgId })
+    .from(workflowDefinitions)
+    .where(eq(workflowDefinitions.id, workflowId))
+    .limit(1);
+  return rows[0]?.orgId ?? null;
+}
+
 /** Terminates a run. `not_found` covers unknown AND un-owned run ids. */
 export async function cancelWorkflowRun(
   deps: WorkflowServiceDeps,
@@ -463,12 +501,37 @@ export async function cancelWorkflowRun(
   const run = await ownedRun(deps, owner, runId);
   if (!run) return "not_found";
   await deps.workflowRunHost.terminate(runId);
+
+  // Stamp pending gate audit rows for this run as cancelled.
+  try {
+    if (run.params.workflowId) {
+      const orgId = await definitionOrgId(deps.db, run.params.workflowId);
+      if (orgId) {
+        const rows = await deps.db
+          .select({ invocationId: actionInvocations.invocationId })
+          .from(actionInvocations)
+          .where(
+            and(
+              eq(actionInvocations.orgId, orgId),
+              sql`${actionInvocations.invocationId} LIKE ${`pol:wf:workflow:${runId}:%`}`,
+              eq(actionInvocations.status, "pending"),
+            ),
+          );
+        for (const row of rows) {
+          await updateInvocationOutcome(deps.db, row.invocationId, orgId, { status: "cancelled" });
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`cancel gate stamp failed for run ${runId}:`, err);
+  }
+
   return "ok";
 }
 
-/** Resolves an approval gate: inserts the approval signal and wakes the
- * run. The caller decides WHO may resolve (the HTTP route lets the session
- * user; the agent tool rides a high-risk decision gate). */
+/** Resolves an approval gate: validates the run is parked on the right signal,
+ * writes any policy grants requested, inserts the resolution signal, and wakes
+ * the run. Returns a rich outcome so callers can map to appropriate HTTP codes. */
 export async function resolveWorkflowApproval(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
@@ -477,20 +540,79 @@ export async function resolveWorkflowApproval(
     nodeId: string;
     approved: boolean;
     note?: string;
-    /** "Grant the rest of this run" — exec-scoped runtime grants written by
-     * the approval node's `onApprovalGrant` host seam on approval. */
-    grantActions?: Array<{ service: string; actionId: string }>;
+    scope?: "once" | "run" | "always";
+    iteration?: number;
+    via: "web" | "agent";
   },
-): Promise<"ok" | "not_found"> {
+): Promise<ResolveApprovalOutcome> {
   const run = await ownedRun(deps, owner, input.runId);
   if (!run) return "not_found";
+  const iter = input.iteration ?? 0;
+  const suffix = iter > 0 ? `:${iter}` : "";
+  const signalType = `approval:${input.nodeId}${suffix}`;
+
+  const wait = run.status === "parked"
+    ? run.waitingOn.find((w) => w.kind === "signal" && w.signalType === signalType)
+    : undefined;
+  if (!wait || wait.kind !== "signal") return "not_parked";
+  if (wait.timeoutAt !== undefined && Date.now() >= wait.timeoutAt) return "timed_out";
+
+  const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
+  if (existing.some((s) => s.signalType === signalType)) return "already_resolved";
+
+  const node = findNodeInDefinition(run.definition, input.nodeId);
+  const isPolicyGate = node?.type === "tool";
+  if (isPolicyGate && input.via === "agent") return "human_only";
+
+  const orgId = await definitionOrgId(deps.db, run.params.workflowId);
+  if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
+
+  if (input.approved && isPolicyGate) {
+    const n = node as Record<string, unknown>;
+    const service = typeof n.service === "string" ? n.service : "";
+    const action = typeof n.action === "string" ? n.action : "";
+    const actionId = action.includes(".") ? action : `${service}.${action}`;
+    const now = Date.now();
+    if (input.scope === "always") {
+      try {
+        await writeAlwaysAllowPolicy(deps.db, { orgId, actionId, grantedBy: owner.userId, now });
+      } catch (err) {
+        if (err instanceof AlwaysAllowNotAdminError) return "forbidden_always";
+        throw err;
+      }
+    }
+    if (input.scope === "always" || input.scope === "run") {
+      await writeExecutionGrant(deps.db, input.runId, {
+        orgId,
+        service,
+        actionId,
+        grantedBy: owner.userId,
+        now,
+      });
+    }
+  }
+
   await deps.workflowStore.insertSignal({
     runId: input.runId,
-    signalId: `approval:${input.nodeId}:resolution`,
-    signalType: `approval:${input.nodeId}`,
-    payload: { approved: input.approved, resolvedBy: owner.userId, note: input.note, grantActions: input.grantActions },
+    signalId: `approval:${input.nodeId}${suffix}:resolution`,
+    signalType,
+    payload: {
+      approved: input.approved,
+      resolvedBy: owner.userId,
+      note: input.note,
+      scope: input.scope,
+      resolvedVia: input.via,
+    },
     createdAt: Date.now(),
   });
+  if (isPolicyGate) {
+    await updateInvocationOutcome(
+      deps.db,
+      `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`,
+      orgId,
+      { status: input.approved ? "approved" : "denied", resolvedBy: owner.userId },
+    );
+  }
   await deps.workflowRunHost.wake(input.runId);
   return "ok";
 }
