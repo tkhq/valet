@@ -1765,12 +1765,15 @@ export interface EventSubscriptionFilterWire {
 // validator rejects it — see routes/events.ts TARGET_KINDS.
 export type EventSubscriptionTargetWire =
   | { kind: "workflow"; workflowId: string }
-  | { kind: "orchestrator"; orchestrator?: "user" | "org" };
+  /** `teamId` is required when `orchestrator` is `"team"`, and refused
+   * otherwise — the two fields are one choice, and a `teamId` alongside
+   * `"user"` would name a team the delivery never reaches. */
+  | { kind: "orchestrator"; orchestrator?: "user" | "team" | "org"; teamId?: string };
 
 export interface EventSubscriptionWire {
   id: string;
   name: string;
-  ownerType: "user" | "org";
+  ownerType: "user" | "team" | "org";
   ownerId: string;
   eventKeys: string[];
   filters: EventSubscriptionFilterWire[];

@@ -24,14 +24,14 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
 export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHost }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, signal, dispatchId }) => {
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
     // A subscription names an OWNER, never one assistant of that owner, so
     // this resolves the owner's default — the target automation gets when
     // nobody chose.
     const { session } = await ensureDefaultAssistantSession(
       { db: deps.db, engineHost: deps.engineHost },
       { type: ownerType, id: ownerId },
-      { actorUserId: ownerId, orgId },
+      { actorUserId, orgId },
     );
     const data = await session.toData();
     if (data.orgId !== orgId) {

@@ -11,7 +11,14 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import {
+  eventDeliveries,
+  events,
+  eventSubscriptions,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+} from "../schema/index.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -763,5 +770,149 @@ describe("POST /api/events/:id/redeliver", () => {
     const res = await redeliver(a.baseUrl, "ev_foreign");
     expect(res.status).toBe(404);
     expect(await deliveriesFor(a, "ev_foreign")).toHaveLength(0);
+  });
+});
+
+/**
+ * A team owns event subscriptions the same way it owns workflows, skills and
+ * sessions: the subscription names the TEAM as owner, and the dispatcher
+ * delivers into that team's default assistant rather than the assistant of
+ * whichever member happened to create it.
+ *
+ * Membership is the bar to create one, matching team workflows and team
+ * sessions — a member who can start a team workflow by hand can equally
+ * arrange for an event to start it. A caller who is not on the team gets 404,
+ * never 403, so a subscription never confirms a team's existence.
+ */
+describe("event subscriptions — team ownership", () => {
+  async function bootWithTeam(): Promise<TestApi> {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    // A second team the caller is NOT on, to prove the refusal below is about
+    // membership and not about the id being unknown.
+    await a.providers.db.insert(teams).values({ id: "team_2", orgId: "local-org", name: "Other", createdAt: now });
+    return a;
+  }
+
+  const teamBody: CreateEventSubscriptionRequest = {
+    ...VALID_BODY,
+    target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+  };
+
+  it("stamps a team target with the TEAM as owner, not the creating member", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(created.ownerType).toBe("team");
+    expect(created.ownerId).toBe("team_1");
+    expect(created.ownerId).not.toBe("test-member");
+    // The row agrees with the response — the owner is persisted, not just
+    // reported, because the dispatcher reads the row and never the response.
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0]?.ownerType).toBe("team");
+    expect(rows[0]?.ownerId).toBe("team_1");
+    // `createdBy` still records the human, which is what the dispatcher hands
+    // the engine as the actor — a team id is not a user.
+    expect(rows[0]?.createdBy).toBe("test-member");
+  });
+
+  it("404s a team the caller is not a member of, without naming it", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_2" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("team not found");
+    expect(body.error).not.toContain("Other");
+  });
+
+  it("404s a team id that does not exist at all — same answer as one you're not on", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_nope" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a team target with no teamId — it names no team", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("team orchestrator target requires teamId");
+  });
+
+  it("400s a teamId on a user target — it would read as delivering to the team, and does not", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "user", teamId: "team_1" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("teamId is only valid when orchestrator is team");
+  });
+
+  it("lets another member of the same team change and delete it", async () => {
+    const a = await bootWithTeam();
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-admin", role: "member" });
+    const created = (await (
+      await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" })
+    ).json()) as CreateEventSubscriptionResponse;
+
+    const patched = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-admin" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patched.status).toBe(200);
+    expect(((await patched.json()) as PatchEventSubscriptionResponse).enabled).toBe(false);
+
+    const deleted = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-admin" },
+    });
+    expect(deleted.status).toBe(204);
+  });
+
+  it("404s a non-member trying to change or delete a team subscription", async () => {
+    const a = await bootWithTeam();
+    const created = (await (
+      await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" })
+    ).json()) as CreateEventSubscriptionResponse;
+
+    const patched = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "outsider" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patched.status).toBe(404);
+
+    const deleted = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "outsider" },
+    });
+    expect(deleted.status).toBe(404);
+
+    // Still there, and still enabled — the refusal changed nothing.
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0]?.enabled).toBe(true);
   });
 });

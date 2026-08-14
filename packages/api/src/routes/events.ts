@@ -15,10 +15,12 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { catalogForService } from "../events/ingest.js";
 import { eventKeyMatches, filtersMatch, type SubscriptionFilter } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
+import { isTeamMember } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -45,8 +47,21 @@ export const eventsRouter = new Hono<AppEnv>();
  * an org member cannot toggle or delete a colleague's personal automation
  * even though they can see it exists.
  */
-function canMutateSubscription(row: { ownerType: "user" | "org"; ownerId: string }, userId: string): boolean {
-  return row.ownerType === "org" || row.ownerId === userId;
+/**
+ * Who may change an existing subscription. The rule is "you can change what
+ * you could have created": an org one is org-wide by construction, a team
+ * one belongs to its members, and a personal one to its owner. A caller who
+ * fails this gets the same 404 as a missing row, so a subscription id never
+ * confirms a team the caller is not on.
+ */
+async function canMutateSubscription(
+  db: AppDb,
+  row: { ownerType: "user" | "team" | "org"; ownerId: string },
+  userId: string,
+): Promise<boolean> {
+  if (row.ownerType === "org") return true;
+  if (row.ownerType === "team") return isTeamMember(db, row.ownerId, userId);
+  return row.ownerId === userId;
 }
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains"] as const;
@@ -146,13 +161,21 @@ export function validateSubscription(
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
     return "workflow target requires workflowId";
   }
-  if (
-    target.kind === "orchestrator" &&
-    target.orchestrator !== undefined &&
-    target.orchestrator !== "user" &&
-    target.orchestrator !== "org"
-  ) {
-    return `unknown target orchestrator: ${String(target.orchestrator)}`;
+  if (target.kind === "orchestrator") {
+    const who = target.orchestrator;
+    if (who !== undefined && who !== "user" && who !== "team" && who !== "org") {
+      return `unknown target orchestrator: ${String(who)}`;
+    }
+    // `orchestrator` and `teamId` are one choice expressed in two fields, so
+    // each is refused without the other. A team target with no id names no
+    // team; a teamId on a user or org target names a team the delivery would
+    // never reach, and would read as if it did.
+    if (who === "team" && (typeof target.teamId !== "string" || target.teamId.length === 0)) {
+      return "team orchestrator target requires teamId";
+    }
+    if (who !== "team" && target.teamId !== undefined) {
+      return "teamId is only valid when orchestrator is team";
+    }
   }
   return null;
 }
@@ -393,11 +416,35 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
-  // Orchestrator targets choose the owning orchestrator: the caller's user
-  // orchestrator (default) or the org orchestrator.
-  const orchestrator = body.target.kind === "orchestrator" ? (body.target.orchestrator ?? "user") : "user";
-  const ownerType = orchestrator === "org" ? ("org" as const) : ("user" as const);
-  const ownerId = orchestrator === "org" ? user.orgId : user.id;
+  // Orchestrator targets choose the owning orchestrator: the caller's own
+  // (the default), a team they are on, or the org's. The owner decides which
+  // default assistant the dispatcher delivers into, so a team target is the
+  // whole reason a team can be event-driven at all.
+  //
+  // Membership, not team-admin, is the bar — the same bar team workflows and
+  // team sessions already use. A subscription is automation the team shares,
+  // and a member who can start a team workflow by hand can equally arrange
+  // for an event to start it.
+  let ownerType: "user" | "team" | "org" = "user";
+  let ownerId = user.id;
+  if (body.target.kind === "orchestrator") {
+    const who = body.target.orchestrator ?? "user";
+    if (who === "org") {
+      ownerType = "org";
+      ownerId = user.orgId;
+    } else if (who === "team") {
+      // `validateSubscription` already refused a team target with no teamId.
+      const teamId = body.target.teamId as string;
+      if (!(await isTeamMember(db, teamId, user.id))) {
+        // 404, not 403: a team the caller is not on must be indistinguishable
+        // from one that does not exist — same convention as the sessions,
+        // workflows and teams routes.
+        return c.json({ error: "team not found" }, 404);
+      }
+      ownerType = "team";
+      ownerId = teamId;
+    }
+  }
 
   const now = Date.now();
   const id = randomUUID();
@@ -451,7 +498,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // A personal subscription owned by someone else answers the same 404 as
   // a missing one — same "cross-owner access is indistinguishable from
   // not-found" convention as workflows/teams routes.
-  if (!row || !canMutateSubscription(row, user.id)) {
+  if (!row || !(await canMutateSubscription(db, row, user.id))) {
     return c.json({ error: "subscription not found" }, 404);
   }
 
@@ -503,7 +550,7 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
     .limit(1);
   const row = rows[0];
-  if (!row || !canMutateSubscription(row, user.id)) {
+  if (!row || !(await canMutateSubscription(db, row, user.id))) {
     return c.json({ error: "subscription not found" }, 404);
   }
 

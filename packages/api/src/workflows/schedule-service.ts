@@ -105,7 +105,7 @@ export async function createWorkflowSchedule(
   // `def.ownerType`/`ownerId` (the workflow's real owner) directly, by
   // design, never these fields. They matter only for an orchestrator-prompt
   // target, which `deliverToOrchestrator` reads.
-  let scheduleOwner: { ownerType: "user" | "org"; ownerId: string } = {
+  let scheduleOwner: { ownerType: "user" | "team" | "org"; ownerId: string } = {
     ownerType: "user",
     ownerId: user.id,
   };
@@ -119,16 +119,12 @@ export async function createWorkflowSchedule(
     // `fire()` for the matching run-ownership fix.
     const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
     if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
-    // Follow the workflow's own owner where this table's `owner_type`
-    // enum (`user`/`org` only, no `team`) can represent it — a team-owned
-    // workflow's schedule maps to the org rather than silently attributing
-    // to whichever member happened to create it.
-    scheduleOwner =
-      owned.ownerType === "org"
-        ? { ownerType: "org", ownerId: owned.ownerId }
-        : owned.ownerType === "team"
-          ? { ownerType: "org", ownerId: user.orgId }
-          : { ownerType: "user", ownerId: owned.ownerId };
+    // Follow the workflow's own owner exactly. This used to widen a team
+    // workflow's schedule to the ORG, because `owner_type` could not hold a
+    // team — which handed a team's scheduled prompt to the org assistant,
+    // a strictly larger audience than the team that owns the workflow. The
+    // column now holds a team, so the schedule follows its workflow.
+    scheduleOwner = { ownerType: owned.ownerType, ownerId: owned.ownerId };
   }
 
   const inserted = await db

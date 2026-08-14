@@ -1169,7 +1169,7 @@ export const eventSubscriptions = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     // "team" is intentionally excluded: subscription dispatch targets only user/org orchestrators.
-    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     /** Event key patterns; trailing `.*` wildcard supported (e.g. "github.pull_request.*"). */
@@ -1198,7 +1198,7 @@ export const workflowSchedules = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull().default("user"),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
     /** Fire target: start a workflow run, or prompt the orchestrator
      * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
