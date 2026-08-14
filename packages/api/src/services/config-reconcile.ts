@@ -320,6 +320,7 @@ async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promis
           name: declaredName,
           baseUrl: provDecl.baseUrl,
           models: declaredModels,
+          enabled: declaredEnabled,
         });
       }
     } else {

@@ -367,7 +367,7 @@ function validateSkillSources(
   path: string,
 ): NonNullable<InstanceConfig["skillSources"]> {
   const arr = assertArray(value, "skillSources", path);
-  return arr.map((item, i) => {
+  const entries = arr.map((item, i) => {
     const obj = assertRecord(item, `skillSources[${i}]`, path);
     let repo: string | undefined;
     let ref: string | undefined;
@@ -391,6 +391,27 @@ function validateSkillSources(
     if (subpath !== undefined) entry.subpath = subpath;
     return entry;
   });
+
+  // Reject configs with duplicate (repo, subpath) pairs — they would collide on
+  // the DB unique index (orgId, ownerType, ownerId, repoFullName, subpath) at
+  // boot. We compare the raw repo string lowercased + subpath so the check is
+  // dependency-light and avoids importing parseRepoInput here; note that two
+  // entries differing only in URL scheme or trailing ".git" will NOT be caught
+  // by this check — the reconciler's unmanaged-row guard will warn at runtime.
+  const seen = new Map<string, number>();
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    const key = `${e.repo.toLowerCase()}|${e.subpath ?? ""}`;
+    const prior = seen.get(key);
+    if (prior !== undefined) {
+      err(
+        `${path}: skillSources[${prior}] and skillSources[${i}] track the same repository and subpath. Remove one (a source can track only one ref).`,
+      );
+    }
+    seen.set(key, i);
+  }
+
+  return entries;
 }
 
 // ---------------------------------------------------------------------------

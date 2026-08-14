@@ -195,6 +195,51 @@ toolPolicies:
   it("throws when version is missing", () => {
     expect(() => parseInstanceConfig("org:\n  name: Foo", path)).toThrow(InstanceConfigError);
   });
+
+  it("throws when skillSources has duplicate (repo, subpath) entries differing only by ref", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: owner/skills
+    ref: main
+    subpath: skills
+  - repo: owner/skills
+    ref: v2
+    subpath: skills
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "skillSources[0] and skillSources[1] track the same repository and subpath. Remove one (a source can track only one ref).",
+    );
+  });
+
+  it("throws when skillSources has duplicate (repo, subpath) differing by repo case", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: Owner/Skills
+    ref: main
+  - repo: owner/skills
+    ref: feature
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "skillSources[0] and skillSources[1] track the same repository and subpath. Remove one (a source can track only one ref).",
+    );
+  });
+
+  it("allows skillSources with same repo but different subpaths", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: owner/skills
+    ref: main
+    subpath: skills
+  - repo: owner/skills
+    ref: main
+    subpath: roles
+`.trim();
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.skillSources).toHaveLength(2);
+  });
 });
 
 describe("loadInstanceConfig", () => {

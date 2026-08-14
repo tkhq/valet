@@ -565,6 +565,18 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
     const rows = await db.select().from(llmProviders).where(eq(llmProviders.kind, "anthropic"));
     expect(rows).toHaveLength(1);
   });
+
+  it("creates a known-kind provider with enabled: false on first run (disabled immediately)", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [{ kind: "openrouter", enabled: false }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const rows = await db.select().from(llmProviders).where(eq(llmProviders.kind, "openrouter"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.enabled).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

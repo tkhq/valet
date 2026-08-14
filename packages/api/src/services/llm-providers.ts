@@ -65,6 +65,8 @@ export interface CreateLlmProviderOptions {
   name: string;
   baseUrl?: string;
   models?: LlmProviderModel[];
+  /** Whether the provider is enabled. Defaults to `true`. */
+  enabled?: boolean;
 }
 
 /**
@@ -81,7 +83,7 @@ export async function createLlmProvider(db: AppDb, opts: CreateLlmProviderOption
     kind: opts.kind,
     name: opts.name,
     baseUrl: opts.baseUrl ?? null,
-    enabled: true,
+    enabled: opts.enabled ?? true,
     models: opts.models ?? [],
     createdAt: Date.now(),
   };
