@@ -77,6 +77,31 @@ export function workspaceOfAssistant(active: AssistantSummary | undefined): stri
   return active.owner.type === "team" ? active.owner.id : PERSONAL;
 }
 
+/**
+ * Which workspace is active, given what is currently known.
+ *
+ * Pure, and exported, because the interesting case is a race and a race is
+ * not worth a render harness to reproduce. The open assistant wins when
+ * there is one. Otherwise the stored key stands, and it is only discarded
+ * once membership is actually KNOWN — while either query is still loading,
+ * `available` holds the caller's own workspace alone, and reading that as
+ * proof the team is gone drops a valid scope, which the caller then
+ * persists.
+ */
+export function resolveWorkspaceKey(args: {
+  /** The open assistant's workspace, when a conversation is open. */
+  derived: string | undefined;
+  stored: string;
+  /** Every workspace the caller may switch to, own workspace first. */
+  available: readonly string[];
+  /** False while either the teams or the org query is still loading. */
+  membershipKnown: boolean;
+}): string {
+  if (args.derived !== undefined) return args.derived;
+  if (!args.membershipKnown) return args.stored;
+  return args.available.includes(args.stored) ? args.stored : PERSONAL;
+}
+
 export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
   const [stored, setStored] = useState<string>(() => loadStored());
 
@@ -103,15 +128,9 @@ export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
   const open = (assistantsQ.data?.assistants ?? []).find((a) => a.id === search.assistant);
   const derived = workspaceOfAssistant(open);
 
-  // Resolve before the effect runs, not after: a scope that is briefly wrong
-  // would let a list fire one request against the previous workspace.
-  //
-  // Only fall back once the teams query has ANSWERED. While it is loading,
-  // `available` holds your own workspace alone, and treating that as proof
-  // the team is gone would drop a team scope on every page load.
-  const teamsKnown = teamsQ.data !== undefined || orgQ.data !== undefined;
-  const settled = teamsKnown && !available.includes(stored) ? PERSONAL : stored;
-  const key = derived ?? settled;
+  // Both queries, not either: `available` is derived from the two together.
+  const membershipKnown = teamsQ.data !== undefined && orgQ.data !== undefined;
+  const key = resolveWorkspaceKey({ derived, stored, available, membershipKnown });
 
   // Persist what the open assistant decided, so leaving `/chat` keeps the
   // workspace you were last actually in.

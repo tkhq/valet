@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { AssistantSummary } from "@valet/api/wire";
-import { PERSONAL, workspaceOfAssistant } from "./workspace-scope";
+import { PERSONAL, resolveWorkspaceKey, workspaceOfAssistant } from "./workspace-scope";
 
 const ME = { type: "user", id: "u1" } as const;
 
@@ -42,5 +42,77 @@ describe("workspaceOfAssistant", () => {
     // scope on every route that has no assistant in the URL — which is every
     // route except /chat — and pin them all to Personal.
     expect(workspaceOfAssistant(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * The interesting case is a race, so the resolution is a pure function.
+ *
+ * The provider derives `available` from TWO queries — teams and org. While
+ * either is loading, `available` holds the caller's own workspace alone.
+ * Reading that as "the stored team is gone" drops a valid scope, and the
+ * provider then persists the drop to localStorage, so the workspace is lost
+ * for good rather than for a frame.
+ */
+describe("resolveWorkspaceKey", () => {
+  const TEAM = "team_1";
+
+  it("keeps a stored team while membership is still loading", () => {
+    // Exactly the race: the org query answered, the teams query has not, so
+    // `available` is Personal-only and says nothing about team_1 yet.
+    expect(
+      resolveWorkspaceKey({
+        derived: undefined,
+        stored: TEAM,
+        available: [PERSONAL],
+        membershipKnown: false,
+      }),
+    ).toBe(TEAM);
+  });
+
+  it("keeps a stored team once membership confirms it", () => {
+    expect(
+      resolveWorkspaceKey({
+        derived: undefined,
+        stored: TEAM,
+        available: [PERSONAL, TEAM],
+        membershipKnown: true,
+      }),
+    ).toBe(TEAM);
+  });
+
+  it("drops a team the caller has actually left", () => {
+    expect(
+      resolveWorkspaceKey({
+        derived: undefined,
+        stored: TEAM,
+        available: [PERSONAL],
+        membershipKnown: true,
+      }),
+    ).toBe(PERSONAL);
+  });
+
+  it("lets the open assistant win over the stored key", () => {
+    expect(
+      resolveWorkspaceKey({
+        derived: "team_2",
+        stored: TEAM,
+        available: [PERSONAL, TEAM],
+        membershipKnown: true,
+      }),
+    ).toBe("team_2");
+  });
+
+  it("lets the open assistant win before membership is known", () => {
+    // Arriving on a team conversation from a notification must move the
+    // scope immediately, not after two queries settle.
+    expect(
+      resolveWorkspaceKey({
+        derived: "team_2",
+        stored: PERSONAL,
+        available: [PERSONAL],
+        membershipKnown: false,
+      }),
+    ).toBe("team_2");
   });
 });

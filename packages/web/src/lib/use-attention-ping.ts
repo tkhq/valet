@@ -70,6 +70,9 @@ export function attentionSessionIds(
 export interface PingContext {
   /** Where the user is right now, e.g. `/chat` or `/sessions/abc`. */
   pathname: string;
+  /** The current query string, with or without its leading `?`. Needed
+   * because `/chat` alone does not say WHICH conversation is open. */
+  search: string;
   /** `document.visibilityState === "visible"`. */
   tabVisible: boolean;
 }
@@ -78,23 +81,37 @@ export interface PingContext {
  * Pure: should THIS notification make a sound?
  *
  * The judgement call is the last clause. If you are looking at the very
- * page the notification points to, the decision card is already on screen
- * and a sound tells you nothing you cannot see — so we stay quiet. Tab
- * hidden, or anywhere else in the app, and it plays.
+ * conversation the notification points to, the decision card is already on
+ * screen and a sound tells you nothing you cannot see — so we stay quiet.
+ * Tab hidden, or anywhere else in the app, and it plays.
  */
 export function shouldPing(n: NotificationSummary, ctx: PingContext): boolean {
   if (!isActionable(n)) return false;
   if (!ctx.tabVisible) return true;
   if (n.href === undefined) return true;
-  return !hrefMatchesLocation(n.href, ctx.pathname);
+  return !hrefMatchesLocation(n.href, ctx.pathname, ctx.search);
 }
 
-/** `href` is a full path with an optional query; the comparison is on the
- * path alone, so a gate on the session you are reading stays silent even if
- * the link carries a thread parameter you do not currently have. */
-export function hrefMatchesLocation(href: string, pathname: string): boolean {
-  const path = href.split("?")[0] ?? href;
-  return path === pathname;
+/**
+ * Does `href` point at the conversation currently on screen?
+ *
+ * The path alone does not answer this. Every assistant conversation lives
+ * at `/chat`, with `?assistant=` naming which one, so comparing paths made
+ * a gate raised by ANY other assistant silent while the reader sat on
+ * `/chat` looking at a different one — the case this product exists to
+ * catch, and the common case now that a user has several assistants and
+ * teams have their own.
+ *
+ * `assistant` is compared; `thread` deliberately is not. The assistant
+ * identifies the conversation, while a thread is a place within one the
+ * reader can already see.
+ */
+export function hrefMatchesLocation(href: string, pathname: string, search: string): boolean {
+  const [path, query = ""] = href.split("?");
+  if (path !== pathname) return false;
+  const target = new URLSearchParams(query).get("assistant");
+  if (target === null) return true;
+  return new URLSearchParams(search.replace(/^\?/, "")).get("assistant") === target;
 }
 
 /** The document title, with the count of things waiting on you. Restores
@@ -103,15 +120,20 @@ export function titleWithCount(base: string, count: number): string {
   return count > 0 ? `(${count}) ${base}` : base;
 }
 
-const BASE_TITLE = "Valet";
-
 export function useAttentionPing(): void {
   const notificationsQ = useNotifications();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const search = useRouterState({ select: (s) => s.location.searchStr });
 
   // Ids we have already considered. Seeded from the FIRST response without
   // pinging: everything unread at load is backlog, and announcing it would
   // make every page refresh sound like a fresh emergency.
+  //
+  // REPLACED, not accumulated, on each poll. Only ids in the current
+  // response can be compared against the next one, so keeping older ids
+  // grows the set for the tab's whole life and buys nothing. An id that
+  // ages out and then returns is a notification the user has not been told
+  // about in the meantime, so treating it as fresh is right anyway.
   const seen = useRef<Set<string> | null>(null);
   const lastPingAt = useRef(0);
 
@@ -125,12 +147,14 @@ export function useAttentionPing(): void {
       return;
     }
 
-    const fresh = notifications.filter((n) => !seen.current?.has(n.id));
-    for (const n of notifications) seen.current.add(n.id);
+    const previous = seen.current;
+    const fresh = notifications.filter((n) => !previous.has(n.id));
+    seen.current = new Set(notifications.map((n) => n.id));
     if (fresh.length === 0) return;
 
     const ctx: PingContext = {
       pathname,
+      search,
       tabVisible: typeof document !== "undefined" && document.visibilityState === "visible",
     };
     if (!fresh.some((n) => shouldPing(n, ctx))) return;
@@ -140,17 +164,25 @@ export function useAttentionPing(): void {
     if (now - lastPingAt.current < PING_COOLDOWN_MS) return;
     lastPingAt.current = now;
     playAttentionChime();
-  }, [notifications, pathname]);
+  }, [notifications, pathname, search]);
+
+  // The title the page chose for itself, captured once before this hook
+  // first writes to it. Prefixing THAT rather than a hardcoded product name
+  // means a page that titles itself keeps its title — otherwise every poll
+  // would overwrite it, and several open tabs would be indistinguishable.
+  const baseTitle = useRef<string | null>(null);
 
   // The title is the fallback that always works: muted tab, blocked
   // autoplay, headphones out. It costs nothing and it is the only signal
   // visible from another application's window.
   useEffect(() => {
     if (typeof document === "undefined") return;
+    baseTitle.current ??= document.title || "Valet";
+    const base = baseTitle.current;
     const count = (notifications ?? []).filter(isActionable).length;
-    document.title = titleWithCount(BASE_TITLE, count);
+    document.title = titleWithCount(base, count);
     return () => {
-      document.title = BASE_TITLE;
+      document.title = base;
     };
   }, [notifications]);
 }

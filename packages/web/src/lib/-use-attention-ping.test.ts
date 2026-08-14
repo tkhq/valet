@@ -25,8 +25,8 @@ function notif(kind: NotificationKind, over: Partial<NotificationSummary> = {}):
   };
 }
 
-const VISIBLE: PingContext = { pathname: "/sessions/abc", tabVisible: true };
-const HIDDEN: PingContext = { pathname: "/sessions/abc", tabVisible: false };
+const VISIBLE: PingContext = { pathname: "/sessions/abc", search: "", tabVisible: true };
+const HIDDEN: PingContext = { pathname: "/sessions/abc", search: "", tabVisible: false };
 
 describe("isActionable", () => {
   it("counts the kinds that block on a person", () => {
@@ -68,13 +68,49 @@ describe("shouldPing", () => {
 });
 
 describe("hrefMatchesLocation", () => {
-  it("compares paths, ignoring the query", () => {
-    expect(hrefMatchesLocation("/chat?thread=t1", "/chat")).toBe(true);
-    expect(hrefMatchesLocation("/chat", "/chat")).toBe(true);
+  it("ignores a thread parameter, which names a place inside a conversation you can see", () => {
+    expect(hrefMatchesLocation("/chat?thread=t1", "/chat", "")).toBe(true);
+    expect(hrefMatchesLocation("/chat", "/chat", "")).toBe(true);
   });
 
   it("does not match a different path", () => {
-    expect(hrefMatchesLocation("/sessions/a", "/sessions/b")).toBe(false);
+    expect(hrefMatchesLocation("/sessions/a", "/sessions/b", "")).toBe(false);
+  });
+
+  /**
+   * Every assistant conversation lives at `/chat`, so the path alone cannot
+   * say which one is open. Comparing paths only made a gate raised by any
+   * OTHER assistant silent while the reader sat on `/chat` — the case this
+   * whole feature exists to catch.
+   */
+  it("does not match another assistant's conversation at the same path", () => {
+    expect(hrefMatchesLocation("/chat?assistant=b", "/chat", "?assistant=a")).toBe(false);
+  });
+
+  it("matches the assistant actually open", () => {
+    expect(hrefMatchesLocation("/chat?assistant=a", "/chat", "?assistant=a")).toBe(true);
+    // The leading `?` is optional — routers report it both ways.
+    expect(hrefMatchesLocation("/chat?assistant=a", "/chat", "assistant=a")).toBe(true);
+  });
+
+  it("does not match when no assistant is open at all", () => {
+    expect(hrefMatchesLocation("/chat?assistant=b", "/chat", "")).toBe(false);
+  });
+
+  it("ignores a thread difference once the assistant agrees", () => {
+    expect(hrefMatchesLocation("/chat?assistant=a&thread=t9", "/chat", "?assistant=a")).toBe(true);
+  });
+});
+
+describe("shouldPing — several assistants share /chat", () => {
+  const onA: PingContext = { pathname: "/chat", search: "?assistant=a", tabVisible: true };
+
+  it("pings for a gate raised by an assistant you are NOT looking at", () => {
+    expect(shouldPing(notif("approval", { href: "/chat?assistant=b" }), onA)).toBe(true);
+  });
+
+  it("stays quiet for the conversation already on screen", () => {
+    expect(shouldPing(notif("approval", { href: "/chat?assistant=a" }), onA)).toBe(false);
   });
 });
 

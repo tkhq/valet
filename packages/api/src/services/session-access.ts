@@ -51,15 +51,27 @@ export interface SessionOwnerLike {
  * live member of the team it belongs to (re-checked every call, never
  * cached, matching `isTeamMember`'s own contract: leaving a team drops
  * access on the very next request).
+ *
+ * The team branch REPLACES the direct-owner comparison rather than adding
+ * to it, exactly as `canAdministerSession` does below, and for the same
+ * reason. `agent_sessions.userId` on a team-owned row does not hold the
+ * team: `ensureAssistantSession` stamps `meta.actorUserId`, the member who
+ * opened the assistant first. Checking that comparison first admitted that
+ * one member forever — read, prompt and WebSocket — even after they left
+ * the team, because it returned before membership was ever consulted. That
+ * contradicted the "leaving a team drops access on the very next request"
+ * contract above, and it disagreed with `assistants/access.ts`, which
+ * builds a synthetic `team:{id}` id specifically so this comparison can
+ * never match a real user. A member still passes here through
+ * `isTeamMember`, so nothing legitimate is lost.
  */
 export async function canViewSession(
   db: AppDb,
   session: SessionOwnerLike,
   callerId: string,
 ): Promise<boolean> {
-  if (session.userId === callerId) return true;
   if (session.ownerType === "team") return isTeamMember(db, session.ownerId, callerId);
-  return false;
+  return session.userId === callerId;
 }
 
 /**

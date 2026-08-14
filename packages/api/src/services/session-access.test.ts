@@ -220,3 +220,48 @@ describe("canAdministerSession", () => {
     expect(ok).toBe(false);
   });
 });
+
+/**
+ * The row a team assistant's session actually has.
+ *
+ * `agent_sessions.userId` does NOT hold the team on such a row:
+ * `ensureAssistantSession` stamps `meta.actorUserId`, which is the member
+ * who opened the assistant first. `canViewSession` used to compare that
+ * value before consulting membership, which admitted that one member
+ * forever — including after they left the team.
+ */
+describe("canViewSession — a team session is not owned by whoever opened it", () => {
+  const openedByAlice = { userId: "alice", ownerType: "team", ownerId: "team-1" };
+
+  it("admits the first opener while they are still on the team", async () => {
+    await seedTeam("team-1", [{ userId: "alice", role: "member" }]);
+    expect(await canViewSession(db, openedByAlice, "alice")).toBe(true);
+  });
+
+  it("refuses the first opener once they leave the team", async () => {
+    // Seeded with a different member, so the team still exists and alice is
+    // simply no longer on it — the state after removeMember.
+    await seedTeam("team-1", [{ userId: "bob", role: "admin" }]);
+    expect(await canViewSession(db, openedByAlice, "alice")).toBe(false);
+  });
+
+  it("admits any other current member, who never appears in the row", async () => {
+    await seedTeam("team-1", [
+      { userId: "alice", role: "member" },
+      { userId: "bob", role: "member" },
+    ]);
+    expect(await canViewSession(db, openedByAlice, "bob")).toBe(true);
+  });
+
+  it("refuses a non-member who is not the stamped opener either", async () => {
+    await seedTeam("team-1", [{ userId: "alice", role: "member" }]);
+    expect(await canViewSession(db, openedByAlice, "carol")).toBe(false);
+  });
+
+  it("still admits the direct owner of a NON-team session", async () => {
+    // The replaced comparison must survive for every other owner type.
+    expect(
+      await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u1"),
+    ).toBe(true);
+  });
+});
