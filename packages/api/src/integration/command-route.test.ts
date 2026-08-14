@@ -20,6 +20,7 @@ import { createSkill } from "../services/skills.js";
 import { orgs, skills } from "../schema/index.js";
 import type {
   CreateSessionResponse,
+  CreateThreadResponse,
   ListCommandsResponse,
   ListMessagesResponse,
   SendPromptResponse,
@@ -161,5 +162,44 @@ describe("command_result REST round-trip (Task 11)", () => {
     // shape-drift regression (CLAUDE.md "Tool-call persistence round trip").
     expect(cmd?.content.length).toBeGreaterThan(0);
     expect(cmd?.role).toBe("system");
+  });
+
+  it("a builtin command posted with threadId lands on that thread", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+
+    // Create a second thread — the one the client is watching.
+    const threadRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({}),
+    });
+    expect(threadRes.status).toBe(201);
+    const thread = (await threadRes.json()) as CreateThreadResponse;
+
+    const postRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ text: "/status", threadId: thread.id }),
+    });
+    expect(postRes.status).toBe(202);
+    const postBody = (await postRes.json()) as SendPromptResponse;
+    expect(postBody.threadId).toBe(thread.id);
+
+    // The command_result is readable on the REQUESTED thread…
+    const onThreadRes = await fetch(
+      `${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${thread.id}`,
+      { headers: HEADERS },
+    );
+    expect(onThreadRes.status).toBe(200);
+    const onThread = (await onThreadRes.json()) as ListMessagesResponse;
+    expect(onThread.messages.some((m) => m.command?.name === "status")).toBe(true);
+
+    // …and NOT on the session default thread.
+    const onDefaultRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      headers: HEADERS,
+    });
+    const onDefault = (await onDefaultRes.json()) as ListMessagesResponse;
+    expect(onDefault.messages.some((m) => m.command?.name === "status")).toBe(false);
   });
 });

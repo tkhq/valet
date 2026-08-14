@@ -693,35 +693,50 @@ export class Session {
   // ── public API ──────────────────────────────────────────────────
 
   async prompt(content: PromptContent, opts: PromptOptions = {}): Promise<PromptReceipt> {
+    const thread = this.resolveTargetThread(opts.threadId);
     const text = commandText(content);
     if (text?.startsWith("/")) {
       const outcome = dispatchCommand(text, this.commandRegistry());
       if (outcome.kind === "expand") {
-        return this.thread().submitPrompt(withText(content, outcome.text), opts);
+        return thread.submitPrompt(withText(content, outcome.text), opts);
       }
       if (outcome.kind === "execute") {
-        return this.executeCommand(outcome.resolved, outcome.args, text, opts);
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text);
       }
       if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
-        const receipt = await this.thread().submitPrompt(content, opts);
+        const receipt = await thread.submitPrompt(content, opts);
         return { ...receipt, nearMiss: outcome.nearMiss };
       }
     }
-    return this.thread().submitPrompt(content, opts);
+    return thread.submitPrompt(content, opts);
+  }
+
+  /** Resolve `PromptOptions.threadId` to a thread, or the session default. */
+  private resolveTargetThread(threadId?: string): Thread {
+    if (threadId === undefined) return this.thread();
+    const thread = this.threadById(threadId);
+    if (!thread) throw new Error(`prompt: thread ${threadId} not found in session ${this.id}`);
+    return thread;
   }
 
   /**
-   * Run a resolved built-in or plugin command, persist a `command_result`
-   * entry, emit `command_result`, and return a command-shaped receipt. Never
-   * touches queue admission — a command runs even while a turn streams.
+   * Run a resolved built-in or plugin command against `thread`, persist a
+   * `command_result` entry, emit `command_result`, and return a
+   * command-shaped receipt. Never touches queue admission — a command runs
+   * even while a turn streams.
+   *
+   * `PromptOptions` other than `threadId` (resolved by the caller) are
+   * intentionally not forwarded: they shape queue submissions (author,
+   * channel, queueMode, model, ...) and a command takes no queue item. If a
+   * future option must reach the command path, add a parameter here so the
+   * dependency is explicit.
    */
   private async executeCommand(
+    thread: Thread,
     resolved: ResolvedCommand,
     args: string[],
     raw: string,
-    _opts: PromptOptions,
   ): Promise<PromptReceipt> {
-    const thread = this.thread();
     let source: CommandSource;
     let name: string;
     let result: { ok: boolean; output: string };

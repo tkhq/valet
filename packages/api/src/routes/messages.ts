@@ -314,20 +314,20 @@ messagesRouter.post("/:id/messages", async (c) => {
   const thread = resolveThread(engineSession, body.threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  // Resolve "/"-text against the registry BEFORE choosing a path, so only
-  // confirmed commands lose thread targeting:
-  // - execute-kind (builtin/plugin) → `session.prompt()`; commands run on
-  //   the default thread (engine invariant).
+  // Resolve "/"-text against the registry BEFORE choosing a path. Every
+  // path targets the REQUESTED thread — never silently rerouted:
+  // - execute-kind (builtin/plugin) → `session.prompt()` with the resolved
+  //   thread id, so the command_result lands where the client is watching.
   // - expand-kind (skill/template) → expand here, then submit the expanded
-  //   text to the REQUESTED thread like any prompt.
+  //   text to the requested thread like any prompt.
   // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
-  //   requested thread, text unchanged — never silently rerouted.
+  //   requested thread, text unchanged.
   const outcome = body.text.startsWith("/")
     ? dispatchCommand(body.text, engineSession.commandRegistry())
     : null;
   const receipt =
     outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(body.text, {})
+      ? await engineSession.prompt(body.text, { threadId: thread.id })
       : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : body.text, {});
 
   // Touch the session row so list ordering reflects recency.
