@@ -24,7 +24,7 @@ import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
-import type { ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
+import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
 
 const PING_INTERVAL_MS = 30_000;
@@ -119,6 +119,7 @@ export function registerWsRoutes(
                 workspace: row.workspace,
                 status: row.status as SessionStatus,
                 runState: run.runState,
+                owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
                 title: row.title ?? undefined,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,

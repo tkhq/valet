@@ -1,8 +1,8 @@
 import { Hono } from "hono";
-import { and, count, desc, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray, or } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { parseAssistantSessionId } from "@valet/engine";
+import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -15,6 +15,7 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -24,6 +25,7 @@ import {
   sessionRepos,
 } from "../schema/index.js";
 import type {
+  AssistantOwner,
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
@@ -113,6 +115,7 @@ function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFie
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     lastActivityAt: run.lastActivityAt,
+    owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
   };
 }
 
@@ -134,14 +137,28 @@ function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
 // Exported so other mounts needing the same "this user's standalone
 // sessions" view (e.g. the MCP `list_sessions` tool, Task 9) reuse the exact
 // query instead of re-deriving it.
-export async function listStandaloneSessions(db: AppDb, userId: string) {
+export async function listStandaloneSessions(db: AppDb, userId: string, owner?: Principal) {
+  // Own rows plus every team you are on — the same union `listWorkflowDefinitions`
+  // and `listSkills` use, so one workspace's sessions read like its workflows.
+  // `owner` narrows that to a single workspace; the caller has already checked
+  // they may reach it.
+  const teamIds = owner ? [] : (await listTeamsForUser(db, userId)).map((t) => t.id);
+  const mine = and(eq(agentSessions.ownerType, "user"), eq(agentSessions.ownerId, userId));
+  const teamRows =
+    teamIds.length > 0
+      ? and(eq(agentSessions.ownerType, "team"), inArray(agentSessions.ownerId, teamIds))
+      : undefined;
+  const scope = owner
+    ? and(eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id))
+    : teamRows
+      ? or(mine, teamRows)
+      : mine;
+
   const [rows, childRows] = await Promise.all([
     db
       .select()
       .from(agentSessions)
-      .where(
-        and(eq(agentSessions.userId, userId), inArray(agentSessions.status, ["active", "hibernated"])),
-      )
+      .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
       .orderBy(desc(agentSessions.updatedAt)),
     db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
   ]);
@@ -154,13 +171,31 @@ sessionsRouter.get("/", async (c) => {
   const { db, engineStore } = c.var.providers;
   const userId = c.var.user.id;
 
+  // Optional workspace filter, same shape `GET /api/assistants` takes.
+  const ownerType = c.req.query("ownerType");
+  const ownerId = c.req.query("ownerId");
+  if ((ownerType === undefined) !== (ownerId === undefined)) {
+    return c.json({ error: "Filter by owner with both ownerType and ownerId, or send neither." }, 400);
+  }
+  let owner: Principal | undefined;
+  if (ownerType !== undefined && ownerId !== undefined) {
+    if (ownerType !== "user" && ownerType !== "team") {
+      return c.json({ error: "ownerType must be 'user' or 'team'." }, 400);
+    }
+    const reachable =
+      ownerType === "user" ? ownerId === userId : await isTeamMember(db, ownerId, userId);
+    // 404, not 403: the same existence-hiding every cross-owner read here uses.
+    if (!reachable) return c.json({ error: "owner not found" }, 404);
+    owner = { type: ownerType, id: ownerId };
+  }
+
   // Three round trips, whatever the number of sessions: the two
   // `listStandaloneSessions` makes, plus ONE cross-session read of every
   // unsettled submission (the same call the admin submissions route uses).
   // `groupSubmissionsBySession` then indexes it by session id. A per-row
   // query here would make an ordinary list cost one query per session.
   const [standalone, unsettled] = await Promise.all([
-    listStandaloneSessions(db, userId),
+    listStandaloneSessions(db, userId, owner),
     engineStore.listAllUnsettledSubmissions(),
   ]);
   const bySession = groupSubmissionsBySession(unsettled);
@@ -198,6 +233,21 @@ sessionsRouter.post("/", async (c) => {
   // a bad request, not a failed enqueue.
   if (body.initialPrompt !== undefined && typeof body.initialPrompt !== "string") {
     return c.json({ error: "initialPrompt must be a string. Send the prompt text, or omit the field." }, 400);
+  }
+
+  // An explicit `teamId: null` from a client that always sends the field is
+  // a real shape — the body is an unchecked cast — so it must fall through to
+  // a personal session rather than misroute into the team branch and 404 on a
+  // team called "null". Same reasoning as `createWorkflowDefinition`.
+  let owner: Principal = { type: "user", id: user.id };
+  if (typeof body.teamId === "string") {
+    // 404 for a non-member or unknown id, matching every other cross-owner
+    // access here — existence-hiding applies to authorization, not just to
+    // whether the row exists.
+    if (!(await isTeamMember(db, body.teamId, user.id))) {
+      return c.json({ error: "team not found" }, 404);
+    }
+    owner = { type: "team", id: body.teamId };
   }
 
   const parsedRepos = parseRepoBindings(body);
@@ -240,8 +290,8 @@ sessionsRouter.post("/", async (c) => {
         workspace: body.workspace,
         title: body.title ?? null,
         status: "active",
-        ownerType: "user",
-        ownerId: user.id,
+        ownerType: owner.type,
+        ownerId: owner.id,
         profile,
         createdAt: now,
         updatedAt: now,
@@ -312,6 +362,7 @@ sessionsRouter.post("/", async (c) => {
     status: "active",
     ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
     title: body.title,
+    owner,
     createdAt: now,
     updatedAt: now,
     messageCount: 0,

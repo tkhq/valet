@@ -13,6 +13,7 @@ const SUMMARY: SessionSummary = {
   createdAt: 1,
   updatedAt: 2,
   lastActivityAt: 2,
+  owner: { type: "user", id: "u1" },
 };
 
 const DETAIL: GetSessionResponse = {

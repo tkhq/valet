@@ -14,8 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import type { SessionDetail, SessionSummary } from "../wire/types.js";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
-import { agentSessions, sessionRepos, imageSources, bakes } from "../schema/index.js";
+import { agentSessions, sessionRepos, imageSources, bakes, teams, teamMembers } from "../schema/index.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import type {
   CreateSessionResponse,
@@ -586,5 +587,123 @@ describe("POST /api/sessions: zero-config repo sources", () => {
       .from(bakes)
       .where(eq(bakes.sourceId, sources[0]!.id));
     expect(bakeRows).toHaveLength(0);
+  });
+});
+
+/**
+ * A standalone session could only ever be personal: create hardcoded
+ * `ownerType: "user"`, so nothing else could own one. Scoping the Sessions
+ * surface by workspace needed creation to take an owner first — a filter
+ * over a column that is always the same value shows an empty list for every
+ * team, which reads as "the team has nothing" rather than "this cannot
+ * exist".
+ */
+describe("POST /api/sessions — team ownership", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  async function seedTeam(target: TestApi, id = "team_1", member = "local-user") {
+    const now = Date.now();
+    await target.providers.db
+      .insert(teams)
+      .values({ id, orgId: "local-org", name: "Platform", createdAt: now });
+    await target.providers.db.insert(teamMembers).values({ teamId: id, userId: member, role: "member" });
+  }
+
+  it("creates a team-owned session and reports the owner", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    const workspace = await mkdtemp(join(tmpdir(), "valet-team-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace, teamId: "team_1" }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as SessionDetail;
+    expect(created.owner).toEqual({ type: "team", id: "team_1" });
+
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, created.id));
+    expect(rows[0]?.ownerType).toBe("team");
+    expect(rows[0]?.ownerId).toBe("team_1");
+  });
+
+  it("404s a team the caller is not on, rather than creating a personal session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    // The team exists; the caller is simply not a member of it.
+    await api.providers.db
+      .insert(teams)
+      .values({ id: "team_other", orgId: "local-org", name: "Elsewhere", createdAt: now });
+    const workspace = await mkdtemp(join(tmpdir(), "valet-team-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace, teamId: "team_other" }),
+    });
+    // Silently falling back to a personal session would be worse than the
+    // 404: the caller asked for the team's and would not be told otherwise.
+    expect(res.status).toBe(404);
+  });
+
+  it("treats an explicit teamId: null as personal, not as a team called null", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-team-"));
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace, teamId: null }),
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as SessionDetail).owner.type).toBe("user");
+  });
+
+  it("lists a team's sessions under that workspace, and yours under yours", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    const mine = await mkdtemp(join(tmpdir(), "valet-mine-"));
+    const theirs = await mkdtemp(join(tmpdir(), "valet-theirs-"));
+
+    const post = (body: object) =>
+      fetch(`${api!.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((r) => r.json() as Promise<SessionDetail>);
+
+    const own = await post({ workspace: mine });
+    const team = await post({ workspace: theirs, teamId: "team_1" });
+
+    const list = async (query = "") =>
+      ((await (await fetch(`${api!.baseUrl}/api/sessions${query}`)).json()) as {
+        sessions: SessionSummary[];
+      }).sessions.map((s) => s.id);
+
+    // Unfiltered is the union, matching how workflows and skills list.
+    expect(await list()).toEqual(expect.arrayContaining([own.id, team.id]));
+    expect(await list("?ownerType=team&ownerId=team_1")).toEqual([team.id]);
+    expect(await list("?ownerType=user&ownerId=local-user")).toEqual([own.id]);
+  });
+
+  it("404s a workspace filter naming a team the caller is not on", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/sessions?ownerType=team&ownerId=team_nope`);
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a half-given owner filter, naming the fix", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/sessions?ownerType=team`);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("both ownerType and ownerId");
   });
 });

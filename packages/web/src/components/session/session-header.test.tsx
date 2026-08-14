@@ -73,6 +73,7 @@ function baseSession(): SessionDetail {
     workspace: "acme/repo",
     status: "active",
     runState: "idle",
+    owner: { type: "user", id: "u1" },
     title: "Fix the bug",
     createdAt: Date.now(),
     updatedAt: Date.now(),

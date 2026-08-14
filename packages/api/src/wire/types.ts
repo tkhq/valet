@@ -83,6 +83,11 @@ export interface SessionSummary {
    * work does not touch the session row, so `updatedAt` alone reads stale
    * during a long turn. */
   lastActivityAt: number;
+  /** Who the session belongs to. Present so a list can be read per
+   * workspace and a row can name its owner — without it the client cannot
+   * tell a personal session from a team's, and every session looked
+   * personal because that is all one could create. */
+  owner: AssistantOwner;
 }
 
 /** A single repo bound to a session (GitHub/repo integration plan, Task 2).
@@ -110,6 +115,11 @@ export interface SessionDetail extends SessionSummary {
 export interface CreateSessionRequest {
   workspace: string;
   title?: string;
+  /** Create as a team-owned session instead of personal. Caller must be a
+   * current member of the team; a non-member or unknown id 404s, same as
+   * any other cross-owner access. Mirrors `CreateWorkflowRequest.teamId` —
+   * one spelling for "make this the team's, not mine". */
+  teamId?: string;
   /** Optional first user prompt; if set, server enqueues immediately after creation. */
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
