@@ -58,6 +58,40 @@ existence for API groups it does not own.
   `BETTER_AUTH_SECRET` when unset.
 - **`helm test`**: a Pod hook that curls the api Service's `/api/health`.
 
+## Pre-existing GitHub App (env fallback)
+
+By default, an org admin creates the deployment's GitHub App in the web UI
+(Organization → GitHub, the manifest flow). That flow always creates a NEW
+App. To use an App that already exists, set the `GITHUB_APP_*` env
+fallback instead:
+
+```sh
+helm upgrade --install valet deploy/chart/valet \
+  --set api.githubApp.appId="123456" \
+  --set api.githubApp.slug="my-valet-app" \
+  --set api.githubApp.clientId="Iv1.abc123" \
+  --set api.secrets.githubAppClientSecret="..." \
+  --set api.secrets.githubAppWebhookSecret="..." \
+  --set-file api.secrets.githubAppPrivateKey=my-valet-app.private-key.pem
+```
+
+- `githubAppPrivateKey` accepts the PEM raw or base64-encoded. Use
+  `--set-file` for the raw PEM, or base64-encode it for delivery through a
+  secrets manager (one line, no newline escaping).
+- Set all values, or none. The api fails loudly on a partial set and names
+  the missing variables.
+- `githubAppWebhookSecret` is optional. Leave it blank for an App without
+  a webhook.
+- Nothing is written to the database — the env is the config. To rotate a
+  value, change it and roll the api pod. An App created later through the
+  manifest flow shadows the fallback for that org.
+- Point the App's webhook URL at `{public URL}/webhooks/github-app` and
+  its callback URL at `{public URL}/api/me/github/callback`. If the
+  private key is lost, generate a new one from the App's GitHub settings
+  page — keys are download-once.
+- For External Secrets Operator (or similar), leave these values blank and
+  deliver the same `GITHUB_APP_*` env vars through `api.extraEnvFrom`.
+
 ## Notes
 
 - **PVCs survive `helm uninstall`** by Kubernetes design — StatefulSet
