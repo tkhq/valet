@@ -442,7 +442,11 @@ export async function resolveInstallationApiToken(
   await ensureInstallationsSynced(deps, orgId);
   if (repoOwner) {
     const token = await mintInstallation(deps, orgId, repoOwner);
-    if (token) return token;
+    // `null` alone means "no installation for this owner" — the one case
+    // the sole-installation fallback is for. Any other value, even an
+    // empty string, is a mint result and must surface, not be masked by
+    // silently trying a different installation.
+    if (token !== null) return token;
   }
   return resolveSoleInstallationToken(deps, orgId);
 }
