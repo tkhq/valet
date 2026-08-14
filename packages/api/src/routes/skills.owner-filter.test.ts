@@ -141,6 +141,35 @@ describe("GET /api/skills and /api/skills/sources filtered to one owner", () => 
     expect(await sourceRepos(api, query)).toEqual(["acme/personal-skills"]);
   });
 
+  it("returns the org library to a plain member, who cannot write it", async () => {
+    api = await bootTestApi();
+    await seedWorkspaces(api);
+    await seedSkill(api, "handbook", { type: "org", id: "local-org" });
+    await seedSource(api, "acme/org-skills", { type: "org", id: "local-org" });
+    const query = "?ownerType=org&ownerId=local-org";
+
+    // `test-member` is an org member and nothing more. The org library is
+    // readable by every member, so this filter answers instead of 404ing —
+    // the write rule stays stricter, and `skills.stored.test.ts` holds it.
+    expect(await skillNames(api, query, "test-member")).toEqual(["handbook"]);
+    expect(await sourceRepos(api, query, "test-member")).toEqual(["acme/org-skills"]);
+  });
+
+  it("hides no org row the same member reads without the filter", async () => {
+    api = await bootTestApi();
+    await seedWorkspaces(api);
+    await seedSkill(api, "handbook", { type: "org", id: "local-org" });
+    await seedSource(api, "acme/org-skills", { type: "org", id: "local-org" });
+
+    // The other half of the test above, and the rule that binds the two: a
+    // filter selects INSIDE the caller's reach. It never widens that reach,
+    // and it must never hide a row the same caller already reads. An org
+    // filter that answered 404 while the unfiltered listing showed the
+    // library would say two different things about one row.
+    expect(await skillNames(api, "", "test-member")).toContain("handbook");
+    expect(await sourceRepos(api, "", "test-member")).toContain("acme/org-skills");
+  });
+
   it("marks a stored skill a plugin shadows, even inside one workspace", async () => {
     api = await bootTestApi({ plugins: [GITHUB_PLUGIN] });
     const team = await createTeam(api.providers.db, {
@@ -205,15 +234,15 @@ describe("an owner the caller cannot reach", () => {
     }
   });
 
-  it("404s another person's workspace, and the org's", async () => {
+  it("404s another person's workspace, and an org that is not the caller's", async () => {
     api = await bootTestApi();
     await seedWorkspaces(api);
 
     for (const path of ["skills", "skills/sources"]) {
       expect((await get(api.baseUrl, path, "?ownerType=user&ownerId=test-member")).status).toBe(404);
-      // `local-user` administers the org, and an org-owned skill still
-      // reaches nobody — listing one is no more allowed than opening one.
-      expect((await get(api.baseUrl, path, "?ownerType=org&ownerId=local-org")).status).toBe(404);
+      // The org library the caller may read is their OWN org's. Any other
+      // org id must read exactly like an org that does not exist.
+      expect((await get(api.baseUrl, path, "?ownerType=org&ownerId=other-org")).status).toBe(404);
     }
   });
 

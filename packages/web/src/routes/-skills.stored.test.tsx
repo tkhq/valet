@@ -61,6 +61,7 @@ const stored: SkillResponse = {
   takesArgs: false,
   updatedAt: 1_700_000_000_000,
   content: "Ship the service from main.\n",
+  editable: true,
 };
 
 let teamsData: ListTeamsResponse = { teams: [] };
@@ -89,7 +90,11 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
+  // `teamsData` is a let, so a test can give the caller a team before it
+  // renders. `useOrg` is read by the editor to decide whether the org scope
+  // is open to this caller — a member here, which is the common case.
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+  useOrg: () => ({ data: { callerRole: "member" }, isLoading: false, error: null }),
 }));
 
 // The badge links by assistant id, so it reads the assistants list to find
@@ -134,10 +139,15 @@ describe("SkillsIndexPage with stored skills", () => {
     teamsData = { teams: [] };
   });
 
-  it("badges each skill with where it came from", () => {
-    render(<SkillsIndexPage />);
-    expect(screen.getAllByText("Plugin").length).toBe(1);
-    expect(screen.getAllByText("Yours").length).toBe(2);
+  it("badges each card with its scope", () => {
+    const { container } = render(<SkillsIndexPage />);
+    // Query inside the grid so the scope-filter dropdown's <option>s do not
+    // count. One plugin skill, two personal stored skills.
+    const grid = container.querySelector(".grid");
+    const badgeText = (label: string) =>
+      Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
+    expect(badgeText("Plugin").length).toBe(1);
+    expect(badgeText("Personal").length).toBe(2);
   });
 
   it("says why a shadowed skill never reaches a session, and how to fix it", () => {
@@ -183,14 +193,21 @@ describe("SkillsIndexPage with stored skills", () => {
         },
       ],
     };
-    render(
+    const { container } = render(
       <TooltipProvider>
         <SkillsIndexPage />
       </TooltipProvider>,
     );
 
     expect(screen.getByText("Platform")).toBeTruthy();
-    expect(screen.queryByText("Team")).toBeNull();
+    // Counted inside the grid, as in the scope-badge test above: the scope
+    // filter over the grid carries a "Team" option, which is a filter value
+    // and not a badge on a card.
+    const grid = container.querySelector(".grid");
+    const teamBadges = Array.from(grid?.querySelectorAll("span") ?? []).filter(
+      (el) => el.textContent === "Team",
+    );
+    expect(teamBadges).toHaveLength(0);
   });
 
   it("points at both ways to write one when the catalog is empty", () => {
@@ -263,6 +280,18 @@ describe("SkillDoc", () => {
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
     expect(screen.getByText(/Edit it where it came from/)).toBeTruthy();
+  });
+
+  it("shows an org skill read-only to a member and names who manages it", () => {
+    currentStored = { ...stored, ownerType: "org", editable: false };
+    open();
+    // The body still reads.
+    expect(screen.getByText("Ship the service from main.")).toBeTruthy();
+    // No write actions, and no editor field.
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByText(/Org skills are managed by org admins/)).toBeTruthy();
   });
 
   it("writes a new skill from an empty form", async () => {

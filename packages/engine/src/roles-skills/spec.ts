@@ -19,7 +19,9 @@ export type SkillSpecField =
   | "license"
   | "compatibility"
   | "metadata"
-  | "allowed-tools";
+  | "allowed-tools"
+  | "invocation"
+  | "argHint";
 
 /**
  * How much a violation matters.
@@ -129,6 +131,24 @@ export function validateSkillFrontmatter(
       severity: "error",
       message:
         "allowed-tools is not text. Write the tool names as one space-separated line of text.",
+    });
+  }
+
+  const invocation = frontmatter.invocation;
+  if (invocation !== undefined && invocation !== "context" && invocation !== "prompt") {
+    violations.push({
+      field: "invocation",
+      severity: "error",
+      message: 'invocation is not "context" or "prompt". Set invocation to "context" or "prompt".',
+    });
+  }
+
+  const argHint = frontmatter.argHint;
+  if (argHint !== undefined && typeof argHint !== "string") {
+    violations.push({
+      field: "argHint",
+      severity: "error",
+      message: "argHint is not text. Write the argument hint as one line of text.",
     });
   }
 

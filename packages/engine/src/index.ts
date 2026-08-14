@@ -112,6 +112,8 @@ export {
 } from "./builtin-tools/index.js";
 export {
   pluginCatalogTools,
+  buildPluginCatalog,
+  invokeAction,
   prepareActionArgs,
   RESOLVE_TTL_MS,
   type ActionPlugin,
@@ -119,7 +121,9 @@ export {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type PluginCatalog,
   type PluginCatalogOptions,
+  type InvokeActionResult,
 } from "./plugin-catalog.js";
 export {
   validateValetPlugin,
@@ -156,6 +160,28 @@ export {
   GATE_EXPIRY_DEFAULT_MS,
   deterministicGateId,
 } from "./decision-gate.js";
+export {
+  BUILTIN_COMMAND_NAMES,
+  type CommandSource,
+  type CommandInfo,
+  type RegistryDiagnostic,
+  type CommandDef,
+  type CommandContext,
+  type ResolvedCommand,
+} from "./commands/types.js";
+export {
+  buildCommandRegistry,
+  type BuildRegistryInput,
+  type CommandRegistry,
+} from "./commands/registry.js";
+export {
+  dispatchCommand,
+  type DispatchOutcome,
+} from "./commands/dispatch.js";
+export {
+  executeBuiltin,
+  type BuiltinResult,
+} from "./commands/builtins.js";
 export {
   estimateTokens,
   estimateEntryTokens,

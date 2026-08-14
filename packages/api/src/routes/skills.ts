@@ -39,17 +39,21 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { partitionByName } from "../plugins/assemble.js";
 import {
+  asRecord,
   createSkill,
   deleteSkill,
   isAuthorizedFor,
   listSkills,
   ownedSkillRow,
+  readableSkillRow,
   SkillNameConflictError,
   SkillNotLocalError,
+  SkillReservedNameError,
   SkillValidationError,
   updateSkill,
   type SkillOwner,
 } from "../services/skills.js";
+import { isOrgAdmin } from "../services/org.js";
 import {
   countSkillsPerSource,
   createSkillSource,
@@ -102,6 +106,9 @@ function toPluginSummary({ plugin, skill }: OwnedSkill): PluginSkillSummary {
 }
 
 function toStoredSummary(row: SkillRow, shadowed: boolean): StoredSkillSummary {
+  const fm = asRecord(row.frontmatter);
+  const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
+  const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
   return {
     name: row.name,
     description: row.description,
@@ -112,8 +119,11 @@ function toStoredSummary(row: SkillRow, shadowed: boolean): StoredSkillSummary {
     shadowed,
     takesArgs: false,
     updatedAt: row.updatedAt,
+    ...(invocation !== undefined ? { invocation } : {}),
+    ...(argHint !== undefined ? { argHint } : {}),
   };
 }
+
 
 function owner(c: { var: { user: { id: string; orgId: string } } }): SkillOwner {
   return { userId: c.var.user.id, orgId: c.var.user.orgId };
@@ -140,11 +150,17 @@ type OwnerScope =
  * reach, exactly as before this filter existed.
  *
  * A query string names an owner; it never proves the caller may read that
- * owner. `isAuthorizedFor` decides that here, in application code, against
- * the caller's OWN org — the same rule every row-level read of these two
- * tables goes through, so a filter can never surface what an unfiltered list
- * hides. An `ownerType=org` filter therefore always fails: no rule admits
- * anybody to an org-owned skill yet.
+ * owner. This decides that here, in application code, against the caller's
+ * OWN org — the same rule every row-level read of these two tables goes
+ * through, so a filter can never surface what an unfiltered list hides.
+ *
+ * The rule a filter must agree with is the READ rule, not the write rule.
+ * `isAuthorizedFor` answers "may this caller WRITE here", and it says no to
+ * an org row for everybody but an org admin. Reading an org row is wider:
+ * `readableSkillRow` gives every member every org row of their own org, and
+ * both `listSkills` and `listSkillSources` put those rows in an unfiltered
+ * listing. So `ownerType=org` is a filter any member may use, for the
+ * caller's own org id alone — another org's id still reads as not found.
  */
 async function readOwnerScope(
   db: AppDb,
@@ -163,11 +179,16 @@ async function readOwnerScope(
   if (!isOwnerType(ownerType)) {
     return { ok: false, error: "ownerType must be 'user', 'team' or 'org'.", status: 400 };
   }
-  const reachable = await isAuthorizedFor(db, caller, {
-    orgId: caller.orgId,
-    ownerType,
-    ownerId,
-  });
+  // The org library belongs to the whole org, so its filter asks about the
+  // org id and not about admin rights. User and team reach is unchanged.
+  const reachable =
+    ownerType === "org"
+      ? ownerId === caller.orgId
+      : await isAuthorizedFor(db, caller, {
+          orgId: caller.orgId,
+          ownerType,
+          ownerId,
+        });
   // 404, and a message that repeats nothing back: an owner the caller cannot
   // reach must read exactly like an owner that does not exist.
   if (!reachable) return { ok: false, error: "owner not found", status: 404 };
@@ -176,6 +197,7 @@ async function readOwnerScope(
 
 /** Maps a service error onto its HTTP status. Anything else rethrows. */
 function errorResponse(err: unknown): { body: Record<string, unknown>; status: 400 | 404 | 409 } {
+  if (err instanceof SkillReservedNameError) return { body: { error: err.message }, status: 400 };
   if (err instanceof SkillValidationError) {
     return { body: { error: err.message, errors: err.errors }, status: 400 };
   }
@@ -247,12 +269,31 @@ skillsRouter.post("/", async (c) => {
     return c.json({ error: "content is required" }, 400);
   }
 
+  // Validate invocation when present.
+  if (body.invocation !== undefined && body.invocation !== "context" && body.invocation !== "prompt") {
+    return c.json(
+      { error: `invocation must be "context" or "prompt". Got "${body.invocation}".` },
+      400,
+    );
+  }
+
+  // Org-owned skill: require org admin.
+  if (body.ownerType === "org") {
+    const adminCheck = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+    if (!adminCheck) {
+      return c.json({ error: "org admin required" }, 403);
+    }
+  }
+
   try {
     const row = await createSkill(c.var.providers.db, owner(c), {
       name: body.name,
       description: typeof body.description === "string" ? body.description : "",
       content: body.content,
       teamId: body.teamId,
+      ownerType: body.ownerType,
+      invocation: body.invocation,
+      argHint: typeof body.argHint === "string" ? body.argHint : undefined,
     });
     // A brand-new skill is shadowed exactly when a plugin already ships its
     // name — the author needs to see that immediately, not at the next
@@ -260,7 +301,12 @@ skillsRouter.post("/", async (c) => {
     const takenByPlugin = ownedSkills(c.var.providers.plugins).some(
       (entry) => entry.skill.name === row.name,
     );
-    const resp: SkillResponse = { ...toStoredSummary(row, takenByPlugin), content: row.content };
+    // The caller just created this row, so they may edit it.
+    const resp: SkillResponse = {
+      ...toStoredSummary(row, takenByPlugin),
+      content: row.content,
+      editable: true,
+    };
     return c.json(resp, 201);
   } catch (err) {
     const { body: errBody, status } = errorResponse(err);
@@ -271,11 +317,20 @@ skillsRouter.post("/", async (c) => {
 // ── Stored skills, by row id ──────────────────────────────────────────────
 
 skillsRouter.get("/stored/:id", async (c) => {
-  const row = await ownedSkillRow(c.var.providers.db, owner(c), c.req.param("id"));
+  // A member may READ any org row in their own org, so this uses the
+  // read-scoped lookup — `ownedSkillRow` would 404 an org row for a non-admin
+  // and break the detail page. Writes stay on `ownedSkillRow`.
+  const row = await readableSkillRow(c.var.providers.db, owner(c), c.req.param("id"));
   if (!row) return c.json({ error: "skill not found" }, 404);
+  // `editable`: a user/team row follows ownership; an org row needs org admin.
+  const orgAdmin = row.ownerType === "org"
+    ? await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id)
+    : false;
+  const editable = await isAuthorizedFor(c.var.providers.db, owner(c), row, { isOrgAdmin: orgAdmin });
   const resp: SkillResponse = {
     ...toStoredSummary(row, isShadowed(c.var.providers.plugins, row)),
     content: row.content,
+    editable,
   };
   return c.json(resp);
 });
@@ -288,16 +343,31 @@ skillsRouter.patch("/stored/:id", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
+  // Validate invocation when present.
+  if (body.invocation !== undefined && body.invocation !== "context" && body.invocation !== "prompt") {
+    return c.json(
+      { error: `invocation must be "context" or "prompt". Got "${body.invocation}".` },
+      400,
+    );
+  }
+
+  const orgAdmin = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+
   try {
     const row = await updateSkill(c.var.providers.db, owner(c), c.req.param("id"), {
       name: body.name,
       description: body.description,
       content: body.content,
+      invocation: body.invocation,
+      argHint: typeof body.argHint === "string" ? body.argHint : undefined,
+      isOrgAdmin: orgAdmin,
     });
     if (!row) return c.json({ error: "skill not found" }, 404);
+    // The PATCH succeeded, so the caller may write this row.
     const resp: SkillResponse = {
       ...toStoredSummary(row, isShadowed(c.var.providers.plugins, row)),
       content: row.content,
+      editable: true,
     };
     return c.json(resp);
   } catch (err) {
@@ -307,7 +377,8 @@ skillsRouter.patch("/stored/:id", async (c) => {
 });
 
 skillsRouter.delete("/stored/:id", async (c) => {
-  const result = await deleteSkill(c.var.providers.db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id);
+  const result = await deleteSkill(c.var.providers.db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (result === "not_found") return c.json({ error: "skill not found" }, 404);
   if (result === "not_local") {
     return c.json(
@@ -359,6 +430,18 @@ skillsRouter.post("/sources", async (c) => {
   }
 
   const { db, skillSync } = c.var.providers;
+
+  // Org-owned source: require org admin.
+  if (body.ownerType === "org") {
+    const adminCheck = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+    if (!adminCheck) {
+      return c.json(
+        { error: "Only an org admin can add an org source. Ask an admin, or add it as a personal source." },
+        403,
+      );
+    }
+  }
+
   let sourceId: string;
   try {
     const row = await createSkillSource(db, owner(c), {
@@ -366,6 +449,7 @@ skillsRouter.post("/sources", async (c) => {
       ref: body.ref,
       subpath: body.subpath,
       teamId: body.teamId,
+      ownerType: body.ownerType,
     });
     sourceId = row.id;
   } catch (err) {
@@ -381,7 +465,8 @@ skillsRouter.post("/sources", async (c) => {
 
 skillsRouter.post("/sources/:id/sync", async (c) => {
   const { db, skillSync } = c.var.providers;
-  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!row) return c.json({ error: "skill source not found" }, 404);
 
   await markSkillSourceDue(db, row.id);
@@ -391,7 +476,8 @@ skillsRouter.post("/sources/:id/sync", async (c) => {
 
 skillsRouter.delete("/sources/:id", async (c) => {
   const { db } = c.var.providers;
-  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!deleted) return c.json({ error: "skill source not found" }, 404);
   const resp: DeleteSkillSourceResponse = { ok: true };
   return c.json(resp);

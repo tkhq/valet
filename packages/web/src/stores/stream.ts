@@ -92,6 +92,13 @@ export interface SessionStreamState {
    * frame. Drives the composer's "N queued" / paused indicator.
    */
   queueByThread: Record<string, WireQueueState>;
+  /**
+   * Bumps on every `model_switched` wire event, whatever triggered the
+   * switch (picker mutation, `/model` command, direct API call). The
+   * session-view hook watches it and refetches the session/threads queries
+   * so the header picker never shows a stale model.
+   */
+  modelSwitchNonce: number;
   /** Last error message from the wire (if any). Cleared on successful turn_end. */
   error?: { code: string; message: string };
   /**
@@ -169,6 +176,7 @@ const EMPTY: SessionStreamState = {
   messages: [],
   pendingGates: {},
   queueByThread: {},
+  modelSwitchNonce: 0,
 };
 
 function ensure(state: StreamStore, sessionId: string): SessionStreamState {
@@ -333,10 +341,12 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "model_switched": {
-      // No store mutation needed — the threads/session queries get
-      // invalidated via the mutation hooks that triggered the change.
-      // This case exists so the WS hook's logger has something to print
-      // and so the exhaustiveness check passes.
+      // Bump the nonce so `useInvalidateSessionOnModelSwitch` refetches the
+      // session/threads queries. Mutation hooks only cover picker-originated
+      // switches; `/model` commands and direct API switches arrive ONLY
+      // through this event — without the bump the header shows a stale model
+      // until a manual reload.
+      next.modelSwitchNonce = slice.modelSwitchNonce + 1;
       return next;
     }
 
@@ -417,6 +427,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "ping": {
+      return next;
+    }
+
+    case "command_result": {
+      // Command results reach the message list through the REST refetch in
+      // useSendPrompt's onSuccess, not through the stream store. The frame
+      // still advances lastOffset via `next`.
       return next;
     }
   }

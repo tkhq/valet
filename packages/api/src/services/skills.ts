@@ -18,7 +18,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
-import { validateSkillFrontmatter, type Principal, type SkillSource } from "@valet/engine";
+import { validateSkillFrontmatter, BUILTIN_COMMAND_NAMES, type Principal, type SkillSource } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
@@ -42,6 +42,16 @@ export class SkillValidationError extends Error {
     super(`skill does not follow the skill spec: ${errors.join(" ")}`);
     this.name = "SkillValidationError";
     this.errors = errors;
+  }
+}
+
+/** Thrown when a skill name matches a built-in command name. */
+export class SkillReservedNameError extends Error {
+  readonly code = "skill_reserved_name";
+  readonly statusCode = 400;
+  constructor(name: string) {
+    super(`"${name}" is a reserved built-in command name. Pick a different name.`);
+    this.name = "SkillReservedNameError";
   }
 }
 
@@ -80,8 +90,14 @@ export function skillContentSha(content: string): string {
  * same validator `loadSkillFromMarkdown` uses. `directoryName` is omitted —
  * a stored skill has no directory, so the name-matches-directory rule does
  * not apply to it.
+ *
+ * Also rejects names that match a built-in command, so skills can never
+ * shadow `help`, `status`, `stop`, or the other built-ins.
  */
 function assertValidFrontmatter(name: string, description: string): void {
+  if ((BUILTIN_COMMAND_NAMES as readonly string[]).includes(name)) {
+    throw new SkillReservedNameError(name);
+  }
   const violations = validateSkillFrontmatter({ name, description });
   if (violations.length > 0) {
     throw new SkillValidationError(violations.map((v) => v.message));
@@ -96,9 +112,14 @@ export interface OwnerScope {
 }
 
 /**
- * True when `owner` may act on a row: its direct user owner, or a live
- * member of its owning team. Org-owned rows are readable by nobody yet —
- * nothing creates one, and an org-wide skill needs its own admin gate.
+ * True when `owner` may WRITE a row: its direct user owner, or a live member
+ * of its owning team. Org-owned rows return true only when the caller is an
+ * org admin — a non-admin member can read them (they show in `listSkills`)
+ * but cannot edit or delete them.
+ *
+ * Pass `isOrgAdmin: true` (resolved by the caller) to unlock org-row writes.
+ * Default `false` preserves the original semantics: `ownedSkillRow` and all
+ * non-org write paths call this without the option and are unaffected.
  *
  * Exported because `services/skill-sources.ts` scopes tracked repositories
  * by exactly this rule. One implementation, so the two tables cannot drift.
@@ -107,10 +128,13 @@ export async function isAuthorizedFor(
   db: AppDb,
   owner: SkillOwner,
   row: OwnerScope,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<boolean> {
   if (row.orgId !== owner.orgId) return false;
   if (row.ownerType === "user") return row.ownerId === owner.userId;
   if (row.ownerType === "team") return isTeamMember(db, row.ownerId, owner.userId);
+  // org row: only an org admin may write
+  if (row.ownerType === "org") return opts.isOrgAdmin === true;
   return false;
 }
 
@@ -123,30 +147,63 @@ export async function ownedSkillRow(
   db: AppDb,
   owner: SkillOwner,
   id: string,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<SkillRow | null> {
   const rows = await db.select().from(skills).where(eq(skills.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
+  return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
+}
+
+/**
+ * One row a caller may READ, or null when it is missing OR out of reach.
+ *
+ * Read scope is wider than write scope: a member may read ANY row in their
+ * own org, including an org-library row they cannot edit. So this returns the
+ * row when `ownedSkillRow` would (user/team ownership, or an org row the
+ * caller may write), and ALSO for any org-owned row in the caller's own org.
+ *
+ * The detail route (`GET /stored/:id`) uses this so opening an org skill's
+ * page works for every member. Writes stay on `ownedSkillRow`, so a member
+ * still cannot edit or delete an org row.
+ */
+export async function readableSkillRow(
+  db: AppDb,
+  owner: SkillOwner,
+  id: string,
+): Promise<SkillRow | null> {
+  const rows = await db.select().from(skills).where(eq(skills.id, id)).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.orgId !== owner.orgId) return null;
+  if (row.ownerType === "org") return row;
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
 /**
  * Every skill the caller can reach: their own rows first, then the rows of
- * the teams they belong to, each group sorted by name.
+ * the teams they belong to, then the org-library rows, each group sorted by
+ * name.
  *
- * The personal-before-team order is load-bearing. The unique index stops two
- * rows sharing a name inside ONE owner scope, but a personal skill and a
- * team skill may legitimately share one — and only one of them can reach a
+ * The user > team > org order is load-bearing. The unique index stops two
+ * rows sharing a name inside ONE owner scope, but a personal, a team, and an
+ * org skill may legitimately share one — and only one of them can reach a
  * session, because a skill name is the `skill` tool's lookup key.
  * `listSkillSourcesFor` keeps the first of a repeated name, so this order is
- * what makes "my own copy wins" true.
+ * what makes "my own copy wins, then my team's, then the org's" true.
+ *
+ * Org-library rows are READ-ONLY to a member here: they show in the catalog
+ * and reach the member's sessions, but `isAuthorizedFor` still returns false
+ * for a non-admin org write, so `ownedSkillRow` (and every write path built
+ * on it) never treats an org row as the caller's to edit.
  *
  * `scope` narrows the answer to ONE owner, for a client that shows one
  * workspace at a time. It replaces the union rather than adding to it: a
- * person who asks for a team's skills must not also get their own. The
- * caller decides whether `scope` may be reached BEFORE calling this — an
- * ownerId off a query string proves nothing, so `routes/skills.ts` runs it
- * through `isAuthorizedFor` first.
+ * person who asks for a team's skills must not also get their own, and a
+ * person who asks for the org library gets the org rows alone. The caller
+ * decides whether `scope` may be reached BEFORE calling this — an ownerId off
+ * a query string proves nothing, so `routes/skills.ts` runs it through
+ * `readOwnerScope` first.
  */
 export async function listSkills(
   db: AppDb,
@@ -160,11 +217,14 @@ export async function listSkills(
     teamIds.length > 0
       ? and(eq(skills.ownerType, "team"), inArray(skills.ownerId, teamIds))
       : undefined;
+  // Every org row in the caller's own org, because the org library is
+  // readable by every member. The `orgId` predicate below is what bounds it.
+  const orgMatch = eq(skills.ownerType, "org");
   const reach = scope
     ? and(eq(skills.ownerType, scope.type), eq(skills.ownerId, scope.id))
     : teamMatch
-      ? or(ownerMatch, teamMatch)
-      : ownerMatch;
+      ? or(ownerMatch, teamMatch, orgMatch)
+      : or(ownerMatch, orgMatch);
 
   const rows = await db
     .select()
@@ -172,9 +232,16 @@ export async function listSkills(
     .where(and(eq(skills.orgId, owner.orgId), reach))
     .orderBy(asc(skills.name));
 
-  // One owner's rows are all one owner type, so this reorder only does
-  // anything for the union above.
-  return [...rows.filter((r) => r.ownerType === "user"), ...rows.filter((r) => r.ownerType !== "user")];
+  // Explicit user → team → org assembly. Do not rely on incidental row order
+  // from the query — the dedupe in `listSkillSourcesFor` is first-name-wins,
+  // so this precedence must be deterministic in code. A scoped read holds one
+  // owner type, so for it the three groups collapse to one and the name order
+  // above survives.
+  return [
+    ...rows.filter((r) => r.ownerType === "user"),
+    ...rows.filter((r) => r.ownerType === "team"),
+    ...rows.filter((r) => r.ownerType === "org"),
+  ];
 }
 
 export interface CreateSkillInput {
@@ -185,16 +252,36 @@ export interface CreateSkillInput {
   /** Creates the skill for a team the caller belongs to instead of for the
    * caller. A team the caller is not on is rejected as not found. */
   teamId?: string;
+  /** Creates the skill for the org instead of for the caller.
+   * Only accepted when `isOrgAdmin` is `true`; ignored otherwise. */
+  ownerType?: "user" | "team" | "org";
   /** Defaults to `local`. The repository importer passes `repo`. */
   origin?: SkillOrigin;
   sourceId?: string;
   upstreamPath?: string;
   /** Frontmatter fields beyond `name`/`description`, e.g. `license`. */
   frontmatter?: Record<string, unknown>;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
+  /**
+   * When `ownerType` is `"org"`, the caller must be an org admin.
+   * Pass `true` after checking — the service trusts this flag.
+   */
+  isOrgAdmin?: boolean;
 }
 
 /**
- * Inserts a skill for the caller, or for a team the caller belongs to.
+ * Inserts a skill for the caller, for a team the caller belongs to, or for
+ * the org when the caller is an org admin.
  *
  * A team the caller is not a member of is reported as not found, so team
  * membership never leaks to a probe — the same rule
@@ -211,18 +298,29 @@ export async function createSkill(
   // JSON body, so an explicit `teamId: null` from a client that always sends
   // the field must fall through to a personal skill.
   const teamId = typeof input.teamId === "string" ? input.teamId : undefined;
+  const isOrgOwned = input.ownerType === "org";
+
+  // Build the frontmatter object, merging invocation and argHint when present.
+  const fm: Record<string, unknown> = {
+    ...(input.frontmatter ?? {}),
+    name: input.name,
+    description: input.description,
+  };
+  if (input.invocation !== undefined) fm.invocation = input.invocation;
+  if (input.argHint !== undefined) fm.argHint = input.argHint;
+
   const now = Date.now();
   const row: SkillRow = {
     id: newSkillId(),
     orgId: owner.orgId,
-    ownerType: teamId ? "team" : "user",
-    ownerId: teamId ?? owner.userId,
+    ownerType: isOrgOwned ? "org" : teamId ? "team" : "user",
+    ownerId: isOrgOwned ? owner.orgId : teamId ?? owner.userId,
     origin: input.origin ?? "local",
     sourceId: input.sourceId ?? null,
     name: input.name,
     description: input.description,
     content: input.content,
-    frontmatter: { ...(input.frontmatter ?? {}), name: input.name, description: input.description },
+    frontmatter: fm,
     contentSha: skillContentSha(input.content),
     upstreamPath: input.upstreamPath ?? null,
     createdAt: now,
@@ -230,7 +328,7 @@ export async function createSkill(
   };
 
   try {
-    if (teamId === undefined) {
+    if (isOrgOwned || teamId === undefined) {
       await db.insert(skills).values(row);
     } else {
       // The membership check and the insert run inside one transaction
@@ -262,6 +360,21 @@ export interface UpdateSkillInput {
   name?: string;
   description?: string;
   content?: string;
+  /**
+   * How the engine expands this skill as a slash command.
+   * When present, replaces the stored value.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * When present, replaces the stored value.
+   */
+  argHint?: string;
+  /**
+   * When the row is org-owned, the caller must be an org admin to edit it.
+   * Pass `true` after checking — the service trusts this flag.
+   */
+  isOrgAdmin?: boolean;
 }
 
 /**
@@ -276,7 +389,7 @@ export async function updateSkill(
   id: string,
   input: UpdateSkillInput,
 ): Promise<SkillRow | null> {
-  const row = await ownedSkillRow(db, owner, id);
+  const row = await ownedSkillRow(db, owner, id, { isOrgAdmin: input.isOrgAdmin });
   if (!row) return null;
   if (row.origin !== "local") throw new SkillNotLocalError(id);
 
@@ -285,12 +398,19 @@ export async function updateSkill(
   const content = input.content ?? row.content;
   assertValidFrontmatter(name, description);
 
+  // Merge invocation/argHint into frontmatter, preserving existing values
+  // when the caller omits them (undefined = keep stored; explicit value = replace).
+  const existingFm = asRecord(row.frontmatter);
+  const fm: Record<string, unknown> = { ...existingFm, name, description };
+  if (input.invocation !== undefined) fm.invocation = input.invocation;
+  if (input.argHint !== undefined) fm.argHint = input.argHint;
+
   const updated: SkillRow = {
     ...row,
     name,
     description,
     content,
-    frontmatter: { ...asRecord(row.frontmatter), name, description },
+    frontmatter: fm,
     contentSha: skillContentSha(content),
     updatedAt: Date.now(),
   };
@@ -356,8 +476,9 @@ export async function deleteSkill(
   db: AppDb,
   owner: SkillOwner,
   id: string,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<DeleteSkillResult> {
-  const row = await ownedSkillRow(db, owner, id);
+  const row = await ownedSkillRow(db, owner, id, opts);
   if (!row) return "not_found";
   if (row.origin !== "local") return "not_local";
   const removed = await db.delete(skills).where(writeScope(owner, row)).returning({ id: skills.id });
@@ -371,8 +492,9 @@ export async function deleteSkill(
  * `SkillSource`s.
  *
  * Scope by principal type:
- *   - `user` — that person's own skills, plus the skills of every team they
- *     belong to. The same union `listSkills` returns.
+ *   - `user` — that person's own skills, then the skills of every team they
+ *     belong to, then the org-library skills. The same union `listSkills`
+ *     returns, deduped user > team > org (first name wins).
  *   - `team` — that team's skills only. A team-owned session is shared, so
  *     one member's personal skills must not appear in it.
  *   - `org`  — that org's own skills only.
@@ -417,18 +539,30 @@ async function rowsForPrincipal(db: AppDb, principal: Principal, orgId: string):
 }
 
 /** A row as the engine sees it. `source` records where the markdown came
- * from: `user` for a skill someone wrote here, `repo` for a synced one. */
+ * from: `user` for a skill someone wrote here, `repo` for a synced one.
+ *
+ * `invocation` and `argHint` are read out of the `frontmatter` jsonb column
+ * (a stored prompt skill carries `invocation: "prompt"` there): they drive how
+ * the engine expands the slash command — a `"prompt"` skill substitutes args
+ * into its body and sends bare, a `"context"` skill wraps in `<skill>` tags.
+ * Both are omitted when absent or the wrong type, so the engine falls back to
+ * its `"context"` default. */
 export function rowToSkillSource(row: SkillRow): SkillSource {
+  const fm = asRecord(row.frontmatter);
+  const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
+  const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
   return {
     name: row.name,
     description: row.description,
     content: row.content,
     source: row.origin === "repo" ? "repo" : "user",
+    ...(invocation ? { invocation } : {}),
+    ...(argHint ? { argHint } : {}),
   };
 }
 
 /** `frontmatter` is a jsonb column, so drizzle types it as `unknown`. */
-function asRecord(value: unknown): Record<string, unknown> {
+export function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   return { ...(value as Record<string, unknown>) };
 }

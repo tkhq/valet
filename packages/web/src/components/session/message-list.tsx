@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import type { StreamMessage } from "~/stores/stream";
 import { MessageItem } from "./message-item";
 import { SignalCard } from "./signal-card";
+import { CommandResult } from "./command-result";
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -82,6 +83,8 @@ export function MessageList({
       {visible.map((m, i) =>
         m.signal ? (
           <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
+        ) : m.command ? (
+          <CommandResult key={m.id} message={m} />
         ) : (
           <MessageItem
             key={m.id}

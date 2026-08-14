@@ -16,6 +16,7 @@ import {
   listSkillSourcesFor,
   listSkills,
   ownedSkillRow,
+  rowToSkillSource,
   SkillNameConflictError,
   SkillNotLocalError,
   SkillValidationError,
@@ -33,6 +34,28 @@ async function seedUser(db: AppDb, id: string) {
 
 function owner(userId: string): SkillOwner {
   return { userId, orgId: ORG };
+}
+
+/** Insert an org-owned skill row directly. `createSkill` only writes user and
+ * team rows, so the org-library case must seed the row itself. */
+async function insertOrgSkill(db: AppDb, name: string, content: string): Promise<void> {
+  const now = Date.now();
+  await db.insert(skills).values({
+    id: `skill_${name}`,
+    orgId: ORG,
+    ownerType: "org",
+    ownerId: ORG,
+    origin: "local",
+    sourceId: null,
+    name,
+    description: `${name} description`,
+    content,
+    frontmatter: { name, description: `${name} description` },
+    contentSha: "sha",
+    upstreamPath: null,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 const BODY = "# Deploy\n\nRun `make deploy`.\n";
@@ -322,7 +345,86 @@ describe("listSkillSourcesFor", () => {
     expect(sources[0]?.content).toBe("# Personal\n");
   });
 
+  it("delivers an org-library skill to a user principal, ordered after team", async () => {
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await createSkill(db, owner("u1"), { name: "mine", description: "Personal.", content: BODY });
+    await createSkill(db, owner("u1"), {
+      name: "ours",
+      description: "Shared.",
+      content: BODY,
+      teamId: team.id,
+    });
+    await insertOrgSkill(db, "org-skill", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
+    // user rows → team rows → org rows, each still name-sorted within group.
+    expect(sources.map((s) => s.name)).toEqual(["mine", "ours", "org-skill"]);
+  });
+
+  it("lets a user's own skill shadow an org skill of the same name", async () => {
+    await createSkill(db, owner("u1"), { name: "deploy", description: "Personal.", content: "# Personal\n" });
+    await insertOrgSkill(db, "deploy", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
+    expect(sources).toHaveLength(1);
+    // First-name-wins with user before org — the personal copy survives.
+    expect(sources[0]?.content).toBe("# Personal\n");
+  });
+
+  it("returns only the org's own skills for an org principal", async () => {
+    await createSkill(db, owner("u1"), { name: "mine", description: "Personal.", content: BODY });
+    await insertOrgSkill(db, "org-skill", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "org", id: ORG }, ORG);
+    expect(sources.map((s) => s.name)).toEqual(["org-skill"]);
+  });
+
   it("returns nothing for a principal with no skills", async () => {
     expect(await listSkillSourcesFor(db, { type: "user", id: "u2" }, ORG)).toEqual([]);
+  });
+});
+
+describe("rowToSkillSource", () => {
+  function skillRow(frontmatter: Record<string, unknown>): SkillRow {
+    const now = Date.now();
+    return {
+      id: "skill_x",
+      orgId: ORG,
+      ownerType: "user",
+      ownerId: "u1",
+      origin: "local",
+      sourceId: null,
+      name: "standup",
+      description: "Daily standup",
+      content: "Summarize $1",
+      frontmatter: { name: "standup", description: "Daily standup", ...frontmatter },
+      contentSha: "sha",
+      upstreamPath: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  it("maps invocation and argHint out of frontmatter", () => {
+    const src = rowToSkillSource(skillRow({ invocation: "prompt", argHint: "<topic>" }));
+    expect(src).toMatchObject({
+      name: "standup",
+      source: "user",
+      invocation: "prompt",
+      argHint: "<topic>",
+    });
+  });
+
+  it("omits invocation/argHint when absent or the wrong type", () => {
+    const src = rowToSkillSource(skillRow({ invocation: 42, argHint: { nope: true } }));
+    expect(src.invocation).toBeUndefined();
+    expect(src.argHint).toBeUndefined();
+  });
+
+  it("maps a repo-origin row to source 'repo'", () => {
+    const row = { ...skillRow({ invocation: "context" }), origin: "repo" as const };
+    const src = rowToSkillSource(row);
+    expect(src.source).toBe("repo");
+    expect(src.invocation).toBe("context");
   });
 });

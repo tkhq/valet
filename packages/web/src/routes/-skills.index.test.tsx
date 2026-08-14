@@ -6,7 +6,7 @@
  * that TanStack Query works.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { ListSkillsResponse } from "@valet/api/wire";
 
@@ -34,6 +34,19 @@ const skillsData: ListSkillsResponse = {
       plugin: "slack",
       takesArgs: false,
     },
+    {
+      name: "standup",
+      description: "Summarize the standup.",
+      origin: "local",
+      id: "skill_1",
+      ownerType: "user",
+      ownerId: "u1",
+      shadowed: false,
+      takesArgs: false,
+      updatedAt: 0,
+      invocation: "prompt",
+      argHint: "<topic>",
+    },
   ],
 };
 
@@ -51,16 +64,9 @@ vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
 }));
 
-// The repositories panel has its own suite
-// (`components/skills/-skill-sources-panel.test.tsx`); here it only has to
-// render, so its hooks return an empty, settled list.
-vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: { sources: [] }, isLoading: false, error: null }),
-  useAddSkillSource: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
-  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
-}));
-
+// A team card carries an `OwnerBadge`, which reads the teams list. No fixture
+// below is team-owned, so the badge never mounts — the mock is here so that
+// adding a team-owned fixture does not need a query client as well.
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
 }));
@@ -81,7 +87,7 @@ describe("SkillsIndexPage", () => {
     expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
     // Router `Link`s render `to`, not `href`, so they carry no link role.
     // Counted inside the grid: the header carries links of its own.
-    expect(container.querySelectorAll(".grid a").length).toBe(4);
+    expect(container.querySelectorAll(".grid a").length).toBe(5);
   });
 
   it("offers a New skill action", () => {
@@ -109,9 +115,9 @@ describe("SkillsIndexPage", () => {
 
   it("links each card to its detail route", () => {
     const { container } = render(<SkillsIndexPage />);
-    // The card's link covers the card instead of wrapping it — the owner
-    // badge in the title row is a link of its own — so it is addressed by
-    // the name it carries for a reader, not through the title text.
+    // The card's link covers the card instead of wrapping it — a team card's
+    // owner badge in the title row is a link of its own — so it is addressed
+    // by the name it carries for a reader, not through the title text.
     const link = container.querySelector('a[aria-label="Read Slack tools"]');
     expect(link?.getAttribute("to")).toBe("/skills/$skillName");
   });
@@ -125,7 +131,8 @@ describe("SkillsIndexPage", () => {
     currentData = { skills: [] };
     render(<SkillsIndexPage />);
     expect(screen.getByText(/No skills yet/)).toBeTruthy();
-    // No counter when there is nothing to count.
+    // The header carries no counter at all now: the grid's own chips and
+    // search say what is in the list, so a running total said it twice.
     expect(screen.queryByText(/\d+ skills? · \d+ plugins?/)).toBeNull();
   });
 
@@ -135,8 +142,53 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
   });
 
-  it("offers the GitHub import above the grid", () => {
+  it("filters to prompts when the Prompts chip is picked", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    // Only the one prompt-invocation skill stays in the grid.
+    expect(container.querySelectorAll(".grid a").length).toBe(1);
+    expect(screen.getByText("Standup")).toBeTruthy();
+  });
+
+  it("hides the prompt when the Skills chip is picked", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
+    // The four plugin skills stay; the one prompt drops out.
+    expect(container.querySelectorAll(".grid a").length).toBe(4);
+    expect(screen.queryByText("Standup")).toBeNull();
+  });
+
+  it("links to the settings sync-sources page instead of an inline panel", () => {
     render(<SkillsIndexPage />);
-    expect(screen.getByRole("button", { name: /import from github/i })).toBeTruthy();
+    const link = screen.getByText(/Manage sync sources in Settings/).closest("a");
+    expect(link?.getAttribute("to")).toBe("/settings/library-sources");
+    // The inline import panel is gone.
+    expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
+  });
+
+  it("filters the grid by a case-insensitive search over name and description", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.change(screen.getByLabelText("Search skills"), { target: { value: "SLACK" } });
+    expect(container.querySelectorAll(".grid a").length).toBe(1);
+    expect(screen.getByText("Slack tools")).toBeTruthy();
+  });
+
+  it("filters the grid by scope", () => {
+    const { container } = render(<SkillsIndexPage />);
+    fireEvent.change(screen.getByLabelText("Filter by scope"), { target: { value: "personal" } });
+    // Only the one stored personal skill stays.
+    expect(container.querySelectorAll(".grid a").length).toBe(1);
+    expect(screen.getByText("Standup")).toBeTruthy();
+  });
+
+  it("shows a scope badge on every card", () => {
+    const { container } = render(<SkillsIndexPage />);
+    // Query inside the grid so the scope-filter dropdown's <option>s do not
+    // count. Four plugin skills → four Plugin badges; one personal stored.
+    const grid = container.querySelector(".grid");
+    const badges = (label: string) =>
+      Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
+    expect(badges("Plugin").length).toBe(4);
+    expect(badges("Personal").length).toBe(1);
   });
 });

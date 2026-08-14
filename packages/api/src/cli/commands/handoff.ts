@@ -192,12 +192,16 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   const receipt: Receipt = {
     sessionId,
     threadId: sent.threadId,
-    messageId: sent.messageId,
+    messageId: sent.messageId ?? "",
     url: `${deps.url}/sessions/${sessionId}`,
   };
   printReceipt(receipt, flags.json);
 
   if (!wait) return ExitCode.OK;
+  // A null messageId means the text ran as a slash command — it executed
+  // immediately and took no queue item, so there is no turn to follow.
+  const sentMessageId = sent.messageId;
+  if (sentMessageId === null) return ExitCode.OK;
 
   // Follow the turn like `send` does, but bounded: the handoff is already
   // delivered, so a quiet target should not hang the calling agent.
@@ -210,7 +214,7 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   });
   const follow = consumeSend(
     { client: deps.client, stream: deps.stream, url: deps.url, apiKey: deps.apiKey },
-    { sessionId, messageId: sent.messageId, threadId: sent.threadId, json: flags.json },
+    { sessionId, messageId: sentMessageId, threadId: sent.threadId, json: flags.json },
   );
   return Promise.race([follow, timeout]);
 }

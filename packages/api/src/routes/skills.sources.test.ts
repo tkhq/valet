@@ -211,6 +211,80 @@ describe("POST /api/skills/sources/:id/sync", () => {
   });
 });
 
+describe("org-scoped skill sources", () => {
+  it("admin creates an org source; every member sees it in the list", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+
+    // `local-user` is the org admin in the test setup.
+    const res = await post(api.baseUrl, { repo: "tkhq/skills", ownerType: "org" });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as SkillSourceSyncResponse;
+    expect(created.source.ownerType).toBe("org");
+
+    // A member with no personal sources still sees the org source.
+    const list = (await (
+      await fetch(`${api.baseUrl}/api/skills/sources`, {
+        headers: { "x-valet-test-user-id": "test-member" },
+      })
+    ).json()) as ListSkillSourcesResponse;
+    expect(list.sources.map((s) => s.ownerType)).toEqual(["org"]);
+    expect(list.sources[0]?.repo).toBe("tkhq/skills");
+  });
+
+  it("member cannot create an org source", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+
+    const res = await post(api.baseUrl, { repo: "tkhq/skills", ownerType: "org" }, "test-member");
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toContain("admin");
+  });
+
+  it("member cannot delete or sync an org source", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    const created = (await (
+      await post(api.baseUrl, { repo: "tkhq/skills", ownerType: "org" })
+    ).json()) as SkillSourceSyncResponse;
+
+    const del = await fetch(`${api.baseUrl}/api/skills/sources/${created.source.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(del.status).toBe(404);
+
+    const sync = await fetch(`${api.baseUrl}/api/skills/sources/${created.source.id}/sync`, {
+      method: "POST",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(sync.status).toBe(404);
+  });
+
+  it("member still creates a personal source", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+
+    const res = await post(api.baseUrl, { repo: "tkhq/skills" }, "test-member");
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as SkillSourceSyncResponse;
+    expect(created.source.ownerType).toBe("user");
+  });
+
+  it("an org source produces org-owned skills", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    await post(api.baseUrl, { repo: "tkhq/skills", ownerType: "org" });
+
+    const catalog = (await (await fetch(`${api.baseUrl}/api/skills`)).json()) as ListSkillsResponse;
+    const imported = catalog.skills.filter((s) => s.origin === "repo");
+    expect(imported).toHaveLength(1);
+    // The catalog union narrows on `origin`; a repo skill is a stored summary.
+    const stored = imported[0];
+    expect(stored && "ownerType" in stored ? stored.ownerType : undefined).toBe("org");
+  });
+});
+
 describe("DELETE /api/skills/sources/:id", () => {
   it("removes the source and the skills it mirrored", async () => {
     const f = serve({ sha: "commit-1", names: ["deploy", "on-call"] });

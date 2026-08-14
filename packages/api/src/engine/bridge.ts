@@ -1,5 +1,5 @@
 import type {
-  BusEvent,
+  CommandResultEntry,
   DeliveredBusEvent,
   DecisionGate as EngineDecisionGate,
   DecisionResolution as EngineDecisionResolution,
@@ -9,6 +9,7 @@ import type {
 import type {
   DecisionGate as WireDecisionGate,
   DecisionResolution as WireDecisionResolution,
+  Message,
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
   WireEvent,
@@ -96,6 +97,38 @@ export function engineSignalToWire(
     signalType: signal.signalType,
     attributes: signal.attributes,
     senderSessionId: signal.senderSessionId,
+  };
+}
+
+/**
+ * Project a `CommandResultEntry` to its wire `Message` shape.
+ *
+ * Called from BOTH `busEventToWire` (live WS path) and `entryToMessage`
+ * (REST reload path) so the two shapes are always identical. Shape drift here
+ * is the documented three-time regression (CLAUDE.md "Tool-call persistence
+ * round trip").
+ */
+export function commandResultEntryToMessage(
+  e: CommandResultEntry,
+  sessionId: string,
+  threadId: string,
+): Message {
+  const created = e.createdAt;
+  return {
+    id: e.id,
+    sessionId,
+    threadId,
+    role: "system",
+    content: e.output,
+    parts: [],
+    createdAt: Number.isFinite(created) ? created : Date.now(),
+    queueItemId: e.queueItemId,
+    command: {
+      // Strip the leading slash from the stored command string.
+      name: e.command.startsWith("/") ? e.command.slice(1) : e.command,
+      source: e.source,
+      ok: e.ok,
+    },
   };
 }
 
@@ -298,6 +331,19 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           queueItemId: e.queueItemId,
           outcome: e.outcome.outcome,
           error: e.outcome.error,
+        },
+      ];
+
+    case "command_result":
+      return [
+        {
+          type: "command_result",
+          threadId: e.threadId || undefined,
+          message: commandResultEntryToMessage(
+            e.entry,
+            ev.sessionId,
+            e.threadId ?? "",
+          ),
         },
       ];
 

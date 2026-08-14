@@ -9,7 +9,7 @@
  * no mark. Either way skills from one plugin read as a family in a mixed
  * grid. A stored skill takes the moss accent instead — the colour separates
  * a skill a plugin ships from a skill stored for the caller at a glance, and
- * the origin badge says it in words.
+ * the scope badge says it in words.
  *
  * The mono footer carries the skill's ID — the string an agent references,
  * which the title's display name hides. The owning plugin is appended only
@@ -28,6 +28,7 @@ import { Badge } from "~/components/primitives";
 import { OwnerBadge } from "~/components/owner-badge";
 import { ServiceIcon } from "~/components/service-icon";
 import { displayName } from "~/components/integrations/display-name";
+import { ScopeBadge, scopeForSkill } from "./scope-badge";
 
 /**
  * What to do about a skill another skill of the same name keeps out of every
@@ -45,12 +46,18 @@ export function shadowNote(skill: StoredSkillSummary): string {
 
 /**
  * Where the markdown lives, in the words a reader needs. Who owns it is a
- * second axis — `OwnerBadge` names the owning team, so this label never
- * speaks for ownership.
+ * second axis — `OwnerBadge` names the owning team, so this label leaves the
+ * team case to it.
+ *
+ * The org library is the exception: it has no owner badge, because there is
+ * no team assistant to link an org row to. So `org` is named here. Without
+ * that case an org skill would read as "Yours", and the reader would think a
+ * read-only row was theirs to edit.
  */
 export function originLabel(skill: SkillSummary): string {
   if (skill.origin === "plugin") return "Plugin";
   if (skill.origin === "repo") return "Repo";
+  if (skill.ownerType === "org") return "Org";
   return "Yours";
 }
 
@@ -70,11 +77,17 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-ink">{title}</span>
-            <Badge variant={skill.origin === "plugin" ? "neutral" : "accent"}>
-              {originLabel(skill)}
-            </Badge>
-            {skill.origin !== "plugin" && (
+            {/* One badge for the scope axis. A team row takes `OwnerBadge`
+                in place of the generic Team badge, because it names the team
+                and links to that team's assistant. */}
+            {skill.origin !== "plugin" && skill.ownerType === "team" ? (
               <OwnerBadge ownerType={skill.ownerType} ownerId={skill.ownerId} />
+            ) : (
+              <ScopeBadge scope={scopeForSkill(skill)} />
+            )}
+            {skill.origin === "repo" && <Badge variant="neutral">Repo</Badge>}
+            {skill.origin !== "plugin" && skill.invocation === "prompt" && (
+              <Badge variant="neutral">prompt</Badge>
             )}
           </div>
           {skill.description && (

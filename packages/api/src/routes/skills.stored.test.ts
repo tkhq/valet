@@ -4,14 +4,17 @@
  * in `skills.test.ts`; this file covers what a database row adds.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createTeam } from "../services/teams.js";
+import { skills } from "../schema/index.js";
 import type {
   CreateSkillRequest,
   GetSkillResponse,
   ListSkillsResponse,
   SkillResponse,
+  StoredSkillSummary,
   UpdateSkillRequest,
 } from "../wire/types.js";
 
@@ -242,6 +245,294 @@ describe("DELETE /api/skills/stored/:id", () => {
 
     const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
       method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/skills — invocation and argHint", () => {
+  it("creates a prompt-invocation skill and reads it back", async () => {
+    api = await bootTestApi();
+
+    const res = await post(api.baseUrl, {
+      name: "standup",
+      description: "Daily standup",
+      content: "Summarize $1",
+      invocation: "prompt",
+      argHint: "<topic>",
+    } as CreateSkillRequest & { invocation: string; argHint: string });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as SkillResponse & { invocation?: string; argHint?: string };
+
+    expect(created.invocation).toBe("prompt");
+    expect(created.argHint).toBe("<topic>");
+
+    const got = (await (await fetch(`${api.baseUrl}/api/skills/standup`)).json()) as GetSkillResponse & {
+      invocation?: string;
+      argHint?: string;
+    };
+    expect(got.invocation).toBe("prompt");
+    expect(got.argHint).toBe("<topic>");
+  });
+
+  it("creates a context-invocation skill and reads it back", async () => {
+    api = await bootTestApi();
+
+    const res = await post(api.baseUrl, {
+      name: "guidelines",
+      description: "Project guidelines",
+      content: "Always write tests first.",
+      invocation: "context",
+    } as CreateSkillRequest & { invocation: string });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as SkillResponse & { invocation?: string };
+    expect(created.invocation).toBe("context");
+  });
+
+  it("rejects an invalid invocation value", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "badskill",
+        description: "Bad invocation",
+        content: "body",
+        invocation: "invalid-value",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("context");
+    expect(body.error).toContain("prompt");
+  });
+
+  it("rejects a reserved built-in name", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "status", description: "d", content: "x" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("reserved built-in command name");
+  });
+
+  it("rejects renaming to a reserved built-in name", async () => {
+    api = await bootTestApi();
+    const created = (await (await post(api.baseUrl, DEPLOY)).json()) as SkillResponse;
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "help" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("reserved built-in command name");
+  });
+});
+
+describe("POST /api/skills — org-scoped writes", () => {
+  it("admin creates an org skill", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "org-guidelines",
+        description: "Org-wide guidelines",
+        content: "Always document your work.",
+        ownerType: "org",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.ownerType).toBe("org");
+  });
+
+  it("member cannot create an org skill", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({
+        name: "org-guidelines",
+        description: "Org-wide guidelines",
+        content: "Always document your work.",
+        ownerType: "org",
+      }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("member can still create a personal skill", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({
+        name: "my-deploy",
+        description: "How to deploy",
+        content: "Run make deploy.",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.ownerType).toBe("user");
+  });
+
+  it("org skill is visible to a member in the listing", async () => {
+    api = await bootTestApi();
+
+    // Admin creates org skill (local-user is org admin)
+    const createRes = await fetch(`${api.baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "org-playbook",
+        description: "Org playbook",
+        content: "Follow the playbook.",
+        ownerType: "org",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+
+    // Member sees it in the listing
+    const listRes = await fetch(`${api.baseUrl}/api/skills`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const { skills } = (await listRes.json()) as ListSkillsResponse;
+    const orgSkill = skills.find((s) => s.name === "org-playbook");
+    expect(orgSkill).toBeDefined();
+    expect((orgSkill as StoredSkillSummary).ownerType).toBe("org");
+  });
+});
+
+describe("PATCH/DELETE /api/skills/stored/:id — org-scoped writes", () => {
+  async function createOrgSkill(baseUrl: string): Promise<SkillResponse> {
+    const res = await fetch(`${baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "org-guide",
+        description: "Org-wide guide",
+        content: "Follow the org guide.",
+        ownerType: "org",
+      }),
+    });
+    return (await res.json()) as SkillResponse;
+  }
+
+  it("admin can PATCH an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "# Updated org guide\n" }),
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as SkillResponse;
+    expect(updated.content).toBe("# Updated org guide\n");
+  });
+
+  it("admin can DELETE an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("member cannot PATCH an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ content: "# Hacked\n" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("member cannot DELETE an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/skills/stored/:id — org read scope and editable", () => {
+  async function createOrgSkill(baseUrl: string): Promise<SkillResponse> {
+    const res = await fetch(`${baseUrl}/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "org-read-guide",
+        description: "Org-wide guide",
+        content: "Follow the org guide.",
+        ownerType: "org",
+      }),
+    });
+    return (await res.json()) as SkillResponse;
+  }
+
+  it("lets a member READ an org skill with editable false", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(200);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.content).toContain("Follow the org guide.");
+    expect(skill.editable).toBe(false);
+  });
+
+  it("returns editable true when an admin READs an org skill", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`);
+    expect(res.status).toBe(200);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.editable).toBe(true);
+  });
+
+  it("returns editable true for the owner of a personal skill", async () => {
+    api = await bootTestApi();
+    const created = (await (await post(api.baseUrl, DEPLOY)).json()) as SkillResponse;
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`);
+    const skill = (await res.json()) as SkillResponse;
+    expect(skill.editable).toBe(true);
+  });
+
+  it("404s a row in another org (cross-org isolation)", async () => {
+    api = await bootTestApi();
+    const created = await createOrgSkill(api.baseUrl);
+    // Move the row to a different org so the caller's org no longer matches.
+    await api.providers.db.update(skills).set({ orgId: "other-org" }).where(eq(skills.id, created.id));
+
+    const res = await fetch(`${api.baseUrl}/api/skills/stored/${created.id}`, {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);

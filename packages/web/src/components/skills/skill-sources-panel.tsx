@@ -1,5 +1,7 @@
 /**
- * Tracked skill repositories, above the catalog grid on `/skills`.
+ * Tracked skill repositories. Two homes: the personal panel on
+ * `/settings/library-sources` (personal and team sources) and the org panel on
+ * `/settings/organization/library` (org sources only).
  *
  * Valet mirrors a repository's `SKILL.md` files into the catalog and re-reads
  * the repository on a schedule. This panel is where a repository is added,
@@ -12,6 +14,14 @@
  * A mirrored skill is not editable, so the rows carry no edit action. Removing
  * a source removes the skills it brought in, which is why the button is
  * "Remove" and not "Disable".
+ *
+ * `scope` picks which sources show and which scope a new source takes:
+ *   - `personal` (default) — the caller's own and team sources. A new source
+ *     goes to the active workspace, which the nav switcher sets: your own, or
+ *     a team. No Owner select asks a second time.
+ *   - `org` — org sources only; a new source is added with `ownerType: "org"`.
+ * `readOnly` hides the add form and the per-row Sync/Remove actions — the org
+ * panel passes it for a member, who may read org sources but not change them.
  */
 import { useState, type FormEvent } from "react";
 import { Button, Input, Spinner } from "~/components/primitives";
@@ -25,24 +35,44 @@ import {
   useSyncSkillSource,
   type SkillSourceSummary,
 } from "~/api/skill-sources";
+import { ScopeBadge, scopeForOwnerType } from "./scope-badge";
 
-export function SkillSourcesPanel() {
+export type SourcesScope = "personal" | "org";
+
+/** Keeps the sources this panel shows. The personal panel keeps the caller's
+ * own and team sources; the org panel keeps org sources only. */
+function inScope(source: SkillSourceSummary, scope: SourcesScope): boolean {
+  return scope === "org" ? source.ownerType === "org" : source.ownerType !== "org";
+}
+
+export function SkillSourcesPanel({
+  scope = "personal",
+  readOnly = false,
+}: {
+  scope?: SourcesScope;
+  readOnly?: boolean;
+} = {}) {
   const { data, isLoading, error } = useSkillSources();
-  const sources = data?.sources ?? [];
+  const sources = (data?.sources ?? []).filter((s) => inScope(s, scope));
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
   const add = useAddSkillSource();
-  // The workspace owns the source. There was an Owner select here, which
-  // asked a second time what the nav's workspace switcher had already
-  // answered — and could disagree with it, so the page could show one
-  // workspace's repositories while the form filed a new one under another.
-  const scope = useWorkspaceScope();
+  // The active workspace owns a personal-panel source. There was an Owner
+  // select here, which asked a second time what the nav's workspace switcher
+  // had already answered — and could disagree with it, so the page could show
+  // one workspace's repositories while the form filed a new one under
+  // another. The org panel is fixed to the org and never reads this.
+  const workspace = useWorkspaceScope();
 
   function submit(e: FormEvent) {
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
-    add.mutate({ repo: value, ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }) });
+    add.mutate(
+      scope === "org"
+        ? { repo: value, ownerType: "org" }
+        : { repo: value, ...(workspace.teamId === undefined ? {} : { teamId: workspace.teamId }) },
+    );
     setRepo("");
   }
 
@@ -50,12 +80,14 @@ export function SkillSourcesPanel() {
     <section className="rounded-lg border border-line bg-paper">
       <div className="flex items-center justify-between gap-3 px-4 py-3">
         <h2 className="text-sm font-medium text-ink">Repositories</h2>
-        <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
-          {open ? "Cancel" : "Import from GitHub"}
-        </Button>
+        {!readOnly && (
+          <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
+            {open ? "Cancel" : "Import from GitHub"}
+          </Button>
+        )}
       </div>
 
-      {open && (
+      {!readOnly && open && (
         <form
           aria-label="Import a skill repository"
           onSubmit={submit}
@@ -95,13 +127,13 @@ export function SkillSourcesPanel() {
       )}
 
       {sources.map((source) => (
-        <SourceRow key={source.id} source={source} />
+        <SourceRow key={source.id} source={source} readOnly={readOnly} />
       ))}
     </section>
   );
 }
 
-function SourceRow({ source }: { source: SkillSourceSummary }) {
+function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly: boolean }) {
   const sync = useSyncSkillSource();
   const remove = useRemoveSkillSource();
   const pinned = [source.ref, source.subpath].filter((part) => part.length > 0).join(" · ");
@@ -111,10 +143,16 @@ function SourceRow({ source }: { source: SkillSourceSummary }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate font-mono text-sm text-ink">{source.repo}</span>
+          {/* One badge for the scope axis, as on `SkillCard`: a team row takes
+              `OwnerBadge`, which names the team and links to its assistant. */}
+          {source.ownerType === "team" ? (
+            <OwnerBadge ownerType={source.ownerType} ownerId={source.ownerId} />
+          ) : (
+            <ScopeBadge scope={scopeForOwnerType(source.ownerType)} />
+          )}
           {pinned.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">{pinned}</span>
           )}
-          <OwnerBadge ownerType={source.ownerType} ownerId={source.ownerId} />
         </div>
         <p className="mt-0.5 text-xs text-muted">
           {source.skillCount} skill{source.skillCount === 1 ? "" : "s"} ·{" "}
@@ -132,24 +170,26 @@ function SourceRow({ source }: { source: SkillSourceSummary }) {
           </p>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-1">
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={sync.isPending}
-          onClick={() => sync.mutate(source.id)}
-        >
-          {sync.isPending ? <Spinner size={14} /> : "Sync"}
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={remove.isPending}
-          onClick={() => remove.mutate(source.id)}
-        >
-          Remove
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={sync.isPending}
+            onClick={() => sync.mutate(source.id)}
+          >
+            {sync.isPending ? <Spinner size={14} /> : "Sync"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate(source.id)}
+          >
+            Remove
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

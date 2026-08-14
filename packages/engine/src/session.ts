@@ -1,6 +1,17 @@
 import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
+import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
+import { dispatchCommand } from "./commands/dispatch.js";
+import { parseCommandArgs } from "./commands/args.js";
+import { executeBuiltin } from "./commands/builtins.js";
+import { invokeAction, type InvokeActionResult } from "./plugin-catalog.js";
+import { GateManager, fromRequest, isDecisionGateExpired } from "./decision-gate.js";
+import type {
+  CommandDef,
+  CommandSource,
+  ResolvedCommand,
+} from "./commands/types.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
@@ -9,10 +20,13 @@ import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
+  CommandResultEntry,
+  MessageEntry,
   CreateSessionOptions,
   CredentialOwner,
   CredentialProvider,
   DecisionGate,
+  DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
   EngineEvent,
@@ -32,6 +46,7 @@ import type {
   SkillSource,
   StoredCredential,
   ThreadData,
+  ToolContext,
   ToolDef,
   WriteFence,
 } from "./types.js";
@@ -39,6 +54,93 @@ import type {
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+}
+
+/**
+ * Extract the plain leading text of a prompt for slash-command detection.
+ * String content is itself; object content uses its `text`; a `SignalContent`
+ * (kind: "signal") never carries a slash command, so it returns undefined.
+ */
+function commandText(content: PromptContent): string | undefined {
+  if (typeof content === "string") return content;
+  if ("kind" in content) return undefined;
+  return content.text;
+}
+
+/**
+ * Replace the leading text of a prompt with `text`, preserving attachments.
+ * Only reached for string/object content (a signal never expands).
+ */
+function withText(content: PromptContent, text: string): PromptContent {
+  if (typeof content === "string") return text;
+  if ("kind" in content) return content;
+  return { ...content, text };
+}
+
+/**
+ * Render an {@link InvokeActionResult} into the `{ ok, output }` shape a
+ * `command_result` entry carries. Error variants name the corrective action,
+ * per the repo's user-facing-error rule.
+ */
+function formatPluginOutcome(
+  outcome: InvokeActionResult,
+  actionId: string,
+): { ok: boolean; output: string } {
+  switch (outcome.kind) {
+    case "ok": {
+      const { result } = outcome;
+      if (!result.success) {
+        return { ok: false, output: `Action failed. ${result.error ?? "Unknown error."}` };
+      }
+      if (result.data === undefined) return { ok: true, output: "Done." };
+      const body =
+        typeof result.data === "string" ? result.data : "```json\n" + stableJson(result.data) + "\n```";
+      return { ok: true, output: body };
+    }
+    case "unknown":
+      return {
+        ok: false,
+        output: `Unknown action "${actionId}". The plugin command points at an action that is not loaded.`,
+      };
+    case "resolve-failed":
+      return {
+        ok: false,
+        output: `Could not load ${outcome.service} actions. ${outcome.message}`,
+      };
+    case "denied-policy":
+      return {
+        ok: false,
+        output: "This action is blocked by org policy. Ask an administrator to allow it.",
+      };
+    case "denied-approval":
+      return {
+        ok: false,
+        output: "Approval was denied. Adjust action policies in Settings to allow this action.",
+      };
+    case "pending-approval":
+      return {
+        ok: false,
+        output: "Approval is pending. Resolve it from the approvals panel.",
+      };
+    case "invalid-args":
+      return { ok: false, output: `Invalid arguments. ${outcome.error}` };
+    case "missing-credential":
+      return {
+        ok: false,
+        output: `Connect the ${outcome.service} integration in Settings.`,
+      };
+    case "error":
+      return { ok: false, output: `Action failed. ${outcome.message}` };
+  }
+}
+
+/** Stable JSON stringify used for plugin-result rendering. */
+function stableJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 /** Options for {@link Session.emit}. */
@@ -114,6 +216,20 @@ export class Session {
   readonly skills = new Map<string, SkillSource>();
   private threads = new Map<string, Thread>();
   private threadsByKey = new Map<string, Thread>();
+  /** Lazily-built slash-command registry; invalidated by refreshCommandRegistry(). */
+  private commandRegistryCache: CommandRegistry | null = null;
+  /**
+   * Gates opened by approval-requiring plugin commands. Session-level, not
+   * thread-level: a command is not a claimed turn, so its gate never
+   * suspends a turn. Resolved through the same `resolveDecision` surface
+   * the turn gates use. Pending command gates do not survive a process
+   * restart — the durable gate row stays pending, and the user re-runs the
+   * command.
+   */
+  private commandGates = new GateManager();
+  /** Cached workspace skills from options.workspaceSkillsProvider; null === not
+   * yet loaded. */
+  private workspaceSkillsCache: SkillSource[] | null = null;
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -578,10 +694,322 @@ export class Session {
   // ── public API ──────────────────────────────────────────────────
 
   async prompt(content: PromptContent, opts: PromptOptions = {}): Promise<PromptReceipt> {
-    return this.thread().submitPrompt(content, opts);
+    const thread = this.resolveTargetThread(opts.threadId);
+    const text = commandText(content);
+    if (text?.startsWith("/")) {
+      const outcome = dispatchCommand(text, this.commandRegistry());
+      if (outcome.kind === "expand") {
+        return thread.submitPrompt(withText(content, outcome.text), opts);
+      }
+      if (outcome.kind === "execute") {
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text);
+      }
+      if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
+        const receipt = await thread.submitPrompt(content, opts);
+        return { ...receipt, nearMiss: outcome.nearMiss };
+      }
+    }
+    return thread.submitPrompt(content, opts);
+  }
+
+  /** Resolve `PromptOptions.threadId` to a thread, or the session default. */
+  private resolveTargetThread(threadId?: string): Thread {
+    if (threadId === undefined) return this.thread();
+    const thread = this.threadById(threadId);
+    if (!thread) throw new Error(`prompt: thread ${threadId} not found in session ${this.id}`);
+    return thread;
+  }
+
+  /**
+   * Run a resolved built-in or plugin command against `thread`, persist a
+   * `command_result` entry, emit `command_result`, and return a
+   * command-shaped receipt. Never touches queue admission — a command runs
+   * even while a turn streams.
+   *
+   * `PromptOptions` other than `threadId` (resolved by the caller) are
+   * intentionally not forwarded: they shape queue submissions (author,
+   * channel, queueMode, model, ...) and a command takes no queue item. If a
+   * future option must reach the command path, add a parameter here so the
+   * dependency is explicit.
+   */
+  private async executeCommand(
+    thread: Thread,
+    resolved: ResolvedCommand,
+    args: string[],
+    raw: string,
+  ): Promise<PromptReceipt> {
+    // Echo the typed command as a persisted user message BEFORE the result.
+    // A command takes no queue item, so nothing else persists the user's
+    // text — without this echo, clients reorder the result above the
+    // command on refetch, and a reload loses the command entirely. Written
+    // first (not raced with the plugin grace window) so the echo always
+    // precedes its result.
+    const echoAt = Date.now();
+    const echo: MessageEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: raw,
+      createdAt: echoAt,
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [echo]);
+    let source: CommandSource;
+    let name: string;
+    let result: { ok: boolean; output: string };
+    if (resolved.source === "builtin") {
+      source = "builtin";
+      name = resolved.name;
+      result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+    } else if (resolved.source === "plugin") {
+      source = "plugin";
+      name = `${resolved.pluginName}:${resolved.def.name}`;
+      // An approval-requiring command can wait minutes on its gate. Do not
+      // hold the caller (an HTTP request) for that: give the action a short
+      // grace window, then let it complete in the background — the
+      // command_result entry lands via the same persist+emit path either way.
+      const pending = this.executePluginCommand(thread, resolved.pluginName, resolved.def, raw);
+      const grace = new Promise<null>((resolve) => {
+        const t = setTimeout(() => resolve(null), 500) as { unref?: () => void };
+        if (typeof t.unref === "function") t.unref();
+      });
+      const fast = await Promise.race([pending, grace]);
+      if (fast === null) {
+        const bgName = name;
+        void pending
+          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r, echoAt))
+          .catch((err: unknown) =>
+            this.persistCommandResult(
+              thread,
+              bgName,
+              "plugin",
+              { ok: false, output: err instanceof Error ? err.message : String(err) },
+              echoAt,
+            ),
+          );
+        return {
+          sessionId: this.id,
+          threadId: thread.id,
+          queueItemId: "",
+          status: "queued",
+          command: { name, source },
+        };
+      }
+      result = fast;
+    } else {
+      // dispatchCommand only yields execute for builtin/plugin sources.
+      throw new Error(`executeCommand: unexpected source ${resolved.source}`);
+    }
+
+    await this.persistCommandResult(thread, name, source, result, echoAt);
+
+    return {
+      sessionId: this.id,
+      threadId: thread.id,
+      queueItemId: "",
+      status: "queued",
+      command: { name, source },
+    };
+  }
+
+  /**
+   * Persist a command_result entry and emit its live event. `notBefore` is
+   * the echo entry's timestamp; the result is stamped strictly after it so
+   * `created_at` alone orders the pair on reload — the REST read
+   * (`getEntries`) has no reliable id tiebreaker (uid counters are
+   * variable-length base36, so lexical id order is not insertion order).
+   */
+  private async persistCommandResult(
+    thread: Thread,
+    name: string,
+    source: CommandSource,
+    result: { ok: boolean; output: string },
+    notBefore: number,
+  ): Promise<void> {
+    const entry: CommandResultEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "command_result",
+      command: `/${name}`,
+      source,
+      ok: result.ok,
+      output: result.output,
+      createdAt: Math.max(Date.now(), notBefore + 1),
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [entry]);
+    await this.emit({ type: "command_result", threadId: thread.id, entry });
+  }
+
+  /**
+   * Run an action-backed plugin command. Maps the raw arg string through the
+   * command's `mapArgs`, then invokes the backing action against the shared
+   * plugin catalog via `invokeAction` — the SAME approval + validation core
+   * the LLM `call_tool` path uses. Renders the outcome as markdown for a
+   * `command_result` entry. A command is not a claimed turn, so approvals
+   * route through the host `commandRequestDecision` hook, not the turn gate.
+   */
+  private async executePluginCommand(
+    thread: Thread,
+    pluginName: string,
+    def: CommandDef,
+    raw: string,
+  ): Promise<{ ok: boolean; output: string }> {
+    const catalog = this.options.pluginCatalog;
+    if (!catalog) {
+      return {
+        ok: false,
+        output:
+          "Plugin commands are not available in this deployment. No plugin catalog is configured.",
+      };
+    }
+    const mapped = def.mapArgs(parseCommandArgs(raw), raw);
+    const ctx = this.buildCommandToolContext(thread);
+    const summary = `/${pluginName}:${def.name}${raw ? ` ${raw}` : ""}`;
+    try {
+      const outcome = await invokeAction(catalog, def.action, mapped, ctx, summary);
+      return formatPluginOutcome(outcome, def.action);
+    } catch (err) {
+      if (isDecisionGateExpired(err)) {
+        return {
+          ok: false,
+          output: "Approval expired before anyone resolved it. Send the command again to retry.",
+        };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Build a command-scoped {@link ToolContext} for a plugin command. Unlike
+   * the Thread's turn-scoped context it never suspends a turn: `requestDecision`
+   * delegates to the host `commandRequestDecision` hook (or denies when none is
+   * set), and there is no fence/DAG bookkeeping. Credentials, sandbox, and
+   * thread reads mirror the turn context so a plugin action behaves the same
+   * whether reached from a slash command or from `call_tool`.
+   */
+  private buildCommandToolContext(thread: Thread): ToolContext {
+    const requestDecision = this.options.commandRequestDecision;
+    return {
+      userId: this.options.userId,
+      orgId: this.options.orgId,
+      sessionId: this.id,
+      threadId: thread.id,
+      sessionPurpose: this.options.purpose,
+      cwd: this.options.workspace,
+      credentials: this.credentialProvider(),
+      sandbox: this.sandbox,
+      config: this.options.toolConfig,
+      owner: this.principal,
+      signal: new AbortController().signal,
+      requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        if (requestDecision) return requestDecision(req);
+        // No host hook: open a real decision gate on the default thread.
+        // The gate persists as a decision_gate entry and emits the same
+        // events turn gates do, so the web approvals UI and channel
+        // approve/deny buttons render it. Resolution arrives through
+        // `resolveDecision`, same as every other gate.
+        return this.awaitCommandGate(thread, req);
+      },
+      threadRead: (key, opts) => this.readEntries(key, opts),
+      listThreads: async () => {
+        const datas = await this.providers.store.listThreads(this.id);
+        return datas.map((d) => ({
+          id: d.id,
+          key: d.key,
+          status: d.status,
+          model: d.model,
+          summary: d.summary,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        }));
+      },
+      setModel: (args) => thread.setModel(args.model),
+    };
+  }
+
+  /**
+   * Lazily-built slash-command registry for this session. Cached across calls
+   * within a session; `refreshCommandRegistry()` invalidates it (the host
+   * calls that after workspace prep and whenever skills change).
+   */
+  commandRegistry(): CommandRegistry {
+    if (this.commandRegistryCache) return this.commandRegistryCache;
+    const registry = buildCommandRegistry({
+      skills: [...(this.workspaceSkillsCache ?? []), ...this.skills.values()],
+      pluginCommands: this.options.pluginCommands ?? [],
+      bareSkillNames: this.options.bareSkillNames ?? false,
+    });
+    this.commandRegistryCache = registry;
+    return registry;
+  }
+
+  /**
+   * Invalidate the cached command registry and refresh workspace skills from
+   * the host `workspaceSkillsProvider` (if any). Call after workspace prep and
+   * on any event that also refreshes `Session.skills`. Idempotent.
+   */
+  async refreshCommandRegistry(): Promise<void> {
+    const provider = this.options.workspaceSkillsProvider;
+    // Load first, invalidate after: when the provider throws, the previous
+    // registry (and its skill list) keeps serving — a stale list beats an
+    // empty one mid-session. The rejection still reaches the caller.
+    this.workspaceSkillsCache = provider ? await provider() : [];
+    this.commandRegistryCache = null;
+  }
+
+  /**
+   * Settle every never-claimed (queued/collecting) item of a thread as
+   * aborted and return how many were removed. Used by `/clear`.
+   */
+  async clearQueue(threadId: string): Promise<number> {
+    const store = this.providers.store;
+    const items = await store.listUnsettledSubmissions(this.id);
+    let removed = 0;
+    for (const it of items) {
+      if (it.threadId !== threadId) continue;
+      if (it.status === "queued" || it.status === "collecting") {
+        const ok = await store.settleUnclaimed(this.id, threadId, it.id, {
+          outcome: "aborted",
+        });
+        if (ok) removed++;
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Create and switch to a fresh thread. Returns the new thread. Used by
+   * `/new-thread`; mints a unique key so it never re-adopts an existing one.
+   */
+  async newThread(): Promise<Thread> {
+    const key = `web:${uid("t")}`;
+    return this.thread(key);
   }
 
   async resolveDecision(gateId: string, resolution: DecisionResolution): Promise<void> {
+    // Command gates first — they are session-level, not owned by any thread.
+    if (this.commandGates.isPending(gateId)) {
+      const existing = await this.providers.store.getDecisionGate(this.id, gateId);
+      this.commandGates.resolve(gateId, resolution);
+      if (existing) {
+        const resolved: DecisionGate = { ...existing, status: "resolved", updatedAt: Date.now() };
+        await this.providers.store.saveDecisionGate(this.id, existing.threadId, resolved);
+        await this.providers.store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
+          gate: resolved,
+          resolution,
+          resolvedAt: new Date(resolution.resolvedAt).toISOString(),
+        });
+        await this.emit(
+          { type: "decision_gate_resolved", threadId: existing.threadId, gateId, resolution },
+          { eventKey: `gate:${gateId}:resolved` },
+        );
+      }
+      return;
+    }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
         t.resolveDecision(gateId, resolution);
@@ -589,6 +1017,51 @@ export class Session {
       }
     }
     // Fallback: gate may have already been resolved or never registered.
+  }
+
+  /**
+   * Open a durable decision gate for an approval-requiring plugin command
+   * and wait for its resolution. Rejects with DecisionGateExpiredError when
+   * the gate's expiry lapses first.
+   */
+  private async awaitCommandGate(
+    thread: Thread,
+    req: DecisionGateRequest,
+  ): Promise<DecisionResolution> {
+    // queueItemId is a fresh nonce: command gates never join an earlier
+    // gate the way retried tool calls do — every invocation asks again.
+    const gate = fromRequest(req, {
+      sessionId: this.id,
+      threadId: thread.id,
+      queueItemId: uid("cmd"),
+      resumeKey: req.resumeKey ?? "command",
+      ordinal: 0,
+    });
+    await this.providers.store.saveDecisionGate(this.id, thread.id, gate);
+    const gateEntry: SessionEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "decision_gate",
+      gate,
+      createdAt: Date.now(),
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [gateEntry]);
+    await this.emit(
+      { type: "decision_gate", threadId: thread.id, gate },
+      { eventKey: `gate:${gate.id}:pending` },
+    );
+    return this.commandGates.register(gate, async (gateId) => {
+      await this.providers.store.updateDecisionGateEntry(this.id, thread.id, gateId, {
+        resolvedAt: new Date().toISOString(),
+        gate: { ...gate, status: "expired" },
+      });
+      await this.emit(
+        { type: "decision_gate_expired", threadId: thread.id, gateId },
+        { eventKey: `gate:${gateId}:expired` },
+      );
+    });
   }
 
   async withdrawDecision(gateId: string, reason: DecisionWithdrawReason): Promise<void> {

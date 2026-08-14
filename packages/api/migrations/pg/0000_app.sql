@@ -3,7 +3,8 @@ CREATE TABLE "orgs" (
 	"name" text NOT NULL,
 	"features" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"model_preferences" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"bare_skill_commands" boolean NOT NULL DEFAULT false
 );
 --> statement-breakpoint
 CREATE TABLE "user" (

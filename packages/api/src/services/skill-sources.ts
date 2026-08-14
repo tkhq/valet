@@ -148,14 +148,22 @@ export interface CreateSkillSourceInput {
   ref?: string;
   subpath?: string;
   /** Tracks the repository for a team the caller belongs to. A team the
-   * caller is not on is rejected as not found. */
+   * caller is not on is rejected as not found. Mutually exclusive with
+   * `ownerType: "org"`. */
   teamId?: string;
+  /** Tracks the repository for the org instead of for the caller.
+   * Only accepted when `isOrgAdmin` is `true`; ignored otherwise. Mutually
+   * exclusive with `teamId`. */
+  ownerType?: "user" | "team" | "org";
+  /** When `ownerType` is `"org"`, the caller must be an org admin.
+   * Pass `true` after checking — the service trusts this flag. */
+  isOrgAdmin?: boolean;
 }
 
 /**
- * Adds a tracked repository for the caller, or for a team they belong to.
- * The new row is due immediately, so the next sweep pass imports it without
- * waiting a full poll interval.
+ * Adds a tracked repository for the caller, for a team they belong to, or for
+ * the org when the caller is an org admin. The new row is due immediately, so
+ * the next sweep pass imports it without waiting a full poll interval.
  */
 export async function createSkillSource(
   db: AppDb,
@@ -167,12 +175,19 @@ export async function createSkillSource(
   // JSON body, so an explicit `teamId: null` must fall through to a personal
   // source. Same rule `createSkill` follows.
   const teamId = typeof input.teamId === "string" ? input.teamId : undefined;
+  const isOrgOwned = input.ownerType === "org";
+  // team and org are mutually exclusive scopes for one source.
+  if (isOrgOwned && teamId !== undefined) {
+    throw new SkillSourceInputError(
+      "A source is either a team source or an org source, not both. Remove teamId or the org scope.",
+    );
+  }
   const now = Date.now();
   const row: SkillSourceRow = {
     id: newSkillSourceId(),
     orgId: owner.orgId,
-    ownerType: teamId ? "team" : "user",
-    ownerId: teamId ?? owner.userId,
+    ownerType: isOrgOwned ? "org" : teamId ? "team" : "user",
+    ownerId: isOrgOwned ? owner.orgId : teamId ?? owner.userId,
     repoFullName: parsed.repoFullName,
     ref: parsed.ref,
     subpath: parsed.subpath,
@@ -189,7 +204,7 @@ export async function createSkillSource(
   };
 
   try {
-    if (teamId === undefined) {
+    if (isOrgOwned || teamId === undefined) {
       await db.insert(skillSources).values(row);
     } else {
       // Same advisory lock `createSkill` takes, for the same reason: without
@@ -220,20 +235,27 @@ export async function ownedSkillSourceRow(
   db: AppDb,
   owner: SkillOwner,
   id: string,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<SkillSourceRow | null> {
   const rows = await db.select().from(skillSources).where(eq(skillSources.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  return (await isAuthorizedFor(db, owner, row)) ? row : null;
+  return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
 }
 
 /**
- * Every source the caller can reach, sorted by repository name.
+ * Every source the caller can reach: their own rows, the rows of every team
+ * they belong to, and the org-library rows, sorted by repository name.
+ *
+ * Org rows show for EVERY member (read-only to a non-admin), the same rule
+ * `listSkills` follows: `isAuthorizedFor` still returns false for a non-admin
+ * org write, so `ownedSkillSourceRow` never treats an org row as the caller's
+ * to change.
  *
  * `scope` narrows the answer to ONE owner, and replaces the union rather
  * than adding to it — the same rule, and the same reason, as `listSkills`.
  * Reaching `scope` is the caller's question to answer first: `routes/skills.ts`
- * runs the query string through `isAuthorizedFor` before it gets here.
+ * runs the query string through `readOwnerScope` before it gets here.
  */
 export async function listSkillSources(
   db: AppDb,
@@ -246,11 +268,14 @@ export async function listSkillSources(
     teamIds.length > 0
       ? and(eq(skillSources.ownerType, "team"), inArray(skillSources.ownerId, teamIds))
       : undefined;
+  // Every org row in the caller's own org — the `orgId` predicate below bounds
+  // it — because the org library is readable by every member.
+  const orgMatch = eq(skillSources.ownerType, "org");
   const reach = scope
     ? and(eq(skillSources.ownerType, scope.type), eq(skillSources.ownerId, scope.id))
     : teamMatch
-      ? or(ownerMatch, teamMatch)
-      : ownerMatch;
+      ? or(ownerMatch, teamMatch, orgMatch)
+      : or(ownerMatch, orgMatch);
 
   return db
     .select()
@@ -271,8 +296,9 @@ export async function deleteSkillSource(
   db: AppDb,
   owner: SkillOwner,
   id: string,
+  opts: { isOrgAdmin?: boolean } = {},
 ): Promise<boolean> {
-  const row = await ownedSkillSourceRow(db, owner, id);
+  const row = await ownedSkillSourceRow(db, owner, id, opts);
   if (!row) return false;
   await db.transaction(async (tx) => {
     await tx.delete(skills).where(and(eq(skills.sourceId, id), eq(skills.origin, "repo")));

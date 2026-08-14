@@ -72,6 +72,7 @@ export function loadSkillFromMarkdown(
     throw new Error(`SKILL.md frontmatter does not follow the skill spec${where}:\n${detail}`);
   }
 
+  const invocation = frontmatter.invocation;
   return {
     name: String(frontmatter.name),
     description: asString(frontmatter.description),
@@ -82,6 +83,9 @@ export function loadSkillFromMarkdown(
     compatibility: asString(frontmatter.compatibility),
     metadata: asStringMap(frontmatter.metadata),
     allowedTools: asString(frontmatter["allowed-tools"]),
+    // The validator has already rejected any other value.
+    invocation: invocation === "prompt" ? "prompt" : invocation === "context" ? "context" : undefined,
+    argHint: asString(frontmatter.argHint),
   };
 }
 

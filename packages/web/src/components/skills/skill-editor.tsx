@@ -17,35 +17,75 @@
  * Only a `local` skill reaches this form. A `repo` skill mirrors a file in
  * the repository it was synced from, and the next sync would overwrite an
  * edit made here — the detail page offers no Edit for one.
+ *
+ * No field here asks who owns the skill. The active workspace answers that —
+ * your own, or a team — and the org Library page answers it through
+ * `defaultScope`. An Owner select stood here and asked a second time, which
+ * let the form file a skill under a workspace the page was not showing.
  */
 import { useState } from "react";
-import type { SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
+import type { CreateSkillRequest, SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
+import { useOrg } from "~/api/settings";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { errorText } from "~/lib/error-text";
 
+/**
+ * Renders a prompt body the way a session reads it, with the argument markers
+ * shown in place: `$1`→`⟨arg1⟩`, `$2`→`⟨arg2⟩`, and `$@` or `$ARGUMENTS`→
+ * `⟨all args⟩`. Display only — a pure string replace, so the editor can show
+ * where the args land without running the engine substitution.
+ *
+ * `$ARGUMENTS` is replaced before `$@`, and both before the numbered markers,
+ * so a longer token never leaves a stray `$` behind a shorter one.
+ */
+export function previewPromptBody(body: string): string {
+  return body
+    .replace(/\$ARGUMENTS\b/g, "⟨all args⟩")
+    .replace(/\$@/g, "⟨all args⟩")
+    .replace(/\$(\d+)/g, (_m, n: string) => `⟨arg${n}⟩`);
+}
+
 export function SkillEditor({
   skill,
+  defaultScope,
   onSaved,
   onCancel,
 }: {
   /** Absent to create. Present to edit — its body must already be loaded. */
   skill?: SkillResponse;
+  /** Files a new skill to the org library instead of to the active workspace.
+   * The org Library page's "New org skill" button sets it, through
+   * `/skills/new?scope=org`. Honored only for an org admin; for anybody else
+   * the active workspace owns the skill, as usual. */
+  defaultScope?: "personal" | "org";
   onSaved: (saved: SkillResponse) => void;
   onCancel: () => void;
 }) {
   const editing = skill !== undefined;
   const create = useCreateSkill();
   const update = useUpdateSkill();
+  // The org scope needs the caller's org role. The flag arrives async, and a
+  // stale `false` costs nothing here: it is read at submit time, not at mount,
+  // so a slow org query cannot silently file an org skill as personal.
+  const org = useOrg();
+  const isAdmin = org.data?.callerRole === "admin";
 
   const [name, setName] = useState(skill?.name ?? "");
   const [description, setDescription] = useState(skill?.description ?? "");
   const [content, setContent] = useState(skill?.content ?? "");
-  // The active workspace owns a new skill. Editing never moved ownership and
-  // still does not — the select was already hidden when editing.
-  const scope = useWorkspaceScope();
+  const [invocation, setInvocation] = useState<"context" | "prompt">(
+    skill?.invocation === "prompt" ? "prompt" : "context",
+  );
+  const [argHint, setArgHint] = useState(skill?.argHint ?? "");
+  // The active workspace owns a new skill, unless the page that opened this
+  // form asked for the org library. There was an Owner select here, which
+  // asked a second time what the nav's workspace switcher had already
+  // answered — and could disagree with it. Editing never moved ownership and
+  // still does not.
+  const workspace = useWorkspaceScope();
 
   const pending = create.isPending || update.isPending;
   const error = create.error ?? update.error;
@@ -53,15 +93,34 @@ export function SkillEditor({
 
   function submit() {
     if (!complete || pending) return;
+    // A `context` skill takes no argHint, so send it only for a `prompt`.
+    const argFields =
+      invocation === "prompt" && argHint.trim() !== "" ? { argHint: argHint.trim() } : {};
     if (editing && skill) {
-      const body: UpdateSkillRequest = { name, description, content };
+      const body: UpdateSkillRequest = { name, description, content, invocation, ...argFields };
       update.mutate({ id: skill.id, body }, { onSuccess: onSaved });
       return;
     }
-    create.mutate(
-      { name, description, content, ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }) },
-      { onSuccess: onSaved },
-    );
+    // Who owns the new skill. The org library wins when the page asked for it
+    // AND the caller may write there — the create route rejects an org skill
+    // from a member, so a member on `?scope=org` files a personal skill
+    // instead. Everybody else gets the active workspace: their own, or the
+    // team the nav switcher names.
+    const ownerFields =
+      defaultScope === "org" && isAdmin
+        ? { ownerType: "org" as const }
+        : workspace.teamId === undefined
+          ? {}
+          : { teamId: workspace.teamId };
+    const body: CreateSkillRequest = {
+      name,
+      description,
+      content,
+      invocation,
+      ...argFields,
+      ...ownerFields,
+    };
+    create.mutate(body, { onSuccess: onSaved });
   }
 
   return (
@@ -106,6 +165,54 @@ export function SkillEditor({
           When to reach for this skill. The assistant reads this to decide.
         </p>
       </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="skill-invocation">Invocation</Label>
+          <select
+            id="skill-invocation"
+            value={invocation}
+            onChange={(e) => setInvocation(e.target.value === "prompt" ? "prompt" : "context")}
+            className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
+          >
+            <option value="context">Context — load as reference</option>
+            <option value="prompt">Prompt — substitute args and send</option>
+          </select>
+          <p className="text-xs text-muted">
+            A context skill loads the body as reference. A prompt skill fills its arguments and
+            sends the body as the message.
+          </p>
+        </div>
+
+        {invocation === "prompt" && (
+          <div className="space-y-1.5">
+            <Label htmlFor="skill-arg-hint">Argument hint</Label>
+            <Input
+              id="skill-arg-hint"
+              value={argHint}
+              onChange={(e) => setArgHint(e.target.value)}
+              placeholder="<topic>"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="text-xs text-muted">
+              Shown in the command palette for the first argument.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {invocation === "prompt" && (
+        <div className="space-y-1.5">
+          <Label>Preview</Label>
+          <p className="whitespace-pre-wrap rounded border border-line bg-paper px-3 py-2 text-xs text-muted">
+            {previewPromptBody(content)}
+          </p>
+          <p className="text-xs text-muted">
+            {"$1"} and {"$2"} fill the arguments in order; {"$@"} fills all of them.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <Label htmlFor="skill-content">Playbook</Label>

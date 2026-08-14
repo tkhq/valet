@@ -255,6 +255,11 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /**
+   * Target thread id. When set, the prompt (or command result) goes to this
+   * thread instead of the session default. Throws if no thread has this id.
+   */
+  threadId?: string;
   author?: PromptAuthor;
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
@@ -282,6 +287,10 @@ export interface PromptReceipt {
   threadId: string;
   queueItemId: string;
   status: "queued" | "running" | "blocked_on_decision_gate";
+  /** Set when the submission was handled as a command and no prompt was queued. */
+  command?: { name: string; source: import("./commands/types.js").CommandSource };
+  /** Set when an unknown /word passed through as prompt text; closest registered name. */
+  nearMiss?: string;
 }
 
 // ── Messages and DAG entries ──────────────────────────────────────
@@ -391,7 +400,20 @@ export interface DecisionGateEntry extends BaseEntry {
   withdrawnReason?: DecisionWithdrawReason;
 }
 
-export type SessionEntry = MessageEntry | CompactionEntry | BranchSummaryEntry | DecisionGateEntry;
+export interface CommandResultEntry extends BaseEntry {
+  type: "command_result";
+  command: string; // as typed, with leading slash
+  source: import("./commands/types.js").CommandSource;
+  ok: boolean;
+  output: string; // markdown
+}
+
+export type SessionEntry =
+  | MessageEntry
+  | CompactionEntry
+  | BranchSummaryEntry
+  | DecisionGateEntry
+  | CommandResultEntry;
 
 export interface MessageQuery {
   limit?: number;
@@ -888,6 +910,17 @@ export type EngineEvent =
     }
   | { type: "model_switched"; threadId?: string; fromModel: string; toModel: string; reason: string }
   | {
+      /**
+       * A slash command ran and produced a transcript record (slash-commands
+       * design). Session-scoped when the command is thread-agnostic; carries
+       * the executing thread id otherwise. Emitted after the
+       * `command_result` entry is persisted.
+       */
+      type: "command_result";
+      threadId?: string;
+      entry: CommandResultEntry;
+    }
+  | {
       type: "submission_settled";
       sessionId: string;
       threadId: string;
@@ -1307,6 +1340,12 @@ export interface SkillSource {
    * pre-approved tools. Experimental in the spec, and Valet does not act
    * on it yet. */
   allowedTools?: string;
+  /** How a slash invocation expands. "context" (default): wrap in <skill>
+   * tags, append args. "prompt": substitute $1/$@ into the body, send bare.
+   * Prompt skills are never surfaced as capability documentation. */
+  invocation?: "context" | "prompt";
+  /** Autocomplete hint for the first argument, e.g. "<topic> [audience]". */
+  argHint?: string;
 }
 
 export interface SkillInvokeOptions {
@@ -1486,6 +1525,55 @@ export interface CreateSessionOptions {
    * prompt hint.
    */
   warmSandboxOnClaim?: boolean;
+  /**
+   * Host capabilities for slash commands the engine cannot answer alone
+   * (`/model`, `/sessions`). Absent === those built-ins return `ok: false`
+   * with an explicit "not exposed" message, and the engine stays runnable in
+   * bare tests.
+   */
+  commandContext?: import("./commands/types.js").CommandContext;
+  /**
+   * Host-injected workspace-skill source for slash commands. Absent === no
+   * workspace skills. Read lazily and cached; the host calls
+   * `Session.refreshCommandRegistry()` after workspace prep and on any event
+   * that also refreshes skills.
+   */
+  workspaceSkillsProvider?: () => Promise<SkillSource[]>;
+  /**
+   * When true, a skill named `review` also registers a bare `/review` command
+   * in addition to the always-present `/skill:review`. Default false.
+   */
+  bareSkillNames?: boolean;
+  /**
+   * Action-backed plugin commands, registered under `${pluginName}:${def.name}`.
+   * The host derives these from every loaded `ValetPlugin.commands`. Absent ===
+   * no plugin commands. Paired with `pluginCatalog`: the registry entry resolves
+   * the command, and `pluginCatalog` invokes its backing action.
+   */
+  pluginCommands?: Array<{
+    pluginName: string;
+    def: import("./commands/types.js").CommandDef;
+  }>;
+  /**
+   * Plugin action catalog for the slash-command path — built by the host with
+   * `buildPluginCatalog(actionPlugins)` from the SAME plugins that back the
+   * LLM `call_tool` tool. A plugin command's `def.action` is invoked against
+   * this catalog through the shared `invokeAction` core, so approval policy and
+   * arg validation stay identical to the tool path. Absent === plugin commands
+   * report that no catalog is available.
+   */
+  pluginCatalog?: import("./plugin-catalog.js").PluginCatalog;
+  /**
+   * Host approval hook for the slash-command path only. A plugin command whose
+   * action needs approval (`require_approval`) calls this instead of the
+   * turn-scoped decision gate — a command is not a claimed turn, so it cannot
+   * suspend one. Return a resolution with `actionId: "approve"` to proceed,
+   * `"pending"` when the decision is deferred, anything else to deny. Absent ===
+   * approval-requiring plugin commands are denied.
+   */
+  commandRequestDecision?: (
+    req: DecisionGateRequest,
+  ) => Promise<DecisionResolution>;
 }
 
 /**

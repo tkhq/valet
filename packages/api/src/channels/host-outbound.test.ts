@@ -226,6 +226,74 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("duplicate delivery test"))).toHaveLength(1);
   });
 
+  it("delivers a command_result to the channel the command came from", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const sessionId = session.id;
+    const threadId = session.thread("fake:99").id;
+
+    const entry = {
+      type: "command_result" as const,
+      id: "cmd-res-1",
+      sessionId,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      command: "/status",
+      source: "builtin" as const,
+      ok: true,
+      output: "**Queue** idle (0 pending)",
+    };
+    const event: BusEvent = {
+      sessionId,
+      threadId,
+      timestamp: Date.now(),
+      event: { type: "command_result", threadId, entry },
+    };
+    await eventStream.append(event, `cmd-1-${randomUUID()}`);
+    await eventStream.append(event, `cmd-2-${randomUUID()}`);
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Queue"))).toBe(true);
+    });
+    const hit = fakeTransport.sent.find((s) => s.message.markdown.includes("Queue"));
+    expect(hit?.message.markdown).toContain("/status");
+    // Dedup: the second append must not double-deliver.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("Queue"))).toHaveLength(1);
+  });
+
+  it("ignores command_result on non-channel threads", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const sessionId = session.id;
+    const threadId = session.thread("web:default").id;
+
+    const event: BusEvent = {
+      sessionId,
+      threadId,
+      timestamp: Date.now(),
+      event: {
+        type: "command_result",
+        threadId,
+        entry: {
+          type: "command_result",
+          id: "cmd-res-web",
+          sessionId,
+          threadId,
+          parentId: null,
+          createdAt: Date.now(),
+          command: "/help",
+          source: "builtin",
+          ok: true,
+          output: "web-only result",
+        },
+      },
+    };
+    await eventStream.append(event, `cmd-web-${randomUUID()}`);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-only result"))).toHaveLength(0);
+  });
+
   it("skips mid-turn assistant messages (message_end fires per-message, not just at turn end)", async () => {
     // message_end fires with reason "end_turn" for every non-abort assistant
     // message the engine persists, including mid-turn narration before a

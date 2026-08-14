@@ -12,6 +12,8 @@
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 import type { RepoListItem } from "@valet/sdk/repos";
+import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
+export type { CommandInfo, RegistryDiagnostic };
 
 // ── Common ────────────────────────────────────────────────────────────────
 
@@ -350,6 +352,17 @@ export interface MessageSignal {
   senderSessionId?: string;
 }
 
+/**
+ * Slash-command metadata on a `command_result` entry. Present only when
+ * `role === "system"` and the entry originated from a slash command.
+ * `name` is the command name without the leading slash.
+ */
+export interface MessageCommand {
+  name: string;
+  source: string;
+  ok: boolean;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -373,6 +386,18 @@ export interface Message {
    * as a card, never a user bubble (plan decision 3).
    */
   signal?: MessageSignal;
+  /**
+   * Present when this message is a `command_result` entry (slash-commands
+   * plan, Task 11). `name` is the command name without the leading slash.
+   * The renderer uses `ok` to show success/failure styling.
+   */
+  command?: MessageCommand;
+  /**
+   * Model that produced this entry (assistant messages). Gives the reply
+   * visible attribution so a model switch is verifiable in the transcript,
+   * not only in the header picker.
+   */
+  model?: string;
 }
 
 export interface ListMessagesResponse {
@@ -388,8 +413,11 @@ export interface SendPromptRequest {
 }
 
 export interface SendPromptResponse {
-  /** ID for client-side optimistic placeholder; the actual user-message row created server-side. */
-  messageId: string;
+  /**
+   * Queue item id for client-side optimistic linkage. `null` when the text
+   * executed as a slash command — commands never take a queue item.
+   */
+  messageId: string | null;
   threadId: string;
 }
 
@@ -580,6 +608,16 @@ export type WireEvent =
       state: string;
       epoch: number;
       estimateMs?: number;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "command_result";
+      /** Target thread id, if the command ran in a thread context. */
+      threadId?: string;
+      /** The completed command as a wire `Message` (role "system", content = output). */
+      message: Message;
     }
   | { seq: number; ts: number; offset?: string; type: "ping" };
 
@@ -1059,6 +1097,18 @@ export interface StoredSkillSummary extends SkillSummaryBase {
    */
   shadowed: boolean;
   updatedAt: number;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Absent when the skill uses the `"context"` default.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Present only on prompt-invocation skills that declare one.
+   */
+  argHint?: string;
 }
 
 export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
@@ -1081,8 +1131,13 @@ export interface ListSkillsResponse {
 export type GetSkillResponse = SkillSummary & { content: string };
 
 /** One stored skill, body included — what the create/read/update routes
- * return. */
-export type SkillResponse = StoredSkillSummary & { content: string };
+ * return.
+ *
+ * `editable` says whether THIS caller may write the row. A user or team row
+ * follows the caller's ownership; an org-library row is editable only for an
+ * org admin. A member reads an org row but gets `editable: false`, so the
+ * detail page shows the body read-only. */
+export type SkillResponse = StoredSkillSummary & { content: string; editable: boolean };
 
 export interface CreateSkillRequest {
   name: string;
@@ -1094,10 +1149,41 @@ export interface CreateSkillRequest {
    * caller. A non-member or unknown id 404s, same as any other cross-owner
    * access. */
   teamId?: string;
+  /** Create the skill for the org instead of for the caller.
+   * Requires the caller to be an org admin; a non-admin gets 403. */
+  ownerType?: "user" | "team" | "org";
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Must be `"context"` or `"prompt"` when present.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
 }
 
 /** Every field is optional; an absent field keeps its stored value. */
-export type UpdateSkillRequest = Partial<Omit<CreateSkillRequest, "teamId">>;
+export interface UpdateSkillRequest {
+  name?: string;
+  description?: string;
+  content?: string;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Must be `"context"` or `"prompt"` when present.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
+}
 
 export interface DeleteSkillResponse {
   ok: true;
@@ -1152,8 +1238,12 @@ export interface CreateSkillSourceRequest {
   ref?: string;
   subpath?: string;
   /** Track the repository for a team the caller belongs to instead of for
-   * the caller. A non-member or unknown id 404s. */
+   * the caller. A non-member or unknown id 404s. Mutually exclusive with
+   * `ownerType: "org"`. */
   teamId?: string;
+  /** Track the repository for the org instead of for the caller.
+   * Requires the caller to be an org admin; a non-admin gets 403. */
+  ownerType?: "user" | "team" | "org";
 }
 
 /** What a sync did. Returned by the create route too, because adding a
@@ -1243,6 +1333,16 @@ export interface PatchMeRequest {
 }
 
 export type PatchMeResponse = MeResponse;
+
+/** Org-level settings response for `PATCH /api/org/settings`. */
+export interface OrgSettingsResponse {
+  bareSkillCommands: boolean;
+}
+
+/** Org-level settings request for `PATCH /api/org/settings`. */
+export interface PatchOrgSettingsRequest {
+  bareSkillCommands?: boolean;
+}
 
 /** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
  * back-compat) — see `services/model-catalog.ts`. `active: false` marks a
@@ -1885,4 +1985,33 @@ export interface HealthResponse {
   /** Resolved sandbox backend (`docker` | `local` | `kubernetes`) the server
    * is running. Append-only; existing consumers ignore it. */
   sandboxBackend?: string;
+}
+
+// ── REST: slash commands (slash-commands plan, Task 10) ──────────────────
+//
+// `GET /api/sessions/:id/commands` — the merged command registry for a
+// session: built-ins, skills, user + repo templates, and plugin commands, plus
+// any registry diagnostics (name collisions, shadowed entries). `CommandInfo`
+// and `RegistryDiagnostic` are the engine's own registry shapes, forwarded
+// as-is.
+
+/** One enumerable completion for a command's first argument. */
+export interface CommandArgOption {
+  /** The literal text to insert (e.g. a model id). */
+  value: string;
+  /** Human-readable label shown beside the value (e.g. a model's display name). */
+  label?: string;
+}
+
+/**
+ * Engine `CommandInfo` plus wire-only argument completions. The registry
+ * itself is sync and cannot enumerate async sources (model ids need a DB +
+ * credential read), so the route attaches `argOptions` for the commands it
+ * knows how to enumerate.
+ */
+export type WireCommandInfo = CommandInfo & { argOptions?: CommandArgOption[] };
+
+export interface ListCommandsResponse {
+  commands: WireCommandInfo[];
+  diagnostics: RegistryDiagnostic[];
 }

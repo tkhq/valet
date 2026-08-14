@@ -1,10 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import type { SkillSummary } from "@valet/api/wire";
 import { useSkills } from "~/api/skills";
 import { Button, Spinner } from "~/components/primitives";
-import { SkillCard } from "~/components/skills/skill-card";
-import { SkillSourcesPanel } from "~/components/skills/skill-sources-panel";
-import { displayName } from "~/components/integrations/display-name";
+import { SkillGrid } from "~/components/skills/skill-grid";
 
 /**
  * `/skills` — markdown documents the assistant can pull into a turn. One
@@ -23,21 +20,17 @@ import { displayName } from "~/components/integrations/display-name";
  * reverted: 8 of the 9 plugins ship exactly one skill, so it produced 8
  * headed sections holding a single card each and stretched 11 items over
  * roughly nine screens. The origin belongs on the card, not in a header.
+ *
+ * The grid, its filter chips, the scope select, and the search box live in
+ * `SkillGrid`, so the org Library settings page reuses the same grid.
  */
 export const Route = createFileRoute("/skills/")({
   component: SkillsIndexPage,
 });
 
-/** Sorted by display name so the page order is stable whatever order the
- * server returns. */
-function sortByName(skills: SkillSummary[]): SkillSummary[] {
-  return [...skills].sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
-}
-
 export function SkillsIndexPage() {
   const { data, isLoading, error } = useSkills();
   const skills = data?.skills ?? [];
-  const sorted = sortByName(skills);
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -49,11 +42,16 @@ export function SkillsIndexPage() {
           </Button>
         </div>
 
-        <div className="mt-8">
-          <SkillSourcesPanel />
+        <div className="mt-6 text-sm">
+          <Link
+            to="/settings/library-sources"
+            className="text-moss underline-offset-2 hover:underline"
+          >
+            Manage sync sources in Settings →
+          </Link>
         </div>
 
-        <div className="mt-8 space-y-12">
+        <div className="mt-8">
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading skills…
@@ -64,21 +62,11 @@ export function SkillsIndexPage() {
               Could not load skills. Check that the server is running, then reload.
             </div>
           )}
-          {!isLoading && !error && skills.length === 0 && (
-            <div className="text-sm text-muted">
-              No skills yet. Write one, or ask your assistant to write one for you.
-            </div>
-          )}
-
-          {!isLoading && !error && sorted.length > 0 && (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {sorted.map((skill) => (
-                <SkillCard
-                  key={skill.origin === "plugin" ? `plugin:${skill.name}` : skill.id}
-                  skill={skill}
-                />
-              ))}
-            </div>
+          {!isLoading && !error && (
+            <SkillGrid
+              skills={skills}
+              emptyLabel="No skills yet. Write one, or ask your assistant to write one for you."
+            />
           )}
         </div>
       </div>

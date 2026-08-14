@@ -39,6 +39,7 @@ import { modelsRouter } from "./routes/models.js";
 import { usageRouter } from "./routes/usage.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
+import { orgSettingsRouter } from "./routes/org-settings.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
@@ -230,6 +231,7 @@ export function createApp(
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/org", orgRouter);
+  app.route("/api/org/settings", orgSettingsRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/github-app", githubAppRouter);

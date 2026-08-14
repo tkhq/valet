@@ -1,5 +1,6 @@
 import type {
   BranchSummaryEntry,
+  CommandResultEntry,
   CompactionEntry,
   DecisionGate,
   DecisionGateEntry,
@@ -54,6 +55,18 @@ export function asString(value: unknown, field: string): string {
 
 export function asStringOrNull(value: unknown, field: string): string | null {
   return value === null || value === undefined ? null : asString(value, field);
+}
+
+/**
+ * Validates and narrows a string into a valid CommandSource enum value.
+ * Invalid values fall back to "builtin".
+ */
+export function asCommandSource(value: unknown): CommandResultEntry["source"] {
+  const validSources: CommandResultEntry["source"][] = ["builtin", "skill", "plugin"];
+  if (typeof value === "string" && validSources.includes(value as CommandResultEntry["source"])) {
+    return value as CommandResultEntry["source"];
+  }
+  return "builtin";
 }
 
 /** Raw column shape of a `SELECT * FROM engine_entries` row. */
@@ -230,6 +243,19 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
         resolution: jsonOrNull(entry.resolution),
         withdrawnReason: entry.withdrawnReason ?? null,
       };
+    case "command_result":
+      // command, source, ok, and output stored in metadata as opaque JSON
+      // per Task 8 design (no dedicated columns needed).
+      return {
+        ...base,
+        content: entry.output,
+        metadata: JSON.stringify({
+          ...(entry.metadata ?? {}),
+          command: entry.command,
+          source: entry.source,
+          ok: entry.ok,
+        }),
+      };
   }
 }
 
@@ -308,6 +334,25 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         resolvedAt: row.resolvedAt ?? undefined,
         resolution: parseJson(row.resolution),
         withdrawnReason: (row.withdrawnReason as DecisionGateEntry["withdrawnReason"]) ?? undefined,
+        metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
+        createdAt: row.createdAt,
+        queueItemId: row.queueItemId ?? undefined,
+      };
+      return e;
+    }
+    case "command_result": {
+      const meta = parseJson<{ command: string; source: string; ok: boolean } & Record<string, unknown>>(row.metadata);
+      const { command, source, ok, ...userMeta } = meta ?? {};
+      const e: CommandResultEntry = {
+        id: row.id,
+        sessionId: row.sessionId,
+        threadId: row.threadId,
+        parentId: row.parentId,
+        type: "command_result",
+        command: command ?? "",
+        source: asCommandSource(source),
+        ok: ok ?? false,
+        output: row.content ?? "",
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
         queueItemId: row.queueItemId ?? undefined,
