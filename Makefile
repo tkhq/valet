@@ -113,7 +113,8 @@ dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@echo "$(GREEN)Starting @valet/api on :8788$(NC)"
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
-	cd packages/api && VALET_LOCAL_AUTH=1 PORT=8788 $(PNPM) run dev
+	if [ -z "$$BETTER_AUTH_SECRET" ] && [ -z "$$VALET_LOCAL_AUTH" ]; then export VALET_LOCAL_AUTH=1; fi; \
+	cd packages/api && PORT=8788 $(PNPM) run dev
 
 dev-web: ## Start the new web client (@valet/web) on :5173
 	@echo "$(GREEN)Starting @valet/web on :5173 (proxy → :8788)$(NC)"
@@ -141,6 +142,8 @@ dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO p
 	@echo "  AUTH_OIDC_DOMAIN=valet.test"
 	@echo "  AUTH_OIDC_NAME=Keycloak"
 	@echo "  AUTH_TRUSTED_ORIGINS=http://localhost:8081  # sso plugin trusts the issuer's discovery URL"
+	@echo "$(YELLOW)Comment out VALET_LOCAL_AUTH in .env first$(NC) — the stub identity is an admin, so"
+	@echo "the api refuses to boot with real auth and the stub together."
 	@echo "Test users: alice@valet.test / bob@valet.test, password 'password'"
 
 dev-keycloak-down: ## Stop the local Keycloak container

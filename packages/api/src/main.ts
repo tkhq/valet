@@ -20,7 +20,7 @@ import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
 import type { Providers } from "./providers/types.js";
-import { loadAuthConfig } from "./auth/config.js";
+import { authModeConflict, loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
 import { buildAuth } from "./auth/index.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
@@ -131,6 +131,15 @@ if (!anthropicApiKey) {
   process.exit(1);
 }
 
+// Stub auth next to real auth is a privilege escalation, not a preference:
+// the stub identity is an admin, so the ladder's stub rung would answer every
+// credential-less request with admin access. Refuse the pair at boot.
+const authConflict = authModeConflict(process.env);
+if (authConflict) {
+  console.error(authConflict);
+  process.exit(1);
+}
+
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;
 
 // Real auth (auth-v2 design): only wired when BETTER_AUTH_SECRET resolves a
@@ -170,11 +179,9 @@ const providers = await buildNodeProviders({
   sandboxApiUrl,
   // Real auth configured → skip seeding the local-dev identity so the
   // "zero users → first signup becomes admin" provisioning rule can fire
-  // (see `NodeProviderOpts.seedLocalIdentity`). EXCEPT when the stub auth
-  // rung is also enabled: `VALET_LOCAL_AUTH=1` makes the middleware resolve
-  // session-less requests to `local-user`, and an unseeded stub identity
-  // 404s every route that joins the `users` table (`/api/me`, org routes).
-  seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig, process.env),
+  // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
+  // here — the boot check above refuses that pair.
+  seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
@@ -403,6 +410,14 @@ function installSignalShutdown(handle: ServerHandle): void {
 // bundle), true only when main.ts is itself the script being run.
 const entryHref = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (import.meta.url === entryHref && /\/main\.(ts|js|mjs)$/.test(import.meta.url)) {
-  const handle = await startServer();
-  installSignalShutdown(handle);
+  // A boot rejection (e.g. `loadAuthConfig` on a half-configured provider)
+  // carries the corrective action in its message. Print that message and
+  // exit 1 — an unhandled rejection buries it under a stack trace.
+  try {
+    const handle = await startServer();
+    installSignalShutdown(handle);
+  } catch (err) {
+    console.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }

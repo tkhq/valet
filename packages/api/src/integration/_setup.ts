@@ -81,12 +81,14 @@ export interface BootTestApiOpts {
   plugins?: ValetPlugin[];
   /**
    * Boots with a real better-auth instance instead of stub-only mode: sets
-   * `BETTER_AUTH_SECRET=test-secret` (restored on `cleanup()`) so
-   * `loadAuthConfig` resolves, then wires `buildAuthHooks` + `buildAuth`
-   * into `createApp` exactly as `main.ts` does. Every other caller stays
-   * untouched — `BETTER_AUTH_SECRET` is unset by default, so `createApp`
-   * gets no `auth`/`authConfig` and runs stub-only, same as before this
-   * option existed.
+   * `BETTER_AUTH_SECRET=test-secret` and unsets `VALET_LOCAL_AUTH` (both
+   * restored on `cleanup()`) so `loadAuthConfig` resolves and the stub rung
+   * stays off, then wires `buildAuthHooks` + `buildAuth` into `createApp`
+   * exactly as `main.ts` does. A credential-less request therefore 401s here
+   * the way it does in production. Every other caller stays untouched —
+   * `BETTER_AUTH_SECRET` is unset by default and `VALET_LOCAL_AUTH=1` stays
+   * on, so `createApp` gets no `auth`/`authConfig` and runs stub-only, same
+   * as before this option existed.
    */
   auth?: boolean;
   /** Passed through to `createApp`'s `CreateAppOpts.webDistDir` — route
@@ -184,15 +186,23 @@ async function getFreePort(): Promise<number> {
 
 export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
-  process.env.VALET_LOCAL_AUTH = "1";
   // Test-only: enables the `x-valet-test-user-id` impersonation header in
   // authMiddleware. Never set this outside the test bootstrap (see
   // packages/api/src/middleware/auth.ts).
   process.env.VALET_TEST_AUTH_HEADER = "1";
 
   const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
+  const prevLocalAuth = process.env.VALET_LOCAL_AUTH;
   if (opts.auth) {
     process.env.BETTER_AUTH_SECRET = "test-secret";
+    // Stub auth and real auth are mutually exclusive — the boot check in
+    // `main.ts` refuses the pair. A real-auth test must see production's
+    // answer to a credential-less request (401), so the stub var comes OFF
+    // here and is restored on `cleanup()`. Stub-mode callers keep the
+    // stub + `x-valet-test-user-id` contract unchanged.
+    delete process.env.VALET_LOCAL_AUTH;
+  } else {
+    process.env.VALET_LOCAL_AUTH = "1";
   }
 
   const { pgdb, appDb: db } = await freshTestPgDb();
@@ -433,6 +443,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (opts.auth) {
         if (prevAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
         else process.env.BETTER_AUTH_SECRET = prevAuthSecret;
+        if (prevLocalAuth === undefined) delete process.env.VALET_LOCAL_AUTH;
+        else process.env.VALET_LOCAL_AUTH = prevLocalAuth;
       }
     },
   };

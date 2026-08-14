@@ -74,8 +74,13 @@ export interface BuildAuthMiddlewareOpts {
  *      resolves → `c.var.user`.
  *   4. `auth` configured and `x-api-key` present → `verifyApiKey`; invalid
  *      401s (same "explicit credential beats fallback" rule as #2).
- *   5. `VALET_LOCAL_AUTH=1` → stub identity (+ `VALET_TEST_AUTH_HEADER`
- *      impersonation), verbatim from the pre-ladder implementation.
+ *   5. No `auth` instance AND `VALET_LOCAL_AUTH=1` → stub identity (+
+ *      `VALET_TEST_AUTH_HEADER` impersonation). The stub and real auth are
+ *      mutually exclusive: the stub identity is a seeded ADMIN, so a stub
+ *      rung that fired next to a real auth instance would answer every
+ *      credential-less request with admin access instead of 401. `main.ts`
+ *      refuses to boot that pair; this rung's `auth` check keeps the
+ *      escalation impossible for every other caller of the factory.
  *   6. 401 `{ error: "unauthorized" }`.
  *
  * Test-only escape hatch: an `x-valet-test-user-id` header (rung 5) swaps
@@ -177,8 +182,10 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       }
     }
 
-    // 5. Stub auth.
-    if (process.env.VALET_LOCAL_AUTH === "1") {
+    // 5. Stub auth. Gated on the ABSENCE of a real auth instance, not on the
+    // env var alone: `LOCAL_USER` is an admin, so a stub rung that stayed
+    // live under real auth would grant admin to any credential-less request.
+    if (!auth && process.env.VALET_LOCAL_AUTH === "1") {
       const testUserId = process.env.VALET_TEST_AUTH_HEADER === "1" ? c.req.header("x-valet-test-user-id") : undefined;
       if (testUserId) {
         const testRows = await db.select().from(users).where(eq(users.id, testUserId)).limit(1);
