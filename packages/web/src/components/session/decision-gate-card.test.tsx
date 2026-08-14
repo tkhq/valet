@@ -79,6 +79,11 @@ describe("DecisionGateCard — policy provenance", () => {
     expect(screen.getByTestId("gate-provenance").textContent).toBe("Gated by an org policy.");
   });
 
+  it("renders the personal-override line for source 'override' (the engine's actual value)", () => {
+    renderCard(gate({ provenance: { baseMode: "require_approval", source: "override", matchedOverrideId: "apo_1" } }));
+    expect(screen.getByTestId("gate-provenance").textContent).toBe("Gated by your personal policy override.");
+  });
+
   it("renders nothing extra when provenance is absent", () => {
     renderCard();
     expect(screen.queryByTestId("gate-provenance")).toBeNull();

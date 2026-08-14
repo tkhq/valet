@@ -587,7 +587,7 @@ describe("policyResolver seam: invocation record discriminators", () => {
 // ── Reserved gate action ids ────────────────────────────────────────
 
 describe("policyResolver seam: reserved extraGateActions ids", () => {
-  it("throws when a host extra action reuses id 'approve'", async () => {
+  it("returns a controlled error (no crash, no gate) when a host extra action reuses id 'approve'", async () => {
     const { resolver } = makeResolver({
       decision: {
         mode: "require_approval",
@@ -596,15 +596,17 @@ describe("policyResolver seam: reserved extraGateActions ids", () => {
       },
     });
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
-    await expect(
-      callTool.execute(
-        { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
-        makeCtx({ policyResolver: resolver }),
-      ),
-    ).rejects.toThrow(/reserved/i);
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    // A host-config bug fails closed as a rendered error — never a throw
+    // through the tool/command path, never an opened gate.
+    expect(result.text).toMatch(/reserved/i);
+    expect(result.text).toContain("policy misconfiguration");
   });
 
-  it("throws when a host extra action reuses id 'deny'", async () => {
+  it("returns a controlled error (no crash, no gate) when a host extra action reuses id 'deny'", async () => {
     const { resolver } = makeResolver({
       decision: {
         mode: "require_approval",
@@ -613,11 +615,13 @@ describe("policyResolver seam: reserved extraGateActions ids", () => {
       },
     });
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
-    await expect(
-      callTool.execute(
-        { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
-        makeCtx({ policyResolver: resolver }),
-      ),
-    ).rejects.toThrow(/reserved/i);
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    // A host-config bug fails closed as a rendered error — never a throw
+    // through the tool/command path, never an opened gate.
+    expect(result.text).toMatch(/reserved/i);
+    expect(result.text).toContain("policy misconfiguration");
   });
 });

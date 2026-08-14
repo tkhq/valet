@@ -471,6 +471,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
 export async function updateInvocationOutcome(
   db: AppDb,
   invocationId: string,
+  orgId: string,
   outcome: {
     status: "completed" | "error";
     result?: unknown;
@@ -493,7 +494,10 @@ export async function updateInvocationOutcome(
         error,
         durationMs: outcome.durationMs ?? null,
       })
-      .where(eq(actionInvocations.invocationId, invocationId));
+      // Org-scoped: `invocationId` embeds the workflow node id, which the
+      // workflow AUTHOR controls — without the orgId predicate a crafted
+      // node id could collide with (and overwrite) another org's row.
+      .where(and(eq(actionInvocations.invocationId, invocationId), eq(actionInvocations.orgId, orgId)));
   } catch (err) {
     console.error(`policy audit outcome update failed for invocation ${invocationId}:`, err);
   }

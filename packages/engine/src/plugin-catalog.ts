@@ -347,13 +347,17 @@ export async function invokeAction(
     // Reject reserved ids up front: "approve"/"deny" are the engine's own
     // default gate actions (added below), so a host extra reusing one would
     // silently collide with — or shadow — the built-in approve/deny
-    // semantics.
+    // semantics. A host-config bug must NOT crash the tool/command path —
+    // return a controlled error outcome (fails closed: the action never
+    // runs, no gate opens) instead of throwing through execute().
     for (const extra of decision.extraGateActions ?? []) {
       if (extra.id === "approve" || extra.id === "deny") {
-        throw new Error(
-          `PolicyDecision.extraGateActions: id "${extra.id}" is reserved for the ` +
-            `engine's built-in approve/deny actions and cannot be reused by a host action`,
-        );
+        return {
+          kind: "error",
+          message:
+            `policy misconfiguration: PolicyDecision.extraGateActions id "${extra.id}" is reserved ` +
+            `for the engine's built-in approve/deny actions and cannot be reused by a host action`,
+        };
       }
     }
     // Strip `approves` before the gate — the gate only understands

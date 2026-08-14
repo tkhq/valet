@@ -338,8 +338,9 @@ export interface DecisionAction {
  * Why a policy-driven approval gate opened — the typed subset of the engine
  * gate's `context.provenance` (the raw `context` stays engine-only). Same
  * vocabulary as `ActionLogEntryWire`; `source` names the winning precedence
- * rung (`org_policy` / `user_override` / `plugin_default` / `risk_default` /
- * `resolver_error`). Absent for gates that did not come from the policy
+ * rung — the engine's `PolicyProvenanceSource` values: `org_policy` /
+ * `runtime_grant` / `override` / `plugin_default` / `risk_default` /
+ * `resolver_error`. Absent for gates that did not come from the policy
  * resolver.
  */
 export interface DecisionGateProvenance {

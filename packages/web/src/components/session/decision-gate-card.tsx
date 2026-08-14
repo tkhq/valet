@@ -191,11 +191,14 @@ export function DecisionGateCard({
  * rungs link nowhere from here (the Action Log carries the row links); this
  * is the live "why" the spec's decision 4 promised. */
 function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
+  // Cases mirror the engine's `PolicyProvenanceSource` values exactly.
   switch (p.source) {
     case "org_policy":
       return "Gated by an org policy.";
-    case "user_override":
+    case "override":
       return "Gated by your personal policy override.";
+    case "runtime_grant":
+      return "Gated by a session grant.";
     case "plugin_default":
       return "Gated by the plugin's default approval mode.";
     case "risk_default":

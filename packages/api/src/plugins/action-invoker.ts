@@ -224,7 +224,9 @@ async function computeResult(
   // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
   // canonical id matches both the session and workflow paths.
   const policyActionId = qualifiedActionId(req.service, action);
-  const audited = Boolean(ctx.orgId && ctx.workflowExecutionId);
+  // Set only when enforceWorkflowPolicy wrote a decision row (org + run
+  // context present); also the org scope for the outcome-stamp UPDATE.
+  const auditOrgId = ctx.orgId && ctx.workflowExecutionId ? ctx.orgId : undefined;
   const denial = await enforceWorkflowPolicy(
     opts,
     req,
@@ -237,8 +239,8 @@ async function computeResult(
 
   const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) {
-    if (audited) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, {
+    if (auditOrgId) {
+      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
         status: "error",
         error: `invalid params: ${prepared.error}`,
       });
@@ -258,8 +260,8 @@ async function computeResult(
     result = await action.execute(prepared.args as Static<typeof action.parameters>, actionCtx);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (audited) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, {
+    if (auditOrgId) {
+      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
         status: "error",
         error: message,
         durationMs: (opts.clock ?? Date.now)() - startedAt,
@@ -273,8 +275,8 @@ async function computeResult(
   // fixed: workflow rows now carry the result, size-capped by the updater).
   // `result` is the full `PluginActionResult` — the same shape the session
   // path's `PolicyInvocationRecord.result` carries.
-  if (audited) {
-    await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, {
+  if (auditOrgId) {
+    await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
       status: result.success ? "completed" : "error",
       result,
       error: result.success ? undefined : (result.error ?? "failed with no error detail"),

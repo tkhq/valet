@@ -139,3 +139,22 @@ The original branch stalled while dev-v2 moved ~230 commits (slash commands, eve
 3. **`InvokeActionResult.denied-approval` gained `reason?: "approval-processing-failed"`** so an `onResolution` throw renders its distinct fail-closed message through the shared outcome union instead of a bespoke `ToolResult`.
 4. **`grantActions` threads through `resolveWorkflowApproval`** (`workflows/service.ts`) rather than the route building the signal inline — dev-v2 moved signal construction into the service; the field rides the service input into the same payload position.
 5. **`PluginServiceSummary` keeps dev-v2's `connect`/`toolCount` fields beside the new `actions` list**; test fixtures were updated to carry all three.
+
+### Adversarial mergeability review (2026-08-14)
+
+Three independent adversarial reviewers (engine contract, policy security, integration/UI) attacked the full diff. Findings and dispositions:
+
+**Fixed in the review-fix commit:**
+
+1. **The slash-command path never received the resolver.** `Session.buildCommandToolContext` omitted `policyResolver`, so command-invoked plugin actions bypassed policy and audit entirely — the re-port's "same enforcement" claim was false. Fixed: the command context threads `options.policyResolver`. Commands run outside the queue, so `queueItemId` is absent there; gated command audits key on the empty turn scope, matching their gate-ordinal scoping.
+2. **A reserved `extraGateActions` id ("approve"/"deny") threw through `execute()`,** crashing the tool call (and the command path) instead of failing closed. Fixed: it now returns a controlled `{ kind: "error" }` outcome — no gate opens, the action never runs, both paths render the message.
+3. **`updateInvocationOutcome` updated by `invocationId` with no org scope.** The id embeds the workflow node id, which the workflow author controls, so a crafted node id could overwrite another org's audit row. Fixed: the UPDATE is org-scoped.
+4. **The gate card's provenance switch matched `user_override` (a value the engine never emits — the real value is `override`) and had no `runtime_grant` case.** Fixed, with the wire doc comment corrected to the engine's actual `PolicyProvenanceSource` vocabulary and a card test on the real value.
+
+**Reviewed and accepted (disclosed, not defects):**
+
+5. **Workflow `grantActions` lets the approval-node resolver (any authorized run owner, not only admins) grant `require_approval` actions for the rest of the run.** This parallels the session path's `approve_session` (also non-admin): both are interactive human approvals; org `deny` dominates grants at rung 0 either way, and grants die with the run. Accepted as designed; tightening (admin-only grants, or bounding grants to actions present in the definition) is backlog.
+6. **`revokeSessionGrants`/`revokeExecutionGrants` filter on session/run id without an org predicate.** Both ids are server-minted with no attacker-controllable input, and revocation only ever tightens. Accepted.
+7. **`findCatalogAction` returns the first plugin matching a duplicate BARE action id**, which can mis-attribute the service in an override bounds-check error message. Invocation-time resolution (rung 0 deny included) is authoritative and unaffected. Accepted as a nit.
+8. **`PluginActionContext.actionId` still mirrors raw `PluginAction.id`** (possibly bare) while the policy/audit actionId is the fqid — intentional (the context field is documented as mirroring the plugin's own id); plugins must not treat it as the policy id.
+9. **After a restart replay, continuation-phase tool calls run with no `runningItem`,** so their audit rows carry no `queueItemId`. Gate ordinals in that state are scoped to the same empty key and stay monotonic per resumeKey, so audit ids remain unique and replay dedup still holds — the cost is turn attribution on those rows, not correctness.
