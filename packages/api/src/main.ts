@@ -365,7 +365,7 @@ const webDistDir = webDistPath();
 const adapter = await selectServerAdapter();
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
-const { app, startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
+const { startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
 // silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.

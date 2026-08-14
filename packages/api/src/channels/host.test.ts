@@ -5,7 +5,6 @@ import {
   VirtualSandboxProvider,
   orchestratorSessionId,
   type ChannelTransport,
-  type GatePromptRef,
   type InboundChannelEvent,
   type OutboundChannelMessage,
   type ValetPlugin,

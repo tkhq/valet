@@ -354,6 +354,3 @@ actionLogRouter.get("/", async (c) => {
   };
   return c.json(resp);
 });
-
-export type PoliciesRouter = typeof policiesRouter;
-export type ActionLogRouter = typeof actionLogRouter;

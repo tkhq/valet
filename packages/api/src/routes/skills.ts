@@ -40,7 +40,6 @@ import {
   deleteSkill,
   isAuthorizedFor,
   listSkills,
-  ownedSkillRow,
   readableSkillRow,
   SkillNameConflictError,
   SkillNotLocalError,

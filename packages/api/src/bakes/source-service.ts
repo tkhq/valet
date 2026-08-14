@@ -310,7 +310,6 @@ async function resolveApiTokenOrNull(
   }
 }
 
-const NIGHTLY_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
 /** Decay window (spec decision 13): a repo source with no live binding and a

@@ -15,7 +15,6 @@
 import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
-  orchestratorSessionId,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,

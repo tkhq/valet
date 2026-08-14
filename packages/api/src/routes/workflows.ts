@@ -298,5 +298,3 @@ workflowsRouter.post("/runs/:runId/cancel", async (c) => {
   const resp: CancelWorkflowRunResponse = { ok: true };
   return c.json(resp);
 });
-
-export type WorkflowsRouter = typeof workflowsRouter;

@@ -59,7 +59,7 @@
  * the missing/unhealthy credential (the GAP), never the secret.
  */
 import { and, eq } from "drizzle-orm";
-import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
+import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import { githubInstallations } from "../schema/index.js";
 import { resolveGithubUrl } from "./github-env.js";
 import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
@@ -422,11 +422,6 @@ async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string
  * genuinely uninstalled App doesn't hammer GitHub on every tool call). */
 const lastLazyDiscovery = new Map<string, number>();
 const LAZY_DISCOVERY_MIN_INTERVAL_MS = 60_000;
-
-/** Test-only: reset the lazy-discovery throttle between tests. */
-export function _resetLazyDiscoveryThrottleForTests(): void {
-  lastLazyDiscovery.clear();
-}
 
 async function ensureInstallationsSynced(deps: GitHubTokenDeps, orgId: string): Promise<void> {
   const rows = await deps.db

@@ -165,5 +165,3 @@ adminRouter.post("/submissions/:sessionId/:itemId/force-settle", async (c) => {
   };
   return c.json(resp, 200);
 });
-
-export type AdminRouter = typeof adminRouter;

@@ -1,10 +1,6 @@
 import { completeSimple } from "@mariozechner/pi-ai";
 import type { Message, Model } from "@mariozechner/pi-ai";
-import type {
-  CompactionConfig,
-  MessageEntry,
-  SessionEntry,
-} from "./types.js";
+import type { CompactionConfig, SessionEntry } from "./types.js";
 
 /**
  * Compaction primitives — all pure functions. Orchestration that calls an

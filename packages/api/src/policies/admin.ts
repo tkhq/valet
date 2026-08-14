@@ -22,7 +22,7 @@ import {
   type ActionPolicyRow,
   type RuntimeGrantRow,
 } from "../schema/index.js";
-import { validateParamMatchers, type ParamMatcher } from "./matchers.js";
+import { type ParamMatcher } from "./matchers.js";
 import { grantPolicyKey, resolvePolicyDecision, type PolicyResolutionRows } from "./resolution.js";
 import { loadPolicyRows } from "./service.js";
 

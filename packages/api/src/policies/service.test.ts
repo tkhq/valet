@@ -8,7 +8,7 @@
  * ONE PGlite instance per process (wasm heap isn't reliably freed on close).
  */
 import { PGlite } from "@electric-sql/pglite";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pgDbFromPglite } from "@valet/store-postgres";
 import type { DecisionResolution, PolicyInvocationRecord, PolicyResolveInput } from "@valet/engine";
@@ -18,7 +18,6 @@ import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
   buildPolicyResolver,
-  capAuditField,
   gatedAuditId,
   loadPolicyRows,
   persistInvocationAudit,

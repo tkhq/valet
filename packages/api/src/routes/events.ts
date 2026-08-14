@@ -396,5 +396,3 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
 
   return c.body(null, 204);
 });
-
-export type EventsRouter = typeof eventsRouter;

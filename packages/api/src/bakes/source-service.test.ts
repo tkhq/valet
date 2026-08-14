@@ -826,8 +826,6 @@ describe("SourceService", () => {
       // Override the service with a builder that reports a specific size via
       // registryInsecure=true so the k8s path would be exercised — but here we
       // just verify the DB write fires when measureBakeSize resolves a number.
-      // We inject a custom spawn that returns a known byte count.
-      const { spawn: realSpawn } = await import("node:child_process");
       // Use a fake measureBakeSize by monkey-patching the module — instead,
       // just verify the column is written by using the docker builder path with
       // a known-good docker inspect stub.

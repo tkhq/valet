@@ -23,7 +23,6 @@ import type {
   PauseSessionResponse,
   RepoBinding,
   SandboxJwtResponse,
-  SessionDetail,
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
@@ -514,5 +513,3 @@ sessionsRouter.delete("/:id", async (c) => {
 
   return c.json({ ok: true });
 });
-
-export type SessionsRouter = typeof sessionsRouter;

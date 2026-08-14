@@ -25,7 +25,6 @@ import type {
   ListThreadsResponse,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
-  PatchThreadResponse,
   PauseSessionResponse,
   ResolveDecisionRequest,
   SandboxJwtResponse,
@@ -151,21 +150,6 @@ export function useSetSessionModel(sessionId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
-    },
-  });
-}
-
-export function useSetThreadModel(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<
-    PatchThreadResponse,
-    Error,
-    { threadId: string; model: string | null }
-  >({
-    mutationFn: ({ threadId, model }) =>
-      api.patchThread(sessionId, threadId, { model }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
     },
   });
 }

@@ -92,5 +92,3 @@ orgInvitesRouter.delete("/:id", async (c) => {
   const resp: RevokeInviteResponse = { ok: true };
   return c.json(resp);
 });
-
-export type OrgInvitesRouter = typeof orgInvitesRouter;

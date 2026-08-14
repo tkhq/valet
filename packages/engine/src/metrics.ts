@@ -78,11 +78,6 @@ function inst(): Instruments {
   return instruments;
 }
 
-/** Test seam: drop the cached instruments so a freshly-registered provider is picked up. */
-export function resetMetricsForTest(): void {
-  instruments = null;
-}
-
 export function recordTurn(args: {
   model?: string;
   reason: string;
