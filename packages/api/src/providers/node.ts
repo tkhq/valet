@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSpawner, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";

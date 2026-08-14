@@ -56,8 +56,6 @@ import type {
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
-  WorkflowRunOutcome,
-  WorkflowRunStatus,
   WorkflowWebhookResponse,
 } from "../wire/types.js";
 
