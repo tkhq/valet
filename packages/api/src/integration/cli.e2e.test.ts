@@ -170,19 +170,22 @@ async function spawnServe(): Promise<ServeHandle> {
   const dataDir = mkdtempSync(join(tmpdir(), "valet-cli-e2e-serve-"));
   const url = `http://localhost:${port}`;
 
+  const serveEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    VALET_LOCAL_AUTH: "1",
+    // Non-empty so startServer()'s boot gate passes; the real key (when
+    // present) flows through and enables the turn sub-group.
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "sk-ant-e2e-placeholder-not-real",
+  };
+  // This serve is a STUB-auth serve. An ambient BETTER_AUTH_SECRET in the
+  // runner's shell would pair real auth with the stub above, which
+  // `startServer` refuses to boot (see auth/config.ts's authModeConflict).
+  delete serveEnv.BETTER_AUTH_SECRET;
+
   const child = spawn(
     tsxBin,
     [cliEntry, "serve", "--port", String(port), "--data-dir", dataDir, "--sandbox", "local"],
-    {
-      cwd: apiRoot,
-      env: {
-        ...process.env,
-        VALET_LOCAL_AUTH: "1",
-        // Non-empty so startServer()'s boot gate passes; the real key (when
-        // present) flows through and enables the turn sub-group.
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "sk-ant-e2e-placeholder-not-real",
-      },
-    },
+    { cwd: apiRoot, env: serveEnv },
   );
 
   let buf = "";

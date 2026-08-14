@@ -107,6 +107,10 @@ async function spawnApi(opts: {
   };
   if (opts.crashAt) env.WF_CRASH_AT = opts.crashAt;
   else delete env.WF_CRASH_AT;
+  // This api runs on STUB auth. An ambient BETTER_AUTH_SECRET in the runner's
+  // shell would pair real auth with the stub above, which `startServer`
+  // refuses to boot (see auth/config.ts's authModeConflict).
+  delete env.BETTER_AUTH_SECRET;
 
   const child = spawn(process.execPath, ["--import", "tsx", MAIN], {
     cwd: API_ROOT,

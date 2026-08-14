@@ -31,7 +31,7 @@ stub applies. Provider variable pairs are all-or-none.
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | GitHub social login |
-| `VALET_LOCAL_AUTH` | `1` → stub identity for local dev (only when real auth is not configured) |
+| `VALET_LOCAL_AUTH` | `1` → stub identity for local dev. Mutually exclusive with `BETTER_AUTH_SECRET` — the server refuses to boot when both are set |
 | `VALET_SANDBOX_JWT_MASTER` | Master key for per-session sandbox gateway JWT secrets (falls back to `BETTER_AUTH_SECRET`) |
 | `VALET_INTERNAL_TOKEN` | Token for the server's internal self-calls (generated if unset) |
 

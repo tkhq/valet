@@ -122,29 +122,24 @@ export interface NodeProviderOpts {
   /**
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
-   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set) AND
-   * the stub rung is off: `evaluateAdmission`'s "zero users → first signup
-   * becomes admin" rule (`auth/provisioning.ts`) never fires if a local user
-   * is pre-seeded, so a fresh real deployment could never mint its first
-   * admin and every real signup would land in the seeded "Local Dev" org.
-   * But when `VALET_LOCAL_AUTH=1` is ALSO set, the middleware's stub rung
-   * resolves session-less requests to `local-user` — an unseeded stub
-   * identity 404s every `users`-joining route, so seeding is mandatory then.
-   * `shouldSeedLocalIdentity` encodes this decision; `main.ts` calls it.
+   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
+   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
+   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * fresh real deployment could never mint its first admin and every real
+   * signup would land in the seeded "Local Dev" org. The stub identity is an
+   * admin, so seeding it next to real auth also leaves an admin row nobody
+   * signed up for. `shouldSeedLocalIdentity` encodes this decision;
+   * `main.ts` calls it.
    */
   seedLocalIdentity?: boolean;
 }
 
 /**
- * Whether boot should seed `local-user`/`local-org`. True unless real auth
- * is configured WITHOUT the stub rung — the only mode where an unseeded db
- * is coherent (see `NodeProviderOpts.seedLocalIdentity`).
+ * Whether boot should seed `local-user`/`local-org`. Real auth configured →
+ * never (see `NodeProviderOpts.seedLocalIdentity`).
  */
-export function shouldSeedLocalIdentity(
-  authConfigured: boolean,
-  env: { VALET_LOCAL_AUTH?: string } = process.env,
-): boolean {
-  return !authConfigured || env.VALET_LOCAL_AUTH === "1";
+export function shouldSeedLocalIdentity(authConfigured: boolean): boolean {
+  return !authConfigured;
 }
 
 export const LOCAL_USER = {
