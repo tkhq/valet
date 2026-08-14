@@ -250,6 +250,41 @@ export class SandboxAttachment {
   }
 
   /**
+   * User-requested sandbox replacement: tear down the current sandbox and
+   * re-provision a fresh one at a bumped epoch with the same persisted
+   * `createOpts`. Mirrors the image-drift replace path in `doReconcile`
+   * (epoch bump, handle drop, release-else-destroy) but is caller-driven.
+   * Resolves once the re-provision settles; rejects when the attachment is
+   * destroyed, has no provider, or a provision is already in flight.
+   */
+  async replace(): Promise<void> {
+    if (this.destroyed) {
+      throw new Error("sandbox attachment destroyed; the session is being torn down");
+    }
+    if (this.noProvider || !this.provider) {
+      throw new Error("attachment has no provider; nothing to re-provision with");
+    }
+    if (this.inFlight || this._state === "provisioning") {
+      throw new Error("sandbox is provisioning. Wait for it to finish, then retry.");
+    }
+
+    const oldSandbox = this._sandbox;
+    const provider = this.provider;
+    this._epoch += 1;
+    this._sandbox = null;
+    this.observation = null;
+    this._state = "provisioning";
+    if (oldSandbox) {
+      void (provider.release
+        ? provider.release(oldSandbox.id)
+        : provider.destroy(oldSandbox.id)
+      ).catch(() => {});
+    }
+    this.kickProvision();
+    if (this.inFlight) await this.inFlight.catch(() => {});
+  }
+
+  /**
    * Await a ready sandbox, bounded by `opts.timeoutMs`. Kicks provisioning
    * if not already in flight. A timeout rejects the caller's wait only —
    * it does not change attachment state (a timeout is not degradation).
