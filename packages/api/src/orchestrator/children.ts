@@ -30,9 +30,12 @@ import {
   type SubmissionResult,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, type ChildWatchRow } from "../schema/index.js";
+import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { computeTargetDirs } from "../engine/workspace-prep.js";
+import type { RepoBinding } from "../wire/types.js";
+import type { SourceService } from "../bakes/source-service.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
@@ -46,6 +49,13 @@ export interface ChildrenDeps {
   db: AppDb;
   engineHost: EngineHost;
   engineStore: SessionStore;
+  /**
+   * Zero-config repo image sources (sandbox-reconcile spec decision 13). A
+   * spawn with `req.repo` upserts the repo's image source and touches
+   * `last_bound_at`, mirroring the REST session-create route. `ChildWatcher`
+   * never uses it.
+   */
+  prebuildService: SourceService;
   /**
    * Directory under which per-child workspaces are created
    * (`{workspaceRoot}/{childSessionId}`, mkdir'd at spawn). Defaults to
@@ -71,6 +81,30 @@ export class ChildLimitError extends Error {
 
 function newChildSessionId(): string {
   return `child_${randomUUID()}`;
+}
+
+/**
+ * Host policy for `SpawnChildRequest.repo` (the `task` tool's free-form repo
+ * string). Accepts `owner/repo` shorthand, an `https://host/owner/repo[.git]`
+ * URL, or a `git@host:owner/repo[.git]` remote — all normalized to a GitHub
+ * https clone URL, matching what the REST create route stores. Returns
+ * undefined for anything else; exported for direct unit tests.
+ */
+export function parseTaskRepo(repo: string, branch?: string): RepoBinding | undefined {
+  const trimmed = repo.trim();
+  const m =
+    /^git@[^:/\s]+:([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(trimmed) ??
+    /^https?:\/\/[^/\s]+\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(trimmed) ??
+    /^([\w.-]+)\/([\w.-]+)$/.exec(trimmed);
+  if (!m) return undefined;
+  const fullName = `${m[1]}/${m[2]}`;
+  return {
+    host: "github",
+    fullName,
+    cloneUrl: `https://github.com/${fullName}.git`,
+    ...(branch !== undefined ? { ref: branch } : {}),
+    auth: "auto",
+  };
 }
 
 /**
@@ -157,11 +191,46 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
     const orgId = parentData.orgId;
 
+    // Host policy for `req.repo` (`task` tool): normalize before anything is
+    // created so a bad value costs nothing. The message is what the tool
+    // surfaces verbatim.
+    const binding = req.repo !== undefined ? parseTaskRepo(req.repo, req.branch) : undefined;
+    if (req.repo !== undefined && binding === undefined) {
+      throw new Error(
+        `unrecognized repo '${req.repo}'. Pass owner/repo or a GitHub clone URL.`,
+      );
+    }
+
     await enforceLimits(deps.db, ctx.parentSessionId, orgId);
 
     const childSessionId = newChildSessionId();
     const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     await mkdir(workspace, { recursive: true });
+
+    if (binding) {
+      // The binding row must land BEFORE the engine session is built —
+      // `buildChildSession` loads meta from `session_repos` to wire clone
+      // prep, and only the first build per cache lifetime decides that (see
+      // `loadSessionMeta`'s module doc). A `childSessionFor` failure below
+      // leaves this row orphaned for a session id that never runs; harmless.
+      await deps.db.insert(sessionRepos).values({
+        sessionId: childSessionId,
+        host: binding.host ?? "github",
+        fullName: binding.fullName,
+        cloneUrl: binding.cloneUrl,
+        ref: binding.ref ?? null,
+        auth: binding.auth ?? "auto",
+        position: 0,
+        targetDir: computeTargetDirs([binding])[0] ?? null,
+      });
+      // Zero-config generation (spec decision 13), same fire-and-forget as
+      // the REST create route — `ensureRepoSource` never throws.
+      void deps.prebuildService.ensureRepoSource(orgId, {
+        host: binding.host ?? "github",
+        fullName: binding.fullName,
+        cloneUrl: binding.cloneUrl,
+      });
+    }
 
     const childSession = await deps.engineHost.childSessionFor(childSessionId, {
       parentSessionId: ctx.parentSessionId,

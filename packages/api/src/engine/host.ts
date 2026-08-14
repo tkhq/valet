@@ -44,6 +44,7 @@ import {
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -1671,6 +1672,22 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
+    // A child spawned with a repo binding (the spawner inserts the
+    // `session_repos` row before calling in here) gets the same declarative
+    // clone prep a REST-created session gets. Only this first build decides —
+    // later cache hits ignore meta (see `loadSessionMeta`'s module doc). No
+    // start-ref sink: a child session records no start-ref today. An absent
+    // `opts.db` (tests that wire no db) degrades to empty bindings, same as
+    // `sessionExtras`/`mintSandboxEnv`.
+    const meta = this.opts.db
+      ? await loadSessionMeta(this.opts.db, {
+          id: childSessionId,
+          userId: opts.actorUserId,
+          orgId: opts.orgId,
+          workspace: opts.workspace,
+        })
+      : { userId: opts.actorUserId, orgId: opts.orgId, workspace: opts.workspace };
+    const specProvider = await this.buildSpecProvider(childSessionId, meta);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -1695,6 +1712,7 @@ export class EngineHost {
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
+      ...(specProvider ? { specProvider } : {}),
     };
 
     const engine = new Engine({

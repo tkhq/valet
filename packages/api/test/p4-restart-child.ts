@@ -39,6 +39,8 @@ import { PgSessionStore, PgEventStream, applyEngineMigrations, pgDbFromPglite } 
 import { applyAppMigrations, buildAppDb } from "../src/lib/drizzle.js";
 import { EngineHost } from "../src/engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../src/orchestrator/children.js";
+import { SourceService } from "../src/bakes/source-service.js";
+import { deriveSecretKey } from "../src/lib/secret-crypto.js";
 import { FsBlobStore } from "../src/providers/blob-fs.js";
 import { orgMembers, orgs, users } from "../src/schema/index.js";
 
@@ -98,7 +100,14 @@ async function main(): Promise<void> {
     },
   });
 
-  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(pgDataDir, "children") };
+  // No builder, no GitHub credential — the spawner's zero-config
+  // `ensureRepoSource` path is a silent no-op here (and never throws).
+  const prebuildService = new SourceService({
+    db,
+    builder: null,
+    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey("test-key") },
+  });
+  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(pgDataDir, "children") };
   const watcher = new ChildWatcher(childrenDeps);
   const spawner = buildChildSpawner(childrenDeps, watcher);
   spawnerRef = spawner;

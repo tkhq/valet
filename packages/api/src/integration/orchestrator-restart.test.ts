@@ -39,6 +39,8 @@ import { PgSessionStore, PgEventStream, pgDbFromPglite, applyEngineMigrations } 
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { SourceService } from "../bakes/source-service.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { agentSessions } from "../schema/index.js";
 
@@ -89,7 +91,14 @@ async function bootRestoredProviders(pgDataDir: string) {
       return spawnerRef(req, ctx);
     },
   });
-  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(dirname(pgDataDir), "children") };
+  // No builder, no GitHub credential — the spawner's zero-config
+  // `ensureRepoSource` path is a silent no-op here (and never throws).
+  const prebuildService = new SourceService({
+    db,
+    builder: null,
+    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey("test-key") },
+  });
+  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(dirname(pgDataDir), "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 

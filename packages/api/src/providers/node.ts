@@ -359,9 +359,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     },
   });
 
-  const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
-  spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
-  readerRef = buildChildReader({ db, engineHost, engineStore });
+  // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
+  // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
+  // in this file builds (`{ db, credentials: engineCredentials, key }`).
+  // Constructed before the child spawner, whose zero-config repo binding
+  // needs it. `start()`/`stop()` are called from `main.ts`.
+  const prebuildService = new SourceService({
+    db,
+    builder: imageBuilder,
+    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+  });
+
+  const childWatcher = new ChildWatcher({ db, engineHost, engineStore, prebuildService });
+  spawnerRef = buildChildSpawner({ db, engineHost, engineStore, prebuildService }, childWatcher);
+  readerRef = buildChildReader({ db, engineHost, engineStore, prebuildService });
 
   const channelHost = new ChannelHost({
     db,
@@ -487,22 +498,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     deliverToOrchestrator,
   });
 
-  // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
-  // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
-  // in this file builds (`{ db, credentials: engineCredentials, key }`).
-  // `start()`/`stop()` are called from `main.ts`.
   // Skill-repository sync (agent-skills design). Reads PUBLIC repositories
   // only, so the reader takes no credential deps — see
   // `services/skill-repo-reader.ts` for why an authenticated importer is
   // deliberately not wired in yet. `start()`/`stop()` are called from
   // `main.ts` alongside the other loops.
   const skillSync = new SkillSyncService({ db, reader: new PublicSkillRepoReader() });
-
-  const prebuildService = new SourceService({
-    db,
-    builder: imageBuilder,
-    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
-  });
 
   return {
     db,
