@@ -158,6 +158,12 @@ describe("command_result REST round-trip (Task 11)", () => {
     const cmd = messages.find((m) => m.command?.name === "status");
     expect(cmd).toBeDefined();
     expect(cmd?.command?.ok).toBe(true);
+
+    // The typed command echoes as a user message BEFORE its result — this
+    // is the ordering the web relies on after refetch/reload.
+    const echoIdx = messages.findIndex((m) => m.role === "user" && m.content === "/status");
+    expect(echoIdx).toBeGreaterThanOrEqual(0);
+    expect(echoIdx).toBeLessThan(messages.indexOf(cmd as (typeof messages)[number]));
     // The TEXT is reachable — not "(empty output)". This is the documented
     // shape-drift regression (CLAUDE.md "Tool-call persistence round trip").
     expect(cmd?.content.length).toBeGreaterThan(0);

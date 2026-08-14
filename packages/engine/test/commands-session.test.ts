@@ -65,6 +65,14 @@ describe("Session.prompt command interception", () => {
     const entries = await store.getEntries(session.id, threadId);
     expect(entries.at(-1)?.type).toBe("command_result");
 
+    // The typed command is echoed as a persisted user message BEFORE the
+    // result — without it, clients render the result above the user's
+    // bubble after any refetch, and reloads lose the command entirely.
+    const echo = entries.at(-2);
+    expect(echo?.type).toBe("message");
+    expect(echo?.type === "message" && echo.role).toBe("user");
+    expect(echo?.type === "message" && echo.content).toBe("/status");
+
     // The queue never took a submission for the command.
     const unsettled = await store.listUnsettledSubmissions(session.id);
     expect(unsettled).toHaveLength(0);

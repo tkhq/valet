@@ -21,6 +21,7 @@ import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
   CommandResultEntry,
+  MessageEntry,
   CreateSessionOptions,
   CredentialOwner,
   CredentialProvider,
@@ -737,6 +738,23 @@ export class Session {
     args: string[],
     raw: string,
   ): Promise<PromptReceipt> {
+    // Echo the typed command as a persisted user message BEFORE the result.
+    // A command takes no queue item, so nothing else persists the user's
+    // text — without this echo, clients reorder the result above the
+    // command on refetch, and a reload loses the command entirely. Written
+    // first (not raced with the plugin grace window) so the echo always
+    // precedes its result.
+    const echo: MessageEntry = {
+      id: uid("e"),
+      sessionId: this.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: raw,
+      createdAt: Date.now(),
+    };
+    await this.providers.store.appendEntries(this.id, thread.id, [echo]);
     let source: CommandSource;
     let name: string;
     let result: { ok: boolean; output: string };
