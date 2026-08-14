@@ -30,6 +30,7 @@ import {
 import type {
   GetWorkflowRunResponse,
   WorkflowDefinitionSummary,
+  WorkflowPendingGate,
   WorkflowRunSummary,
 } from "../wire/types.js";
 
@@ -440,6 +441,11 @@ export async function listWorkflowRuns(
   for (const r of runRows) {
     const run = await deps.workflowStore.getRun(r.id);
     if (!run) continue;
+    const needsApproval =
+      run.status === "parked" &&
+      run.waitingOn.some(
+        (w) => w.kind === "signal" && w.signalType.startsWith("approval:"),
+      );
     runs.push({
       runId: run.runId,
       workflowId: run.params.workflowId,
@@ -447,6 +453,7 @@ export async function listWorkflowRuns(
       outcome: run.outcome,
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
+      needsApproval: needsApproval || undefined,
     });
   }
   return runs;
@@ -466,7 +473,7 @@ export type ResolveApprovalOutcome =
   | "forbidden_always" | "org_mismatch" | "human_only";
 
 /** Scan `definition` (unknown at runtime) for the node with `nodeId`. */
-function findNodeInDefinition(definition: unknown, nodeId: string): Record<string, unknown> | undefined {
+export function findNodeInDefinition(definition: unknown, nodeId: string): Record<string, unknown> | undefined {
   if (typeof definition !== "object" || definition === null) return undefined;
   const def = definition as Record<string, unknown>;
   if (!Array.isArray(def.nodes)) return undefined;
@@ -633,6 +640,84 @@ export async function getWorkflowRunDetail(
     deps.workflowStore.listSignals(runId, { unconsumed: true }),
   ]);
 
+  // Build pendingGates from run.waitingOn entries that are approval signals.
+  const pendingGates: WorkflowPendingGate[] = [];
+  for (const w of run.waitingOn) {
+    if (w.kind !== "signal" || !w.signalType.startsWith("approval:")) continue;
+
+    // signalType format: `approval:{nodeId}` (top-level) or `approval:{nodeId}:{iteration}`.
+    const afterPrefix = w.signalType.slice("approval:".length);
+    // Find the last colon that is followed only by digits — that is the iteration suffix.
+    const iterSuffixMatch = afterPrefix.match(/^(.*):(\d+)$/);
+    let nodeId: string;
+    let iteration: number | undefined;
+    if (iterSuffixMatch) {
+      nodeId = iterSuffixMatch[1];
+      iteration = parseInt(iterSuffixMatch[2], 10);
+    } else {
+      nodeId = afterPrefix;
+      iteration = undefined;
+    }
+
+    const node = findNodeInDefinition(run.definition, nodeId);
+    const isToolNode = node?.type === "tool";
+
+    if (isToolNode && node) {
+      // Find the matching intent checkpoint for gate effects.
+      const iter = iteration ?? 0;
+      const intentCp = checkpoints.find(
+        (cp) => cp.nodeId === nodeId && cp.iteration === iter && cp.status === "intent",
+      );
+      const effects = intentCp?.effects;
+
+      const gate: WorkflowPendingGate = {
+        nodeId,
+        kind: "policy_gate",
+      };
+      if (iteration !== undefined) gate.iteration = iteration;
+      if (typeof node.service === "string") gate.service = node.service;
+      if (typeof node.action === "string") gate.action = node.action;
+      if (node.onDeny === "fail" || node.onDeny === "skip") gate.onDeny = node.onDeny;
+      if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;
+
+      // Pull gate effects from the intent checkpoint (typeof-narrowed, no casts).
+      if (effects !== undefined && typeof effects === "object" && effects !== null) {
+        if ("riskLevel" in effects && typeof effects.riskLevel === "string") {
+          gate.riskLevel = effects.riskLevel;
+        }
+        if ("provenance" in effects && typeof effects.provenance === "string") {
+          gate.provenance = effects.provenance;
+        }
+        if ("gateParams" in effects) {
+          gate.gateParams = effects.gateParams;
+        }
+        if ("gateParamsTruncated" in effects && typeof effects.gateParamsTruncated === "boolean") {
+          gate.gateParamsTruncated = effects.gateParamsTruncated;
+        }
+        if ("gateItem" in effects) {
+          gate.gateItem = effects.gateItem;
+        }
+        if ("timeoutAt" in effects && typeof effects.timeoutAt === "number") {
+          gate.timeoutAt = effects.timeoutAt;
+        }
+      }
+
+      pendingGates.push(gate);
+    } else {
+      // Approval node (non-tool).
+      const gate: WorkflowPendingGate = {
+        nodeId,
+        kind: "approval",
+      };
+      if (iteration !== undefined) gate.iteration = iteration;
+      if (node && typeof node.prompt === "string") gate.prompt = node.prompt;
+      if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;
+      pendingGates.push(gate);
+    }
+  }
+
+  const needsApproval = pendingGates.length > 0 || undefined;
+
   return {
     run: {
       runId: run.runId,
@@ -641,6 +726,7 @@ export async function getWorkflowRunDetail(
       outcome: run.outcome,
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
+      needsApproval,
       waitingOn: run.waitingOn,
       definition: run.definition,
       params: run.params,
@@ -659,5 +745,6 @@ export async function getWorkflowRunDetail(
       payload: s.payload,
       createdAt: s.createdAt,
     })),
+    pendingGates,
   };
 }

@@ -14,6 +14,10 @@ import { addMember, createTeam } from "../services/teams.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import { actionInvocations, orgs, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import {
+  getWorkflowRunDetail,
+  listWorkflowRuns,
+} from "../workflows/service.js";
 import type {
   CreateWorkflowResponse,
   DeleteWorkflowWebhookResponse,
@@ -924,6 +928,325 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       .from(actionInvocations)
       .where(eq(actionInvocations.invocationId, invId));
     expect(rows[0]?.status).toBe("cancelled");
+  });
+});
+
+describe("pendingGates + needsApproval wire", () => {
+  it("(a) tool node park with gate effects → policy_gate entry with all fields populated verbatim", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_a_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        {
+          id: "t1",
+          type: "tool",
+          service: "github",
+          action: "create_pr",
+          params: {},
+          onDeny: "skip",
+        },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [
+        { from: "trigger", to: "t1" },
+        { from: "t1", to: "stop" },
+      ],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-wf-a", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_a_${now}`, workflowId: wfId, version: 1, name: "pg-wf-a",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_a_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    // Seed the intent checkpoint with gate effects.
+    const gateParams = { repo: "valet", branch: "main" };
+    await workflowStore.putIntent({
+      runId,
+      nodeId: "t1",
+      iteration: 0,
+      attempt: 1,
+      status: "intent",
+      createdAt: now,
+      effects: {
+        invocationId: `pol:wf:${runId}:t1`,
+        gate: true,
+        gateParams,
+        gateItem: { item: 42 },
+        riskLevel: "high",
+        provenance: "inferred",
+        timeoutAt: 123,
+      },
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:t1", nodeId: "t1", timeoutAt: 123 },
+    ]);
+
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail).not.toBeNull();
+    expect(detail!.pendingGates).toHaveLength(1);
+    const gate = detail!.pendingGates[0];
+    expect(gate.kind).toBe("policy_gate");
+    expect(gate.nodeId).toBe("t1");
+    expect(gate.service).toBe("github");
+    expect(gate.action).toBe("create_pr");
+    expect(gate.onDeny).toBe("skip");
+    expect(gate.riskLevel).toBe("high");
+    expect(gate.provenance).toBe("inferred");
+    expect(gate.timeoutAt).toBe(123);
+    expect(gate.gateParams).toEqual(gateParams); // verbatim round-trip
+    expect(gate.gateItem).toEqual({ item: 42 });
+    expect(gate.iteration).toBeUndefined(); // top-level node, no iteration
+    expect(gate.prompt).toBeUndefined();
+  });
+
+  it("(a) gateParamsTruncated is present when set in effects", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_trunc_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "t2", type: "tool", service: "svc", action: "act", params: {} },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "t2" }, { from: "t2", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-trunc", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_trunc_${now}`, workflowId: wfId, version: 1, name: "pg-trunc",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_trunc_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.putIntent({
+      runId,
+      nodeId: "t2",
+      iteration: 0,
+      attempt: 1,
+      status: "intent",
+      createdAt: now,
+      effects: {
+        gate: true,
+        gateParams: { truncated: true },
+        gateParamsTruncated: true,
+      },
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:t2", nodeId: "t2" },
+    ]);
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail!.pendingGates[0].gateParamsTruncated).toBe(true);
+  });
+
+  it("(b) approval node park → kind=approval, prompt from definition, no gate fields", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_b_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "approval1", type: "approval", prompt: "Please review this action." },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "approval1" }, { from: "approval1", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-wf-b", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_b_${now}`, workflowId: wfId, version: 1, name: "pg-wf-b",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_b_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:approval1", nodeId: "approval1" },
+    ]);
+
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail).not.toBeNull();
+    expect(detail!.pendingGates).toHaveLength(1);
+    const gate = detail!.pendingGates[0];
+    expect(gate.kind).toBe("approval");
+    expect(gate.nodeId).toBe("approval1");
+    expect(gate.prompt).toBe("Please review this action.");
+    expect(gate.service).toBeUndefined();
+    expect(gate.action).toBeUndefined();
+    expect(gate.gateParams).toBeUndefined();
+    expect(gate.riskLevel).toBeUndefined();
+    expect(gate.onDeny).toBeUndefined();
+  });
+
+  it("(c) listWorkflowRuns: approval-parked run → needsApproval=true; timer-parked → needsApproval absent", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { workflowStore, workflowRunHost, db } = localApi.providers;
+
+    // Create a workflow via the HTTP route (uses the default VALID_DEFINITION).
+    const wfRes = await fetch(`${localApi.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "pg-c-wf", definition: VALID_DEFINITION }),
+    });
+    expect(wfRes.status).toBe(201);
+    const wf = (await wfRes.json()) as CreateWorkflowResponse;
+
+    // Start run 1 — will become the approval-parked run.
+    const approvalStartRes = await fetch(`${localApi.baseUrl}/api/workflows/${wf.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(approvalStartRes.status).toBe(201);
+    const { runId: approvalRunId } = (await approvalStartRes.json()) as StartWorkflowRunResponse;
+    await workflowStore.createRun(
+      approvalRunId,
+      { workflowId: wf.id, definitionVersionId: "v1" },
+      VALID_DEFINITION, "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(approvalRunId, 1, [
+      { kind: "signal", signalType: "approval:stop", nodeId: "stop" },
+    ]);
+
+    // Start run 2 — will become the timer-parked run.
+    const timerStartRes = await fetch(`${localApi.baseUrl}/api/workflows/${wf.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(timerStartRes.status).toBe(201);
+    const { runId: timerRunId } = (await timerStartRes.json()) as StartWorkflowRunResponse;
+    await workflowStore.createRun(
+      timerRunId,
+      { workflowId: wf.id, definitionVersionId: "v1" },
+      VALID_DEFINITION, "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(timerRunId, 1, [
+      { kind: "timer", nodeId: "stop", wakeAt: Date.now() + 60000 },
+    ]);
+
+    const runs = await listWorkflowRuns(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      wf.id,
+    );
+    expect(runs).not.toBeNull();
+    const approvalRun = runs!.find((r) => r.runId === approvalRunId);
+    const timerRun = runs!.find((r) => r.runId === timerRunId);
+    expect(approvalRun?.needsApproval).toBe(true);
+    // Timer-parked run must NOT carry needsApproval (absent, not false).
+    expect(timerRun?.needsApproval).toBeUndefined();
+  });
+
+  it("(d) checkpoint wire does NOT expose effects (selective exposure only)", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_d_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "t3", type: "tool", service: "svc", action: "act", params: {} },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "t3" }, { from: "t3", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-wf-d", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_d_${now}`, workflowId: wfId, version: 1, name: "pg-wf-d",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_d_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def, "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.putIntent({
+      runId,
+      nodeId: "t3",
+      iteration: 0,
+      attempt: 1,
+      status: "intent",
+      createdAt: now,
+      effects: { gate: true, gateParams: { secret: "internal" } },
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:t3", nodeId: "t3" },
+    ]);
+
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail).not.toBeNull();
+    // The checkpoints array must NOT expose effects.
+    for (const cp of detail!.checkpoints) {
+      expect(cp).not.toHaveProperty("effects");
+    }
   });
 });
 

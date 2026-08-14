@@ -780,6 +780,8 @@ export interface WorkflowRunSummary {
   outcome?: WorkflowRunOutcome;
   createdAt: number;
   updatedAt: number;
+  /** True when the run is parked waiting for at least one human approval. */
+  needsApproval?: boolean;
 }
 
 export interface ListWorkflowRunsResponse {
@@ -812,6 +814,26 @@ export interface WorkflowRunCheckpoint {
   createdAt: number;
 }
 
+/** One pending approval gate on a parked workflow run. */
+export interface WorkflowPendingGate {
+  nodeId: string;
+  kind: "approval" | "policy_gate";
+  iteration?: number;
+  /** Approval nodes: the human-readable prompt from the definition. */
+  prompt?: string;
+  /** Policy gates: the service that owns the action. */
+  service?: string;
+  /** Policy gates: the action identifier. */
+  action?: string;
+  riskLevel?: string;
+  provenance?: string;
+  gateParams?: unknown;
+  gateParamsTruncated?: boolean;
+  gateItem?: unknown;
+  timeoutAt?: number;
+  onDeny?: "fail" | "skip";
+}
+
 export interface WorkflowRunSignal {
   signalId: string;
   signalType: string;
@@ -827,6 +849,7 @@ export interface WorkflowRunDetail {
   };
   checkpoints: WorkflowRunCheckpoint[];
   signals: WorkflowRunSignal[];
+  pendingGates: WorkflowPendingGate[];
 }
 
 export type GetWorkflowRunResponse = WorkflowRunDetail;
