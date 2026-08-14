@@ -9,11 +9,12 @@ import type { Account, BetterAuthOptions, User } from "better-auth";
 import type { CredentialStore } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { orgMembers, orgs, users, invites } from "../schema/index.js";
+import { orgMembers, orgs, users, invites, teams, teamMembers } from "../schema/index.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createInvite } from "./invites.js";
 import type { AuthConfig } from "./config.js";
+import type { InstanceConfig } from "../config/instance-config.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
 
 // better-auth's real `GenericEndpointContext` is a large request-plumbing object
@@ -395,6 +396,83 @@ describe("buildAuthHooks", () => {
 
       const cred = await credentialStore.get({ type: "user", id: "u-new" }, "google_calendar");
       expect(cred).toBeNull();
+    });
+  });
+
+  describe("databaseHooks.user.create.after — instanceConfig team bind", () => {
+    function makeInstanceConfig(overrides: Partial<InstanceConfig> = {}): InstanceConfig {
+      return { version: 1, ...overrides };
+    }
+
+    it("inserts a team_members row when the new user's email is declared in a config team", async () => {
+      const cfg = baseConfig();
+      // Create the org and team row the provisioner will look up.
+      const orgId = "org-team-test";
+      await db.insert(orgs).values({ id: orgId, name: "Team Test Org", createdAt: Date.now() });
+      await db.insert(teams).values({ id: "team-platform", orgId, name: "Platform", createdAt: Date.now() });
+
+      const instanceConfig = makeInstanceConfig({
+        teams: [{ name: "Platform", members: [{ email: "member@example.com", role: "admin" }] }],
+      });
+
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore, instanceConfig });
+
+      const user = makeUser({ id: "u-member", email: "member@example.com", role: "member" });
+      await db.insert(users).values({ id: user.id, email: user.email, name: user.name, role: "member" });
+      await databaseHooks!.user!.create!.after!({ ...user }, dbHookCtx({ path: "/sign-up/email" }));
+
+      const rows = await db
+        .select()
+        .from(teamMembers)
+        .where(eq(teamMembers.userId, "u-member"));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ teamId: "team-platform", userId: "u-member", role: "admin" });
+    });
+
+    it("does not insert a team_members row when the new user's email is not declared", async () => {
+      const cfg = baseConfig();
+      const orgId = "org-team-test2";
+      await db.insert(orgs).values({ id: orgId, name: "Team Test Org 2", createdAt: Date.now() });
+      await db.insert(teams).values({ id: "team-eng", orgId, name: "Engineering", createdAt: Date.now() });
+
+      const instanceConfig = makeInstanceConfig({
+        teams: [{ name: "Engineering", members: [{ email: "declared@example.com", role: "member" }] }],
+      });
+
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore, instanceConfig });
+
+      const user = makeUser({ id: "u-undeclared", email: "undeclared@example.com", role: "member" });
+      await db.insert(users).values({ id: user.id, email: user.email, name: user.name, role: "member" });
+      await databaseHooks!.user!.create!.after!({ ...user }, dbHookCtx({ path: "/sign-up/email" }));
+
+      const rows = await db
+        .select()
+        .from(teamMembers)
+        .where(eq(teamMembers.userId, "u-undeclared"));
+      expect(rows).toHaveLength(0);
+    });
+
+    it("does not throw when a declared team is missing from the db", async () => {
+      const cfg = baseConfig();
+      // No team row created — team "Missing" does not exist in db.
+      const instanceConfig = makeInstanceConfig({
+        teams: [{ name: "Missing", members: [{ email: "member@example.com", role: "member" }] }],
+      });
+
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore, instanceConfig });
+
+      const user = makeUser({ id: "u-missing-team", email: "member@example.com", role: "member" });
+      await db.insert(users).values({ id: user.id, email: user.email, name: user.name, role: "member" });
+      await expect(
+        databaseHooks!.user!.create!.after!({ ...user }, dbHookCtx({ path: "/sign-up/email" })),
+      ).resolves.not.toThrow();
+
+      // No team_members row written.
+      const rows = await db
+        .select()
+        .from(teamMembers)
+        .where(eq(teamMembers.userId, "u-missing-team"));
+      expect(rows).toHaveLength(0);
     });
   });
 });

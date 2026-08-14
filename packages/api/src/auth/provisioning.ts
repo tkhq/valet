@@ -6,11 +6,13 @@
  */
 import { createAuthMiddleware, APIError } from "better-auth/api";
 import type { Account, BetterAuthOptions, User } from "better-auth";
+import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, users } from "../schema/index.js";
+import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
+import type { InstanceConfig } from "../config/instance-config.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
 
 export type Admission =
@@ -82,6 +84,7 @@ export interface ProvisioningDeps {
   db: AppDb;
   cfg: AuthConfig;
   credentialStore: CredentialStore;
+  instanceConfig?: InstanceConfig | null;
 }
 
 /** Google plugins' credential-read keys (`ActionPlugin.service`, underscored —
@@ -134,7 +137,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   beforeHook: ReturnType<typeof createAuthMiddleware>;
   databaseHooks: BetterAuthOptions["databaseHooks"];
 } {
-  const { db, cfg, credentialStore } = deps;
+  const { db, cfg, credentialStore, instanceConfig } = deps;
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
@@ -186,6 +189,32 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
 
     if (admission?.allowed && admission.inviteId) {
       await acceptInvite(db, admission.inviteId, user.id);
+    }
+
+    // Bind the user to any config-declared teams whose member list includes
+    // this email. Team rows are resolved by name within the org — if a team
+    // is missing (e.g. config edited after boot), skip silently; the next
+    // boot's reconciler recreates it.
+    const userEmail = keyForEmail(user.email);
+    for (const teamDecl of instanceConfig?.teams ?? []) {
+      const match = (teamDecl.members ?? []).find((m) => m.email === userEmail);
+      if (!match) continue;
+
+      const teamRows = await db
+        .select({ id: teams.id })
+        .from(teams)
+        .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
+        .limit(1);
+      const teamRow = teamRows[0];
+      if (!teamRow) continue;
+
+      await db
+        .insert(teamMembers)
+        .values({ teamId: teamRow.id, userId: user.id, role: match.role })
+        .onConflictDoUpdate({
+          target: [teamMembers.teamId, teamMembers.userId],
+          set: { role: match.role },
+        });
     }
   };
 
