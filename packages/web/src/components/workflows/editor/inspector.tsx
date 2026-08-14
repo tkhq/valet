@@ -18,6 +18,7 @@ import {
   type IfDataType,
   type IfNode,
   type LlmNode,
+  type NodeErrorPolicy,
   type OrchestratorNode,
   type SessionNode,
   type SetNode,
@@ -339,9 +340,45 @@ function StopForm({ node, onChange }: { node: StopNode; onChange: (patch: Record
   );
 }
 
+// ─── onError (llm / tool / workflow) ──────────────────────────────────────
+
+/**
+ * `onError` is not offered inside a foreach body: a body has no outgoing
+ * edges, so the validator rejects it and points at `foreach.onItemError`
+ * instead. Every form that renders both at top level and as a body takes
+ * `allowOnError` and passes `false` from `BodyNodeForm`.
+ */
+interface ErrorPolicyProps {
+  allowOnError?: boolean;
+}
+
+function ErrorPolicyField({
+  value,
+  onChange,
+}: {
+  value: NodeErrorPolicy | undefined;
+  onChange: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <SelectField
+      label="On error"
+      value={value ?? "fail"}
+      onChange={(next) => onChange({ onError: next })}
+      options={[
+        { value: "fail", label: "Fail the run" },
+        { value: "continue", label: "Continue — keep running downstream nodes" },
+      ]}
+    />
+  );
+}
+
 // ─── llm ──────────────────────────────────────────────────────────────────
 
-function LlmForm({ node, onChange }: { node: LlmNode; onChange: (patch: Record<string, unknown>) => void }) {
+function LlmForm({
+  node,
+  onChange,
+  allowOnError = true,
+}: { node: LlmNode; onChange: (patch: Record<string, unknown>) => void } & ErrorPolicyProps) {
   return (
     <div className="flex flex-col gap-3">
       <LabeledInput label="Model" value={node.model} onChange={(value) => onChange({ model: value })} />
@@ -366,6 +403,7 @@ function LlmForm({ node, onChange }: { node: LlmNode; onChange: (patch: Record<s
         onChange={(value) => onChange({ maxOutputTokens: value })}
         min={1}
       />
+      {allowOnError && <ErrorPolicyField value={node.onError} onChange={onChange} />}
     </div>
   );
 }
@@ -396,7 +434,11 @@ function OrchestratorForm({ node, onChange }: { node: OrchestratorNode; onChange
 
 // ─── tool ─────────────────────────────────────────────────────────────────
 
-function ToolForm({ node, onChange }: { node: ToolNode; onChange: (patch: Record<string, unknown>) => void }) {
+function ToolForm({
+  node,
+  onChange,
+  allowOnError = true,
+}: { node: ToolNode; onChange: (patch: Record<string, unknown>) => void } & ErrorPolicyProps) {
   return (
     <div className="flex flex-col gap-3">
       <LabeledInput label="Service" value={node.service} onChange={(value) => onChange({ service: value })} />
@@ -407,6 +449,7 @@ function ToolForm({ node, onChange }: { node: ToolNode; onChange: (patch: Record
         onChange={(value) => onChange({ params: value && typeof value === "object" ? value : {} })}
       />
       <LabeledInput label="Summary" value={node.summary ?? ""} onChange={(value) => onChange({ summary: value || undefined })} />
+      {allowOnError && <ErrorPolicyField value={node.onError} onChange={onChange} />}
     </div>
   );
 }
@@ -414,10 +457,11 @@ function ToolForm({ node, onChange }: { node: ToolNode; onChange: (patch: Record
 function WorkflowCallForm({
   node,
   onChange,
+  allowOnError = true,
 }: {
   node: WorkflowCallNode;
   onChange: (patch: Record<string, unknown>) => void;
-}) {
+} & ErrorPolicyProps) {
   return (
     <div className="flex flex-col gap-3">
       <LabeledInput
@@ -430,6 +474,7 @@ function WorkflowCallForm({
         value={node.input ?? {}}
         onChange={(value) => onChange({ input: value && typeof value === "object" ? value : undefined })}
       />
+      {allowOnError && <ErrorPolicyField value={node.onError} onChange={onChange} />}
     </div>
   );
 }
@@ -517,12 +562,13 @@ function ForeachBodyForm({ body, onChange }: { body: ForeachBodyNode; onChange: 
   );
 }
 
+/** `allowOnError={false}`: the per-item policy is the foreach's own `onItemError`. */
 function BodyNodeForm({ node, onChange }: { node: ForeachBodyNode; onChange: (patch: Record<string, unknown>) => void }) {
   switch (node.type) {
     case "llm":
-      return <LlmForm node={node} onChange={onChange} />;
+      return <LlmForm node={node} onChange={onChange} allowOnError={false} />;
     case "tool":
-      return <ToolForm node={node} onChange={onChange} />;
+      return <ToolForm node={node} onChange={onChange} allowOnError={false} />;
     case "set":
       return <SetForm node={node} onChange={onChange} />;
     case "orchestrator":
@@ -530,7 +576,7 @@ function BodyNodeForm({ node, onChange }: { node: ForeachBodyNode; onChange: (pa
     case "session":
       return <SessionForm node={node} onChange={onChange} />;
     case "workflow":
-      return <WorkflowCallForm node={node} onChange={onChange} />;
+      return <WorkflowCallForm node={node} onChange={onChange} allowOnError={false} />;
   }
 }
 

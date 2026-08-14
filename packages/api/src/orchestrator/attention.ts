@@ -56,6 +56,24 @@ export interface AttentionEvent {
   dedupeKey?: string;
 }
 
+/**
+ * Narrows a stored owner record to a `Principal`. Ports that persist
+ * ownership (the `WorkflowStore`, for one) type `ownerType` as a plain
+ * string because they never interpret it, so the value is checked here
+ * rather than asserted. An owner this router cannot resolve an audience for
+ * — absent, or an unrecognized type — returns `undefined`, and the caller
+ * skips the event.
+ */
+export function principalFromOwner(
+  owner: { ownerType: string; ownerId: string } | undefined,
+): Principal | undefined {
+  if (!owner) return undefined;
+  if (owner.ownerType === "user" || owner.ownerType === "team" || owner.ownerType === "org") {
+    return { type: owner.ownerType, id: owner.ownerId };
+  }
+  return undefined;
+}
+
 /** Best-effort per-recipient channel delivery (e.g. Telegram DM). Must never throw. */
 export interface AttentionChannelDeliverer {
   deliver(userId: string, event: AttentionEvent): Promise<void>;

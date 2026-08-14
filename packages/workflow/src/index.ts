@@ -20,6 +20,7 @@ export type {
   ForeachNode,
   ForeachBodyNode,
   LlmNode,
+  NodeErrorPolicy,
   OrchestratorNode,
   ToolNode,
   ToolCredentialMode,
@@ -45,14 +46,17 @@ export { parseDurationMs } from './dag/duration.js';
 export { validateWorkflowDefinition } from './dag/validate.js';
 export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
-export { WorkflowFenceError } from './store.js';
+export { WorkflowCursorError, WorkflowFenceError, decodeRunCursor, encodeRunCursor } from './store.js';
 export type {
+  ListRunsFilter,
+  ListRunsPage,
   NodeCheckpoint,
   RunParams,
   RunParkState,
   RunSignal,
   RunWaitCondition,
   WorkflowRun,
+  WorkflowRunListItem,
   WorkflowStore,
 } from './store.js';
 
@@ -89,7 +93,7 @@ export type {
 } from './nodes/index.js';
 
 export { driveUntilPark } from './interpreter.js';
-export type { InterpreterDeps } from './interpreter.js';
+export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interpreter.js';
 
 export { LocalRunHost } from './local-host.js';
 export type { LocalRunHostDeps, RunHost } from './local-host.js';

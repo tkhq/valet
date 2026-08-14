@@ -19,9 +19,11 @@ import {
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
+  isRunStatus,
+  listRunsForOwner,
   listWorkflowDefinitions,
-  listWorkflowRuns,
   resolveWorkflowApproval,
+  RUN_STATUS_VALUES,
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
@@ -47,7 +49,7 @@ import {
   mintOrRotateWorkflowWebhook,
 } from "./webhook-service.js";
 import { publicUrlFromEnv } from "../channels/host.js";
-import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
+import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
 
 /** `POST /api/hooks/workflows/:workflowId/:hookId`'s path, absolute when a
  * public origin is configured (same `VALET_PUBLIC_URL`/`BETTER_AUTH_URL`
@@ -280,25 +282,58 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             iteration: cp.iteration,
             status: cp.status,
             error: cp.error,
+            // The session a session node drove, and the run a workflow node
+            // started — how the agent reaches a failed node's actual output.
+            sessionId: cp.sessionId,
+            childRunId: cp.childRunId,
           })),
         },
       };
     },
   });
 
-  const listRuns = action(Type.Object({ workflow_id: Type.String() }))({
+  const listRuns = action(
+    Type.Object({
+      workflow_id: Type.Optional(Type.String()),
+      parent_run_id: Type.Optional(Type.String()),
+      status: Type.Optional(Type.Array(Type.String())),
+      limit: Type.Optional(Type.Number()),
+      cursor: Type.Optional(Type.String()),
+    }),
+  )({
     id: "workflows.list_runs",
     name: "List workflow runs",
     description:
-      "List a workflow's runs (runId, status, outcome, timestamps), newest first. " +
-      "Use to find parked/pending runs before cancelling or checking approvals.",
+      "List runs (runId, status, outcome, timestamps), newest first. Omit workflow_id " +
+      "for every workflow you can reach. Pass parent_run_id to track one batch's child " +
+      "runs. Use to find parked/pending runs before cancelling or checking approvals. " +
+      "Paginated: pass the returned nextCursor back as cursor for the next page.",
     riskLevel: "low",
-    execute: async ({ workflow_id }, ctx) => {
+    execute: async ({ workflow_id, parent_run_id, status, limit, cursor }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const runs = await listWorkflowRuns(getDeps(), owner, workflow_id);
-      if (!runs) return { success: false, error: `workflow not found: ${workflow_id}` };
-      return { success: true, data: { workflowId: workflow_id, runs } };
+      const badStatus = status?.filter((s) => !isRunStatus(s));
+      if (badStatus && badStatus.length > 0) {
+        return {
+          success: false,
+          error: `unknown run status ${badStatus.join(", ")} — use one of: ${RUN_STATUS_VALUES.join(", ")}`,
+        };
+      }
+      let page;
+      try {
+        page = await listRunsForOwner(getDeps(), owner, {
+          workflowIds: workflow_id === undefined ? undefined : [workflow_id],
+          status: status?.filter(isRunStatus),
+          parentRunId: parent_run_id,
+          limit,
+          cursor,
+        });
+      } catch (err) {
+        if (err instanceof WorkflowCursorError) return { success: false, error: err.message };
+        throw err;
+      }
+      if (!page) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: workflow_id, ...page } };
     },
   });
 

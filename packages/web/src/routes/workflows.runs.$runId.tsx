@@ -119,6 +119,30 @@ export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetai
                 <span className="text-sm font-medium text-ink">{cp.nodeId}</span>
                 <span className="text-xs text-muted">{cp.status}</span>
               </div>
+              {/* The work the node started. On a failed node this is the
+                  only way to read what actually went wrong. */}
+              {(cp.sessionId || cp.childRunId) && (
+                <div className="mt-1 flex gap-3 text-xs">
+                  {cp.sessionId && (
+                    <Link
+                      to="/sessions/$sessionId"
+                      params={{ sessionId: cp.sessionId }}
+                      className="text-muted hover:underline"
+                    >
+                      Open session
+                    </Link>
+                  )}
+                  {cp.childRunId && (
+                    <Link
+                      to="/workflows/runs/$runId"
+                      params={{ runId: cp.childRunId }}
+                      className="text-muted hover:underline"
+                    >
+                      Open child run
+                    </Link>
+                  )}
+                </div>
+              )}
               {cp.error && <div className="mt-1 text-xs text-danger-500">{cp.error}</div>}
               {cp.result !== undefined && (
                 <pre className="mt-2 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">

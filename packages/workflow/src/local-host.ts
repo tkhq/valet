@@ -56,7 +56,7 @@
 
 import { detachedFromTrace } from '@valet/engine';
 
-import { driveUntilPark } from './interpreter.js';
+import { driveUntilPark, type OnRunSettled } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import type { NodeExecutorRegistry, OnApprovalPending } from './nodes/index.js';
 import type { RunParams, RunParkState, RunWaitCondition, WorkflowStore } from './store.js';
@@ -88,6 +88,13 @@ export interface LocalRunHostDeps {
   executors?: NodeExecutorRegistry;
   clock?: () => number;
   onApprovalPending?: OnApprovalPending;
+  /**
+   * Settle report (batch-fanout design decision 4). Handed to every drive
+   * this host runs, so a run that settles under any path — natural,
+   * `stop`-node terminate, cancel, or `terminalizing` reclaim — reports
+   * once. Optional: an unwired host settles runs exactly as before.
+   */
+  onRunSettled?: OnRunSettled;
   /** Max concurrently-driven runs. Default 4 (decision 16). */
   concurrency?: number;
   /** Poll interval in ms. Default 1000 (decision 16). */
@@ -114,6 +121,7 @@ export class LocalRunHost implements RunHost {
   private readonly executors?: NodeExecutorRegistry;
   private readonly clock: () => number;
   private readonly onApprovalPending?: OnApprovalPending;
+  private readonly onRunSettled?: OnRunSettled;
   private readonly concurrency: number;
   private readonly pollMs: number;
   private readonly leaseMs: number;
@@ -146,6 +154,7 @@ export class LocalRunHost implements RunHost {
     this.executors = deps.executors;
     this.clock = deps.clock ?? (() => Date.now());
     this.onApprovalPending = deps.onApprovalPending;
+    this.onRunSettled = deps.onRunSettled;
     this.concurrency = deps.concurrency ?? 4;
     this.pollMs = deps.pollMs ?? 1_000;
     this.leaseMs = deps.leaseMs ?? 30_000;
@@ -288,6 +297,7 @@ export class LocalRunHost implements RunHost {
         clock: this.clock,
         executors: this.executors,
         onApprovalPending: this.onApprovalPending,
+        onRunSettled: this.onRunSettled,
         onBeginTerminalize:
           this.crashAt === 'terminalizing'
             ? () => {

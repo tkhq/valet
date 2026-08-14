@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
 import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
+import { runCountLabel } from "~/lib/run-count";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { Button, Spinner } from "~/components/primitives";
 
@@ -77,6 +78,7 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
   const del = useDeleteWorkflow();
   const navigate = useNavigate();
   const runCount = runsQ.data?.runs.length;
+  const countLabel = runCountLabel(runsQ.data);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleRun() {
@@ -103,9 +105,9 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
         className="min-w-0 text-sm font-medium text-ink hover:underline"
       >
         {workflow.name}
-        {runCount !== undefined && (
+        {countLabel !== undefined && (
           <span className="ml-2 text-xs text-muted font-normal">
-            {runCount} run{runCount === 1 ? "" : "s"}
+            {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
           </span>
         )}
       </Link>

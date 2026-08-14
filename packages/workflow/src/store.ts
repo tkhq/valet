@@ -116,6 +116,80 @@ export class WorkflowFenceError extends Error {
   }
 }
 
+/**
+ * The run fields a list view needs. Deliberately excludes `definition` and
+ * `params` — both are jsonb snapshots, and dragging them back for every row
+ * is the cost `listRuns` exists to remove.
+ */
+export interface WorkflowRunListItem {
+  runId: string;
+  workflowId: string;
+  status: RunParkState['status'];
+  outcome?: RunParkState['outcome'];
+  createdAt: number;
+  updatedAt: number;
+  owner?: { ownerType: string; ownerId: string };
+  /** Lifted out of `RunParams` so a batch parent's children are one query. */
+  parentRunId?: string;
+  parentNodeId?: string;
+  parentIteration?: number;
+}
+
+/** Filter for `listRuns`. Every field is optional except `limit`. */
+export interface ListRunsFilter {
+  /** Any-of. Omit to read every workflow's runs. */
+  workflowIds?: string[];
+  /** Any-of. */
+  status?: RunParkState['status'][];
+  /** Any-of. Runs with no outcome yet never match. */
+  outcome?: NonNullable<RunParkState['outcome']>[];
+  /** Children of one parent run (batch tracking). */
+  parentRunId?: string;
+  /** `createdAt >= since`. */
+  since?: number;
+  limit: number;
+  /** A previous page's `nextCursor`, passed back unchanged. */
+  cursor?: string;
+}
+
+export interface ListRunsPage {
+  runs: WorkflowRunListItem[];
+  /** Absent on the last page. */
+  nextCursor?: string;
+}
+
+/**
+ * Keyset cursor for `listRuns`. The run id is part of the key because a
+ * 250-item fan-out creates many runs in the same millisecond — `createdAt`
+ * alone would skip or repeat rows across pages.
+ */
+export function encodeRunCursor(item: { createdAt: number; runId: string }): string {
+  return `${item.createdAt}:${item.runId}`;
+}
+
+/** Thrown by `decodeRunCursor` for a cursor a store cannot read. */
+export class WorkflowCursorError extends Error {
+  constructor(cursor: string) {
+    super(
+      `invalid workflow run cursor ${JSON.stringify(cursor)} — pass back the ` +
+        `nextCursor value from the previous page unchanged, or omit it to start at the newest run`,
+    );
+    this.name = 'WorkflowCursorError';
+  }
+}
+
+export function decodeRunCursor(cursor: string): { createdAt: number; runId: string } {
+  const split = cursor.indexOf(':');
+  if (split <= 0) throw new WorkflowCursorError(cursor);
+  const createdAt = Number(cursor.slice(0, split));
+  const runId = cursor.slice(split + 1);
+  // `createdAt` must be a safe integer, not merely finite: a store that keeps
+  // it in an integer column rejects `1.5` or `1e+30` with a driver error the
+  // caller cannot act on, and this codec is the only place both stores agree.
+  if (!Number.isSafeInteger(createdAt) || runId === '') throw new WorkflowCursorError(cursor);
+  return { createdAt, runId };
+}
+
 export interface WorkflowStore {
   /**
    * Insert a new run row if absent; if a row with this id already exists,
@@ -192,6 +266,18 @@ export interface WorkflowStore {
    * of which runs exist, since a freshly-restarted host has none.
    */
   listParked(limit: number): Promise<WorkflowRun[]>;
+
+  /**
+   * Newest-first page of run summaries, keyset-paginated. This is the read
+   * path for run lists (batch-fanout design decision 5): a batch parent's
+   * children are one query through `parentRunId`, instead of one `getRun`
+   * per row.
+   *
+   * The filter carries no owner field on purpose — the port stays free of
+   * team-membership semantics. A caller that must scope by principal
+   * resolves the workflow ids it may read and passes them in `workflowIds`.
+   */
+  listRuns(filter: ListRunsFilter): Promise<ListRunsPage>;
 
   /**
    * Insert a checkpoint in `intent` status, or CAS-replace an existing

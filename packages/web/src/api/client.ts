@@ -64,6 +64,8 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
@@ -196,6 +198,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+/** Keyset paging for the run lists. `cursor` is a page's `nextCursor`. */
+export interface WorkflowRunPage {
+  limit?: number;
+  cursor?: string;
+}
+
+/** Filters the cross-workflow run list accepts. Array fields match any-of. */
+export interface WorkflowRunFilter extends WorkflowRunPage {
+  workflowIds?: string[];
+  status?: WorkflowRunStatus[];
+  outcome?: WorkflowRunOutcome[];
+  parentRunId?: string;
+  since?: number;
 }
 
 export const api = {
@@ -357,8 +374,36 @@ export const api = {
       `/workflows/${encodeURIComponent(id)}/runs`,
       body,
     ),
-  listWorkflowRuns: (id: string) =>
-    request<ListWorkflowRunsResponse>("GET", `/workflows/${encodeURIComponent(id)}/runs`),
+  listWorkflowRuns: (id: string, opts?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListWorkflowRunsResponse>(
+      "GET",
+      `/workflows/${encodeURIComponent(id)}/runs${tail}`,
+    );
+  },
+  // Cross-workflow run list. `parentRunId` is how a batch parent's child
+  // runs come back in one request.
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+    // An any-of filter with no values matches nothing. A query string cannot
+    // carry an empty repeated field, so an unguarded request would drop the
+    // filter and list every readable run — the opposite of what was asked.
+    for (const values of [opts?.workflowIds, opts?.status, opts?.outcome]) {
+      if (values?.length === 0) return Promise.resolve({ runs: [] });
+    }
+    const qs = new URLSearchParams();
+    for (const workflowId of opts?.workflowIds ?? []) qs.append("workflowId", workflowId);
+    for (const status of opts?.status ?? []) qs.append("status", status);
+    for (const outcome of opts?.outcome ?? []) qs.append("outcome", outcome);
+    if (opts?.parentRunId) qs.set("parentRunId", opts.parentRunId);
+    if (opts?.since !== undefined) qs.set("since", String(opts.since));
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+  },
   listWorkflowVersions: (id: string) =>
     request<ListWorkflowVersionsResponse>("GET", `/workflows/${encodeURIComponent(id)}/versions`),
   getWorkflowVersion: (id: string, version: number) =>

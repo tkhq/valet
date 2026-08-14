@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { TriggerNode, WaitNode } from './dag/nodes.js';
+import type { NodeErrorPolicy, TriggerNode, WaitNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
-import type { WorkflowEngineDeps } from './engine-deps.js';
+import type { WorkflowEngineDeps, WorkflowInvokeActionResult } from './engine-deps.js';
 import { driveUntilPark, type InterpreterDeps } from './interpreter.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
 import { createDefaultNodeExecutors, executeTrigger, type NodeExecuteResult, type NodeExecutor, type NodeExecutorRegistry } from './nodes/index.js';
@@ -684,5 +684,182 @@ describe('driveUntilPark: diamond join and skip propagation', () => {
     // Fed only by the skipped branch: all incoming inactive → skipped, and propagates.
     expect(byNode.get('dead-end')?.status).toBe('skipped');
     expect(byNode.get('after-dead-end')?.status).toBe('skipped');
+  });
+});
+
+// ─── 14. Per-node onError (batch-fanout design decision 3) ───────────────────
+
+describe('driveUntilPark: onError "continue"', () => {
+  /** Every `tool` node in these definitions fails, so the policy is the only variable. */
+  function failingActionEngine(error: string): WorkflowEngineDeps {
+    return {
+      ...makeFakeEngineDeps(),
+      invokeAction: vi.fn(async (): Promise<WorkflowInvokeActionResult> => ({ ok: false, error })),
+    };
+  }
+
+  /** `notify` is the tail node the templates rely on — it must run on the failure path. */
+  function notifyDefinition(onError?: NodeErrorPolicy): WorkflowDefinition {
+    return {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'call', type: 'tool', service: 'slack', action: 'send_message', params: {}, ...(onError ? { onError } : {}) },
+        { id: 'notify', type: 'set', values: { text: 'batch item failed: {{nodes.call.error}}' } },
+      ],
+      edges: [
+        { from: 't', to: 'call' },
+        { from: 'call', to: 'notify' },
+      ],
+    };
+  }
+
+  it('runs the tail notify node after a tolerated failure and settles the run completed', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = failingActionEngine('slack rejected the message');
+    await store.createRun('run-15', runParams(), notifyDefinition('continue'), 'v1');
+    const attempt = await claimAttempt(store, 'run-15');
+
+    const park = await driveUntilPark('run-15', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed'); // the tolerated failure does not dominate
+
+    const byNode = new Map((await store.getCheckpoints('run-15')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('call')?.status).toBe('failed'); // the failure is still recorded
+    expect(byNode.get('call')?.error).toBe('slack rejected the message');
+    expect(byNode.get('notify')?.status).toBe('completed');
+    // `nodes.<id>.error` reached the downstream template.
+    expect(byNode.get('notify')?.result).toEqual({ text: 'batch item failed: slack rejected the message' });
+  });
+
+  it('starves the tail notify node under the default policy and settles the run failed', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = failingActionEngine('slack rejected the message');
+    await store.createRun('run-16', runParams(), notifyDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-16');
+
+    const park = await driveUntilPark('run-16', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('failed');
+
+    const byNode = new Map((await store.getCheckpoints('run-16')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('call')?.status).toBe('failed');
+    expect(byNode.get('notify')?.status).toBe('skipped');
+  });
+
+  it('settles completed on the terminate path when the only failure is tolerated', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = failingActionEngine('slack rejected the message');
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'call', type: 'tool', service: 'slack', action: 'send_message', params: {}, onError: 'continue' },
+        { id: 'notify', type: 'set', values: { text: 'done' } },
+        { id: 'stop', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'call' },
+        { from: 'call', to: 'notify' },
+        { from: 'notify', to: 'stop' },
+      ],
+    };
+    await store.createRun('run-17', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-17');
+
+    const park = await driveUntilPark('run-17', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+  });
+
+  it('still settles failed when a sibling node fails under the default policy', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = failingActionEngine('slack rejected the message');
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'tolerated', type: 'tool', service: 'slack', action: 'send_message', params: {}, onError: 'continue' },
+        { id: 'strict', type: 'tool', service: 'slack', action: 'send_message', params: {} },
+        { id: 'notify', type: 'set', values: { text: 'done' } },
+      ],
+      edges: [
+        { from: 't', to: 'tolerated' },
+        { from: 't', to: 'strict' },
+        { from: 'tolerated', to: 'notify' },
+      ],
+    };
+    await store.createRun('run-18', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-18');
+
+    const park = await driveUntilPark('run-18', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('failed'); // `strict` alone dominates
+
+    const byNode = new Map((await store.getCheckpoints('run-18')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('notify')?.status).toBe('completed'); // the tolerated branch still ran
+  });
+
+  /**
+   * The template context is the one place decision 3 could change a
+   * definition that never opts in: a cross-branch `when` reads the failed
+   * node while its own branch is still running. `probe` is on that other
+   * branch, and its incoming edge asks whether the failure is visible.
+   */
+  function crossBranchProbeDefinition(onError?: NodeErrorPolicy): WorkflowDefinition {
+    return {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'broken', type: 'tool', service: 'slack', action: 'send_message', params: {}, ...(onError ? { onError } : {}) },
+        { id: 'other', type: 'set', values: { ok: true } },
+        { id: 'probe', type: 'set', values: { saw: 'the failure is in the template context' } },
+      ],
+      edges: [
+        { from: 't', to: 'broken' },
+        { from: 't', to: 'other' },
+        { from: 'other', to: 'probe', when: 'exists(nodes.broken.error)' },
+      ],
+    };
+  }
+
+  it('hides a default-policy failure from the template context, so an opt-out definition is unchanged', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = failingActionEngine('slack rejected the message');
+    await store.createRun('run-19', runParams(), crossBranchProbeDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-19');
+
+    const park = await driveUntilPark('run-19', attempt, { store, engine, clock: clock.now });
+
+    expect(park.outcome).toBe('failed');
+    const byNode = new Map((await store.getCheckpoints('run-19')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('broken')?.status).toBe('failed');
+    expect(byNode.get('other')?.status).toBe('completed');
+    // `nodes.broken` never enters the context, so the edge stays inactive.
+    expect(byNode.get('probe')?.status).toBe('skipped');
+  });
+
+  it('exposes a tolerated failure to a node on another branch', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = failingActionEngine('slack rejected the message');
+    await store.createRun('run-20', runParams(), crossBranchProbeDefinition('continue'), 'v1');
+    const attempt = await claimAttempt(store, 'run-20');
+
+    const park = await driveUntilPark('run-20', attempt, { store, engine, clock: clock.now });
+
+    expect(park.outcome).toBe('completed');
+    const byNode = new Map((await store.getCheckpoints('run-20')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('probe')?.status).toBe('completed');
+    expect(byNode.get('probe')?.result).toEqual({ saw: 'the failure is in the template context' });
   });
 });

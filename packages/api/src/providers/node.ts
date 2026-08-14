@@ -11,9 +11,8 @@ import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzl
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildReader,
-  buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
-import { routeAttention } from "../orchestrator/attention.js";
+import { buildChildReader, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
@@ -27,6 +26,7 @@ import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { buildRunSettledAttention } from "../workflows/run-attention.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -370,8 +370,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // the API either way.
     try {
       const run = await workflowStore.getRun(info.runId);
-      if (!run?.owner) return; // no recorded owner: nothing to notify
-      const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
+      const owner = principalFromOwner(run?.owner);
+      if (!owner) return; // no recorded owner: nothing to notify
       await routeAttention(
         { db },
         {
@@ -393,6 +393,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
+    // Settle attention (batch-fanout design decision 4): a failed top-level
+    // run raises a notification through the same router the approval park
+    // above uses. See `run-attention.ts` for why child runs stay silent.
+    onRunSettled: buildRunSettledAttention({ db, store: workflowStore }),
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };

@@ -7,9 +7,12 @@
 import { and, desc, eq, inArray, or } from "drizzle-orm";
 import {
   validateWorkflowDefinition,
+  type ListRunsFilter,
+  type NodeCheckpoint,
   type RunParams,
   type ValidateEnvironment,
   type WorkflowDefinition,
+  type WorkflowRunListItem,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
@@ -17,12 +20,16 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
+import { workflowDefinitions, workflowVersions, workflowWebhooks } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import type {
   GetWorkflowRunResponse,
+  ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
+  WorkflowRunCheckpoint,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
   WorkflowRunSummary,
 } from "../wire/types.js";
 
@@ -135,21 +142,41 @@ export async function ownedDefinitionRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
-export async function listWorkflowDefinitions(
-  deps: WorkflowServiceDeps,
-  owner: WorkflowOwner,
-): Promise<WorkflowDefinitionSummary[]> {
-  const myTeams = await listTeamsForUser(deps.db, owner.userId);
+/** The "definitions this caller may read" predicate — their own, plus every
+ * team they are a live member of. Shared by the definitions list and
+ * `ownedWorkflowIds` so the two can never disagree about reach. Membership
+ * is re-read on every call for the same reason `isAuthorizedFor` does. */
+async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner) {
+  const myTeams = await listTeamsForUser(db, owner.userId);
   const teamIds = myTeams.map((t) => t.id);
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, teamIds))
       : undefined;
+  return teamMatch ? or(ownerMatch, teamMatch) : ownerMatch;
+}
+
+/** Ids of every workflow the caller may read. The cross-workflow run list
+ * scopes on these: `WorkflowStore.listRuns` takes no owner filter, so
+ * authorization stays here in application code (batch-fanout design
+ * decision 5). */
+export async function ownedWorkflowIds(db: AppDb, owner: WorkflowOwner): Promise<string[]> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(await ownedDefinitionFilter(db, owner));
+  return rows.map((r) => r.id);
+}
+
+export async function listWorkflowDefinitions(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+): Promise<WorkflowDefinitionSummary[]> {
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(teamMatch ? or(ownerMatch, teamMatch) : ownerMatch)
+    .where(await ownedDefinitionFilter(deps.db, owner))
     .orderBy(desc(workflowDefinitions.updatedAt));
   return rows.map(rowToDefinition);
 }
@@ -356,14 +383,12 @@ export async function deleteWorkflowDefinition(
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return "not_found";
 
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, id));
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (run && run.status !== "settled") return "has_active_runs";
-  }
+  const active = await deps.workflowStore.listRuns({
+    workflowIds: [id],
+    status: ["pending", "running", "parked", "terminalizing"],
+    limit: 1,
+  });
+  if (active.runs.length > 0) return "has_active_runs";
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
@@ -409,40 +434,132 @@ export async function startWorkflowRun(
   return { runId };
 }
 
+/** Page size when the caller names none, and the ceiling it is clamped to.
+ * Exported so callers can name the accepted range in their error message. */
+export const RUN_PAGE_LIMIT_DEFAULT = 50;
+export const RUN_PAGE_LIMIT_MAX = 200;
+
+/** The run filter values callers may pass, and their guards. Defined once
+ * here so the HTTP route and the agent action reject the same set. */
+export const RUN_STATUS_VALUES = ["pending", "running", "parked", "terminalizing", "settled"] as const;
+export const RUN_OUTCOME_VALUES = ["completed", "failed", "cancelled"] as const;
+
+export function isRunStatus(value: string): value is WorkflowRunStatus {
+  return RUN_STATUS_VALUES.some((v) => v === value);
+}
+
+export function isRunOutcome(value: string): value is WorkflowRunOutcome {
+  return RUN_OUTCOME_VALUES.some((v) => v === value);
+}
+
+function clampRunLimit(limit: number | undefined): number {
+  if (limit === undefined) return RUN_PAGE_LIMIT_DEFAULT;
+  return Math.min(Math.max(Math.trunc(limit), 1), RUN_PAGE_LIMIT_MAX);
+}
+
+function toRunSummary(item: WorkflowRunListItem): WorkflowRunSummary {
+  return {
+    runId: item.runId,
+    workflowId: item.workflowId,
+    status: item.status,
+    outcome: item.outcome,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    parentRunId: item.parentRunId,
+    parentNodeId: item.parentNodeId,
+    parentIteration: item.parentIteration,
+  };
+}
+
+/** Paging controls every run list shares. */
+export interface RunPageOptions {
+  limit?: number;
+  cursor?: string;
+}
+
+/** One workflow's runs, newest first. Null when the workflow isn't owned. */
 export async function listWorkflowRuns(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
-): Promise<WorkflowRunSummary[] | null> {
+  page: RunPageOptions = {},
+): Promise<ListWorkflowRunsResponse | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
-  // `WorkflowStore` has no "list runs by workflowId" method — it's a small,
-  // portable port (decision 6) and this is an API-only read concern, so the
-  // list is built by asking the app db for the definition's run ids, then
-  // re-fetching each through the store for a consistent shape. `workflow_runs`
-  // doesn't index by owner alone, but every row here is already scoped by
-  // `workflowId`, which we've just verified is owned.
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, workflowId))
-    .orderBy(desc(workflowRuns.createdAt));
+  const result = await deps.workflowStore.listRuns({
+    workflowIds: [workflowId],
+    limit: clampRunLimit(page.limit),
+    cursor: page.cursor,
+  });
+  return { runs: result.runs.map(toRunSummary), nextCursor: result.nextCursor };
+}
 
-  const runs: WorkflowRunSummary[] = [];
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (!run) continue;
-    runs.push({
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-    });
+/** Filters the cross-workflow run list accepts, on top of `RunPageOptions`. */
+export interface OwnerRunsFilter extends RunPageOptions {
+  /** Narrows to these workflows. Omit for every workflow the caller may read. */
+  workflowIds?: string[];
+  status?: ListRunsFilter["status"];
+  outcome?: ListRunsFilter["outcome"];
+  /** Children of one run — this is how a batch parent's items come back in one query. */
+  parentRunId?: string;
+  since?: number;
+}
+
+/**
+ * Runs across every workflow the caller may read, newest first. Null when
+ * the caller named a workflow id they cannot read — the route answers 404,
+ * so an unreadable workflow and a missing one stay indistinguishable.
+ *
+ * Runs of a deleted definition are unreachable here, as they were through
+ * the per-workflow list: they stay reachable by run id.
+ */
+export async function listRunsForOwner(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  filter: OwnerRunsFilter = {},
+): Promise<ListWorkflowRunsResponse | null> {
+  const readable = await ownedWorkflowIds(deps.db, owner);
+  let workflowIds = readable;
+  if (filter.workflowIds !== undefined) {
+    const readableSet = new Set(readable);
+    if (filter.workflowIds.some((id) => !readableSet.has(id))) return null;
+    workflowIds = filter.workflowIds;
   }
-  return runs;
+  if (workflowIds.length === 0) return { runs: [] };
+
+  const result = await deps.workflowStore.listRuns({
+    workflowIds,
+    status: filter.status,
+    outcome: filter.outcome,
+    parentRunId: filter.parentRunId,
+    since: filter.since,
+    limit: clampRunLimit(filter.limit),
+    cursor: filter.cursor,
+  });
+  return { runs: result.runs.map(toRunSummary), nextCursor: result.nextCursor };
+}
+
+/**
+ * Projects one checkpoint for the wire. The interpreter records a session
+ * node's `sessionId` and a workflow node's `childRunId` in the checkpoint's
+ * `effects` bag (`nodes/submission-node.ts`, `nodes/workflow-call.ts`);
+ * both are what turns a run page into a link to the work the node started.
+ * The rest of `effects` (receipts, repair state) is interpreter bookkeeping
+ * and stays off the wire.
+ */
+export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
+  const effects = cp.effects;
+  return {
+    nodeId: cp.nodeId,
+    iteration: cp.iteration,
+    status: cp.status,
+    result: cp.result,
+    error: cp.error,
+    createdAt: cp.createdAt,
+    sessionId: typeof effects?.sessionId === "string" ? effects.sessionId : undefined,
+    childRunId: typeof effects?.childRunId === "string" ? effects.childRunId : undefined,
+  };
 }
 
 /** Owner-gated run lookup shared by cancel/approval below. */
@@ -515,14 +632,7 @@ export async function getWorkflowRunDetail(
       definition: run.definition,
       params: run.params,
     },
-    checkpoints: checkpoints.map((cp) => ({
-      nodeId: cp.nodeId,
-      iteration: cp.iteration,
-      status: cp.status,
-      result: cp.result,
-      error: cp.error,
-      createdAt: cp.createdAt,
-    })),
+    checkpoints: checkpoints.map(toRunCheckpoint),
     signals: signals.map((s) => ({
       signalId: s.signalId,
       signalType: s.signalType,

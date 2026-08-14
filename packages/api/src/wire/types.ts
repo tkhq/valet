@@ -762,10 +762,18 @@ export interface WorkflowRunSummary {
   outcome?: WorkflowRunOutcome;
   createdAt: number;
   updatedAt: number;
+  // Set when a `workflow` node in another run started this one (batch
+  // fan-out): the parent run, the node that called it, and which foreach
+  // item it belongs to. Absent on a top-level run.
+  parentRunId?: string;
+  parentNodeId?: string;
+  parentIteration?: number;
 }
 
 export interface ListWorkflowRunsResponse {
   runs: WorkflowRunSummary[];
+  /** Pass back as `cursor` for the next page. Absent on the last page. */
+  nextCursor?: string;
 }
 
 // Version history: one immutable snapshot per definition-changing save
@@ -792,6 +800,11 @@ export interface WorkflowRunCheckpoint {
   result?: unknown;
   error?: string;
   createdAt: number;
+  /** The session a session/orchestrator node drove. Present on a failed
+   * node too — that is where the failure is readable. */
+  sessionId?: string;
+  /** The run a `workflow` node started. */
+  childRunId?: string;
 }
 
 export interface WorkflowRunSignal {

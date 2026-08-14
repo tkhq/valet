@@ -8,6 +8,13 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import type { WorkflowRunDetail } from "@valet/api/wire";
 import { RunDetailBody } from "./workflows.runs.$runId";
 
@@ -31,6 +38,27 @@ function baseRun(overrides: Partial<WorkflowRunDetail["run"]> = {}): WorkflowRun
     checkpoints: [],
     signals: [],
   };
+}
+
+/** Router context, needed only by the checkpoint-link case: `Link` reads the
+ * router store, and the rest of this file renders `RunDetailBody` bare. */
+function renderInRouter(ui: React.ReactElement) {
+  const rootRoute = createRootRoute({ component: () => ui });
+  const sessionRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/sessions/$sessionId",
+    component: () => null,
+  });
+  const runRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/workflows/runs/$runId",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([sessionRoute, runRoute]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  return render(<RouterProvider router={router} />);
 }
 
 describe("RunDetailBody", () => {
@@ -69,6 +97,31 @@ describe("RunDetailBody", () => {
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
     expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
     expect(screen.getByText("completed")).toBeTruthy();
+  });
+
+  it("links a checkpoint to the session it drove and the child run it started", async () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [
+      {
+        nodeId: "ask",
+        iteration: 0,
+        status: "failed",
+        error: "session failed",
+        sessionId: "s_abc",
+        createdAt: Date.now(),
+      },
+      { nodeId: "sub", iteration: 0, status: "completed", childRunId: "wfrun_sub_1", createdAt: Date.now() },
+      { nodeId: "set1", iteration: 0, status: "completed", createdAt: Date.now() },
+    ];
+    renderInRouter(
+      <RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />,
+    );
+    expect((await screen.findByText("Open session")).getAttribute("href")).toBe("/sessions/s_abc");
+    expect(screen.getByText("Open child run").getAttribute("href")).toBe(
+      "/workflows/runs/wfrun_sub_1",
+    );
+    // A checkpoint carrying neither id gets no link row.
+    expect(screen.getAllByText("Open session")).toHaveLength(1);
   });
 
   it("renders checkpoints with status and a result preview", () => {

@@ -476,6 +476,229 @@ describe("GET /api/workflows/:id/runs", () => {
     const { runs } = (await res.json()) as ListWorkflowRunsResponse;
     expect(runs.map((r) => r.runId)).toEqual([runId]);
   });
+
+  it("pages by cursor and rejects a limit outside the accepted range", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+    for (const runId of ["wfrun_page_a", "wfrun_page_b", "wfrun_page_c"]) {
+      await api.providers.workflowStore.createRun(
+        runId,
+        { workflowId: created.id, definitionVersionId: "v1" },
+        created.definition,
+        "v1",
+        { ownerType: "user", ownerId: "local-user" },
+      );
+    }
+
+    const first = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs?limit=2`);
+    const firstPage = (await first.json()) as ListWorkflowRunsResponse;
+    expect(firstPage.runs).toHaveLength(2);
+    expect(firstPage.nextCursor).toBeDefined();
+
+    const second = await fetch(
+      `${api.baseUrl}/api/workflows/${created.id}/runs?limit=2&cursor=${encodeURIComponent(firstPage.nextCursor ?? "")}`,
+    );
+    const secondPage = (await second.json()) as ListWorkflowRunsResponse;
+    expect(secondPage.runs).toHaveLength(1);
+    expect(secondPage.nextCursor).toBeUndefined();
+
+    const seen = [...firstPage.runs, ...secondPage.runs].map((r) => r.runId);
+    expect(new Set(seen).size).toBe(3);
+
+    const bad = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs?limit=0`);
+    expect(bad.status).toBe(400);
+    const badCursor = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs?cursor=nonsense`);
+    expect(badCursor.status).toBe(400);
+  });
+});
+
+describe("run detail checkpoint links", () => {
+  it("surfaces a failed session node's sessionId and a workflow node's childRunId", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_links";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const claimed = await api.providers.workflowStore.claimRun(runId, "test-owner", 30_000);
+    if (!claimed) throw new Error("expected claim to succeed");
+    await api.providers.workflowStore.completeCheckpoint(runId, "ask", 0, claimed.attempt, {
+      runId,
+      nodeId: "ask",
+      iteration: 0,
+      status: "failed",
+      error: "session failed",
+      // What `submission-node.ts` and `workflow-call.ts` actually persist.
+      effects: { sessionId: "s_abc", receipt: { threadId: "t1", queueItemId: "q1" }, repairAttempted: false },
+      attempt: claimed.attempt,
+      createdAt: Date.now(),
+    });
+    await api.providers.workflowStore.completeCheckpoint(runId, "sub", 0, claimed.attempt, {
+      runId,
+      nodeId: "sub",
+      iteration: 0,
+      status: "completed",
+      effects: { childRunId: "wfrun_sub_child" },
+      attempt: claimed.attempt,
+      createdAt: Date.now(),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
+    expect(res.status).toBe(200);
+    const detail = (await res.json()) as GetWorkflowRunResponse;
+    const ask = detail.checkpoints.find((cp) => cp.nodeId === "ask");
+    const sub = detail.checkpoints.find((cp) => cp.nodeId === "sub");
+    expect(ask?.sessionId).toBe("s_abc");
+    expect(sub?.childRunId).toBe("wfrun_sub_child");
+    // The rest of the effects bag stays off the wire.
+    expect(JSON.stringify(detail.checkpoints)).not.toContain("repairAttempted");
+  });
+});
+
+describe("DELETE /api/workflows/:id with a run in flight", () => {
+  it("409s while a run is not settled, then deletes once it settles", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_active";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+
+    const blocked = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(blocked.status).toBe(409);
+
+    await api.providers.workflowStore.settleRun(runId, "completed");
+    const deleted = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+  });
+});
+
+describe("GET /api/workflows/runs", () => {
+  /** Seeds one run, returning its id. */
+  async function seedRun(
+    testApi: TestApi,
+    workflowId: string,
+    runId: string,
+    params: Record<string, unknown> = {},
+  ): Promise<string> {
+    await testApi.providers.workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1", ...params },
+      VALID_DEFINITION,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    return runId;
+  }
+
+  it("resolves to the cross-workflow list, not to GET /:id with id='runs'", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(body.runs).toEqual([]);
+  });
+
+  it("lists runs across every workflow the caller owns", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const first = await createWorkflow(api.baseUrl, "wf-one");
+    const second = await createWorkflow(api.baseUrl, "wf-two");
+    await seedRun(api, first.id, "wfrun_cross_a");
+    await seedRun(api, second.id, "wfrun_cross_b");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(new Set(body.runs.map((r) => r.runId))).toEqual(
+      new Set(["wfrun_cross_a", "wfrun_cross_b"]),
+    );
+  });
+
+  it("returns a batch parent's children in one query via parentRunId", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_batch_parent");
+    await seedRun(api, created.id, "wfrun_batch_child_1", {
+      parentRunId: "wfrun_batch_parent",
+      parentNodeId: "fanout",
+      parentIteration: 0,
+    });
+    await seedRun(api, created.id, "wfrun_batch_child_2", {
+      parentRunId: "wfrun_batch_parent",
+      parentNodeId: "fanout",
+      parentIteration: 1,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs?parentRunId=wfrun_batch_parent`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(new Set(body.runs.map((r) => r.runId))).toEqual(
+      new Set(["wfrun_batch_child_1", "wfrun_batch_child_2"]),
+    );
+    expect(body.runs.every((r) => r.parentRunId === "wfrun_batch_parent")).toBe(true);
+    expect(body.runs.map((r) => r.parentNodeId)).toEqual(["fanout", "fanout"]);
+  });
+
+  it("filters by status and rejects an unknown one", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_status_pending");
+    await seedRun(api, created.id, "wfrun_status_settled");
+    await api.providers.workflowStore.settleRun("wfrun_status_settled", "completed");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs?status=settled`);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(body.runs.map((r) => r.runId)).toEqual(["wfrun_status_settled"]);
+    expect(body.runs[0].outcome).toBe("completed");
+
+    const bad = await fetch(`${api.baseUrl}/api/workflows/runs?status=nope`);
+    expect(bad.status).toBe(400);
+  });
+
+  it("404s a workflowId the caller cannot read, and hides its runs from an unfiltered list", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_private");
+    const headers = { "x-valet-test-user-id": "test-member" };
+
+    const filtered = await fetch(
+      `${api.baseUrl}/api/workflows/runs?workflowId=${created.id}`,
+      { headers },
+    );
+    expect(filtered.status).toBe(404);
+
+    const unfiltered = await fetch(`${api.baseUrl}/api/workflows/runs`, { headers });
+    expect(unfiltered.status).toBe(200);
+    const body = (await unfiltered.json()) as ListWorkflowRunsResponse;
+    expect(body.runs).toEqual([]);
+  });
+
+  // `created_at` is an integer column. A value it cannot hold must answer 400
+  // with the corrective action, never a 500 carrying a driver syntax error.
+  it("400s a since or cursor value the run store cannot hold", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_bounds");
+
+    for (const query of ["since=1.5", "since=1e30", "since=-1", "cursor=1.5%3Awfrun_bounds"]) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/runs?${query}`);
+      expect([query, res.status]).toEqual([query, 400]);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/millisecond timestamp|nextCursor/);
+    }
+
+    const ok = await fetch(`${api.baseUrl}/api/workflows/runs?since=0`);
+    expect(ok.status).toBe(200);
+  });
 });
 
 describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
