@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
-import type { ActionPlugin, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, ApprovalOverrideRule, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
 import { assemblePlugins, partitionByName, pluginSessionExtras } from "./assemble.js";
 
 function makeAction(id: string): PluginAction {
@@ -227,6 +227,42 @@ describe("pluginSessionExtras with stored skills", () => {
   it("reports no shadowing when nothing collides", () => {
     const { shadowedSkills } = pluginSessionExtras([], [stored("deploy", "mine")]);
     expect(shadowedSkills).toEqual([]);
+  });
+});
+
+describe("pluginSessionExtras with approvalOverrides", () => {
+  it("blocks all tools when a wildcard deny override is set", async () => {
+    const plugins = [makePlugin("svc", { actions: [makeActionPlugin("svc")] })];
+    const overrides: ApprovalOverrideRule[] = [{ match: "*", mode: "deny" }];
+    const { tools } = pluginSessionExtras(plugins, [], { approvalOverrides: overrides });
+
+    const callTool = tools.find((t) => t.name === "call_tool");
+    expect(callTool).toBeDefined();
+
+    // Executing the call_tool with any action should return blocked text.
+    const result = await callTool!.execute({ tool_id: "svc.do_thing", params: {} }, {} as never);
+    expect(typeof result).toBe("object");
+    expect((result as { text: string }).text).toContain("blocked by org policy");
+  });
+
+  it("allows tools when no overrides are set", async () => {
+    const plugins = [makePlugin("svc", { actions: [makeActionPlugin("svc")] })];
+    const { tools } = pluginSessionExtras(plugins);
+
+    const callTool = tools.find((t) => t.name === "call_tool");
+    expect(callTool).toBeDefined();
+
+    const result = await callTool!.execute({ tool_id: "svc.do_thing", params: {} }, {} as never);
+    // The fixture action returns { success: true } — not a denied-policy result.
+    expect((result as { text: string }).text).not.toContain("blocked by org policy");
+  });
+
+  it("produces a fresh tools array per call when overrides differ", () => {
+    const plugins = [makePlugin("svc", { actions: [makeActionPlugin("svc")] })];
+    const overrides: ApprovalOverrideRule[] = [{ match: "*", mode: "deny" }];
+    const withOverrides = pluginSessionExtras(plugins, [], { approvalOverrides: overrides });
+    const withoutOverrides = pluginSessionExtras(plugins);
+    expect(withOverrides.tools).not.toBe(withoutOverrides.tools);
   });
 });
 

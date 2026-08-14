@@ -40,6 +40,8 @@ import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from ".
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
+import type { InstanceConfig } from "../config/instance-config.js";
+import { InstanceConfigError } from "../config/instance-config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -132,6 +134,13 @@ export interface NodeProviderOpts {
    * `main.ts` calls it.
    */
   seedLocalIdentity?: boolean;
+  /**
+   * Parsed instance config (`valet.yaml`). When present:
+   * - `plugins` allow/deny feeds `loadNodeModulesPlugins` instead of
+   *   `parseValetPluginsEnv`. Both set simultaneously is an error.
+   * - `toolPolicies` flow into `EngineHost` as `approvalOverrides`.
+   */
+  instanceConfig?: InstanceConfig;
 }
 
 /**
@@ -253,7 +262,18 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
-  const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
+  // Plugin filter: config file `plugins` block takes precedence over
+  // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
+  // the operator must remove one to avoid ambiguity.
+  const configPlugins = opts.instanceConfig?.plugins;
+  if (configPlugins && process.env.VALET_PLUGINS) {
+    throw new InstanceConfigError(
+      "VALET_PLUGINS is set and the config file declares plugins. Remove one.",
+    );
+  }
+  const { allowlist, denylist } = configPlugins
+    ? { allowlist: configPlugins.allow, denylist: configPlugins.deny }
+    : parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
     : assemblePlugins([
@@ -303,6 +323,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxJwtMaster: opts.sandboxJwtMaster,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
+    ...(opts.instanceConfig?.toolPolicies
+      ? { approvalOverrides: opts.instanceConfig.toolPolicies }
+      : {}),
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.

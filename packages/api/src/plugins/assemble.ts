@@ -28,7 +28,7 @@
  *     entries come back in `shadowedSkills` so `/api/skills` can say what
  *     happened instead of dropping them in silence.
  */
-import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
+import { pluginCatalogTools, type ActionPlugin, type ApprovalOverrideRule, type ValetPlugin } from "@valet/engine";
 import type { RoleSpec, SkillSource, ToolDef } from "@valet/engine";
 import { buildSkillTool } from "./skill-tool.js";
 
@@ -140,12 +140,20 @@ export function partitionByName<T extends { name: string }>(
  * leak one session's dynamically-resolved actions (and their TTL clock)
  * into every other session sharing the plugin set.
  */
+export interface PluginSessionExtrasOpts {
+  approvalOverrides?: ApprovalOverrideRule[];
+}
+
 export function pluginSessionExtras(
   plugins: ValetPlugin[],
   extraSkills: SkillSource[] = [],
+  opts?: PluginSessionExtrasOpts,
 ): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
-  const tools = actionPlugins.length > 0 ? pluginCatalogTools({ plugins: actionPlugins }) : [];
+  const tools =
+    actionPlugins.length > 0
+      ? pluginCatalogTools({ plugins: actionPlugins, approvalOverrides: opts?.approvalOverrides })
+      : [];
   const pluginSkills = collectSkills(plugins);
   const { kept, shadowed } = partitionByName(
     pluginSkills.map((s) => s.name),
