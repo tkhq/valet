@@ -25,6 +25,8 @@ import type {
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  CreateWorkflowEventTriggerRequest,
+  CreateWorkflowScheduleRequest,
   DeleteCredentialResponse,
   EnsureOrchestratorResponse,
   GetGithubAppResponse,
@@ -36,10 +38,12 @@ import type {
   GetSessionResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
+  GetWorkflowTriggerCatalogResponse,
   ListCredentialsResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
+  ListAllWorkflowRunsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
@@ -54,6 +58,7 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  ListWorkflowTriggersResponse,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
@@ -101,9 +106,13 @@ import type {
   StartWorkflowRunResponse,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
+  UpdateWorkflowEventTriggerRequest,
   UpdateWorkflowRequest,
+  UpdateWorkflowScheduleRequest,
   UsageSummaryResponse,
   UpdateWorkflowResponse,
+  WorkflowEventTriggerResponse,
+  WorkflowScheduleResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
 import type {
@@ -365,6 +374,31 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
+
+  // workflow triggers (spec 2026-08-15)
+  listWorkflowTriggers: (workflowId?: string) =>
+    request<ListWorkflowTriggersResponse>(
+      "GET",
+      `/workflows/triggers${workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""}`,
+    ),
+  getWorkflowTriggerCatalog: () =>
+    request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
+  listAllWorkflowRuns: (limit?: number) =>
+    request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${limit ? `?limit=${limit}` : ""}`),
+  createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
+    request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
+  updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>
+    request<WorkflowScheduleResponse>("PATCH", `/workflows/schedules/${encodeURIComponent(id)}`, body),
+  deleteWorkflowSchedule: (id: string) =>
+    request<{ ok: true }>("DELETE", `/workflows/schedules/${encodeURIComponent(id)}`),
+  runWorkflowScheduleNow: (id: string) =>
+    request<{ ok: true }>("POST", `/workflows/schedules/${encodeURIComponent(id)}/run`),
+  createWorkflowEventTrigger: (body: CreateWorkflowEventTriggerRequest) =>
+    request<WorkflowEventTriggerResponse>("POST", "/workflows/event-triggers", body),
+  updateWorkflowEventTrigger: (id: string, body: UpdateWorkflowEventTriggerRequest) =>
+    request<WorkflowEventTriggerResponse>("PATCH", `/workflows/event-triggers/${encodeURIComponent(id)}`, body),
+  deleteWorkflowEventTrigger: (id: string) =>
+    request<{ ok: true }>("DELETE", `/workflows/event-triggers/${encodeURIComponent(id)}`),
 
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),
