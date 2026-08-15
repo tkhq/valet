@@ -1,5 +1,6 @@
 export {
   SANDBOX_CR_API_VERSION,
+  type ContainerSecurityContext,
   type EnvVar,
   type K8sProviderConfig,
   type PodOwnerReference,
@@ -16,6 +17,7 @@ export {
   type SandboxCRStatus,
   type SandboxPodSpec,
   type SandboxPodTemplate,
+  type SeccompProfile,
   type SecretVolumeSource,
   type Volume,
   type VolumeClaimTemplate,
@@ -25,6 +27,9 @@ export {
 export {
   CREDS_MOUNT_PATH,
   CREDS_VOLUME_NAME,
+  DEV_FUSE_VOLUME_NAME,
+  DOCKER_STATE_MOUNT_PATH,
+  DOCKER_STATE_VOLUME_NAME,
   SANDBOX_CONTAINER_NAME,
   SESSION_LABEL_KEY,
   WORKSPACE_MOUNT_PATH,

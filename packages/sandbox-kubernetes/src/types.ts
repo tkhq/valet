@@ -56,6 +56,18 @@ export interface K8sProviderConfig {
   imagePullSecrets?: { name: string }[];
 }
 
+/** `corev1.SeccompProfile` subset — only the two profile types the manifest
+ * builder emits (Unconfined for rootless DinD, RuntimeDefault for future use). */
+export interface SeccompProfile {
+  type: "Unconfined" | "RuntimeDefault";
+}
+
+/** `corev1.SecurityContext` subset — container-level security context fields
+ * the manifest builder sets for rootless DinD sandboxes. */
+export interface ContainerSecurityContext {
+  seccompProfile?: SeccompProfile;
+}
+
 /** `corev1.EnvVar` subset — name/value pairs only (we never emit valueFrom). */
 export interface EnvVar {
   name: string;
@@ -91,6 +103,9 @@ export interface SecretVolumeSource {
 export interface Volume {
   name: string;
   secret?: SecretVolumeSource;
+  emptyDir?: Record<string, never>;
+  /** `corev1.HostPathVolumeSource` subset — only the /dev/fuse char device. */
+  hostPath?: { path: string; type: "CharDevice" };
 }
 
 /** `corev1.Container` subset — only the fields the manifest builder sets. */
@@ -102,6 +117,7 @@ export interface SandboxContainer {
   env?: EnvVar[];
   resources?: ResourceRequirements;
   volumeMounts?: VolumeMount[];
+  securityContext?: ContainerSecurityContext;
   /** `corev1.Container.workingDir` — set to `WORKSPACE_MOUNT_PATH` by the
    * manifest builder so relative paths in `exec`/file ops resolve against
    * the persistent `/workspace` volume by default (the k8s `pods/exec` API
