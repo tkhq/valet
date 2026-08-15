@@ -82,7 +82,10 @@ describe("PoliciesSection — new policy target one-of", () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
-    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    // The service combobox: "gmail" is in the catalog; typing selects it via Enter
+    const serviceInput = screen.getByRole("combobox", { name: /^service$/i });
+    await user.click(serviceInput);
+    await user.keyboard("gmail{Enter}");
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     expect(createOrgPolicyMutate).toHaveBeenCalledTimes(1);
@@ -97,7 +100,10 @@ describe("PoliciesSection — new policy target one-of", () => {
     render(<PoliciesSection />);
 
     await user.click(screen.getByRole("radio", { name: "Action" }));
-    await user.selectOptions(screen.getByLabelText("Action", { selector: "#policy-action" }), "gmail.send_email");
+    // The action combobox: "gmail.send_email" is in the catalog; select via Enter
+    const actionInput = screen.getByRole("combobox", { name: /^action$/i });
+    await user.click(actionInput);
+    await user.keyboard("gmail.send_email{Enter}");
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     const call = createOrgPolicyMutate.mock.calls[0][0];
@@ -122,6 +128,13 @@ describe("PoliciesSection — new policy target one-of", () => {
   });
 });
 
+/** Helper: select "gmail" in the service combobox (combobox replaced the old <select>). */
+async function selectGmailService(user: ReturnType<typeof userEvent.setup>) {
+  const serviceInput = screen.getByRole("combobox", { name: /^service$/i });
+  await user.click(serviceInput);
+  await user.keyboard("gmail{Enter}");
+}
+
 describe("PoliciesSection — matcher rows", () => {
   it("a gt matcher submits a NUMBER value, not a string (matchers.ts requires number for gt/gte/lt/lte)", async () => {
     const user = userEvent.setup();
@@ -131,7 +144,7 @@ describe("PoliciesSection — matcher rows", () => {
     await user.type(screen.getByLabelText("Matcher path"), "amount");
     await user.selectOptions(screen.getByLabelText("Matcher operator"), "gt");
     await user.type(screen.getByLabelText("Matcher value"), "100");
-    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    await selectGmailService(user);
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     const call = createOrgPolicyMutate.mock.calls[0][0];
@@ -146,7 +159,7 @@ describe("PoliciesSection — matcher rows", () => {
     await user.type(screen.getByLabelText("Matcher path"), "status");
     await user.selectOptions(screen.getByLabelText("Matcher operator"), "in");
     await user.type(screen.getByLabelText("Matcher value"), "a, b ,c");
-    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    await selectGmailService(user);
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     const call = createOrgPolicyMutate.mock.calls[0][0];
@@ -161,7 +174,7 @@ describe("PoliciesSection — matcher rows", () => {
     await user.type(screen.getByLabelText("Matcher path"), "amount");
     await user.selectOptions(screen.getByLabelText("Matcher operator"), "gt");
     await user.type(screen.getByLabelText("Matcher value"), "not-a-number");
-    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    await selectGmailService(user);
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     expect(createOrgPolicyMutate).not.toHaveBeenCalled();
@@ -174,7 +187,7 @@ describe("PoliciesSection — matcher rows", () => {
 
     await user.click(screen.getByRole("button", { name: "Add matcher" }));
     await user.click(screen.getByRole("button", { name: "Remove matcher" }));
-    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    await selectGmailService(user);
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     const call = createOrgPolicyMutate.mock.calls[0][0];
