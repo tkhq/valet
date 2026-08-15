@@ -66,6 +66,14 @@ export interface SeccompProfile {
  * the manifest builder sets for rootless DinD sandboxes. */
 export interface ContainerSecurityContext {
   seccompProfile?: SeccompProfile;
+  /** `corev1.Capabilities` subset — capabilities to add to the container.
+   * Used for rootless DinD: adds SYS_ADMIN (uid_map write) and NET_ADMIN
+   * (rootlesskit sysctl in netns). */
+  capabilities?: { add: string[] };
+  /** `corev1.SecurityContext.procMount` — Unmasked unmasks /proc/sys so
+   * rootlesskit can set net.ipv4.ip_forward. Requires the ProcMountType
+   * feature gate to be enabled on the cluster. */
+  procMount?: "Unmasked" | "Default";
 }
 
 /** `corev1.EnvVar` subset — name/value pairs only (we never emit valueFrom). */

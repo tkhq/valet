@@ -42,6 +42,8 @@ export const DOCKER_STATE_VOLUME_NAME = "docker-state";
 export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
 /** Volume name for the /dev/fuse hostPath device (rootless DinD). */
 export const DEV_FUSE_VOLUME_NAME = "dev-fuse";
+/** Volume name for the /dev/net/tun hostPath device (rootless DinD — needed by rootlesskit). */
+export const DEV_TUN_VOLUME_NAME = "dev-tun";
 
 /** Returns the name of the Kubernetes Secret backing the creds volume for a sandbox. */
 export function credsSecretName(sandboxName: string): string {
@@ -167,12 +169,17 @@ export function buildSandboxManifest(
   // mechanism used by the rootless BuildKit builder in k8s-builder.ts. Never
   // sets privileged — rootless Docker does not require it.
   if (opts.docker) {
-    container.securityContext = { seccompProfile: { type: "Unconfined" } };
+    container.securityContext = {
+      seccompProfile: { type: "Unconfined" },
+      capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
+      procMount: "Unmasked",
+    };
     container.env = [...(container.env ?? []), { name: "VALET_SANDBOX_DOCKER", value: "1" }];
     container.volumeMounts = [
       ...(container.volumeMounts ?? []),
       { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
       { name: DEV_FUSE_VOLUME_NAME, mountPath: "/dev/fuse" },
+      { name: DEV_TUN_VOLUME_NAME, mountPath: "/dev/net/tun" },
     ];
     if (!isFullProfile) {
       container.command = [
@@ -204,6 +211,7 @@ export function buildSandboxManifest(
       ...(podSpec.volumes ?? []),
       { name: DOCKER_STATE_VOLUME_NAME, emptyDir: {} },
       { name: DEV_FUSE_VOLUME_NAME, hostPath: { path: "/dev/fuse", type: "CharDevice" } },
+      { name: DEV_TUN_VOLUME_NAME, hostPath: { path: "/dev/net/tun", type: "CharDevice" } },
     ];
   }
 

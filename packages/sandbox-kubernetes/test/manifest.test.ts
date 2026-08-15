@@ -4,6 +4,7 @@ import {
   CREDS_MOUNT_PATH,
   CREDS_VOLUME_NAME,
   DEV_FUSE_VOLUME_NAME,
+  DEV_TUN_VOLUME_NAME,
   DOCKER_STATE_MOUNT_PATH,
   DOCKER_STATE_VOLUME_NAME,
   SANDBOX_CR_API_VERSION,
@@ -291,16 +292,25 @@ describe("docker flag (rootless DinD)", () => {
     ]).toBe("unconfined");
     const c = pod.spec.containers[0]!;
     expect(c.securityContext?.seccompProfile?.type).toBe("Unconfined");
+    expect(c.securityContext?.capabilities?.add).toEqual(["SYS_ADMIN", "NET_ADMIN"]);
+    expect(c.securityContext?.procMount).toBe("Unmasked");
     expect(c.env).toContainEqual({ name: "VALET_SANDBOX_DOCKER", value: "1" });
     expect(c.volumeMounts).toContainEqual({
       name: DOCKER_STATE_VOLUME_NAME,
       mountPath: DOCKER_STATE_MOUNT_PATH,
+    });
+    expect(c.volumeMounts).toContainEqual({
+      name: DEV_TUN_VOLUME_NAME,
+      mountPath: "/dev/net/tun",
     });
     expect(pod.spec.volumes).toContainEqual(
       expect.objectContaining({ name: DOCKER_STATE_VOLUME_NAME }),
     );
     expect(pod.spec.volumes).toContainEqual(
       expect.objectContaining({ name: DEV_FUSE_VOLUME_NAME }),
+    );
+    expect(pod.spec.volumes).toContainEqual(
+      expect.objectContaining({ name: DEV_TUN_VOLUME_NAME }),
     );
     expect(JSON.stringify(cr)).not.toContain("privileged");
   });
@@ -321,5 +331,8 @@ describe("docker flag (rootless DinD)", () => {
     expect(s).not.toContain("apparmor");
     expect(s).not.toContain("VALET_SANDBOX_DOCKER");
     expect(s).not.toContain(DOCKER_STATE_VOLUME_NAME);
+    expect(s).not.toContain("capabilities");
+    expect(s).not.toContain("procMount");
+    expect(s).not.toContain(DEV_TUN_VOLUME_NAME);
   });
 });
