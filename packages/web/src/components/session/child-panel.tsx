@@ -24,6 +24,15 @@ export function ChildPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
+  // Callers pass inline callbacks (a new reference every render), so the
+  // keydown effect reads onClose through a ref: the window listener
+  // registers once per mount instead of re-registering each render, and
+  // it can never invoke a stale closure.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -31,7 +40,7 @@ export function ChildPanel({
         // Composer's Escape-to-interrupt does not also abort a running
         // turn — closing the top layer wins; a second Escape interrupts.
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       // Minimal focus trap: keep Tab from leaving the panel while it's open.
@@ -57,7 +66,7 @@ export function ChildPanel({
     // bubble-phase interrupt listener, regardless of mount order.
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [onClose]);
+  }, []);
 
   // Focus the panel on open, restore focus to whatever triggered it on close.
   useEffect(() => {
