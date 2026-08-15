@@ -1,8 +1,13 @@
-# Session sandbox image for the `sandbox-kubernetes` provider (kubernetes-
-# deployment design decision 2). This is the pod the k8s provider's manifest
-# builder runs — NOT the legacy OpenCode/VNC/code-server dev-environment
-# image at `docker/Dockerfile.sandbox` (that one backs the Modal/docker-
-# compose "opencode" stack and is intentionally left untouched).
+# CI-published full-profile base image for the `sandbox-kubernetes` provider
+# (kubernetes-deployment design decision 2). This image is the FROM target for
+# the auto-seeded `kind='base', profile='full'` image_sources row — it ships
+# the compiled `@valet/sandbox-gateway` bundle, ttyd, and code-server on top
+# of the headless agent tooling, making it suitable for interactive developer
+# sessions. Published as `ghcr.io/tkhq/valet-sandbox:sha-<shortsha>` by
+# `.github/workflows/docker-publish.yml`. NOT the legacy OpenCode/VNC/code-
+# server dev-environment image at `docker/Dockerfile.sandbox` (that one backs
+# the Modal/docker-compose "opencode" stack and is intentionally left
+# untouched).
 #
 # `packages/sandbox-kubernetes/src/manifest.ts` sets the pod's `command`
 # depending on profile:

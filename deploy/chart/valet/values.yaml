@@ -113,6 +113,22 @@ sandbox:
   # stay narrowly scoped instead of granting pod access next to the api
   # pod itself.
   namespace: valet-sandboxes
+
+  # Public base image the seeded headless base source FROMs. Layered with
+  # agent tooling (git, ripgrep, gh, node) via seed setup_commands.
+  headlessBaseImage: node:22-bookworm-slim
+
+  # Image the seeded full-profile base source FROMs (via an auto-seeded
+  # kind='external' source). Ships gateway + ttyd + code-server. Pin to
+  # sha-<shortsha> for reproducible deploys.
+  fullBaseImage: ghcr.io/tkhq/valet-sandbox:latest
+
+  # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
+  # else resolves. Kept for one release; will be removed in a future v2.x.
+  # image:
+  #   repository: ghcr.io/tkhq/valet-sandbox
+  #   tag: latest
+
   # Same CI-publishing story as api.image: for remote clusters use
   # ghcr.io/<owner>/valet-sandbox pinned to a sha-<shortsha> tag.
   image:

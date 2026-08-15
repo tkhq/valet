@@ -13,6 +13,7 @@ import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
+import type { SourceService } from "../bakes/source-service.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
 
 export type Admission =
@@ -90,6 +91,7 @@ export interface ProvisioningDeps {
   cfg: AuthConfig;
   credentialStore: CredentialStore;
   instanceConfig?: InstanceConfig | null;
+  sourceService?: SourceService;
 }
 
 /** Google plugins' credential-read keys (`ActionPlugin.service`, underscored —
@@ -142,7 +144,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   beforeHook: ReturnType<typeof createAuthMiddleware>;
   databaseHooks: BetterAuthOptions["databaseHooks"];
 } {
-  const { db, cfg, credentialStore, instanceConfig } = deps;
+  const { db, cfg, credentialStore, instanceConfig, sourceService } = deps;
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
@@ -188,7 +190,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     const admission = pendingAdmissions.get(key);
     pendingAdmissions.delete(key);
 
-    const org = await ensureOrg(db);
+    const org = await ensureOrg(db, sourceService);
     const role: "admin" | "member" = user.role === "admin" ? "admin" : "member";
     await db.insert(orgMembers).values({ orgId: org.id, userId: user.id, role, createdAt: Date.now() });
 

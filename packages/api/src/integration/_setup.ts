@@ -68,6 +68,9 @@ export interface BootTestApiOpts {
    * `sandboxProvider` that records the `SandboxCreateOpts.image` it
    * receives. Unset by default, matching `EngineHost`'s own default. */
   defaultImage?: string;
+  /** Forwarded to `EngineHostOpts.defaultImages` — tests that pin
+   * per-profile stock-image fallback behavior. */
+  defaultImages?: Partial<Record<"headless" | "full", string>>;
   /**
    * Override the default real `LocalRunHost` — route-level tests that only
    * need to observe `start`/`wake`/`terminate` calls (never actually drive a
@@ -282,6 +285,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
+    ...(opts.defaultImages ? { defaultImages: opts.defaultImages } : {}),
     idleMinutes: opts.idleMinutes,
     onHibernate: opts.onHibernate ?? defaultHibernationHooks.onHibernate,
     onWake: opts.onWake ?? defaultHibernationHooks.onWake,

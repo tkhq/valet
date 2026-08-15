@@ -31,6 +31,7 @@ import {
   type LlmProviderKind,
 } from "./llm-providers.js";
 import { parseRepoInput } from "./skill-sources.js";
+import type { SourceService } from "../bakes/source-service.js";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -38,6 +39,7 @@ import { parseRepoInput } from "./skill-sources.js";
 
 export interface ReconcileDeps {
   db: AppDb;
+  sourceService?: SourceService;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,8 +90,8 @@ export function configPolicyId(dimension: PolicyDimension, value: string): strin
 // Org pass
 // ---------------------------------------------------------------------------
 
-async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
-  const org = await ensureOrg(db);
+async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig, sourceService?: SourceService): Promise<void> {
+  const org = await ensureOrg(db, sourceService);
 
   const orgCfg = cfg.org;
   if (!orgCfg) return;
@@ -610,10 +612,10 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig): Promis
  * Structured as sequential passes so later tasks can append more passes here.
  */
 export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: InstanceConfig): Promise<void> {
-  const { db } = deps;
+  const { db, sourceService } = deps;
 
   // Pass 1: org + members + invites
-  await reconcileOrgPass(db, cfg);
+  await reconcileOrgPass(db, cfg, sourceService);
 
   // Pass 2: teams
   await reconcileTeamsPass(db, cfg);

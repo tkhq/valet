@@ -1219,6 +1219,9 @@ export const imageSources = pgTable(
     pullSecretName: text("pull_secret_name"),
     // kind='base' fields
     setupCommands: jsonb("setup_commands"),
+    // Populated only for kind='base' rows. Identifies which session profile
+    // this base image targets. Null for kind='external' and kind='repo'.
+    profile: text("profile", { enum: ["headless", "full"] }),
     // kind='repo' fields
     repoHost: text("repo_host"),
     repoFullName: text("repo_full_name"),

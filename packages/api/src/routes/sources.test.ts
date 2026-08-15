@@ -26,6 +26,7 @@ interface SourceJson {
   externalRef: string | null;
   pullSecretName: string | null;
   setupCommands: string[] | null;
+  profile: string | null;
   repoHost: string | null;
   repoFullName: string | null;
   cloneUrl: string | null;
@@ -77,7 +78,7 @@ async function createBase(baseUrl: string, overrides: Record<string, unknown> = 
   const res = await fetch(`${baseUrl}/api/org/sources`, {
     method: "POST",
     headers: HEADERS,
-    body: JSON.stringify({ kind: "base", name: "Org Base", setupCommands: [], ...overrides }),
+    body: JSON.stringify({ kind: "base", name: "Org Base", setupCommands: [], profile: "headless", ...overrides }),
   });
   expect(res.status).toBe(201);
   const body = (await res.json()) as { source: SourceJson };
@@ -99,6 +100,8 @@ async function seedRepoSource(apiInstance: TestApi, overrides: Partial<Record<st
     externalRef: null,
     pullSecretName: null,
     setupCommands: null,
+    // profile is null for kind='repo' sources.
+    profile: null as null,
     repoHost: "github",
     repoFullName: "acme/widgets",
     cloneUrl: "https://github.com/acme/widgets.git",
@@ -110,7 +113,7 @@ async function seedRepoSource(apiInstance: TestApi, overrides: Partial<Record<st
     ...overrides,
   };
   await db.insert(imageSources).values(row);
-  return row as SourceJson;
+  return row as unknown as SourceJson;
 }
 
 // ── GET /api/org/sources ──────────────────────────────────────────────────────
@@ -203,6 +206,25 @@ describe("POST /api/org/sources (kind=external)", () => {
     expect(body.source.externalRef).toBe("registry.internal/base:latest");
     expect(typeof body.source.id).toBe("string");
   });
+
+  it("profile field is not accepted for kind='external' (not stored)", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "external",
+        name: "Ext with profile",
+        externalRef: "ghcr.io/acme/base:latest",
+        profile: "headless",
+      }),
+    });
+    // External sources succeed even if profile is passed — it's silently ignored.
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { source: SourceJson };
+    // profile must be null for external sources.
+    expect(body.source.profile).toBeNull();
+  });
 });
 
 // ── POST /api/org/sources — kind='base' ───────────────────────────────────────
@@ -216,17 +238,52 @@ describe("POST /api/org/sources (kind=base)", () => {
     expect(source.enabled).toBe(true);
   });
 
-  it("409s on a second base source for the same org", async () => {
+  it("409s on a second base source for the same (org, profile)", async () => {
     api = await bootTestApi();
-    await createBase(api.baseUrl);
+    await createBase(api.baseUrl, { profile: "headless" });
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Second Base" }),
+      body: JSON.stringify({ kind: "base", name: "Second Base", profile: "headless" }),
     });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("already exists");
+    expect(body.error).toContain("already exists for this org and profile");
+  });
+
+  it("allows two base sources for different profiles", async () => {
+    api = await bootTestApi();
+    await createBase(api.baseUrl, { profile: "headless" });
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "base", name: "Full Base", profile: "full" }),
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("400s when profile is missing", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "base", name: "Base", setupCommands: [] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("profile");
+  });
+
+  it("400s when profile is an invalid string", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "base", name: "Base", profile: "agent", setupCommands: [] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("profile");
   });
 
   it("400s when a setup command contains a newline", async () => {
@@ -234,7 +291,7 @@ describe("POST /api/org/sources (kind=base)", () => {
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", setupCommands: ["apt-get install\ngit"] }),
+      body: JSON.stringify({ kind: "base", name: "Base", profile: "headless", setupCommands: ["apt-get install\ngit"] }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
@@ -246,7 +303,7 @@ describe("POST /api/org/sources (kind=base)", () => {
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", setupCommands: ["apt-get install\rgit"] }),
+      body: JSON.stringify({ kind: "base", name: "Base", profile: "headless", setupCommands: ["apt-get install\rgit"] }),
     });
     expect(res.status).toBe(400);
   });
@@ -407,6 +464,19 @@ describe("PATCH /api/org/sources/:id", () => {
     });
     // parentId is repo-only — rejects with 400 regardless of id being valid
     expect(res.status).toBe(400);
+  });
+
+  it("400s when attempting to change profile (profile is immutable)", async () => {
+    api = await bootTestApi();
+    const source = await createBase(api.baseUrl, { profile: "headless" });
+    const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ profile: "full" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("immutable");
   });
 });
 

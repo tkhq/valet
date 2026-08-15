@@ -7,7 +7,7 @@
  * network call — `buildSandboxProvider` only *constructs* the provider
  * here, it never invokes any of its methods.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
@@ -108,10 +108,18 @@ describe("buildSandboxProvider", () => {
     ).not.toThrow();
   });
 
-  it("throws when VALET_SANDBOX_BACKEND=kubernetes and VALET_SANDBOX_IMAGE is unset", () => {
-    expect(() =>
-      buildSandboxProvider({ VALET_SANDBOX_BACKEND: "kubernetes" }, { kubeConfig: fakeKubeConfig() }),
-    ).toThrow(/VALET_SANDBOX_IMAGE is required/);
+  it("warns (does not throw) when VALET_SANDBOX_BACKEND=kubernetes and VALET_SANDBOX_IMAGE is unset — seeded base sources are now the primary path", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() =>
+        buildSandboxProvider({ VALET_SANDBOX_BACKEND: "kubernetes" }, { kubeConfig: fakeKubeConfig() }),
+      ).not.toThrow();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("VALET_SANDBOX_IMAGE"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("throws a clear error for an unrecognized backend", () => {

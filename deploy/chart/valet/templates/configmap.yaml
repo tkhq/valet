@@ -15,6 +15,9 @@ data:
   VALET_SANDBOX_BACKEND: "kubernetes"
   VALET_SANDBOX_NAMESPACE: {{ .Values.sandbox.namespace | quote }}
   VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
+  # Per-profile base image refs (used by seedDefaultBasesIfMissing at boot).
+  VALET_HEADLESS_BASE_IMAGE: {{ .Values.sandbox.headlessBaseImage | quote }}
+  VALET_FULL_BASE_IMAGE: {{ .Values.sandbox.fullBaseImage | quote }}
   VALET_WEB_DIST_DIR: "/app/web/dist"
   # Sandbox images v2 plan, Task 5: kubernetes prebuild image builder +
   # registry wiring. VALET_IMAGE_BUILDER pins the kubernetes builder
