@@ -150,6 +150,28 @@ export function Composer({
     }
   }
 
+  // Escape interrupts the running turn — parity with the Stop button —
+  // from anywhere on the chat tab, not just the textarea. Window-level
+  // because focus often sits outside the textarea mid-turn (it disables
+  // while a send is in flight). Layered dismissals keep priority: any
+  // handler that claims Escape first (the command popup above, the child
+  // panel's close) calls preventDefault, and a claimed event is skipped.
+  const abortMutate = abort.mutate;
+  const abortPending = abort.isPending;
+  useEffect(() => {
+    function onEscape(e: globalThis.KeyboardEvent) {
+      if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
+      if (!busy || !threadId || abortPending) return;
+      e.preventDefault();
+      abortMutate(
+        { threadId },
+        { onError: (err) => console.error("abort failed:", err) },
+      );
+    }
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [busy, threadId, abortPending, abortMutate]);
+
   function insertSelection(id: string) {
     if (commandQuery !== null) {
       setText(`/${id} `);
@@ -252,6 +274,7 @@ export function Composer({
             onClick={() => void stop()}
             disabled={!threadId || abort.isPending}
             aria-label="Stop"
+            title="Stop (Esc)"
           >
             <Square className="h-3.5 w-3.5 fill-current" />
             <span>Stop</span>

@@ -6,12 +6,13 @@
  * leave the store empty afterward, so it doesn't leak into a later
  * mount/remount.
  */
-import { describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const abortMutate = vi.fn();
 
 // importOriginal: see -new-session-dialog.test.tsx for why a bare
 // replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -20,7 +21,11 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useSendPrompt: () => ({ isPending: false, mutateAsync: vi.fn() }),
-    useAbortThread: () => ({ isPending: false, mutateAsync: abortMutateAsync }),
+    useAbortThread: () => ({
+      isPending: false,
+      mutateAsync: abortMutateAsync,
+      mutate: abortMutate,
+    }),
   };
 });
 
@@ -106,6 +111,49 @@ describe("Composer — stop button", () => {
 
     await userEvent.click(stopButton);
     expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+  });
+});
+
+describe("Composer — Escape interrupts the running turn", () => {
+  beforeEach(() => {
+    abortMutate.mockClear();
+    useComposerPrefillStore.setState({ text: null });
+  });
+
+  it("aborts the active thread on Escape while the agent is busy", () => {
+    renderComposer("streaming");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(abortMutate).toHaveBeenCalledTimes(1);
+    expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1" });
+  });
+
+  it("does nothing on Escape while idle", () => {
+    renderComposer("idle");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(abortMutate).not.toHaveBeenCalled();
+  });
+
+  it("skips an Escape already claimed by another layer (defaultPrevented)", () => {
+    renderComposer("streaming");
+    // Simulate a higher-priority dismissal (e.g. ChildPanel close) that
+    // claims the event in the capture phase before the interrupt listener.
+    const claim = (e: KeyboardEvent) => e.preventDefault();
+    window.addEventListener("keydown", claim, { capture: true });
+    fireEvent.keyDown(window, { key: "Escape" });
+    window.removeEventListener("keydown", claim, { capture: true });
+    expect(abortMutate).not.toHaveBeenCalled();
+  });
+
+  it("dismisses an open command popup instead of aborting", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer("streaming");
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/sta");
+    expect(screen.getByRole("listbox")).toBeTruthy();
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(abortMutate).not.toHaveBeenCalled();
   });
 });
 
