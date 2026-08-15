@@ -329,6 +329,10 @@ export const agentSessions = pgTable(
     // web-created interactive sessions may request "full" — orchestrator,
     // child, and workflow sessions always hardcode "headless".
     profile: text("profile", { enum: ["headless", "full"] }).notNull().default("headless"),
+    // Force Docker sandbox backend for this session (sandbox-docker plan, Task 6).
+    // When true, buildSession passes `docker: true` to SandboxCreateOpts so the
+    // docker provider is selected regardless of the server-level default.
+    docker: boolean("docker").notNull().default(false),
     // The `bakes.id` this session's sandbox booted from, when session
     // create resolved the primary repo binding to a `pushed` bake image
     // (sandbox images v2 plan, Task 4). Null for cold-start sessions (no

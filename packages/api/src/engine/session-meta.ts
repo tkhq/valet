@@ -40,6 +40,8 @@ export interface SessionMetaSource {
   workspace: string;
   /** Present on the app row; omitted by orchestrator/child callers (headless). */
   profile?: "headless" | "full";
+  /** Force Docker sandbox backend. Omitted by orchestrator/child callers. */
+  docker?: boolean;
 }
 
 /**
@@ -96,6 +98,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     orgId: src.orgId,
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
+    ...(src.docker !== undefined ? { docker: src.docker } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
     userEmail: userRows[0]?.email,

@@ -79,6 +79,9 @@ export interface SessionDetail extends SessionSummary {
   /** Session-default model id. Threads inherit when they have no override. */
   model?: string;
   profile: SandboxProfile;
+  /** Force Docker sandbox backend for this session. False (default) uses the
+   * server-level provider. Task 7 ORs in the repo-config flag. */
+  docker: boolean;
   /** Repos bound to this session, in position order. Omitted when unbound. */
   repos?: RepoBinding[];
 }
@@ -90,6 +93,9 @@ export interface CreateSessionRequest {
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
   profile?: SandboxProfile;
+  /** Force Docker sandbox backend. Defaults to false. Task 7 ORs in the
+   * repo-config flag at session build time. */
+  docker?: boolean;
   /** Multiple repo bindings. Mutually exclusive with `repo` (400 if both set). */
   repos?: RepoBinding[];
   /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */

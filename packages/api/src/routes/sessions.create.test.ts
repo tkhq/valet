@@ -94,6 +94,66 @@ describe("POST /api/sessions: profile", () => {
   });
 });
 
+describe("POST /api/sessions: docker flag", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  it("defaults docker to false when omitted", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-docker-default-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+    expect(body.docker).toBe(false);
+
+    const getRes = await fetch(`${api.baseUrl}/api/sessions/${body.id}`);
+    expect(getRes.status).toBe(200);
+    const getBody = (await getRes.json()) as GetSessionResponse;
+    expect(getBody.docker).toBe(false);
+  });
+
+  it("accepts docker: true at session create and persists it", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-docker-true-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, docker: true }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+    expect(body.docker).toBe(true);
+
+    const getRes = await fetch(`${api.baseUrl}/api/sessions/${body.id}`);
+    expect(getRes.status).toBe(200);
+    const getBody = (await getRes.json()) as GetSessionResponse;
+    expect(getBody.docker).toBe(true);
+  });
+
+  it("rejects a non-boolean docker value", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-docker-bad-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, docker: "yes" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("docker must be a boolean");
+  });
+});
+
 describe("POST /api/sessions: repo bindings", () => {
   let api: TestApi | undefined;
 

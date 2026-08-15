@@ -243,6 +243,10 @@ export interface SessionMeta {
   /** Interactive-service profile (sandbox auth gateway plan, Task 5).
    * Defaults to "headless" when omitted. */
   profile?: "headless" | "full";
+  /** Force Docker sandbox backend for this session (sandbox-docker plan, Task 6).
+   * When true, buildSession passes `docker: true` to SandboxCreateOpts.
+   * Task 7 ORs in the repo-config flag. */
+  docker?: boolean;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -600,6 +604,7 @@ export class EngineHost {
       image,
       env: sandboxMint?.env,
       profile,
+      ...(meta.docker ? { docker: true } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();

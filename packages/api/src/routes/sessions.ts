@@ -159,6 +159,10 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "profile must be 'headless' or 'full'" }, 400);
   }
   const profile = body.profile ?? "headless";
+  if (body.docker !== undefined && typeof body.docker !== "boolean") {
+    return c.json({ error: "docker must be a boolean" }, 400);
+  }
+  const docker = body.docker === true;
 
   const parsedRepos = parseRepoBindings(body);
   if ("error" in parsedRepos) {
@@ -202,6 +206,7 @@ sessionsRouter.post("/", async (c) => {
         ownerType: "user",
         ownerId: user.id,
         profile,
+        docker,
         createdAt: now,
         updatedAt: now,
       });
@@ -248,6 +253,7 @@ sessionsRouter.post("/", async (c) => {
     updatedAt: now,
     messageCount: 0,
     profile,
+    docker,
     ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail, 201);
@@ -292,6 +298,7 @@ sessionsRouter.get("/:id", async (c) => {
     messageCount: Number(n ?? 0),
     model,
     profile: row.profile,
+    docker: row.docker,
     ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail);
@@ -338,6 +345,7 @@ sessionsRouter.patch("/:id", async (c) => {
     messageCount: Number(n ?? 0),
     model: engineSession.options.modelSpec ?? engineSession.options.model.id,
     profile: row.profile,
+    docker: row.docker,
   };
   return c.json(detail);
 });
