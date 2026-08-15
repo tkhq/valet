@@ -1,6 +1,6 @@
 # Workflow approval UX — inline policy gates, approval scopes, policy-form typeahead
 
-Status: approved design (rev 2 after adversarial review), not yet implemented.
+Status: implemented (2026-08-14).
 Date: 2026-08-14.
 Related: `2026-07-16-action-policies-audit-design.md` (policy engine, grants, audit),
 the workflow node-completion plan (`tool` node), and the Phase 5 `approval` node.
@@ -379,3 +379,24 @@ place). Delete `~/.valet/pg` and restart the stack.
 - Param-matcher editing in the override form; param-bound grants (run-scope
   coverage is param-blind and the UI says so).
 - Org-admin break-glass resolution of user-owned runs.
+
+
+## Deviations
+
+1. **gateItem / "Item N of M" / remaining-iteration count not yet rendered.**
+   The wire ships `gateItem` from the intent checkpoint effects. The run-page
+   card does not yet render it as "Item N of M" or a remaining-iteration count.
+   Wire the UI in a follow-up.
+
+2. **409 copy differs from spec strings in one route.**
+   The resolution route returns `"this approval gate has already been resolved"`.
+   The spec used "already resolved" (lowercase, no article). The route copy is
+   the authoritative string; the UI card detects 409 by HTTP status, not by
+   matching message text.
+
+3. **Approval-node resolutions no longer mint grants.**
+   The `grantActions` field is removed. The route rejects any request that
+   includes it with a 400. Scope `"run"` and `"always"` write a runtime grant
+   only for tool-node (policy gate) resolutions. Approval-node resolutions use
+   the signal as the authorization for that one invocation; no grant row is
+   written.

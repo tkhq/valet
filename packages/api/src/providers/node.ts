@@ -376,13 +376,18 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       const run = await workflowStore.getRun(info.runId);
       if (!run?.owner) return; // no recorded owner: nothing to notify
       const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
+      const isPolicyGate = info.kind === "policy_gate";
       await routeAttention(
         { db },
         {
           kind: "approval",
           owner,
           title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
-          body: info.summary ? info.prompt : undefined,
+          body: isPolicyGate
+            ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`
+            : info.summary
+              ? info.prompt
+              : undefined,
           href: `/workflows/runs/${info.runId}`,
           dedupeKey: `${info.runId}:${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`,
         },

@@ -20,7 +20,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { actionInvocations, workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
-import { isOrgMember } from "../services/org.js";
+import { isOrgAdmin, isOrgMember } from "../services/org.js";
 import {
   writeExecutionGrant,
   writeAlwaysAllowPolicy,
@@ -576,6 +576,50 @@ export async function resolveWorkflowApproval(
   const isPolicyGate = node?.type === "tool";
   if (isPolicyGate && input.via === "agent") return "human_only";
 
+  // Auth check for "always" scope must happen BEFORE the signal insert so a
+  // forbidden_always response never writes anything (no signal, no grant).
+  if (input.approved && input.scope === "always" && isPolicyGate) {
+    const adminOk = await isOrgAdmin(deps.db, orgId, owner.userId);
+    if (!adminOk) return "forbidden_always";
+  }
+
+  // insertSignal is first-write-wins (ON CONFLICT DO NOTHING). Insert the signal
+  // first so two concurrent resolutions can only race here — the loser gets the
+  // existing row back with a different payload and returns "already_resolved"
+  // without writing any grants or audit rows. Grant/policy writes happen only
+  // after the insert confirms this caller won the race. wake() is called after
+  // all writes; the executor does not consume the signal until its next drive,
+  // so the ordering is safe.
+  const submitted = {
+    approved: input.approved,
+    resolvedBy: owner.userId,
+    scope: input.scope,
+  };
+  const signalId = `approval:${input.nodeId}${suffix}:resolution`;
+  const stored = await deps.workflowStore.insertSignal({
+    runId: input.runId,
+    signalId,
+    signalType,
+    payload: {
+      approved: input.approved,
+      resolvedBy: owner.userId,
+      note: input.note,
+      scope: input.scope,
+      resolvedVia: input.via,
+    },
+    createdAt: Date.now(),
+  });
+  // Compare the returned row's payload to what we submitted. If another caller
+  // won the race the stored payload will differ — do not stamp audit for the loser.
+  const storedPayload = stored.payload as { approved?: boolean; resolvedBy?: string; scope?: string } | undefined;
+  if (
+    storedPayload?.resolvedBy !== submitted.resolvedBy ||
+    storedPayload?.approved !== submitted.approved ||
+    storedPayload?.scope !== submitted.scope
+  ) {
+    return "already_resolved";
+  }
+
   if (input.approved && isPolicyGate) {
     const n = node as Record<string, unknown>;
     const service = typeof n.service === "string" ? n.service : "";
@@ -583,6 +627,9 @@ export async function resolveWorkflowApproval(
     const actionId = action.includes(".") ? action : `${service}.${action}`;
     const now = Date.now();
     if (input.scope === "always") {
+      // Admin eligibility was already checked above (before the signal insert).
+      // AlwaysAllowNotAdminError should not fire here, but re-throw defensively
+      // for unexpected cases.
       try {
         await writeAlwaysAllowPolicy(deps.db, { orgId, actionId, grantedBy: owner.userId, now });
       } catch (err) {
@@ -601,19 +648,6 @@ export async function resolveWorkflowApproval(
     }
   }
 
-  await deps.workflowStore.insertSignal({
-    runId: input.runId,
-    signalId: `approval:${input.nodeId}${suffix}:resolution`,
-    signalType,
-    payload: {
-      approved: input.approved,
-      resolvedBy: owner.userId,
-      note: input.note,
-      scope: input.scope,
-      resolvedVia: input.via,
-    },
-    createdAt: Date.now(),
-  });
   if (isPolicyGate) {
     await updateInvocationOutcome(
       deps.db,

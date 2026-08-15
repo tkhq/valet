@@ -12,6 +12,8 @@ import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
 import { useResolveApproval } from "~/api/workflows";
 import { useMe } from "~/api/settings";
+import { ApiError } from "~/api/client";
+import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
   Spinner,
@@ -22,9 +24,6 @@ import {
 } from "~/components/primitives";
 import { RiskBadge } from "./risk-badge";
 import { cn } from "~/lib/cn";
-
-// 409 response copies (from the route contract in packages/api/src/routes/workflows.ts)
-const MSG_ALREADY_RESOLVED = "This gate was already resolved. Refresh the run page.";
 
 export interface PolicyGateCardProps {
   runId: string;
@@ -73,11 +72,18 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
     setConfirmAlways(false);
   }
 
-  const errorMsg =
-    resolve.isError && resolve.error
-      ? (resolve.error as { message?: string }).message ?? String(resolve.error)
-      : null;
-  const is409 = errorMsg != null && errorMsg.includes("already resolved");
+  // `ApiError.message` is "{method} {path} → {status}" — the server's {error}
+  // body is in `error.payload`. Detect 409-already-resolved by status code, not
+  // message text; extract the human-readable server message via `apiErrorMessage`.
+  const is409AlreadyResolved =
+    resolve.isError &&
+    resolve.error instanceof ApiError &&
+    resolve.error.status === 409;
+  const errorMsg = resolve.isError && resolve.error
+    ? is409AlreadyResolved
+      ? null // shown as the special already-resolved banner below
+      : apiErrorMessage(resolve.error)
+    : null;
 
   const denyMicrocopy =
     gate.onDeny === "skip"
@@ -232,16 +238,21 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
       <div className="text-[11px] text-muted">{denyMicrocopy}</div>
 
       {/* Footer: timeout + error */}
-      {(gate.timeoutAt != null || errorMsg != null) && (
+      {(gate.timeoutAt != null || is409AlreadyResolved || errorMsg != null) && (
         <div className="space-y-1">
           {gate.timeoutAt != null && (
             <div className="text-[11px] text-muted">
               Gate times out {new Date(gate.timeoutAt).toLocaleString()}.
             </div>
           )}
+          {is409AlreadyResolved && (
+            <div className="text-xs text-muted">
+              This gate was already resolved. Refreshing…
+            </div>
+          )}
           {errorMsg != null && (
             <div className="text-xs text-danger-500">
-              {is409 ? "This gate was already resolved. Refreshing…" : errorMsg}
+              {errorMsg}
             </div>
           )}
         </div>

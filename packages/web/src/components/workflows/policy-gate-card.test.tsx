@@ -8,6 +8,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WorkflowPendingGate } from "@valet/api/wire";
+import { ApiError } from "~/api/client";
 import { PolicyGateCard } from "./policy-gate-card";
 
 // ── shared mock state ───────────────────────────────────────────────────────
@@ -15,7 +16,7 @@ import { PolicyGateCard } from "./policy-gate-card";
 const mutate = vi.fn();
 let mockOrgRole: string | undefined = "member";
 let mockIsError = false;
-let mockError: { message: string } | null = null;
+let mockError: ApiError | null = null;
 
 vi.mock("~/api/workflows", () => ({
   useResolveApproval: () => ({
@@ -200,17 +201,33 @@ describe("PolicyGateCard", () => {
 
   // ── Case 6: mutation errors ───────────────────────────────────────────────
 
-  it("shows already-resolved message on 409-matching error", () => {
+  it("shows already-resolved banner on 409 ApiError (detected by status, not message text)", () => {
     mockIsError = true;
-    mockError = { message: "This gate was already resolved. Refresh the run page." };
+    // The server returns { error: "this approval gate has already been resolved" }
+    // but ApiError.message is "POST … → 409" — the component must detect via status.
+    mockError = new ApiError(409, "POST /api/workflows/runs/x/approvals/y → 409", {
+      error: "this approval gate has already been resolved",
+    });
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
     expect(screen.getByText(/This gate was already resolved\. Refreshing/i)).toBeTruthy();
+    // The raw "POST … → 409" message must NOT appear in the error area.
+    expect(screen.queryByText(/→ 409/)).toBeNull();
   });
 
-  it("shows server error verbatim on generic errors", () => {
+  it("shows apiErrorMessage body for non-409 ApiErrors", () => {
     mockIsError = true;
-    mockError = { message: "Something unexpected went wrong." };
+    mockError = new ApiError(500, "POST /api/workflows/runs/x/approvals/y → 500", {
+      error: "internal server error",
+    });
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
+    expect(screen.getByText("internal server error")).toBeTruthy();
+  });
+
+  it("shows server error fallback for a generic Error", () => {
+    mockIsError = true;
+    mockError = new ApiError(400, "Something unexpected went wrong.", undefined);
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
+    // Falls back to err.message since payload has no { error } key.
     expect(screen.getByText("Something unexpected went wrong.")).toBeTruthy();
   });
 

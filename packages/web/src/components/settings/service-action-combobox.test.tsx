@@ -270,6 +270,74 @@ describe("ServiceActionCombobox — case 5: ARIA", () => {
   });
 });
 
+// ── Case 4b: exact-match commit on click-outside / Tab ────────────────────────
+
+describe("ServiceActionCombobox — case 4b: exact-match commit", () => {
+  it("click-outside with exact catalog label commits the catalog item's id", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <div>
+        <ServiceActionCombobox mode="service" value="" onChange={onChange} />
+        <button type="button">outside</button>
+      </div>,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    // Type the exact label of the first catalog service
+    await user.keyboard("github");
+    // Click outside
+    await user.click(screen.getByRole("button", { name: "outside" }));
+
+    expect(onChange).toHaveBeenCalledWith("github");
+  });
+
+  it("Tab key commits exact catalog match by id", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <ServiceActionCombobox mode="service" value="" onChange={onChange} />,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    await user.keyboard("github");
+    await user.tab();
+
+    expect(onChange).toHaveBeenCalledWith("github");
+  });
+
+  it("Tab key on non-matching text commits free text", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <ServiceActionCombobox mode="service" value="" onChange={onChange} />,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    await user.keyboard("myfreetext");
+    await user.tab();
+
+    expect(onChange).toHaveBeenCalledWith("myfreetext");
+  });
+
+  it("click-outside with non-matching text commits as free text", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <div>
+        <ServiceActionCombobox mode="service" value="" onChange={onChange} />
+        <button type="button">outside</button>
+      </div>,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    await user.keyboard("zzz");
+    await user.click(screen.getByRole("button", { name: "outside" }));
+
+    expect(onChange).toHaveBeenCalledWith("zzz");
+  });
+});
+
 // ── Case 6: loading ───────────────────────────────────────────────────────────
 
 describe("ServiceActionCombobox — case 6: loading state", () => {

@@ -947,6 +947,63 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     expect(rows[0]).toMatchObject({ status: "approved", resolvedBy: "local-user" });
   });
 
+  it("resolution race: second sequential call with a different decision gets already_resolved and writes no grant or audit row", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const invId = `pol:wf:workflow:${runId}:gate`;
+    await persistInvocationAudit(db, {
+      invocationId: invId,
+      orgId: "local-org",
+      workflowExecutionId: runId,
+      service: "widgets",
+      actionId: "widgets.nuke",
+      resolvedMode: "require_approval",
+      status: "pending",
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+
+    // First resolution: approve with scope=run (writes a grant)
+    const first = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: true, scope: "run", via: "web" },
+    );
+    expect(first).toBe("ok");
+
+    // Audit row must carry the first (approve) decision.
+    const auditAfterFirst = await db
+      .select({ status: actionInvocations.status, resolvedBy: actionInvocations.resolvedBy })
+      .from(actionInvocations)
+      .where(eq(actionInvocations.invocationId, invId));
+    expect(auditAfterFirst[0]).toMatchObject({ status: "approved", resolvedBy: "local-user" });
+
+    // Grant row must exist after first.
+    const grantsAfterFirst = await db.select().from(runtimeGrants).where(eq(runtimeGrants.workflowExecutionId, runId));
+    expect(grantsAfterFirst.length).toBeGreaterThan(0);
+
+    // Second resolution: deny (simulates the racing loser arriving after the signal is stored)
+    const second = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: false, scope: "once", via: "web" },
+    );
+    expect(second).toBe("already_resolved");
+
+    // Audit row must still carry the FIRST decision, not the loser's.
+    const auditAfterSecond = await db
+      .select({ status: actionInvocations.status })
+      .from(actionInvocations)
+      .where(eq(actionInvocations.invocationId, invId));
+    expect(auditAfterSecond[0]?.status).toBe("approved");
+
+    // Grant count must not have increased (loser wrote nothing).
+    const grantsAfterSecond = await db.select().from(runtimeGrants).where(eq(runtimeGrants.workflowExecutionId, runId));
+    expect(grantsAfterSecond.length).toBe(grantsAfterFirst.length);
+  });
+
   it("cancelWorkflowRun stamps pending tool-gate audit rows as cancelled", async () => {
     const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
     api = localApi;

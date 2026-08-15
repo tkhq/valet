@@ -134,25 +134,59 @@ export function ServiceActionCombobox({
     }
   }, [highlightedIndex, open]);
 
-  // Click-outside: commit free text if applicable, then close
+  // Click-outside: commit the typed value, then close.
+  // - If query exactly matches a catalog item (label or id), commit that item's id.
+  // - If query is non-empty and not in catalog (free text), commit the raw query.
+  // - Otherwise just close.
   useEffect(() => {
     function handleMouseDown(e: MouseEvent) {
       const target = e.target as Node;
       if (listboxRef.current?.contains(target) || inputRef.current?.contains(target)) {
         return;
       }
-      if (showFreeText) {
-        onChange(query.trim());
+      const trimmed = query.trim();
+      if (trimmed) {
+        const exact = catalogItems.find(
+          (item) =>
+            item.id.toLowerCase() === trimmed.toLowerCase() ||
+            item.label.toLowerCase() === trimmed.toLowerCase(),
+        );
+        if (exact) {
+          onChange(exact.id);
+        } else {
+          onChange(trimmed);
+        }
         setQuery("");
       }
       setOpen(false);
     }
     document.addEventListener("mousedown", handleMouseDown);
     return () => document.removeEventListener("mousedown", handleMouseDown);
-  }, [showFreeText, query, onChange]);
+  }, [query, catalogItems, onChange]);
 
   function select(id: string) {
     onChange(id);
+    setQuery("");
+    setOpen(false);
+  }
+
+  function handleBlur() {
+    // Called on Tab or any focus departure not caught by the mousedown handler.
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setOpen(false);
+      return;
+    }
+    const exact = catalogItems.find(
+      (item) =>
+        item.id.toLowerCase() === trimmed.toLowerCase() ||
+        item.label.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (exact) {
+      onChange(exact.id);
+    } else {
+      onChange(trimmed);
+    }
     setQuery("");
     setOpen(false);
   }
@@ -222,6 +256,7 @@ export function ServiceActionCombobox({
           setQuery("");
           setOpen(true);
         }}
+        onBlur={handleBlur}
         onKeyDown={handleKeyDown}
         autoComplete="off"
       />
