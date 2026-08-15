@@ -154,15 +154,17 @@ function DefinitionRow({
   const latestRun = runs[0];
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const schedules = triggers.filter((t) => t.kind === "schedule");
+  const schedules = triggers.filter(
+    (t): t is Extract<WorkflowTriggerItem, { kind: "schedule" }> => t.kind === "schedule",
+  );
   const events = triggers.filter((t) => t.kind === "event");
   const scheduleCount = schedules.length;
   const eventCount = events.length;
 
   // Earliest next fire among enabled schedules.
   const nextFire = schedules
-    .filter((t) => t.enabled && t.kind === "schedule")
-    .map((t) => (t.kind === "schedule" ? t.detail.nextFireAt : Infinity))
+    .filter((t) => t.enabled)
+    .map((t) => t.detail.nextFireAt)
     .reduce((min, v) => Math.min(min, v), Infinity);
   const nextFireAt = isFinite(nextFire) ? nextFire : undefined;
 
