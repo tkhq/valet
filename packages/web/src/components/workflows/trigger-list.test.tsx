@@ -56,7 +56,7 @@ const deleteEventMutateAsync = vi.fn().mockResolvedValue({});
 const runNowMutateAsync = vi.fn().mockResolvedValue({});
 const createScheduleMutateAsync = vi.fn().mockResolvedValue({});
 const createEventTriggerMutateAsync = vi.fn().mockResolvedValue({});
-const useWorkflowTriggersMock = vi.fn(() => ({
+const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: triggersData,
   isLoading: false,
   error: null,

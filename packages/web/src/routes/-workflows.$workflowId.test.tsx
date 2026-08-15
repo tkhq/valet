@@ -16,7 +16,7 @@ import type { ReactNode } from "react";
 const navigate = vi.fn();
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
-const useWorkflowTriggersMock = vi.fn(() => ({
+const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
   isLoading: false,
   error: null,
