@@ -807,6 +807,12 @@ export interface WorkflowRunSummary {
   updatedAt: number;
   /** True when the run is parked waiting for at least one human approval. */
   needsApproval?: boolean;
+  /**
+   * Set only while the run is parked: what it is blocked on, so a run list
+   * shows the gate (node + signal/timer) without a per-run detail fetch.
+   * Same conditions `GetWorkflowRunResponse.run.waitingOn` carries.
+   */
+  waitingOn?: Array<{ kind: string; nodeId: string; signalType?: string; wakeAt?: number }>;
 }
 
 export interface ListWorkflowRunsResponse {

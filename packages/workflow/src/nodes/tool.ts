@@ -36,7 +36,11 @@
  */
 
 import { parseDurationMs } from '../dag/duration.js';
-import { renderJsonTemplates } from '../dag/expression.js';
+import {
+  collectUnresolvedTemplatePaths,
+  renderJsonTemplates,
+  type TemplateContext,
+} from '../dag/expression.js';
 import type { ToolNode } from '../dag/nodes.js';
 import type { NodeCheckpoint, RunSignal } from '../store.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
@@ -196,9 +200,10 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
   }
 
   if (!response.ok) {
+    const base = 'error' in response ? response.error : 'invokeAction returned ok:false';
     return await writeTerminal(args, invocationId, heldSignal, {
       status: 'failed',
-      error: 'error' in response ? response.error : 'invokeAction returned ok:false',
+      error: base + unresolvedParamsNote(node.params, templateContext),
     });
   }
 
@@ -400,6 +405,32 @@ function mintInvocationId(runId: string, nodeId: string, iteration: number): str
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * When a failed invocation's params contained template paths that resolved
+ * to nothing (each rendered as null), name them — a receiver-side
+ * "param must be a string" error is otherwise a dead end for the author.
+ */
+function unresolvedParamsNote(params: Record<string, unknown>, ctx: TemplateContext): string {
+  const unresolved = new Set<string>();
+  collectFromJson(params, ctx, unresolved);
+  if (unresolved.size === 0) return '';
+  return ` (unresolved template path(s), each rendered as null: ${[...unresolved].join(', ')})`;
+}
+
+function collectFromJson(value: unknown, ctx: TemplateContext, out: Set<string>): void {
+  if (typeof value === 'string') {
+    for (const path of collectUnresolvedTemplatePaths(value, ctx)) out.add(path);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectFromJson(entry, ctx, out);
+    return;
+  }
+  if (isPlainRecord(value)) {
+    for (const entry of Object.values(value)) collectFromJson(entry, ctx, out);
+  }
 }
 
 function errorMessage(err: unknown): string {

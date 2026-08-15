@@ -510,6 +510,47 @@ export function collectTemplatePaths(source: string): string[][] {
   return out;
 }
 
+/** Like {@link collectAstPaths}, but skips `exists(...)` — probing a
+ * possibly-missing path is that function's purpose, not a mistake. */
+function collectAstValuePaths(node: ExprNode, out: string[][]): void {
+  switch (node.kind) {
+    case 'path':
+      out.push(node.segments);
+      return;
+    case 'unary':
+      collectAstValuePaths(node.operand, out);
+      return;
+    case 'binary':
+      collectAstValuePaths(node.left, out);
+      collectAstValuePaths(node.right, out);
+      return;
+    case 'exists':
+    case 'literal':
+      return;
+  }
+}
+
+/**
+ * Dotted paths in `source`'s `{{ ... }}` expressions that evaluate to
+ * `undefined` against `ctx`. Executors use this to name the template
+ * variable behind a downstream failure ("param must be a string") instead
+ * of leaving the author to guess. Returns [] for unparseable sources —
+ * parse errors are the validator's job, not this diagnostic's.
+ */
+export function collectUnresolvedTemplatePaths(source: string, ctx: TemplateContext): string[] {
+  let segments: TemplateSegment[];
+  try {
+    segments = parseTemplate(source).segments;
+  } catch {
+    return [];
+  }
+  const paths: string[][] = [];
+  for (const seg of segments) {
+    if (seg.kind === 'expr' && seg.ast) collectAstValuePaths(seg.ast, paths);
+  }
+  return paths.filter((p) => readPath(ctx, p) === undefined).map((p) => p.join('.'));
+}
+
 /**
  * Render a template against a context.
  *

@@ -5,6 +5,7 @@ import { workflowsActionPlugin, ownerFromContext } from "./actions.js";
 import type { PluginActionContext } from "@valet/engine";
 import { createWorkflowDefinition, type WorkflowServiceDeps } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
+import { workflowRuns } from "../schema/index.js";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -120,7 +121,9 @@ describe("webhook actions", () => {
   });
 
   beforeEach(async () => {
-    await buildAppQueryable(pglite).query(`TRUNCATE workflow_webhooks, workflow_definitions RESTART IDENTITY CASCADE`);
+    await buildAppQueryable(pglite).query(
+      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
+    );
     deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new StubRunHost() };
   });
 
@@ -172,6 +175,89 @@ describe("webhook actions", () => {
     expect(after.success).toBe(true);
     if (!after.success) return;
     expect((after.data as { webhook: { workflowId: string } }).webhook.workflowId).toBe(workflowId);
+  });
+
+  it("get_node_result returns the checkpoint result verbatim when small, a truncation stub when huge", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const getNodeResult = plugin.actions.find((a) => a.id === "workflows.get_node_result")!;
+
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    const params = {
+      workflowId: "wf-x",
+      definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-x", params, definition, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-x", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const base = { runId: "run-x", attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, nodeId: "small", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-x", "small", 0, claim.attempt, {
+      ...base, nodeId: "small", iteration: 0, status: "completed",
+      result: { text: "hello", usage: { totalTokens: 2 } },
+    });
+    await deps.workflowStore.putIntent({ ...base, nodeId: "huge", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-x", "huge", 0, claim.attempt, {
+      ...base, nodeId: "huge", iteration: 0, status: "completed",
+      result: { blob: "x".repeat(30_000) },
+    });
+
+    const small = await getNodeResult.execute({ run_id: "run-x", node_id: "small" }, ctx());
+    expect(small.success).toBe(true);
+    if (!small.success) return;
+    const smallCp = (small.data as { checkpoints: Array<{ result: unknown }> }).checkpoints[0]!;
+    expect(smallCp.result).toEqual({ text: "hello", usage: { totalTokens: 2 } });
+
+    const huge = await getNodeResult.execute({ run_id: "run-x", node_id: "huge" }, ctx());
+    expect(huge.success).toBe(true);
+    if (!huge.success) return;
+    const hugeCp = (huge.data as { checkpoints: Array<{ result: { truncated?: boolean; jsonPrefix?: string } }> })
+      .checkpoints[0]!;
+    expect(hugeCp.result.truncated).toBe(true);
+    expect(typeof hugeCp.result.jsonPrefix).toBe("string");
+  });
+
+  it("list_runs names a parked run's waitingOn conditions", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const listRuns = plugin.actions.find((a) => a.id === "workflows.list_runs")!;
+
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    const params = {
+      workflowId,
+      definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-parked", params, definition, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-parked", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    await deps.workflowStore.parkRun("run-parked", claim.attempt, [
+      { kind: "signal", nodeId: "get_pr", signalType: "approval:get_pr" },
+    ]);
+    // listWorkflowRuns discovers run ids through the app db table.
+    await db.insert(workflowRuns).values({
+      id: "run-parked",
+      workflowId,
+      definitionVersionId: "v1",
+      definition,
+      params,
+      status: "parked",
+      waitingOn: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    const result = await listRuns.execute({ workflow_id: workflowId }, ctx());
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const runs = (result.data as { runs: Array<{ runId: string; needsApproval?: boolean; waitingOn?: unknown }> }).runs;
+    const parked = runs.find((r) => r.runId === "run-parked");
+    expect(parked?.needsApproval).toBe(true);
+    expect(parked?.waitingOn).toEqual([
+      { kind: "signal", nodeId: "get_pr", signalType: "approval:get_pr" },
+    ]);
   });
 
   it("get_webhook fails for a workflow the caller doesn't own", async () => {

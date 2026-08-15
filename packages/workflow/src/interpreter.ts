@@ -705,13 +705,16 @@ function computeRunnable(
   return runnable;
 }
 
-// ─── Template context (decision 4: `{ trigger, nodes }`, `nodes.<id>.output`) ─
+// ─── Template context (decision 4: `{ trigger, nodes }`, `nodes.<id>.result`) ─
 
 function buildTemplateContext(definition: WorkflowDefinition, cpAll: Map<string, NodeCheckpoint>): TemplateContext {
-  const nodes: Record<string, { output: unknown }> = {};
+  // `result` is the documented form — it names the same checkpoint field
+  // agents see in `get_node_result`. `output` is the original key, kept so
+  // existing definitions keep resolving. Both read the same value.
+  const nodes: Record<string, { result: unknown; output: unknown }> = {};
   for (const [nodeId, cp] of cpAll) {
     if (cp.status !== 'completed') continue; // skipped/failed/intent nodes contribute no output
-    nodes[nodeId] = { output: cp.result };
+    nodes[nodeId] = { result: cp.result, output: cp.result };
   }
   const triggerNode = definition.nodes.find((n) => n.type === 'trigger');
   const trigger = triggerNode ? nodes[triggerNode.id]?.output : undefined;

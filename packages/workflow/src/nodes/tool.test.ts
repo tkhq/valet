@@ -275,6 +275,59 @@ describe('executeTool: ok:false result', () => {
 
     const byNode = new Map((await store.getCheckpoints('run-5')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('tl')?.status).toBe('failed');
+    // The fixture's {{trigger.data.thing}} is unresolved (empty trigger
+    // data), so the error also names it — see suite 5b.
+    expect(byNode.get('tl')?.error).toContain('no integrations are connected');
+  });
+});
+
+// ─── 5b. ok:false + unresolved template paths → named in the error ───────────
+
+describe('executeTool: failure with unresolved template paths', () => {
+  it('appends the unresolved paths so a param-validation error is actionable', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine } = makeEngine([{ ok: false, error: '/title: Expected string' }]);
+
+    const definition = toolDefinition({
+      params: { title: '{{nodes.s.result.missing}}', ok: '{{trigger.data.thing}}' },
+    });
+    definition.nodes.splice(1, 0, { id: 's', type: 'set', values: { present: 'x' } });
+    definition.edges = [
+      { from: 't', to: 's' },
+      { from: 's', to: 'tl' },
+      { from: 'tl', to: 'e' },
+    ];
+
+    await store.createRun('run-5b', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-5b');
+    const park = await driveUntilPark('run-5b', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('failed');
+
+    const byNode = new Map((await store.getCheckpoints('run-5b')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('tl')?.status).toBe('failed');
+    expect(byNode.get('tl')?.error).toContain('/title: Expected string');
+    expect(byNode.get('tl')?.error).toContain('nodes.s.result.missing');
+    expect(byNode.get('tl')?.error).toContain('trigger.data.thing');
+  });
+
+  it('does not decorate a failure when every template path resolved', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine } = makeEngine([{ ok: false, error: 'no integrations are connected' }]);
+
+    await store.createRun(
+      'run-5c',
+      runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { thing: 'x' }, metadata: {} } }),
+      toolDefinition(),
+      'v1',
+    );
+    const attempt = await claimAttempt(store, 'run-5c');
+    await driveUntilPark('run-5c', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-5c')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('tl')?.error).toBe('no integrations are connected');
   });
 });

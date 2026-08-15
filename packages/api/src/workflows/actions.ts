@@ -299,6 +299,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "List workflow runs",
     description:
       "List a workflow's runs (runId, status, outcome, timestamps), newest first. " +
+      "Parked runs also carry waitingOn — the node and signal/timer each is blocked on " +
+      "(signalType approval:<nodeId> = an approval node OR a policy gate on a tool node). " +
       "Use to find parked/pending runs before cancelling or checking approvals.",
     riskLevel: "low",
     execute: async ({ workflow_id }, ctx) => {
@@ -471,7 +473,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Get node result",
     description:
       "Fetch a run node's FULL checkpoint output (result + error) — use when debugging a " +
-      "failed or surprising node; get_run intentionally omits result bodies. Foreach body " +
+      "failed or surprising node; get_run intentionally omits result bodies. `result` is " +
+      "the checkpoint value verbatim (the same value templates read via nodes.<id>.result); " +
+      "an oversized result comes back as { truncated: true, jsonPrefix }. Foreach body " +
       "nodes have one checkpoint per iteration; pass `iteration` to narrow.",
     riskLevel: "low",
     execute: async ({ run_id, node_id, iteration }, ctx) => {
@@ -498,7 +502,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             iteration: cp.iteration,
             status: cp.status,
             error: cp.error,
-            result: truncateJson(cp.result, 20_000),
+            result: presentResult(cp.result, 20_000),
           })),
         },
       };
@@ -766,15 +770,22 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   };
 }
 
-/** JSON-stringify with a hard cap so a giant node result can't blow up the
- * LLM context; the flag tells the model the payload was cut. */
-function truncateJson(value: unknown, maxChars: number): { json: string; truncated: boolean } {
+/**
+ * Return a checkpoint result verbatim when its JSON fits `maxChars`, so the
+ * agent sees the same structured value templates read via
+ * `nodes.<id>.result`. An oversized result becomes a `{ truncated: true,
+ * jsonPrefix }` stub so a giant payload can't blow up the LLM context.
+ * (An earlier always-stringified wrapper here read as the checkpoint's own
+ * shape and convinced agents the data was unreachable.)
+ */
+function presentResult(value: unknown, maxChars: number): unknown {
   let json: string;
   try {
     json = JSON.stringify(value) ?? "null";
   } catch (err) {
     json = `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
+    return { truncated: true, jsonPrefix: json };
   }
-  if (json.length <= maxChars) return { json, truncated: false };
-  return { json: json.slice(0, maxChars), truncated: true };
+  if (json.length <= maxChars) return value;
+  return { truncated: true, jsonPrefix: json.slice(0, maxChars) };
 }

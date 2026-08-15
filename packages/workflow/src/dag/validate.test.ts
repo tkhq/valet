@@ -702,6 +702,35 @@ describe('validateWorkflowDefinition — linter checks', () => {
     }
   });
 
+  it('rejects a nodes.<id> path whose next segment is not result/output', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'extract', type: 'set', values: { owner: 'tkhq' } },
+        { id: 'gen', type: 'llm', model: 'm', prompt: 'owner: {{nodes.extract.values.owner}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => e.includes('"values"') && e.includes('nodes.extract.result.owner')),
+      ).toBe(true);
+    }
+  });
+
+  it('accepts nodes.<id>.result and nodes.<id>.output paths', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'extract', type: 'set', values: { owner: 'tkhq' } },
+        { id: 'gen', type: 'llm', model: 'm', prompt: '{{nodes.extract.result.owner}} {{nodes.extract.output.owner}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it('requires fromOutput on edges leaving an if node', () => {
     const result = validateWorkflowDefinition(
       linear(

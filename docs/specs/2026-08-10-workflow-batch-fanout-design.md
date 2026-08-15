@@ -24,7 +24,7 @@ Each batch item becomes a real run: per-node status, reruns, and the runs list d
 
 Guards: the referenced definition must have the same owner (team scope arrives with RBAC Phase B); nesting depth 1 — a child workflow may not contain `workflow` nodes (validated statically at save and enforced at start); the node fails, not the platform, when the referenced definition is missing or deleted.
 
-Output contract: a run's output is the checkpointed result of its stop node when the stop node declares an `output` template; otherwise the map of its terminal nodes' outputs. The parent reads `nodes.<id>.output` as with any other node.
+Output contract: a run's output is the checkpointed result of its stop node when the stop node declares an `output` template; otherwise the map of its terminal nodes' outputs. The parent reads `nodes.<id>.result` as with any other node (`nodes.<id>.output` is the legacy alias for the same value).
 
 ### 2. Parallel waves
 

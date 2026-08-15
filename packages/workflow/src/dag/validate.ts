@@ -675,6 +675,21 @@ function checkPathRefs(label: string, field: string, paths: string[][], refCtx: 
         errors.push(
           `${label}: ${field} references unknown node ${JSON.stringify(target)}${didYouMean(target, [...refCtx.referenceableIds])}`,
         );
+      } else {
+        // The runtime context only defines `result` (and its legacy alias
+        // `output`) under a node id. Any other segment resolves to null at
+        // run time and surfaces as a confusing downstream error — catch it
+        // at save time with the corrected path.
+        const segment = segments[2];
+        if (segment !== undefined && segment !== 'result' && segment !== 'output') {
+          const rest = segments.slice(3);
+          // `values` is the common set-node mistake — a set node's rendered
+          // values ARE its result, so the segment is dropped, not moved.
+          const corrected = ['nodes', target, 'result', ...(segment === 'values' ? [] : [segment]), ...rest].join('.');
+          errors.push(
+            `${label}: ${field} references ${JSON.stringify(segment)} under nodes.${target} — a node's checkpoint is read via nodes.${target}.result... (did you mean "${corrected}"?)`,
+          );
+        }
       }
       continue;
     }
