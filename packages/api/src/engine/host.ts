@@ -46,6 +46,7 @@ import {
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -599,12 +600,15 @@ export class EngineHost {
     // resolve a prebuild image override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImage;
+    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker key.
+    // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
+    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
       env: sandboxMint?.env,
       profile,
-      ...(meta.docker ? { docker: true } : {}),
+      ...(dockerFlag ? { docker: true } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
@@ -942,6 +946,49 @@ export class EngineHost {
       }
       return { type: "oauth2", accessToken: resolved.token };
     };
+  }
+
+  /**
+   * Best-effort: reads `.valet/prebuild.yaml`'s `docker` key for the session's
+   * primary repo. Returns `false` on any failure (no token, no repos, non-GitHub
+   * host, network error, bad YAML) — the session still starts without docker.
+   *
+   * Mirrors the guard structure of `buildCredentialResolver`: exits early when
+   * `githubTokenDeps`/`db` are not wired (db-less test environments).
+   */
+  private async resolveRepoDockerFlag(sessionId: string, meta: SessionMeta): Promise<boolean> {
+    const tokenDeps = this.opts.githubTokenDeps;
+    const db = this.opts.db;
+    if (!tokenDeps || !db) return false;
+    try {
+      const primaryRepo = meta.repos?.[0];
+      if (!primaryRepo) return false;
+      const host = primaryRepo.host ?? "github.com";
+      if (host !== "github.com") return false;
+      const [owner, repoName] = primaryRepo.fullName.split("/");
+      if (!owner || !repoName) return false;
+      const ref = primaryRepo.ref ?? "HEAD";
+      const fullDeps = {
+        db,
+        credentials: this.opts.engineCredentials,
+        key: tokenDeps.key,
+        apiUrl: tokenDeps.apiUrl,
+        githubUrl: tokenDeps.githubUrl,
+        fetchImpl: tokenDeps.fetchImpl,
+        now: tokenDeps.now,
+      };
+      const resolved = await resolveSessionGitHubToken(
+        fullDeps,
+        { orgId: meta.orgId, sessionId, purpose: "api" },
+      );
+      return repoDockerFlag(fullDeps, resolved.token, owner, repoName, ref);
+    } catch (err) {
+      console.error(
+        `EngineHost: resolveRepoDockerFlag failed for session ${sessionId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return false;
+    }
   }
 
   /**

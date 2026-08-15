@@ -22,6 +22,8 @@ import {
   defaultRetention,
   imageRefFor,
   slugify,
+  repoDockerFlag,
+  clearRepoDockerCache,
 } from "./source-service.js";
 
 const orgId = "org1";
@@ -1115,5 +1117,88 @@ describe("defaultRetention (kubernetes)", () => {
 describe("error exports", () => {
   it("GitHubAuthError is an Error subclass", () => {
     expect(new GitHubAuthError("x")).toBeInstanceOf(Error);
+  });
+});
+
+// ── repoDockerFlag ────────────────────────────────────────────────────────────
+
+describe("repoDockerFlag", () => {
+  let db: AppDb;
+  let credentials: PgCredentialStore;
+  let fixture: GithubFixture;
+  let contentsHandler: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse;
+
+  function deps(): GitHubTokenDeps {
+    return {
+      db,
+      credentials,
+      key: deriveSecretKey("cache-key"),
+      apiUrl: fixture.url,
+      githubUrl: fixture.url,
+      now: () => NOW,
+    };
+  }
+
+  beforeEach(async () => {
+    const { pgdb, appDb } = await freshTestPgDb();
+    db = appDb;
+    credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+    contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    fixture = startGithubFixture({
+      getContents: (owner, repo, path, ref) => contentsHandler(owner, repo, path, ref),
+    });
+  });
+
+  afterEach(async () => {
+    clearRepoDockerCache();
+    await fixture.close();
+  });
+
+  it("returns true when .valet/prebuild.yaml has docker: true", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: true"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(true);
+  });
+
+  it("returns false when the file is absent, and caches subsequent calls", async () => {
+    let callCount = 0;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") callCount++;
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(false);
+    expect(callCount).toBe(1);
+    // Second call — should be served from cache, no new HTTP call.
+    await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(callCount).toBe(1);
+  });
+
+  it("returns false when docker: false in the file", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: false"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(false);
+  });
+
+  it("returns false on network/server errors (best-effort)", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { status: 500, body: { message: "Internal Server Error" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(false);
   });
 });
