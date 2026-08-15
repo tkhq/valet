@@ -174,6 +174,47 @@ describe("webhook actions", () => {
     expect((after.data as { webhook: { workflowId: string } }).webhook.workflowId).toBe(workflowId);
   });
 
+  it("get_node_result returns the checkpoint result verbatim when small, a truncation stub when huge", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const getNodeResult = plugin.actions.find((a) => a.id === "workflows.get_node_result")!;
+
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    const params = {
+      workflowId: "wf-x",
+      definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-x", params, definition, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-x", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const base = { runId: "run-x", attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, nodeId: "small", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-x", "small", 0, claim.attempt, {
+      ...base, nodeId: "small", iteration: 0, status: "completed",
+      result: { text: "hello", usage: { totalTokens: 2 } },
+    });
+    await deps.workflowStore.putIntent({ ...base, nodeId: "huge", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-x", "huge", 0, claim.attempt, {
+      ...base, nodeId: "huge", iteration: 0, status: "completed",
+      result: { blob: "x".repeat(30_000) },
+    });
+
+    const small = await getNodeResult.execute({ run_id: "run-x", node_id: "small" }, ctx());
+    expect(small.success).toBe(true);
+    if (!small.success) return;
+    const smallCp = (small.data as { checkpoints: Array<{ result: unknown }> }).checkpoints[0]!;
+    expect(smallCp.result).toEqual({ text: "hello", usage: { totalTokens: 2 } });
+
+    const huge = await getNodeResult.execute({ run_id: "run-x", node_id: "huge" }, ctx());
+    expect(huge.success).toBe(true);
+    if (!huge.success) return;
+    const hugeCp = (huge.data as { checkpoints: Array<{ result: { truncated?: boolean; jsonPrefix?: string } }> })
+      .checkpoints[0]!;
+    expect(hugeCp.result.truncated).toBe(true);
+    expect(typeof hugeCp.result.jsonPrefix).toBe("string");
+  });
+
   it("get_webhook fails for a workflow the caller doesn't own", async () => {
     const workflowId = await seedWorkflow();
     const plugin = workflowsActionPlugin(() => deps);
