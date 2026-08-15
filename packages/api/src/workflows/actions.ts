@@ -299,6 +299,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "List workflow runs",
     description:
       "List a workflow's runs (runId, status, outcome, timestamps), newest first. " +
+      "Parked runs also carry waitingOn — the node and signal/timer each is blocked on " +
+      "(signalType approval:<nodeId> = an approval node OR a policy gate on a tool node). " +
       "Use to find parked/pending runs before cancelling or checking approvals.",
     riskLevel: "low",
     execute: async ({ workflow_id }, ctx) => {

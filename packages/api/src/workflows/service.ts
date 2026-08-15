@@ -462,6 +462,18 @@ export async function listWorkflowRuns(
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
       needsApproval: needsApproval || undefined,
+      // Parked only: name the blocking conditions in the list itself, so a
+      // surprising park (e.g. a policy gate on a tool node) is visible
+      // without a per-run detail fetch.
+      waitingOn:
+        run.status === "parked" && run.waitingOn.length > 0
+          ? run.waitingOn.map((w) => ({
+              kind: w.kind,
+              nodeId: w.nodeId,
+              ...(w.kind === "signal" ? { signalType: w.signalType } : {}),
+              ...(w.kind === "timer" ? { wakeAt: w.wakeAt } : {}),
+            }))
+          : undefined,
     });
   }
   return runs;
