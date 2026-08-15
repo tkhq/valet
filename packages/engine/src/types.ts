@@ -1880,6 +1880,24 @@ export type ChildReader = (
 ) => Promise<SessionEntry[] | null>;
 
 /**
+ * Sends a message into a child session on behalf of its parent — the
+ * steering half of the child toolset (`task` spawns, `child_read` reads,
+ * `child_send` redirects). `interrupt: true` supersedes the child's
+ * in-flight work (queue-mode steer); the default queues behind it.
+ *
+ * The host re-points its settlement watch at the new submission, so the
+ * parent's next `child.settled` signal reports the steered work, not the
+ * superseded original.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`,
+ * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.
+ */
+export type ChildSender = (
+  req: { childSessionId: string; message: string; interrupt?: boolean },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+) => Promise<{ queueItemId: string } | null>;
+
+/**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,
  * sandbox, model, etc. — the engine does not maintain a registry of session
  * creation options across restarts.

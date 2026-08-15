@@ -14,6 +14,7 @@ import type { QueueItem, SignalContent } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   buildChildReader,
+  buildChildSender,
   buildChildSpawner,
   ChildWatcher,
   ChildLimitError,
@@ -1320,5 +1321,244 @@ describe("parseTaskRepo", () => {
     expect(parseTaskRepo("tkhq/.github")?.fullName).toBe("tkhq/.github");
     expect(parseTaskRepo("tkhq/sdk.js")?.fullName).toBe("tkhq/sdk.js");
     expect(parseTaskRepo("tkhq/-repo")).toBeUndefined();
+  });
+});
+
+// The sender is what makes a child steerable: without it, a parent that
+// watches a child drift can only wait for the wrong result. Its correctness
+// hinges on re-pointing the watch — the settlement the parent is owed after
+// a send is the NEW submission's, never the superseded original's.
+describe("buildChildSender", () => {
+  /** Hand-built child + watch row (watcher-test idiom): no LLM turn runs. */
+  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string }) {
+    const { engineHost, engineStore, db } = a.providers;
+    const parent = await engineHost.sessionFor(opts.parentId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor(opts.childId, {
+      parentSessionId: opts.parentId,
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    await child.pause();
+
+    await engineStore.admitSubmission(opts.childId, childThread.id, queuedItem(opts.queueItemId, childThread.id, "original task"));
+    if (opts.settled) {
+      await engineStore.settleUnclaimed(opts.childId, childThread.id, opts.queueItemId, { outcome: "completed" });
+    }
+
+    const now = Date.now();
+    await db.insert(agentSessions).values({
+      id: opts.childId,
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(childWatches).values({
+      childSessionId: opts.childId,
+      queueItemId: opts.queueItemId,
+      parentSessionId: opts.parentId,
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      settled: opts.settled,
+      createdAt: now,
+    });
+    return { parent, parentThread, child, childThread };
+  }
+
+  function settledSignalsOf(items: QueueItem[]): QueueItem[] {
+    return items.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled",
+    );
+  }
+
+  it("answers null for a session that is not this parent's child", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const sender = buildChildSender(deps, new ChildWatcher(deps));
+    expect(
+      await sender(
+        { childSessionId: "child-nope", message: "hello" },
+        { parentSessionId: "parent-x", parentThreadId: "th-x", actorUserId: "local-user" },
+      ),
+    ).toBeNull();
+  });
+
+  it("answers null for another parent's child — same answer as nonexistent", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    await seedChild(api, { childId: "child-owned", parentId: "parent-a", settled: false, queueItemId: "qi-a" });
+    const sender = buildChildSender(deps, new ChildWatcher(deps));
+    expect(
+      await sender(
+        { childSessionId: "child-owned", message: "hello" },
+        { parentSessionId: "parent-b", parentThreadId: "th-b", actorUserId: "local-user" },
+      ),
+    ).toBeNull();
+  });
+
+  it("answers null for a deleted child", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    await seedChild(api, { childId: "child-del", parentId: "parent-del", settled: false, queueItemId: "qi-del" });
+    await api.providers.db
+      .update(agentSessions)
+      .set({ status: "deleted" })
+      .where(eq(agentSessions.id, "child-del"));
+    const sender = buildChildSender(deps, new ChildWatcher(deps));
+    expect(
+      await sender(
+        { childSessionId: "child-del", message: "hello" },
+        { parentSessionId: "parent-del", parentThreadId: "th-del", actorUserId: "local-user" },
+      ),
+    ).toBeNull();
+  });
+
+  it("steers a running child: supersedes its work, re-points the watch, and the parent gets exactly one child.settled — for the NEW submission", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineStore, db } = api.providers;
+
+    const { parentThread, child, childThread } = await seedChild(api, {
+      childId: "child-steer",
+      parentId: "parent-steer",
+      settled: false,
+      queueItemId: "qi-orig",
+    });
+    // The spawner would have armed the watcher on the original submission.
+    watcher.arm({
+      childSessionId: "child-steer",
+      queueItemId: "qi-orig",
+      parentSessionId: "parent-steer",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    });
+
+    const sender = buildChildSender(deps, watcher);
+    const res = await sender(
+      { childSessionId: "child-steer", message: "stop — fix the chart instead", interrupt: true },
+      { parentSessionId: "parent-steer", parentThreadId: parentThread.id, actorUserId: "local-user" },
+    );
+    expect(res).not.toBeNull();
+    expect(res?.queueItemId).toBeTruthy();
+    expect(res?.queueItemId).not.toBe("qi-orig");
+
+    // Steer semantics: the original submission settled as superseded.
+    const orig = await child.thread().awaitResult("qi-orig");
+    expect(orig.outcome).toBe("superseded");
+
+    // The watch row now points at the new submission and is live again.
+    const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-steer")).limit(1);
+    expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
+    expect(rows[0]?.settled).toBe(false);
+
+    // The stale watcher (armed on qi-orig, which just settled as superseded)
+    // must stay silent: no premature child.settled on the parent.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-steer"))).toHaveLength(0);
+    const midRows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-steer")).limit(1);
+    expect(midRows[0]?.settled).toBe(false);
+
+    // The child finishes the steered work: exactly one signal, for the new item.
+    await engineStore.settleUnclaimed("child-steer", childThread.id, res?.queueItemId ?? "", { outcome: "completed" });
+    await waitFor(async () => {
+      const r = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-steer")).limit(1);
+      return r[0]?.settled === true;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const signals = settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-steer"));
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.dispatchId).toBe(`child-steer:settled:child-steer:${res?.queueItemId}`);
+    const content = signals[0]?.content as SignalContent;
+    expect(content.attributes?.outcome).toBe("completed");
+  });
+
+  it("queues behind a running child by default (no interrupt): the original submission stays unsettled", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineStore, db } = api.providers;
+
+    const { parentThread } = await seedChild(api, {
+      childId: "child-fu",
+      parentId: "parent-fu",
+      settled: false,
+      queueItemId: "qi-fu-orig",
+    });
+
+    const sender = buildChildSender(deps, watcher);
+    const res = await sender(
+      { childSessionId: "child-fu", message: "when you finish, also update the docs" },
+      { parentSessionId: "parent-fu", parentThreadId: parentThread.id, actorUserId: "local-user" },
+    );
+    expect(res).not.toBeNull();
+
+    // Followup mode: both submissions are live on the child.
+    const unsettled = await engineStore.listUnsettledSubmissions("child-fu");
+    const ids = unsettled.map((i) => i.id);
+    expect(ids).toContain("qi-fu-orig");
+    expect(ids).toContain(res?.queueItemId);
+
+    // The watch tracks the LAST submission — its settlement is the one the
+    // parent is owed (FIFO: the follow-up settles after the original).
+    const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-fu")).limit(1);
+    expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
+  });
+
+  it("re-opens a settled child: the send un-settles the watch and its next settlement reaches the parent", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineStore, db } = api.providers;
+
+    const { parentThread, childThread } = await seedChild(api, {
+      childId: "child-again",
+      parentId: "parent-again",
+      settled: true,
+      queueItemId: "qi-done",
+    });
+
+    const sender = buildChildSender(deps, watcher);
+    const res = await sender(
+      { childSessionId: "child-again", message: "one more thing: add tests" },
+      { parentSessionId: "parent-again", parentThreadId: parentThread.id, actorUserId: "local-user" },
+    );
+    expect(res).not.toBeNull();
+
+    const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-again")).limit(1);
+    expect(rows[0]?.settled).toBe(false);
+    expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
+
+    await engineStore.settleUnclaimed("child-again", childThread.id, res?.queueItemId ?? "", { outcome: "completed" });
+    await waitFor(async () => {
+      const r = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-again")).limit(1);
+      return r[0]?.settled === true;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const signals = settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-again"));
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.dispatchId).toBe(`child-again:settled:child-again:${res?.queueItemId}`);
   });
 });

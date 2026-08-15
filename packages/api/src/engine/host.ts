@@ -11,6 +11,7 @@ import {
   NoCredentialsError,
   type BlobStore,
   type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type CredentialStore,
   type EventStream,
@@ -133,6 +134,13 @@ export interface EngineHostOpts {
    * session that may read them back.
    */
   childReader?: ChildReader;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childSender`,
+   * which is what the engine's `child_send` built-in calls. Completes the
+   * child toolset (`task` spawns, `child_read` reads, `child_send`
+   * steers); scoped exactly like the other two — children never get it.
+   */
+  childSender?: ChildSender;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -1158,6 +1166,7 @@ export class EngineHost {
         internalToken: internalToken(),
         ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
         ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
+        ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a

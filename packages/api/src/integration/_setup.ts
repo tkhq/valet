@@ -17,6 +17,7 @@ import { eq } from "drizzle-orm";
 import {
   VirtualSandboxProvider,
   type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type SandboxProvider,
   type ValetPlugin,
@@ -26,7 +27,7 @@ import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalGrant, type Ru
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildReader, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -269,6 +270,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // real orchestrator.
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
+  let senderRef: ChildSender | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -300,6 +302,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
       return readerRef(req, ctx);
     },
+    childSender: (req, ctx) => {
+      if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
+      return senderRef(req, ctx);
+    },
   });
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here unless a test injects one); routes
@@ -324,6 +330,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
+  senderRef = buildChildSender(childrenDeps, childWatcher);
 
   const channelHost = new ChannelHost({
     db,

@@ -22,6 +22,7 @@ import {
   PendingCapError,
   ValidationError as EngineValidationError,
   type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type Principal,
   type SessionStore,
@@ -456,6 +457,25 @@ export class ChildWatcher {
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(watch.queueItemId);
 
+    // Re-point guard (`child_send`): the sender moves the watch row to its
+    // new submission and arms a fresh watcher on it. A watcher that wakes
+    // for a submission the row no longer tracks must stay silent — its
+    // settlement (typically outcome "superseded" from an interrupt) is not
+    // the one the parent is owed. The row is the durable source of truth;
+    // the superseded-with-live-replacement check covers the moment between
+    // the steer's atomic supersession and the sender's row update landing.
+    const rows = await this.deps.db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, watch.childSessionId))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.settled || row.queueItemId !== watch.queueItemId) return;
+    if (result.outcome === "superseded") {
+      const live = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
+      if (live.length > 0) return;
+    }
+
     // Optional title attribute (decision 11): the spawn request's title is
     // mirrored onto the child's agent_sessions row — read it back from there
     // rather than widening child_watches with a redundant column.
@@ -591,6 +611,92 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
       limit: req.limit ?? CHILD_READ_DEFAULT_LIMIT,
       includeCompacted: true,
     });
+  };
+}
+
+/**
+ * Builds the `ChildSender` injected into every orchestrator's
+ * `toolConfig.childSender`, which is what the engine's `child_send` built-in
+ * calls. This is the steering half of the child toolset: `task` spawns,
+ * `child_read` reads, `child_send` redirects or re-opens.
+ *
+ * Authority is the same `child_watches` edge as `buildChildReader`. Unlike
+ * the reader, a send goes through `engineHost.sessionFor` on purpose — it
+ * must wake the child (cold-starting a torn-down sandbox if the child
+ * already settled) so the queue actually runs the new submission.
+ *
+ * After admitting the message, the watch row is re-pointed at the new
+ * submission (`settled: false`) and the watcher re-armed, so the parent's
+ * next `child.settled` signal reports the steered work. `interrupt: true`
+ * admits with queue-mode steer, superseding the child's in-flight work; the
+ * stale watcher on the superseded submission goes quiet via the re-point
+ * guard in `ChildWatcher.attempt`.
+ */
+export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): ChildSender {
+  return async (req, ctx) => {
+    const watchRows = await deps.db
+      .select()
+      .from(childWatches)
+      .where(
+        and(
+          eq(childWatches.childSessionId, req.childSessionId),
+          eq(childWatches.parentSessionId, ctx.parentSessionId),
+        ),
+      )
+      .limit(1);
+    // Same null contract as `buildChildReader`: "not yours" and "does not
+    // exist" are indistinguishable, so foreign session ids stay unguessable.
+    const watchRow = watchRows[0];
+    if (!watchRow) return null;
+
+    const childRows = await deps.db
+      .select({ status: agentSessions.status })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, req.childSessionId))
+      .limit(1);
+    const child = childRows[0];
+    if (!child || child.status === "deleted") return null;
+
+    const childData = await deps.engineStore.getSession(req.childSessionId);
+    if (!childData) return null;
+
+    const childSession = await deps.engineHost.sessionFor(
+      req.childSessionId,
+      await loadSessionMeta(deps.db, {
+        id: req.childSessionId,
+        userId: childData.userId,
+        orgId: childData.orgId,
+        workspace: childData.workspace,
+      }),
+    );
+
+    const receipt = await childSession.prompt(req.message, {
+      author: { id: ctx.actorUserId },
+      queueMode: req.interrupt ? "steer" : "followup",
+    });
+
+    // Re-point BEFORE arming: the fresh watcher must find the row already
+    // tracking its submission, and the stale watcher (if any) must find it
+    // no longer tracking the old one.
+    await deps.db
+      .update(childWatches)
+      .set({
+        queueItemId: receipt.queueItemId,
+        parentThreadId: ctx.parentThreadId,
+        settled: false,
+      })
+      .where(eq(childWatches.childSessionId, req.childSessionId));
+
+    watcher.arm({
+      childSessionId: req.childSessionId,
+      queueItemId: receipt.queueItemId,
+      parentSessionId: ctx.parentSessionId,
+      parentThreadId: ctx.parentThreadId,
+      actorUserId: ctx.actorUserId,
+      orgId: watchRow.orgId,
+    });
+
+    return { queueItemId: receipt.queueItemId };
   };
 }
 
