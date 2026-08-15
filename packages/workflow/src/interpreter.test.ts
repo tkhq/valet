@@ -97,6 +97,51 @@ describe('driveUntilPark: linear trigger → set → stop', () => {
   });
 });
 
+// ─── 1b. `nodes.<id>.result` alias ──────────────────────────────────────────
+
+describe('driveUntilPark: nodes.<id>.result alias', () => {
+  it('resolves node outputs via .result (the documented form) and via .output', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 's', type: 'set', values: { greeting: 'hello {{trigger.data.name}}', n: 5 } },
+        { id: 'big', type: 'set', values: { branch: 'big' } },
+        {
+          id: 'e',
+          type: 'stop',
+          outcome: 'success',
+          output: { viaResult: '{{nodes.s.result.greeting}}', viaOutput: '{{nodes.s.output.greeting}}' },
+        },
+      ],
+      edges: [
+        { from: 't', to: 's' },
+        { from: 's', to: 'big', when: 'nodes.s.result.n > 3' },
+        { from: 'big', to: 'e' },
+      ],
+    };
+    const params = runParams({
+      input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { name: 'world' }, metadata: {} },
+    });
+    await store.createRun('run-alias', params, definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-alias');
+
+    const park = await driveUntilPark('run-alias', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+    const checkpoints = await store.getCheckpoints('run-alias');
+    const byNode = new Map(checkpoints.map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('big')?.status).toBe('completed');
+    expect(byNode.get('e')?.result).toMatchObject({
+      output: { viaResult: 'hello world', viaOutput: 'hello world' },
+    });
+  });
+});
+
 // ─── 2a. Tool-node fromOutput edges (policy gate pass / deny) ────────────────
 
 describe('driveUntilPark: tool-node fromOutput edges', () => {
