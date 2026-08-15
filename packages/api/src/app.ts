@@ -27,6 +27,7 @@ import { teamsRouter } from "./routes/teams.js";
 import { memoryRouter } from "./routes/memory.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { credentialsRouter } from "./routes/credentials.js";
@@ -200,6 +201,9 @@ export function createApp(
   app.route("/api/memory", memoryRouter);
   app.route("/api/orchestrator", orchestratorRouter);
   app.route("/api/notifications", notificationsRouter);
+  // Trigger routes first: workflowsRouter's `GET /:id` would otherwise
+  // swallow `/triggers` and `/runs` as workflow ids.
+  app.route("/api/workflows", workflowTriggersRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
   app.route("/api/credentials", credentialConnectRouter);
