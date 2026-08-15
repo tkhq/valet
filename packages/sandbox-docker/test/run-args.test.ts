@@ -219,7 +219,11 @@ describe("docker flag (rootless DinD)", () => {
     const joined = args.join(" ");
     expect(joined).toContain("--security-opt seccomp=unconfined");
     expect(joined).toContain("--security-opt apparmor=unconfined");
+    expect(joined).toContain("--security-opt systempaths=unconfined");
+    expect(joined).toContain("--cap-add SYS_ADMIN");
+    expect(joined).toContain("--cap-add NET_ADMIN");
     expect(joined).toContain("--device /dev/fuse");
+    expect(joined).toContain("--device /dev/net/tun");
     expect(joined).toContain("--env VALET_SANDBOX_DOCKER=1");
     expect(joined).not.toContain("--privileged");
   });
@@ -235,7 +239,11 @@ describe("docker flag (rootless DinD)", () => {
     const joined = buildDockerRunArgs(base).join(" ");
     expect(joined).not.toContain("seccomp");
     expect(joined).not.toContain("apparmor");
+    expect(joined).not.toContain("systempaths");
     expect(joined).not.toContain("/dev/fuse");
     expect(joined).not.toContain("VALET_SANDBOX_DOCKER");
+    expect(joined).not.toContain("cap-add");
+    expect(joined).not.toContain("SYS_ADMIN");
+    expect(joined).not.toContain("NET_ADMIN");
   });
 });

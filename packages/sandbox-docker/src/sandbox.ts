@@ -157,8 +157,8 @@ export interface BuildDockerRunArgsOpts {
    * When absent, no creds volume is added. */
   credsHostDir?: string;
   /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). Adds the
-   * seccomp/AppArmor/fuse relaxations and VALET_SANDBOX_DOCKER=1 — never
-   * --privileged. */
+   * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
+   * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
   docker?: boolean;
 }
 
@@ -178,7 +178,11 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   if (opts.docker) {
     runArgs.push("--security-opt", "seccomp=unconfined");
     runArgs.push("--security-opt", "apparmor=unconfined");
+    runArgs.push("--security-opt", "systempaths=unconfined");
+    runArgs.push("--cap-add", "SYS_ADMIN");
+    runArgs.push("--cap-add", "NET_ADMIN");
     runArgs.push("--device", "/dev/fuse");
+    runArgs.push("--device", "/dev/net/tun");
     runArgs.push("--env", "VALET_SANDBOX_DOCKER=1");
   }
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
