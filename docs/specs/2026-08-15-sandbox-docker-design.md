@@ -16,11 +16,20 @@ docker.
 1. **Audience:** any user workload. This is a platform capability, not
    a dev-only escape hatch. The design must hold for untrusted agent
    code.
-2. **Isolation floor: rootless everywhere.** The daemon runs as a
-   non-root user inside the unprivileged sandbox container. No
-   `--privileged`, no host `docker.sock` mount, no added capabilities,
-   on either provider. This extends the rootless-BuildKit posture that
-   the prebuild pipeline already uses in production (see
+2. **Isolation floor: rootless, with minimal capability grants.**
+   The daemon runs as a non-root user inside the sandbox container.
+   No `--privileged`, no host `docker.sock` mount. On both providers
+   the opted-in sandbox receives exactly: CAP_SYS_ADMIN and
+   CAP_NET_ADMIN, devices `/dev/fuse` and `/dev/net/tun`, seccomp
+   unconfined, AppArmor unconfined, and unmasked system paths
+   (`--security-opt systempaths=unconfined` on docker;
+   `procMount: Unmasked` on kubernetes). These grants are empirically
+   required: `newuidmap` must write to `uid_map` (needs SYS_ADMIN
+   and unmasked `/proc/self/uid_map`), and rootlesskit must set
+   `net.ipv4.ip_forward` in its netns via sysctl (needs NET_ADMIN
+   and unmasked `/proc/sys`). All other capabilities remain dropped.
+   This extends the rootless-BuildKit posture that the prebuild
+   pipeline already uses in production (see
    `2026-08-02-sandbox-reconcile-design.md`, decision 4).
 3. **Opt-in, two switches:** a `docker: true` key in
    `.valet/prebuild.yaml`, or a `docker` option at session create.
@@ -90,32 +99,43 @@ inherit the toolchain via `FROM`.
 ### sandbox-docker
 
 When `opts.docker`, `buildDockerRunArgs`
-(`packages/sandbox-docker/src/sandbox.ts`) adds:
+(`packages/sandbox-docker/src/sandbox.ts`) adds, in this order:
 
 ```
 --security-opt seccomp=unconfined
 --security-opt apparmor=unconfined
+--security-opt systempaths=unconfined
+--cap-add SYS_ADMIN
+--cap-add NET_ADMIN
 --device /dev/fuse
+--device /dev/net/tun
 --env VALET_SANDBOX_DOCKER=1
 ```
 
-Nothing else changes. Never `--privileged`.
+`systempaths=unconfined` unmasks `/proc/sys` so rootlesskit can set
+`net.ipv4.ip_forward` in its netns. Never `--privileged`.
 
 ### sandbox-kubernetes
 
-`SandboxContainer` / `SandboxPodSpec`
-(`packages/sandbox-kubernetes/src/types.ts`) gain a `securityContext`
-field (none exists today). When `opts.docker`, the manifest builder
-(`packages/sandbox-kubernetes/src/manifest.ts`) adds:
+`ContainerSecurityContext`
+(`packages/sandbox-kubernetes/src/types.ts`) gains
+`capabilities?: { add: string[] }` and
+`procMount?: "Unmasked" | "Default"`. When `opts.docker`, the
+manifest builder (`packages/sandbox-kubernetes/src/manifest.ts`) adds:
 
 - pod annotation
   `container.apparmor.security.beta.kubernetes.io/<container>: unconfined`
-- container `securityContext.seccompProfile.type: Unconfined`
-- `/dev/fuse` access, using the same mechanism the rootless BuildKit
-  builder (`packages/api/src/prebuilds/k8s-builder.ts`) uses in this
-  cluster
+- container `securityContext`:
+  `{ seccompProfile: { type: "Unconfined" }, capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] }, procMount: "Unmasked" }`
+- `/dev/fuse` hostPath device volume (same mechanism as the rootless
+  BuildKit builder in `packages/api/src/prebuilds/k8s-builder.ts`)
+- `/dev/net/tun` hostPath device volume (needed by rootlesskit)
 - an `emptyDir` volume for docker state
 - `VALET_SANDBOX_DOCKER=1` in the container env
+
+Note: `procMount: Unmasked` requires the ProcMountType feature gate.
+Where that gate is unavailable, the k8s DinD path does not converge.
+This is checked at acceptance.
 
 ### State lifetime
 
@@ -131,20 +151,27 @@ fuse-overlayfs state on a shared PVC has unclear crash semantics.
 
 - seccomp: unconfined (larger kernel syscall attack surface)
 - AppArmor: unconfined
-- adds `/dev/fuse`
+- system paths: unconfined (unmasked `/proc/sys` for sysctl in rootlesskit netns)
+- capabilities: adds CAP_SYS_ADMIN and CAP_NET_ADMIN
+- devices: adds `/dev/fuse` and `/dev/net/tun`
+
+CAP_SYS_ADMIN on the outer container is the largest single relaxation.
+It is confined to opted-in sandboxes and is strictly weaker than
+`--privileged` (no raw block devices, all other caps dropped, system
+paths selectively unmasked rather than fully exposed).
 
 It does NOT:
 
 - run the sandbox or the daemon as privileged
 - mount the host docker socket
-- add Linux capabilities
+- add any capability beyond SYS_ADMIN and NET_ADMIN
 - change anything for sandboxes that did not opt in
 
 The daemon and every container it runs live inside the sandbox's user
 namespace. A container escape from the inner docker lands in the
 rootless daemon's userns, not on the host. The residual risk is kernel
-attack surface through unconfined seccomp — the same trade already
-accepted for rootless BuildKit build pods.
+attack surface through unconfined seccomp and SYS_ADMIN — the same
+trade already accepted for rootless BuildKit build pods.
 
 `docs/security-model.md` gains a subsection stating the above.
 
