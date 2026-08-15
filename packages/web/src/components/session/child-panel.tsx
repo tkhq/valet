@@ -27,6 +27,10 @@ export function ChildPanel({
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
+        // Claim the event (capture phase + preventDefault) so the
+        // Composer's Escape-to-interrupt does not also abort a running
+        // turn — closing the top layer wins; a second Escape interrupts.
+        e.preventDefault();
         onClose();
         return;
       }
@@ -49,8 +53,10 @@ export function ChildPanel({
         }
       }
     }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    // Capture phase: the panel must see Escape before the Composer's
+    // bubble-phase interrupt listener, regardless of mount order.
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [onClose]);
 
   // Focus the panel on open, restore focus to whatever triggered it on close.

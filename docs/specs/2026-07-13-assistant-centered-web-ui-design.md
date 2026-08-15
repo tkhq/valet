@@ -51,6 +51,8 @@ The existing session view re-mounted for the assistant session id (threads, gate
 
 3. **Child slide-over.** Clicking a child (sidebar or card) opens the child session **in place** as a right-hand slide-over panel: the child's live transcript, its gates resolvable there, an "open full page" affordance to `/sessions/$id`. Implemented by reusing the session view components with a `variant: "panel"` (no threads sidebar, compact header). Closing the panel returns to the assistant with no navigation.
 
+   Added 2026-08-15: **Escape interrupts the running turn.** While the agent is busy, Escape triggers the same thread abort as the Stop button (window-level listener in the `Composer`, so it works anywhere on the chat tab). Layered dismissals keep priority through `preventDefault`: an open command popup consumes Escape to close itself; an open child panel consumes Escape (capture phase) to close; only an unclaimed Escape interrupts.
+
 ### `/memory` and `/memory/$` — memory explorer
 
 Two panes:
