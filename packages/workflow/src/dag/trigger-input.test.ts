@@ -3,6 +3,14 @@ import { describe, it, expect } from 'vitest';
 import { resolveTriggerInput } from './trigger-input.js';
 import type { WorkflowInputDefinition } from './shape.js';
 
+/** Deliberately-malformed input definition. `dataSchema` is unchecked stored
+ * JSON — a definition authored outside the editor can carry a type string this
+ * version doesn't know. Same unknown-then-single-cast seam as
+ * validate.test.ts's `rawNode`. */
+function rawDef(def: unknown): WorkflowInputDefinition {
+  return def as WorkflowInputDefinition;
+}
+
 const schema: Record<string, WorkflowInputDefinition> = {
   name: { type: 'string', required: true },
   retries: { type: 'number', default: 3 },
@@ -75,6 +83,12 @@ describe('resolveTriggerInput', () => {
   it('an empty or absent schema returns the input unchanged', () => {
     expect(resolveTriggerInput(undefined, { a: 1 })).toEqual({ input: { a: 1 }, errors: [] });
     expect(resolveTriggerInput({}, { a: 1 })).toEqual({ input: { a: 1 }, errors: [] });
+  });
+
+  it('an unrecognized type string skips the type check instead of rejecting everything', () => {
+    const result = resolveTriggerInput({ weird: rawDef({ type: 'uuid' }) }, { weird: 'x' });
+    expect(result.errors).toEqual([]);
+    expect(result.input.weird).toBe('x');
   });
 
   it('null is not a valid value for a typed field', () => {

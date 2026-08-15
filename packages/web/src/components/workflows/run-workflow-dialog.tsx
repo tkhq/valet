@@ -124,7 +124,7 @@ function SchemaField({
   const label = def.required ? `${field} *` : field;
   return (
     <div className="flex flex-col gap-1">
-      <SchemaFieldControl field={field} label={label} def={def} value={value} onChange={onChange} />
+      <SchemaFieldControl label={label} def={def} value={value} onChange={onChange} />
       {def.description && <span className="text-xs text-muted">{def.description}</span>}
       {error && (
         <span role="alert" className="text-xs text-danger-600 dark:text-danger-500">
@@ -135,20 +135,41 @@ function SchemaField({
   );
 }
 
+function BooleanField({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const id = useId();
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        id={id}
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-4 w-4 accent-[--moss] rounded border-line"
+      />
+      <Label htmlFor={id}>{label}</Label>
+    </div>
+  );
+}
+
 function SchemaFieldControl({
-  field,
   label,
   def,
   value,
   onChange,
 }: {
-  field: string;
   label: string;
   def: WorkflowInputDefinition;
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
-  const id = useId();
   switch (def.type) {
     case "string": {
       if (def.enum && def.enum.length > 0) {
@@ -181,18 +202,7 @@ function SchemaFieldControl({
         />
       );
     case "boolean":
-      return (
-        <div className="flex items-center gap-2">
-          <input
-            id={id}
-            type="checkbox"
-            checked={value === true}
-            onChange={(e) => onChange(e.target.checked)}
-            className="h-4 w-4 accent-[--moss] rounded border-line"
-          />
-          <Label htmlFor={id}>{label}</Label>
-        </div>
-      );
+      return <BooleanField label={label} checked={value === true} onChange={onChange} />;
     case "object":
     case "array":
       return (

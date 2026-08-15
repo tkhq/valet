@@ -30,6 +30,11 @@ function matchesType(value: unknown, type: WorkflowInputDefinition['type']): boo
     case 'object':
       return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
+  // The union is exhaustive at compile time only — schemas are unchecked
+  // stored JSON, so an unrecognized type string reaches here at runtime.
+  // Skip the type check (required/default/enum still apply) instead of
+  // rejecting every value of a field this version can't classify.
+  return true;
 }
 
 /** Extract the trigger node's declared input schema from a stored (unknown)
