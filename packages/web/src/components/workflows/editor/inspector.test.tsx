@@ -37,6 +37,60 @@ describe("Inspector", () => {
     expect(screen.queryByRole("button", { name: "Duplicate" })).toBeNull();
   });
 
+  describe("trigger dataSchema editor", () => {
+    const node: TriggerNode = {
+      id: "trigger",
+      type: "trigger",
+      dataSchema: {
+        name: { type: "string", required: true, description: "Deployment name" },
+        retries: { type: "number", default: 3 },
+      },
+    };
+
+    it("renders a row per declared input", () => {
+      render(<Inspector node={node} onChange={noop} onRemove={noop} onDuplicate={noop} />);
+      expect(screen.getByDisplayValue("name")).toBeTruthy();
+      expect(screen.getByDisplayValue("retries")).toBeTruthy();
+    });
+
+    it("adds a new input via the Add input button", () => {
+      const onChange = vi.fn();
+      render(<Inspector node={node} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
+      fireEvent.click(screen.getByRole("button", { name: "Add input" }));
+      const patch = onChange.mock.calls[0][0] as { dataSchema: Record<string, unknown> };
+      expect(Object.keys(patch.dataSchema)).toHaveLength(3);
+      expect(patch.dataSchema.name).toEqual(node.dataSchema?.name);
+    });
+
+    it("editing a default propagates a dataSchema patch with the typed value", () => {
+      const onChange = vi.fn();
+      render(<Inspector node={node} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
+      const defaults = screen.getAllByLabelText("Default");
+      fireEvent.change(defaults[1], { target: { value: "5" } });
+      const patch = onChange.mock.calls[0][0] as {
+        dataSchema: Record<string, { default?: unknown }>;
+      };
+      expect(patch.dataSchema.retries.default).toBe(5);
+    });
+
+    it("renaming an input keeps its definition under the new key", () => {
+      const onChange = vi.fn();
+      render(<Inspector node={node} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
+      fireEvent.change(screen.getByDisplayValue("retries"), { target: { value: "attempts" } });
+      const patch = onChange.mock.calls[0][0] as { dataSchema: Record<string, unknown> };
+      expect(patch.dataSchema.attempts).toEqual({ type: "number", default: 3 });
+      expect(patch.dataSchema.retries).toBeUndefined();
+    });
+
+    it("removing an input drops it from the schema", () => {
+      const onChange = vi.fn();
+      render(<Inspector node={node} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
+      fireEvent.click(screen.getByRole("button", { name: "Remove retries" }));
+      const patch = onChange.mock.calls[0][0] as { dataSchema: Record<string, unknown> };
+      expect(Object.keys(patch.dataSchema)).toEqual(["name"]);
+    });
+  });
+
   it("fires onRemove and onDuplicate for a non-trigger node", () => {
     const onRemove = vi.fn();
     const onDuplicate = vi.fn();

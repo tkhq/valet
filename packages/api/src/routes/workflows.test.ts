@@ -46,17 +46,17 @@ const VALID_DEFINITION = {
 
 /** A `RunHost` stub that records every call instead of driving anything. */
 class StubRunHost implements RunHost {
-  started: Array<{ runId: string; owner?: { ownerType: string; ownerId: string } }> = [];
+  started: Array<{ runId: string; params?: unknown; owner?: { ownerType: string; ownerId: string } }> = [];
   woken: string[] = [];
   terminated: string[] = [];
 
   async start(
     runId: string,
-    _params: unknown,
+    params: unknown,
     _definition: unknown,
     owner?: { ownerType: string; ownerId: string },
   ): Promise<void> {
-    this.started.push({ runId, owner });
+    this.started.push({ runId, params, owner });
   }
   async wake(runId: string): Promise<void> {
     this.woken.push(runId);
@@ -322,6 +322,82 @@ describe("POST /api/workflows/:id/runs", () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(404);
+    expect(stub.started).toHaveLength(0);
+  });
+
+  const SCHEMA_DEFINITION = {
+    version: "dag/v1",
+    nodes: [
+      {
+        id: "trigger",
+        type: "trigger",
+        dataSchema: {
+          name: { type: "string", required: true },
+          retries: { type: "number", default: 3 },
+        },
+      },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [{ from: "trigger", to: "stop" }],
+  };
+
+  async function createSchemaWorkflow(baseUrl: string): Promise<CreateWorkflowResponse> {
+    const res = await fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "schema-workflow", definition: SCHEMA_DEFINITION }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateWorkflowResponse;
+  }
+
+  it("merges trigger dataSchema defaults into the run's trigger data", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { name: "deploy" } }),
+    });
+    expect(res.status).toBe(201);
+
+    expect(stub.started).toHaveLength(1);
+    const params = stub.started[0].params as { input: { data: Record<string, unknown> } };
+    expect(params.input.data).toEqual({ name: "deploy", retries: 3 });
+  });
+
+  it("400s a run missing a required trigger input, naming the field", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: {} }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: Array<{ field: string; message: string }> };
+    expect(body.fields.map((f) => f.field)).toEqual(["name"]);
+    expect(body.error).toContain("name");
+    expect(stub.started).toHaveLength(0);
+  });
+
+  it("400s a type mismatch against the trigger dataSchema", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { name: "deploy", retries: "three" } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { fields: Array<{ field: string }> };
+    expect(body.fields.map((f) => f.field)).toEqual(["retries"]);
     expect(stub.started).toHaveLength(0);
   });
 });

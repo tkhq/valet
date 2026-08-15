@@ -2,8 +2,10 @@ import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
+import { triggerDataSchema } from "@valet/workflow";
 import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
+import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -78,10 +80,24 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
   const navigate = useNavigate();
   const runCount = runsQ.data?.runs.length;
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [runOpen, setRunOpen] = useState(false);
+
+  // A trigger with declared inputs routes through the run dialog; without
+  // one, Run starts immediately as before (no empty-dialog flash).
+  const schema = triggerDataSchema(workflow.definition);
+  const hasSchema = schema !== undefined && Object.keys(schema).length > 0;
+
+  function goToRun(runId: string) {
+    void navigate({ to: "/workflows/runs/$runId", params: { runId } });
+  }
 
   async function handleRun() {
+    if (hasSchema) {
+      setRunOpen(true);
+      return;
+    }
     const result = await startRun.mutateAsync();
-    void navigate({ to: "/workflows/runs/$runId", params: { runId: result.runId } });
+    goToRun(result.runId);
   }
 
   async function handleDelete() {
@@ -109,6 +125,16 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
           </span>
         )}
       </Link>
+      {hasSchema && schema && (
+        <RunWorkflowDialog
+          workflowId={workflow.id}
+          workflowName={workflow.name}
+          schema={schema}
+          open={runOpen}
+          onOpenChange={setRunOpen}
+          onStarted={goToRun}
+        />
+      )}
       <div className="flex items-center gap-2 shrink-0">
         {deleteError && <span className="text-xs text-danger-500">{deleteError}</span>}
         <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>

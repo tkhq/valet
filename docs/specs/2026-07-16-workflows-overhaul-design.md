@@ -59,3 +59,32 @@ In chat: "make a workflow that runs every morning at 8, checks <something> with 
 - Version-history UI and run-detail graph overlay on the workflow pages (chat gets the graph first; the run page keeps its checkpoint list).
 - Workflow marketplace/templates, import/export.
 - Editing workflows from Telegram/CLI (they get gate approve/deny like everything else; authoring UX is chat + editor).
+
+## Addendum (2026-08-14): trigger input schema drives the run form
+
+The manual-trigger path now enforces the trigger node's `dataSchema`
+(`Record<string, WorkflowInputDefinition>`: `type`, `required`,
+`default`, `description`, `enum`).
+
+- `resolveTriggerInput(schema, input)` (`@valet/workflow`,
+  `dag/trigger-input.ts`) merges defaults, then validates required
+  fields, primitive types, and enum membership. `triggerDataSchema`
+  extracts the schema from an unknown stored definition. Both are pure
+  and shared by the api and the web client.
+- `startWorkflowRun` runs the resolver. Invalid input returns
+  `{ invalidInput }`; `POST /api/workflows/:id/runs` maps it to 400 with
+  per-field messages, and the `workflows.start_run` action returns the
+  same messages as its error result. The defaulted input becomes
+  `trigger.data`.
+- The web Run buttons (index row and editor header) open
+  `RunWorkflowDialog` when the schema declares at least one input; the
+  dialog generates one field per entry (string/enum → text/select,
+  number → number, boolean → checkbox, object/array → JSON), pre-fills
+  defaults, and validates with the same resolver before submit. With no
+  declared inputs, Run starts immediately as before.
+- The editor inspector's trigger form edits `dataSchema` (add, rename,
+  remove; per-type default control; comma-separated allowed values for
+  strings).
+
+Webhook/schedule/event trigger payloads are not validated against
+`dataSchema` in this pass — manual runs only.
