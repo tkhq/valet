@@ -109,6 +109,18 @@ restored last, so the existing overlays nest unchanged around it. A turn that
 starts before the first `ready` transition simply runs without the fragment —
 the same graceful degradation as the cold-sandbox hint.
 
+Concurrency contract: `Session` stores the provider result as one immutable
+`RepoInstructions | null` reference, and `refreshRepoInstructions()` replaces
+that reference in a single assignment after the provider resolves — it never
+mutates the stored object. The overlay reads the reference exactly once, at
+turn start, when it builds and appends the fragment; the appended string is a
+turn-local copy. A refresh that lands mid-turn (e.g. a hibernation-wake
+`ready` transition racing an in-flight turn) therefore cannot change the
+prompt a running turn already carries. Either the turn read the old reference
+or the new one — both are complete, coherent snapshots — and the new value
+takes effect on the next turn's overlay. Implementations MUST NOT re-read the
+stored value after the turn-start snapshot.
+
 ### 5. Host seam mirrors `workspaceSkillsProvider`
 
 `CreateSessionOptions` gains an optional provider:
@@ -170,6 +182,9 @@ to promise precedence behavior for them.
 - Engine unit test: overlay composition order and restore nesting with role +
   cold hint + repo instructions all active in one turn; a turn with no
   provider and a turn where the provider returns null.
+- Engine unit test: a `refreshRepoInstructions()` that resolves mid-turn does
+  not change the in-flight turn's system prompt; the next turn carries the new
+  content (the turn-start snapshot contract, decision 4).
 - Api unit test: the scan exec output parses into `RepoInstructions` — root
   content, nested paths, cap + truncation marker, CLAUDE.md fallback,
   missing-file → null.
