@@ -1047,6 +1047,21 @@ export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
   | {
+      /**
+       * Live-only tool-call argument streaming (same ephemeral plane as
+       * text_delta — never durable, never persisted). Emitted once when the
+       * model opens a tool call (empty argsDelta) and once per raw args JSON
+       * chunk. Consumers concatenate argsDelta per callId and parse the
+       * accumulated string leniently; `tool_start` later carries the
+       * complete args and self-heals any dropped delta.
+       */
+      type: "tool_call_update";
+      threadId: string;
+      callId: string;
+      toolName: string;
+      argsDelta: string;
+    }
+  | {
       type: "message_update";
       threadId: string;
       messageId: string;
@@ -1059,8 +1074,8 @@ export type EngineEvent =
       messageId: string;
       reason: "end_turn" | "error" | "abort";
     }
-  | { type: "tool_start"; threadId: string; tool: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; result: string; isError: boolean }
+  | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
+  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
   | {
       type: "turn_end";
       threadId: string;

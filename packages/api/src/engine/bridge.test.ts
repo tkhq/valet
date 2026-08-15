@@ -76,6 +76,30 @@ describe("busEventToWire", () => {
     expect(out).toEqual([{ type: "tool_start", threadId: "t1", toolName: "bash", args: { cmd: "ls" } }]);
   });
 
+  it("forwards callId on tool_start and tool_end when present", () => {
+    const start = busEventToWire(
+      ev({ type: "tool_start", threadId: "t1", tool: "bash", callId: "tc1", args: {} }),
+    );
+    expect(start).toEqual([
+      { type: "tool_start", threadId: "t1", toolName: "bash", callId: "tc1", args: {} },
+    ]);
+    const end = busEventToWire(
+      ev({ type: "tool_end", threadId: "t1", tool: "bash", callId: "tc1", result: "ok", isError: false }),
+    );
+    expect(end).toEqual([
+      { type: "tool_end", threadId: "t1", toolName: "bash", callId: "tc1", result: "ok", isError: false },
+    ]);
+  });
+
+  it("forwards tool_call_update args deltas", () => {
+    const out = busEventToWire(
+      ev({ type: "tool_call_update", threadId: "t1", callId: "tc1", toolName: "write", argsDelta: '{"pa' }),
+    );
+    expect(out).toEqual([
+      { type: "tool_call_update", threadId: "t1", callId: "tc1", toolName: "write", argsDelta: '{"pa' },
+    ]);
+  });
+
   it("forwards tool_end with result + isError", () => {
     const out = busEventToWire(ev({ type: "tool_end", threadId: "t1", tool: "bash", result: "ok", isError: false }));
     expect(out).toEqual([{ type: "tool_end", threadId: "t1", toolName: "bash", result: "ok", isError: false }]);

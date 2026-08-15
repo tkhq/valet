@@ -240,7 +240,13 @@ export type MessagePart =
       kind: "tool_call";
       callId: string;
       toolName: string;
-      status: "running" | "completed" | "error";
+      /**
+       * `streaming` is a live-plane-only state: the client synthesizes it
+       * from `tool_call_update` frames while args are still being generated.
+       * The engine never persists it, so REST (`GET /messages`) and
+       * `message_update` frames only ever carry the other three.
+       */
+      status: "streaming" | "running" | "completed" | "error";
       args?: unknown;
       result?: unknown;
       error?: string;
@@ -416,6 +422,21 @@ export type WireEvent =
   | { seq: number; ts: number; offset?: string; type: "init"; session: SessionDetail }
   | { seq: number; ts: number; offset?: string; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
   | { seq: number; ts: number; offset?: string; type: "text_delta"; threadId: string; messageId: string; delta: string }
+  | {
+      /**
+       * Live-only tool-call argument streaming (ephemeral, no offset).
+       * `argsDelta` is a raw chunk of the args JSON; concatenate per callId
+       * and parse leniently. `tool_start` later carries the complete args
+       * and self-heals any dropped delta.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "tool_call_update";
+      threadId: string;
+      callId: string;
+      toolName: string;
+      argsDelta: string;
+    }
   | {
       seq: number;
       ts: number; offset?: string;

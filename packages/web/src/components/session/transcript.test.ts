@@ -150,4 +150,34 @@ describe("buildTranscript", () => {
     });
     expect(out).toContain("<unserializable:");
   });
+
+  it("does not throw on a streaming tool_call whose args/result are still undefined", () => {
+    const streaming: Message = {
+      id: "m_stream",
+      sessionId: "sess_1",
+      threadId: "th_1",
+      role: "assistant",
+      content: "",
+      parts: [
+        {
+          kind: "tool_call",
+          callId: "call_s",
+          toolName: "write",
+          status: "streaming",
+          // First delta not parseable yet — no args, no result.
+        },
+      ],
+      createdAt: 1_700_000_003_000,
+    };
+    const out = buildTranscript({
+      session,
+      threadId: "th_1",
+      messages: [streaming],
+      agentStatus: "streaming",
+      conn: "open",
+    });
+    expect(out).toContain("tool_call · write · streaming");
+    // A still-streaming call has no result yet — don't print a result block.
+    expect(out).not.toContain("**result**");
+  });
 });

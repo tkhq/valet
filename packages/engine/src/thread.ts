@@ -2918,6 +2918,12 @@ export class Thread {
         break;
       }
       case "message_update": {
+        // A superseded (zombie) attempt can keep receiving buffered stream
+        // events after its fence died. Fenced durable emits already throw
+        // StaleAttemptError; ephemeral emits (text_delta, tool_call_update)
+        // bypass the fence, so gate them on the detected-stale flag to stop
+        // painting a dead attempt's output into live clients.
+        if (this.staleFenceDetected) break;
         const ev = event.assistantMessageEvent;
         if (ev.type === "text_delta") {
           await this.session.emit({
@@ -2925,6 +2931,19 @@ export class Thread {
             threadId: this.id,
             text: ev.delta,
           });
+        } else if (ev.type === "toolcall_start" || ev.type === "toolcall_delta") {
+          // Live-only args streaming: forward the raw JSON chunk keyed by
+          // callId so clients can render the tool call before it executes.
+          const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "toolCall") {
+            await this.session.emit({
+              type: "tool_call_update",
+              threadId: this.id,
+              callId: block.id,
+              toolName: block.name,
+              argsDelta: ev.type === "toolcall_delta" ? ev.delta : "",
+            });
+          }
         } else if (ev.type === "toolcall_end") {
           const part: MessagePart = {
             type: "tool_call",
@@ -3022,6 +3041,7 @@ export class Thread {
             type: "tool_start",
             threadId: this.id,
             tool: event.toolName,
+            callId: event.toolCallId,
             args: event.args ?? {},
           },
           { queueItemId: this.runningItem?.id },
@@ -3067,6 +3087,7 @@ export class Thread {
             type: "tool_end",
             threadId: this.id,
             tool: event.toolName,
+            callId: event.toolCallId,
             result: resultText,
             isError: event.isError,
           },

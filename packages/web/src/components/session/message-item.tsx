@@ -4,6 +4,8 @@ import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
 import { pickRenderer, ToolShell } from "./tool-renderers";
+import { showsLiveBody } from "./tool-renderers/types";
+import { ToolBody } from "./tool-renderers/tool-shell";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
@@ -91,8 +93,14 @@ function TextBlock({ text }: { text: string }) {
 
 function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
   const renderer = pickRenderer(part.toolName, part.args);
-  const target = renderer.formatTarget(part.args);
-  const summary = renderer.formatSummary?.(part.args, part.result, part.status);
+  // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
+  // formatTarget/formatSummary would compute from partial, jagged args
+  // (truncated paths, churning line counts) the renderer never opted to see.
+  const live = showsLiveBody(renderer, part.status);
+  const target = live ? renderer.formatTarget(part.args) : undefined;
+  const summary = live
+    ? renderer.formatSummary?.(part.args, part.result, part.status)
+    : undefined;
   const Body = renderer.Body;
 
   return (
@@ -104,12 +112,20 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
       summary={summary}
       status={part.status}
     >
-      <Body
-        args={part.args}
-        result={part.result}
-        status={part.status}
-        error={part.error}
-      />
+      {live ? (
+        <Body
+          args={part.args}
+          result={part.result}
+          status={part.status}
+          error={part.error}
+        />
+      ) : (
+        // Args are still streaming and this renderer didn't opt in — hold
+        // the body until the call is complete, like before streaming existed.
+        <ToolBody className="text-[11px] text-muted italic font-mono">
+          receiving arguments…
+        </ToolBody>
+      )}
     </ToolShell>
   );
 }

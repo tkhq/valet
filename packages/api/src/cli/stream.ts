@@ -57,6 +57,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   init: true,
   message_start: true,
   text_delta: true,
+  tool_call_update: true,
   message_update: true,
   message_end: true,
   tool_start: true,

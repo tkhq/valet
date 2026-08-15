@@ -1237,8 +1237,9 @@ export class Session {
       event,
       timestamp: Date.now(),
     };
-    // text_delta is the high-frequency streaming plane — never durable.
-    if (event.type === "text_delta") {
+    // text_delta / tool_call_update are the high-frequency streaming plane —
+    // never durable.
+    if (event.type === "text_delta" || event.type === "tool_call_update") {
       this.providers.stream.publishEphemeral(busEvent);
       return;
     }
