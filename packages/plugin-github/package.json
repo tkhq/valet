@@ -12,8 +12,8 @@
     "./actions": "./src/actions/index.ts",
     "./repo": "./src/repo.ts",
     "./plugin": {
-      "types": "./dist/plugin.d.ts",
-      "default": "./dist/plugin.js"
+      "types": "./src/plugin.ts",
+      "import": "./src/plugin.ts"
     }
   },
   "scripts": {
