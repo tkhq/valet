@@ -981,7 +981,29 @@ export class EngineHost {
         fullDeps,
         { orgId: meta.orgId, sessionId, purpose: "api" },
       );
-      return repoDockerFlag(fullDeps, resolved.token, owner, repoName, ref);
+      const TIMEOUT_MS = 5_000;
+      const timedOut = Symbol("timedOut");
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+        timeoutId = setTimeout(() => resolve(timedOut), TIMEOUT_MS);
+        // Unref so the timer does not keep the process alive after all real work ends.
+        if (timeoutId && typeof (timeoutId as NodeJS.Timeout).unref === "function") {
+          (timeoutId as NodeJS.Timeout).unref();
+        }
+      });
+      const result = await Promise.race([
+        repoDockerFlag(fullDeps, resolved.token, owner, repoName, ref),
+        timeoutPromise,
+      ]);
+      clearTimeout(timeoutId);
+      if (result === timedOut) {
+        // Do not cache — a timeout is not a repo answer.
+        console.error(
+          `EngineHost: resolveRepoDockerFlag timed out for session ${sessionId}`,
+        );
+        return false;
+      }
+      return result;
     } catch (err) {
       console.error(
         `EngineHost: resolveRepoDockerFlag failed for session ${sessionId}:`,

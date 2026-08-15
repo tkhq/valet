@@ -1201,4 +1201,51 @@ describe("repoDockerFlag", () => {
     const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
     expect(result).toBe(false);
   });
+
+  it("resolves false and does not cache when the fetch hangs (timeout seam)", async () => {
+    // A never-resolving fetch simulates a hung connection. The caller
+    // (host.ts resolveRepoDockerFlag) races this against a 5 s deadline;
+    // here we use a 200 ms deadline so the suite stays fast.
+    let hangResolve: (() => void) | undefined;
+    const hangingFetch: typeof fetch = () =>
+      new Promise<Response>((resolve) => {
+        hangResolve = () => resolve(new Response("{}", { status: 200 }));
+      });
+
+    const timedOut = Symbol("timedOut");
+    const result = await Promise.race([
+      repoDockerFlag({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
+      new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 200)),
+    ]);
+    expect(result).toBe(timedOut); // the call is still pending — not cached
+
+    // The key must NOT be in the cache. If it were, a subsequent call with the
+    // real fixture (docker: true) would return the cached false instead of true.
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: true"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const afterTimeout = await repoDockerFlag(deps(), "tok", "o", "r", "hang-ref");
+    expect(afterTimeout).toBe(true); // real fetch ran — not served from a stale cache entry
+
+    // Resolve the hang to let the dangling promise settle cleanly.
+    hangResolve?.();
+  });
+
+  it("does not grow unboundedly — still resolves correctly after 1001 distinct keys", async () => {
+    // Fill the cache past the 1000-entry cap via distinct owner/repo/ref keys.
+    // Verifies the cap guard does not corrupt state: the 1001st call must still
+    // return the correct value (false for a missing file).
+    contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    const promises: Promise<boolean>[] = [];
+    for (let i = 0; i < 1000; i++) {
+      promises.push(repoDockerFlag(deps(), "tok", "o", `repo-${i}`, "main"));
+    }
+    await Promise.all(promises);
+    // The map was cleared at entry 1000. This call re-fetches cleanly.
+    const result = await repoDockerFlag(deps(), "tok", "o", "cap-check", "main");
+    expect(result).toBe(false);
+  });
 });

@@ -330,6 +330,12 @@ export async function repoDockerFlag(
       err instanceof Error ? err.message : String(err),
     );
   }
+  // Crude size cap: clear the whole map rather than LRU-evict. The map holds
+  // at most ~1000 entries (owner/repo@ref strings + booleans), which is small
+  // enough in memory; clearing is O(1) and avoids the complexity of a real
+  // eviction policy. A hard limit of 1000 is far beyond any realistic session
+  // volume before the 10-min TTL would reclaim entries anyway.
+  if (repoDockerCache.size >= 1000) repoDockerCache.clear();
   repoDockerCache.set(key, { value, at: Date.now() });
   return value;
 }
