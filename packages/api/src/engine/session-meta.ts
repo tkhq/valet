@@ -40,7 +40,8 @@ export interface SessionMetaSource {
   workspace: string;
   /** Present on the app row; omitted by orchestrator/child callers (headless). */
   profile?: "headless" | "full";
-  /** Force Docker sandbox backend. Omitted by orchestrator/child callers. */
+  /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
+   * Omitted by orchestrator/child callers. */
   docker?: boolean;
 }
 

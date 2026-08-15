@@ -1,7 +1,7 @@
 # Sandbox Docker Support (rootless DinD) — Design
 
 Date: 2026-08-15
-Status: approved design, not yet implemented
+Status: implemented (feat/sandbox-docker)
 
 ## Problem
 
@@ -79,10 +79,14 @@ toolchain, dormant by default:
   ranges baked in. Rootless dockerd requires user-namespace remapping;
   the agent process stays container-root and is unaffected.
 - `docker/start-docker.sh`: launches `dockerd-rootless.sh` as the
-  `dockerd` user. Socket at `/run/docker/docker.sock`, permissions open
-  to container-root. Data-root on an ephemeral dir. Exports
-  `DOCKER_HOST=unix:///run/docker/docker.sock` for the agent via
-  profile env.
+  `dockerd` user. Socket at `/tmp/valet-docker/docker.sock`
+  (`XDG_RUNTIME_DIR` must be outside `/run`: rootlesskit's
+  `--copy-up=/run` hides bind-mount paths under `/run` across the
+  user-namespace boundary). After the socket appears, the script
+  symlinks `/var/run/docker.sock` to it, so root-run docker CLIs need
+  no `DOCKER_HOST`. Data-root at
+  `/home/dockerd/.local/share/docker`. Daemon log at
+  `/var/log/valet/dockerd.log`.
 - `start-full.sh` starts `start-docker.sh` when
   `VALET_SANDBOX_DOCKER=1`. For the headless profile, whose command is
   `tail -f /dev/null` today, providers substitute a wrapper command

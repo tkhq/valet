@@ -14,6 +14,8 @@
 
 ## Global Constraints
 
+> Amended 2026-08-15 (see spec decision 2): rootless DinD additionally requires CAP_SYS_ADMIN + CAP_NET_ADMIN, /dev/net/tun, and unmasked system paths; "never add capabilities" no longer holds. The ledger records the ruling.
+
 - Never `--privileged`, never mount a host docker socket, never add Linux capabilities (spec decision 2).
 - The daemon must NOT start in sandboxes that did not opt in; their run args / manifests must be byte-identical to today.
 - No `any`, no `as unknown as T`, no `@ts-ignore` (CLAUDE.md type-safety rules).

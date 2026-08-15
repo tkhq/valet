@@ -244,9 +244,8 @@ export interface SessionMeta {
   /** Interactive-service profile (sandbox auth gateway plan, Task 5).
    * Defaults to "headless" when omitted. */
   profile?: "headless" | "full";
-  /** Force Docker sandbox backend for this session (sandbox-docker plan, Task 6).
-   * When true, buildSession passes `docker: true` to SandboxCreateOpts.
-   * Task 7 ORs in the repo-config flag. */
+  /** Request a rootless docker daemon inside this session's sandbox
+   * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
   docker?: boolean;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
