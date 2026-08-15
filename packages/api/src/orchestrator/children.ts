@@ -464,6 +464,17 @@ export class ChildWatcher {
     // the one the parent is owed. The row is the durable source of truth;
     // the superseded-with-live-replacement check covers the moment between
     // the steer's atomic supersession and the sender's row update landing.
+    //
+    // A followup send has the mirror-image race: the original submission
+    // can complete between the sender's prompt() and its row update, and
+    // the stale watcher then reports that completion. That signal is
+    // truthful — the child really finished the original work — and is the
+    // same two-signal sequence the parent gets when a send lands just
+    // after settlement (the re-open path). Only a superseded settlement
+    // must never reach the parent, because it is not a result at all.
+    // Admission and the row update cannot be one transaction: the engine
+    // store and the app db are separate pluggable contracts (the spawner's
+    // prompt-then-insert window is the same shape).
     const rows = await this.deps.db
       .select()
       .from(childWatches)
