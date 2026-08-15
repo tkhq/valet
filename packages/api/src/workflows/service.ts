@@ -538,6 +538,46 @@ export async function cancelWorkflowRun(
   return "ok";
 }
 
+export type RetryWorkflowRunResult =
+  | { runId: string }
+  | "not_found"
+  | "not_retryable"
+  | "workflow_deleted";
+
+/**
+ * Starts a fresh run of the same workflow, reusing the failed run's trigger
+ * input. Only settled runs with outcome `failed` or `cancelled` are
+ * retryable. The new run snapshots the CURRENT definition, not the old run's
+ * snapshot — the usual retry motive is "I fixed the workflow; run it again".
+ * `not_found` covers unknown AND un-owned run ids.
+ */
+export async function retryWorkflowRun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runId: string,
+): Promise<RetryWorkflowRunResult> {
+  const run = await ownedRun(deps, owner, runId);
+  if (!run) return "not_found";
+  if (run.status !== "settled" || run.outcome === "completed") return "not_retryable";
+
+  const started = await startWorkflowRun(
+    deps,
+    owner,
+    run.params.workflowId,
+    triggerData(run.params.input),
+  );
+  if (!started) return "workflow_deleted";
+  return started;
+}
+
+/** Extracts the `data` field from a stored trigger payload (`unknown` at rest). */
+function triggerData(input: unknown): Record<string, unknown> | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const data = (input as Record<string, unknown>).data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined;
+  return data as Record<string, unknown>;
+}
+
 /** Resolves an approval gate: validates the run is parked on the right signal,
  * writes any policy grants requested, inserts the resolution signal, and wakes
  * the run. Returns a rich outcome so callers can map to appropriate HTTP codes. */

@@ -61,7 +61,7 @@ describe("RunDetailBody", () => {
       },
       [{ nodeId: "deploy", kind: "approval", prompt: "Ship it?" }],
     );
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("Ship it?")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
   });
@@ -76,7 +76,7 @@ describe("RunDetailBody", () => {
         edges: [],
       },
     });
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("Ship it?")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
   });
@@ -86,21 +86,65 @@ describe("RunDetailBody", () => {
       status: "parked",
       waitingOn: [{ kind: "timer", nodeId: "wait1", wakeAt: Date.now() }],
     });
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   });
 
   it("shows the Cancel button while the run is non-terminal", () => {
     const data = baseRun({ status: "running" });
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
   });
 
   it("hides the Cancel button once the run has settled", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
     expect(screen.getByText("completed")).toBeTruthy();
+  });
+
+  it("shows the Retry button for a settled failed run and wires the click", () => {
+    const onRetry = vi.fn();
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    render(
+      <RunDetailBody
+        runId="wfrun_1"
+        data={data}
+        onCancel={vi.fn()}
+        cancelPending={false}
+        onRetry={onRetry}
+        retryPending={false}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Retry run" });
+    button.click();
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the Retry button for a settled cancelled run", () => {
+    const data = baseRun({ status: "settled", outcome: "cancelled" });
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByRole("button", { name: "Retry run" })).toBeTruthy();
+  });
+
+  it("hides the Retry button while the run is non-terminal and when it completed", () => {
+    for (const overrides of [
+      { status: "running" as const },
+      { status: "settled" as const, outcome: "completed" as const },
+    ]) {
+      const { unmount } = render(
+        <RunDetailBody
+          runId="wfrun_1"
+          data={baseRun(overrides)}
+          onCancel={vi.fn()}
+          cancelPending={false}
+          onRetry={vi.fn()}
+          retryPending={false}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
+      unmount();
+    }
   });
 
   it("renders checkpoints with status and a result preview", () => {
@@ -108,7 +152,7 @@ describe("RunDetailBody", () => {
     data.checkpoints = [
       { nodeId: "set1", iteration: 0, status: "completed", result: { ok: true }, createdAt: Date.now() },
     ];
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("set1")).toBeTruthy();
     expect(screen.getByText(/"ok": true/)).toBeTruthy();
   });
@@ -127,7 +171,7 @@ describe("RunDetailBody", () => {
         },
       ],
     );
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("linear.save_issue")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
   });
@@ -137,7 +181,7 @@ describe("RunDetailBody", () => {
       { status: "parked" },
       [{ nodeId: "n1", kind: "policy_gate", service: "gh", action: "create_pr", onDeny: "fail" }],
     );
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("Needs approval")).toBeTruthy();
   });
 
@@ -152,7 +196,7 @@ describe("RunDetailBody", () => {
         createdAt: Date.now(),
       },
     ];
-    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} />);
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText(/Denied by alice@example\.com/i)).toBeTruthy();
     // Result preview must NOT show the success treatment
     expect(screen.queryByText(/"policyDenied"/)).toBeNull();

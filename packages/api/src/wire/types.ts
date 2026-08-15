@@ -899,6 +899,10 @@ export interface CancelWorkflowRunResponse {
   ok: true;
 }
 
+export interface RetryWorkflowRunResponse {
+  runId: string;
+}
+
 // Arbitrary-URL webhook triggers (overhaul design decision 5). `hookId` is
 // the bearer secret in `POST /api/hooks/workflows/:workflowId/:hookId` —
 // minting/rotating returns it once; `GetWorkflowWebhookResponse` also
