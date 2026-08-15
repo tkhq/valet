@@ -27,6 +27,7 @@ import {
 } from "./submission.js";
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
+import { buildRepoInstructionsFragment } from "./repo-instructions.js";
 import { capturePatch } from "./patch-capture.js";
 import { recordSettlement, recordTurn } from "./metrics.js";
 import {
@@ -1294,6 +1295,18 @@ export class Thread {
         try { await this.session.attachment.reconcile(); } catch (err) { console.error("[thread] reconcile failed, continuing:", err); }
       }
 
+      // First load of repo AGENTS.md instructions (agents-md spec, decision 1):
+      // the ready transition's host-hook refresh is async and unawaited, so
+      // without this the first turn would race it and run without the
+      // fragment. No-op unless a provider exists, the attachment is ready,
+      // and no refresh has completed yet. Errors degrade to running without
+      // instructions — never fail the turn.
+      try {
+        await this.session.ensureRepoInstructions();
+      } catch (err) {
+        console.error("[thread] repo-instructions load failed, continuing:", err);
+      }
+
       let turnFailed = false;
       let turnError: unknown;
       try {
@@ -2188,6 +2201,11 @@ export class Thread {
       this.agent.state.model = turnModel;
     }
 
+    // Repo AGENTS.md instructions overlay (agents-md spec, decision 4):
+    // applied FIRST so the composition is base → systemContext → repo
+    // instructions → role → cold hint, and restored LAST so the existing
+    // overlays nest unchanged inside it.
+    const repoInstructionsPrompt = this.applyRepoInstructionsForTurn();
     // Apply role overlay (system-prompt overlay + optional model override) for
     // this one turn. Restored unconditionally in finally.
     const roleOverlay = this.applyRoleForTurn(item);
@@ -2225,6 +2243,7 @@ export class Thread {
     } finally {
       this.restoreColdHintAfterTurn(coldHintPrompt);
       this.restoreRoleAfterTurn(roleOverlay);
+      this.restoreRepoInstructionsAfterTurn(repoInstructionsPrompt);
       // Restore the agent's baseline model so the next turn picks up any
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
@@ -2260,6 +2279,31 @@ export class Thread {
 
   private restoreColdHintAfterTurn(preHintPrompt: string): void {
     this.agent.state.systemPrompt = preHintPrompt;
+  }
+
+  /**
+   * Repo AGENTS.md instructions overlay (agents-md spec, decision 4).
+   * Snapshots `session.repoInstructions()` exactly ONCE, here at turn start,
+   * and appends a turn-local fragment — a `refreshRepoInstructions()` that
+   * lands mid-turn replaces the session's reference but cannot change the
+   * prompt this turn already carries; the new value takes effect on the next
+   * turn's overlay. Returns the pre-overlay prompt for the unconditional
+   * restore in the turn's finally.
+   */
+  private applyRepoInstructionsForTurn(): string {
+    const preOverlayPrompt = this.agent.state.systemPrompt;
+    const instructions = this.session.repoInstructions();
+    if (!instructions) return preOverlayPrompt;
+    const fragment = buildRepoInstructionsFragment(instructions);
+    if (!fragment) return preOverlayPrompt;
+    this.agent.state.systemPrompt = preOverlayPrompt
+      ? `${preOverlayPrompt}\n\n${fragment}`
+      : fragment;
+    return preOverlayPrompt;
+  }
+
+  private restoreRepoInstructionsAfterTurn(preOverlayPrompt: string): void {
+    this.agent.state.systemPrompt = preOverlayPrompt;
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {

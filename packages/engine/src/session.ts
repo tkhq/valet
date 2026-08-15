@@ -38,6 +38,7 @@ import type {
   ProviderBundle,
   QueueItem,
   QueueMode,
+  RepoInstructions,
   RoleSpec,
   Sandbox,
   SessionData,
@@ -230,6 +231,20 @@ export class Session {
   /** Cached workspace skills from options.workspaceSkillsProvider; null === not
    * yet loaded. */
   private workspaceSkillsCache: SkillSource[] | null = null;
+  /**
+   * Repo AGENTS.md instructions from options.repoInstructionsProvider. One
+   * immutable reference, replaced atomically by `refreshRepoInstructions()`
+   * and never mutated — the per-turn overlay snapshots it once at turn start
+   * (agents-md spec, decision 4's concurrency contract). `null` === none
+   * loaded (not yet read, or the workspace has none).
+   */
+  private repoInstructionsRef: RepoInstructions | null = null;
+  /**
+   * Whether `refreshRepoInstructions()` has completed at least once. Guards
+   * `ensureRepoInstructions()` so a workspace with NO instructions (a legal
+   * `null` result) doesn't re-exec the scan on every turn.
+   */
+  private repoInstructionsLoaded = false;
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -966,6 +981,47 @@ export class Session {
     // empty one mid-session. The rejection still reaches the caller.
     this.workspaceSkillsCache = provider ? await provider() : [];
     this.commandRegistryCache = null;
+  }
+
+  /**
+   * The current repo AGENTS.md instructions, or `null` when none are loaded.
+   * The returned object is immutable — callers snapshot the reference once
+   * (the per-turn overlay does this at turn start) and never see a
+   * mid-flight mutation.
+   */
+  repoInstructions(): RepoInstructions | null {
+    return this.repoInstructionsRef;
+  }
+
+  /**
+   * Re-read repo instructions through `options.repoInstructionsProvider`.
+   * No provider === no-op. The stored value is replaced in a single
+   * assignment after the provider resolves; a provider rejection propagates
+   * to the caller and leaves the previous value serving (same load-first
+   * idiom as `refreshCommandRegistry`). The host calls this on every
+   * attachment `ready` transition.
+   */
+  async refreshRepoInstructions(): Promise<void> {
+    const provider = this.options.repoInstructionsProvider;
+    if (!provider) return;
+    this.repoInstructionsRef = await provider();
+    this.repoInstructionsLoaded = true;
+  }
+
+  /**
+   * First-load seam for the run-start path: refresh once the attachment is
+   * `ready`, unless a refresh already completed. Closes the race where the
+   * first turn's ready transition fires but the (async, unawaited) host-hook
+   * refresh hasn't landed before the turn's overlay snapshots — the thread
+   * awaits this after the run-start reconcile window. Idempotent and cheap
+   * after the first successful load; a provider failure leaves the loaded
+   * flag unset so the next turn retries.
+   */
+  async ensureRepoInstructions(): Promise<void> {
+    if (this.repoInstructionsLoaded) return;
+    if (!this.options.repoInstructionsProvider) return;
+    if (this.attachment.state !== "ready") return;
+    await this.refreshRepoInstructions();
   }
 
   /**

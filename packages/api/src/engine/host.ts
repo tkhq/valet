@@ -32,12 +32,14 @@ import {
   type CommandContext,
   type CommandDef,
   type PluginCatalog,
+  type RepoInstructions,
   type Sandbox,
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import type { RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
+import { makeRepoInstructionsProvider } from "./repo-instructions.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   GitHubAuthError,
@@ -477,6 +479,14 @@ export class EngineHost {
         Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
           console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
         );
+        // Repo AGENTS.md instructions (agents-md spec, decision 1): re-read on
+        // every ready transition — cold boot, wake, and warm rebuild — so
+        // mid-session edits land at natural boundaries. A no-op when the
+        // session has no `repoInstructionsProvider`. Best-effort, same as the
+        // registry refresh above; a failure leaves the previous value serving.
+        Promise.resolve(session.refreshRepoInstructions()).catch((err) =>
+          console.error(`EngineHost: refreshRepoInstructions failed for session ${sessionId}:`, err),
+        );
       }
     });
   }
@@ -574,6 +584,13 @@ export class EngineHost {
       () => builtSession,
       specProvider !== undefined,
     );
+    // Repo AGENTS.md instructions (agents-md spec, decision 5): same lazy
+    // `builtSession` accessor as the command options above.
+    const repoInstructionsProvider = this.buildRepoInstructionsProvider(
+      () => builtSession,
+      meta.repos,
+      specProvider !== undefined,
+    );
     // Initial sandbox image: the stock default. The specProvider closure may
     // resolve a prebuild image override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
@@ -604,6 +621,7 @@ export class EngineHost {
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
             ...(commandOptions ?? {}),
+            ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
           },
         })
@@ -623,6 +641,7 @@ export class EngineHost {
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
           ...(commandOptions ?? {}),
+          ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
         });
 
@@ -1025,6 +1044,28 @@ export class EngineHost {
       pluginCommands,
       pluginCatalog,
     };
+  }
+
+  /**
+   * Builds the `repoInstructionsProvider` for a session build (agents-md
+   * spec, decision 5). Wired only when the session has BOTH a prepared
+   * workspace (`hasPrep`, same gate as `workspaceSkillsProvider`) and at
+   * least one repo binding — a credential-only prep clones nothing, so
+   * there is no AGENTS.md to scan. The sandbox accessor mirrors
+   * `buildCommandOptions`: it reaches for the sandbox only once the
+   * attachment is `ready`, so a refresh never provisions one.
+   */
+  private buildRepoInstructionsProvider(
+    getSession: () => Session | undefined,
+    repos: SessionMeta["repos"],
+    hasPrep: boolean,
+  ): (() => Promise<RepoInstructions | null>) | undefined {
+    if (!hasPrep || !repos || repos.length === 0) return undefined;
+    return makeRepoInstructionsProvider(() => {
+      const session = getSession();
+      if (!session || session.attachment.state !== "ready") return undefined;
+      return session.sandbox as Sandbox;
+    }, repos[0].targetDir);
   }
 
   /**
@@ -1688,6 +1729,16 @@ export class EngineHost {
         })
       : { userId: opts.actorUserId, orgId: opts.orgId, workspace: opts.workspace };
     const specProvider = await this.buildSpecProvider(childSessionId, meta);
+    // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
+    // spawned with a repo binding reads its AGENTS.md exactly like a
+    // REST-created session. `builtSession` is assigned below, after the
+    // engine builds the session — the provider resolves it lazily.
+    let builtSession: Session | undefined;
+    const repoInstructionsProvider = this.buildRepoInstructionsProvider(
+      () => builtSession,
+      "repos" in meta ? meta.repos : undefined,
+      specProvider !== undefined,
+    );
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -1713,6 +1764,7 @@ export class EngineHost {
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       ...(specProvider ? { specProvider } : {}),
+      ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
     };
 
     const engine = new Engine({
@@ -1729,6 +1781,7 @@ export class EngineHost {
       ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
+    builtSession = session;
     this.cache.set(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);

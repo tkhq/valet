@@ -1504,6 +1504,27 @@ export type SpecProvider = () => Promise<DesiredSandboxSpec>;
 
 // ── Engine API ─────────────────────────────────────────────────────
 
+/**
+ * Repository agent instructions read from the workspace — the AGENTS.md
+ * format (https://agents.md/). Produced by a host
+ * `repoInstructionsProvider`; injected into the system prompt as a per-turn
+ * overlay. See docs/specs/2026-08-15-agents-md-instructions-design.md.
+ */
+export interface RepoInstructions {
+  /**
+   * Root AGENTS.md (or CLAUDE.md fallback) content of the primary repo
+   * binding, already size-capped by the host. Empty string === no root file;
+   * the fragment then carries only the nested-file list.
+   */
+  content: string;
+  /**
+   * Absolute in-sandbox paths of other AGENTS.md files (nested files and
+   * secondary bindings' roots). Listed — not inlined — with the format's
+   * closest-file-wins precedence instruction.
+   */
+  nestedPaths: string[];
+}
+
 export interface RoleSpec {
   name: string;
   description?: string;
@@ -1754,6 +1775,16 @@ export interface CreateSessionOptions {
    * that also refreshes skills.
    */
   workspaceSkillsProvider?: () => Promise<SkillSource[]>;
+  /**
+   * Host-injected reader for the workspace's AGENTS.md instructions
+   * (docs/specs/2026-08-15-agents-md-instructions-design.md). Absent === no
+   * repo instructions — every existing path is unchanged. When present, the
+   * engine loads it lazily at run start once the attachment is `ready`
+   * (`Session.ensureRepoInstructions`) and the host re-invokes
+   * `Session.refreshRepoInstructions()` on each `ready` transition. A `null`
+   * return means the workspace carries no instructions.
+   */
+  repoInstructionsProvider?: () => Promise<RepoInstructions | null>;
   /**
    * When true, a skill named `review` also registers a bare `/review` command
    * in addition to the always-present `/skill:review`. Default false.
