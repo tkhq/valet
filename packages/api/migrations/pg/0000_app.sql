@@ -295,12 +295,17 @@ CREATE TABLE "child_watches" (
 	"org_id" text NOT NULL,
 	"settled" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
-	"dismissed_at" bigint
+	"dismissed_at" bigint,
+	"settled_at" bigint,
+	"sandbox_reclaimed_at" bigint,
+	"parked_sandbox_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
+--> statement-breakpoint
+CREATE INDEX "child_watches_retention" ON "child_watches" ("settled_at") WHERE "settled" = true AND "sandbox_reclaimed_at" IS NULL;
 --> statement-breakpoint
 CREATE TABLE "notifications" (
 	"id" text PRIMARY KEY NOT NULL,

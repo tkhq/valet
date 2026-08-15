@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import type {
   ChildReader,
+  ChildSender,
   ChildSpawner,
   ExecJobHandle,
   JobPoll,
@@ -342,6 +343,63 @@ export const childReadTool = defineTool({
   },
 });
 
+export const childSendTool = defineTool({
+  name: "child_send",
+  description:
+    "Send a message to a child session this session spawned — steer it " +
+    "mid-run or follow up after it settled. By default the message queues " +
+    "behind the child's current work; set `interrupt: true` to supersede " +
+    "that work (use it when the child is heading the wrong direction). " +
+    "Either way the settlement watch re-arms: the child's next result " +
+    "arrives as a fresh `child.settled` signal on the thread that spawned " +
+    "the child.",
+  parameters: Type.Object({
+    child_session_id: Type.String({
+      description: "The child session to message, as returned by `task` or named in a child.settled signal.",
+    }),
+    message: Type.String({ minLength: 1, description: "The message to deliver to the child." }),
+    interrupt: Type.Optional(
+      Type.Boolean({
+        description: "Supersede the child's in-flight work instead of queueing behind it. Default false.",
+      }),
+    ),
+  }),
+  execute: async (args, ctx) => {
+    // Same `toolConfig` passthrough convention as `task`'s childSpawner:
+    // `ctx.config` is verbatim `Record<string, unknown>`, so a
+    // sender-shaped value is known only by convention.
+    const rawSender = ctx.config?.childSender;
+    if (typeof rawSender !== "function") {
+      return { text: "[child_send_unavailable] this session cannot message child sessions" };
+    }
+    const sender = rawSender as ChildSender; // narrowed by typeof check above
+
+    const result = await sender(
+      {
+        childSessionId: args.child_session_id,
+        message: args.message,
+        ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
+      },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+    );
+    if (result === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    const mode = args.interrupt
+      ? "superseding its in-flight work"
+      : "queued behind its current work";
+    return {
+      text:
+        `sent to child ${args.child_session_id} (submission ${result.queueItemId}, ${mode}). ` +
+        `Its next result will arrive as a child.settled signal on the thread that spawned it.`,
+    };
+  },
+});
+
 export const listThreadsTool = defineTool({
   name: "list_threads",
   description:
@@ -480,4 +538,5 @@ export const builtinTools: ToolDef[] = [
   askApprovalTool,
   taskTool,
   childReadTool,
+  childSendTool,
 ];

@@ -128,6 +128,21 @@ export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
   return n;
 }
 
+/**
+ * Retention window for a settled child's suspended sandbox
+ * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 72). `0`, a negative
+ * number, or a non-number disables retention: settled children get the
+ * eager destroy-on-settle. Only consulted on hibernation-capable backends —
+ * elsewhere the child watcher never parks in the first place.
+ */
+export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_CHILD_SANDBOX_RETENTION_HOURS;
+  if (raw === undefined || raw === "") return 72 * 3_600_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 3_600_000;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -19,7 +19,7 @@ import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js
 import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildReader,
+import { buildChildReader, buildChildSender,
   buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -44,7 +44,7 @@ import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
-import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
+import { buildSandboxProvider, resolveChildRetentionMs, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
@@ -329,6 +329,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // and try to call `task`.
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
+  let senderRef: ChildSender | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -358,6 +359,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
       return readerRef(req, ctx);
     },
+    childSender: (req, ctx) => {
+      if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
+      return senderRef(req, ctx);
+    },
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
@@ -371,9 +376,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
   });
 
-  const childWatcher = new ChildWatcher({ db, engineHost, engineStore, prebuildService });
-  spawnerRef = buildChildSpawner({ db, engineHost, engineStore, prebuildService }, childWatcher);
-  readerRef = buildChildReader({ db, engineHost, engineStore, prebuildService });
+  const childrenDeps = {
+    db,
+    engineHost,
+    engineStore,
+    prebuildService,
+    retentionMs: resolveChildRetentionMs(process.env),
+  };
+  const childWatcher = new ChildWatcher(childrenDeps);
+  spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
+  readerRef = buildChildReader(childrenDeps);
+  senderRef = buildChildSender(childrenDeps, childWatcher);
 
   const channelHost = new ChannelHost({
     db,

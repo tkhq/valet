@@ -11,6 +11,7 @@ import {
   NoCredentialsError,
   type BlobStore,
   type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type CredentialStore,
   type EventStream,
@@ -135,6 +136,13 @@ export interface EngineHostOpts {
    * session that may read them back.
    */
   childReader?: ChildReader;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childSender`,
+   * which is what the engine's `child_send` built-in calls. Completes the
+   * child toolset (`task` spawns, `child_read` reads, `child_send`
+   * steers); scoped exactly like the other two — children never get it.
+   */
+  childSender?: ChildSender;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -1199,6 +1207,7 @@ export class EngineHost {
         internalToken: internalToken(),
         ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
         ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
+        ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
@@ -1506,6 +1515,27 @@ export class EngineHost {
    */
   liveSession(sessionId: string): Session | null {
     return this.cache.get(sessionId)?.session ?? null;
+  }
+
+  /**
+   * Whether the sandbox backend can suspend/resume (hibernation). The
+   * child retention path consults this at settle time: capable backends
+   * park a settled child's sandbox for later revival; the rest destroy it
+   * eagerly, exactly as before retention existed.
+   */
+  sandboxHibernationCapable(): boolean {
+    return this.opts.sandboxProvider.capabilities().hibernation;
+  }
+
+  /**
+   * Destroy one sandbox by its provider id, without touching any session
+   * state. The child retention sweep uses this for a parked child whose
+   * session is no longer cached (an api restart evicted it) — the
+   * `child_watches.parkedSandboxId` recorded at park time is the only
+   * remaining handle.
+   */
+  async destroySandbox(sandboxId: string): Promise<void> {
+    await this.opts.sandboxProvider.destroy(sandboxId);
   }
 
   /**

@@ -48,7 +48,11 @@ statements to.
 
 You can hold a conversation directly, search and update your shared memory, and spawn child
 sessions (via the task tool, when available) to do hands-on coding or research work you report
-back on. Prefer doing quick things yourself; delegate work that needs a real dev environment.`;
+back on. Prefer doing quick things yourself; delegate work that needs a real dev environment.
+A running child is steerable: child_read shows its transcript, and child_send delivers a
+message to it — queued behind its current work by default, or superseding that work with
+interrupt: true when the child is heading the wrong direction. child_send also re-opens a
+settled child for follow-up work; either way its next result arrives as a child.settled signal.`;
 
     case "team":
       return `You are the shared assistant for a team, not a personal assistant with someone else's
