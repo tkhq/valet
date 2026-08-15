@@ -6,14 +6,15 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "valet": {
-    "plugin": "./dist/plugin.js"
+    "plugin": "./src/plugin.ts"
   },
   "exports": {
     "./actions": "./src/actions/index.ts",
     "./repo": "./src/repo.ts",
     "./plugin": {
       "types": "./src/plugin.ts",
-      "import": "./src/plugin.ts"
+      "import": "./src/plugin.ts",
+      "default": "./src/plugin.ts"
     }
   },
   "scripts": {
