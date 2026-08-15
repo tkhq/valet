@@ -23,7 +23,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, childWatches, eventDropLog } from "../schema/index.js";
+import { agentSessions, childWatches, eventDropLog, sandboxTokens } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -661,6 +661,189 @@ describe("ChildWatcher", () => {
     // double-log an already-logged permanent denial.
     expect(drops).toHaveLength(1);
     expect(drops[0]?.detail).toContain("parent-does-not-exist");
+
+    // A permanent denial is a FAILURE, not a completed run: the parent
+    // never received the settlement, so keep the child's sandbox and
+    // cached session for debugging. The idle sweep owns the reclaim.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(engineHost.liveSession("child-real-denial")).not.toBeNull();
+  });
+
+  it("tears down the child's sandbox and evicts its cached session on settle, keeping session data", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-td", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-td", {
+      parentSessionId: "parent-td",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    // Give the child a live sandbox so the teardown has something real to
+    // release.
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    const attachment = child.attachment;
+    expect(attachment.state).toBe("ready");
+
+    const itemId = "qi-td-1";
+    await engineStore.admitSubmission("child-td", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-td", childThread.id, itemId, { outcome: "completed" });
+
+    const watch = {
+      childSessionId: "child-td",
+      queueItemId: itemId,
+      parentSessionId: "parent-td",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-td")).limit(1);
+      return rows[0]?.settled === true;
+    });
+    // Teardown runs after markSettled — wait for the eviction.
+    await waitFor(async () => engineHost.liveSession("child-td") === null);
+
+    // The sandbox is gone (attachment released), but the session data —
+    // what child_read and the Sessions page read — survives.
+    expect(attachment.state).toBe("released");
+    const childData = await engineStore.getSession("child-td");
+    expect(childData).not.toBeNull();
+  });
+
+  it("teardown revokes the settled child's sandbox tokens", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-tok", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-tok", {
+      parentSessionId: "parent-tok",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+
+    // A live bearer token, as minted for the child's sandbox env.
+    await db.insert(sandboxTokens).values({
+      id: "tok-child-tok",
+      tokenHash: "hash-child-tok",
+      sessionId: "child-tok",
+      userId: "local-user",
+      orgId: "local-org",
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 3_600_000),
+    });
+
+    const itemId = "qi-tok-1";
+    await engineStore.admitSubmission("child-tok", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-tok", childThread.id, itemId, { outcome: "completed" });
+
+    const watch = {
+      childSessionId: "child-tok",
+      queueItemId: itemId,
+      parentSessionId: "parent-tok",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => engineHost.liveSession("child-tok") === null);
+
+    const tokens = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "child-tok"));
+    expect(tokens[0]?.revokedAt).not.toBeNull();
+  });
+
+  it("skips teardown while the child still has an unsettled submission (a user woke it)", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-busy", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-busy", {
+      parentSessionId: "parent-busy",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    // Keep the child's queue from running the extra item into failure.
+    await child.pause();
+
+    const itemId = "qi-busy-1";
+    await engineStore.admitSubmission("child-busy", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-busy", childThread.id, itemId, { outcome: "completed" });
+    // A user prompt admitted before the watcher fires — must NOT lose its
+    // sandbox to the settle teardown.
+    await engineStore.admitSubmission(
+      "child-busy",
+      childThread.id,
+      queuedItem("qi-busy-user", childThread.id, "follow-up"),
+    );
+
+    const watch = {
+      childSessionId: "child-busy",
+      queueItemId: itemId,
+      parentSessionId: "parent-busy",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-busy")).limit(1);
+      return rows[0]?.settled === true;
+    });
+    // Give any (buggy) teardown a chance to run, then assert it did not.
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(engineHost.liveSession("child-busy")).not.toBeNull();
+    expect(child.attachment.state).toBe("ready");
   });
 });
 

@@ -1,9 +1,18 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { Check, ClipboardCopy, Moon, Trash2 } from "lucide-react";
+import { Check, ClipboardCopy, MoreHorizontal, Moon, RefreshCw, Trash2 } from "lucide-react";
 import type { Message, SessionDetail } from "@valet/api/wire";
-import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
-import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
+import {
+  Badge,
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+  Tooltip,
+} from "~/components/primitives";
+import { useDeleteSession, usePauseSession, useReplaceSandbox, useSetSessionModel } from "~/api/queries";
 import { useMe, useOrg } from "~/api/settings";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
@@ -28,15 +37,15 @@ export function shortenWorkspace(workspace: string): string {
 }
 
 /** Server sends `{ error: "a turn is running" }` / `{ error: "sandbox is not
- * ready to pause" }` for the documented 409s (sandbox hibernation plan, Task
- * 4); fall back to the mutation's own message for anything else (network
+ * ready to pause" }` for the documented 409s (pause and sandbox-replace);
+ * fall back to the mutation's own message for anything else (network
  * failure, capability-off 409, unexpected shape). */
-function extractPauseError(err: unknown): string {
+function extractActionError(err: unknown, fallback: string): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
     const message = (err.payload as Record<string, unknown>).error;
     if (typeof message === "string" && message) return message;
   }
-  return err instanceof Error ? err.message : "Failed to pause session.";
+  return err instanceof Error ? err.message : fallback;
 }
 
 export function SessionHeader({
@@ -58,14 +67,20 @@ export function SessionHeader({
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
   const pause = usePauseSession(session.id);
+  const replace = useReplaceSandbox(session.id);
   const me = useMe();
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
-  const [pauseError, setPauseError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function destroy() {
-    if (!confirm(`Delete session and tear down its sandbox?`)) return;
+    if (
+      !confirm(
+        "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.",
+      )
+    )
+      return;
     try {
       await del.mutateAsync(session.id);
       navigate({ to: "/" });
@@ -75,11 +90,20 @@ export function SessionHeader({
   }
 
   async function pauseSession() {
-    setPauseError(null);
+    setActionError(null);
     try {
       await pause.mutateAsync();
     } catch (err) {
-      setPauseError(extractPauseError(err));
+      setActionError(extractActionError(err, "Failed to pause session."));
+    }
+  }
+
+  async function replaceSandbox() {
+    setActionError(null);
+    try {
+      await replace.mutateAsync();
+    } catch (err) {
+      setActionError(extractActionError(err, "Failed to replace the sandbox."));
     }
   }
 
@@ -160,7 +184,7 @@ export function SessionHeader({
         </div>
       </Tooltip>
       <div className="ml-auto flex items-center gap-1.5">
-        {pauseError && <span className="text-xs text-danger-500">{pauseError}</span>}
+        {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
         <Tooltip content="Session-default model. Threads inherit unless overridden.">
           <span>
             <ModelPicker
@@ -198,17 +222,34 @@ export function SessionHeader({
             {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
           </Button>
         </Tooltip>
-        <Tooltip content="Delete session">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={destroy}
-            disabled={del.isPending}
-            aria-label="Delete session"
-          >
-            {del.isPending ? <Spinner size={14} /> : <Trash2 className="h-4 w-4" />}
-          </Button>
-        </Tooltip>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" aria-label="Session menu">
+              {del.isPending || replace.isPending ? (
+                <Spinner size={14} />
+              ) : (
+                <MoreHorizontal className="h-4 w-4" />
+              )}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              disabled={replace.isPending}
+              onSelect={() => void replaceSandbox()}
+            >
+              <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
+              Replace sandbox
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-danger-500"
+              disabled={del.isPending}
+              onSelect={() => void destroy()}
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
+              Delete session…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </header>
   );

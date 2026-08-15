@@ -239,10 +239,17 @@ describeE2E("api integration: phase 4 exit criteria — full orchestrator loop",
       }, 30_000);
 
       // The child actually ran the echo — its own transcript contains the
-      // command's output.
-      const child = api.providers.engineHost.liveSession(watch.childSessionId);
-      expect(child).not.toBeNull();
-      const childEntries = (await child!.readEntries("web:default")) ?? [];
+      // command's output. The watcher evicts the settled child from the
+      // cache (compute reclaim), so rehydrate it from the store — this also
+      // proves the transcript survives the settle teardown.
+      const childData = await api.providers.engineStore.getSession(watch.childSessionId);
+      expect(childData).not.toBeNull();
+      const child = await api.providers.engineHost.sessionFor(watch.childSessionId, {
+        userId: childData!.userId,
+        orgId: childData!.orgId,
+        workspace: childData!.workspace,
+      });
+      const childEntries = (await child.readEntries("web:default")) ?? [];
       const childText = JSON.stringify(childEntries);
       expect(childText).toContain("p4-loop-ok");
 

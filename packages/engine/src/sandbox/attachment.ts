@@ -235,10 +235,17 @@ export class SandboxAttachment {
     if (!provider.suspend) {
       throw new Error("provider does not support hibernation");
     }
+    const startEpoch = this._epoch;
     // On rejection: state is untouched (still `ready`) and the error propagates.
     await provider.suspend(sandbox.id);
     // A concurrent destroy() during the await wins — do not resurrect it.
     if (this.destroyed) return;
+    // A concurrent replace()/re-provision during the await also wins: the
+    // epoch moved (or the handle changed), so the sandbox this suspend
+    // targeted is gone. Marking the FRESH sandbox `suspended` would make the
+    // next wake `resume()` a never-suspended sandbox (same stale-transition
+    // guard doResume uses).
+    if (this._epoch !== startEpoch || this._sandbox !== sandbox || this._state !== "ready") return;
     // Bump the suspend/resume cycle counter BEFORE emitting so this `suspended`
     // event and the wake's re-emitted `provisioning`/`ready` all carry a
     // wake-tag that disambiguates them from the cold-boot status events on the
@@ -247,6 +254,45 @@ export class SandboxAttachment {
     this._wakeCount += 1;
     this._state = "suspended";
     this.emitStatus();
+  }
+
+  /**
+   * User-requested sandbox replacement: tear down the current sandbox and
+   * re-provision a fresh one at a bumped epoch with the same persisted
+   * `createOpts`. Mirrors the image-drift replace path in `doReconcile`
+   * (epoch bump, handle drop, release-else-destroy) but is caller-driven.
+   * Resolves once the re-provision settles; rejects when the attachment is
+   * destroyed, has no provider, or a provision is already in flight.
+   */
+  async replace(): Promise<void> {
+    if (this.destroyed) {
+      throw new Error("sandbox attachment destroyed; the session is being torn down");
+    }
+    if (this.noProvider || !this.provider) {
+      throw new Error("attachment has no provider; nothing to re-provision with");
+    }
+    if (this.inFlight || this._state === "provisioning") {
+      throw new Error("sandbox is provisioning. Wait for it to finish, then retry.");
+    }
+
+    const oldSandbox = this._sandbox;
+    const provider = this.provider;
+    this._epoch += 1;
+    this._sandbox = null;
+    this.observation = null;
+    this._state = "provisioning";
+    if (oldSandbox) {
+      void (provider.release
+        ? provider.release(oldSandbox.id)
+        : provider.destroy(oldSandbox.id)
+      ).catch(() => {});
+    }
+    this.kickProvision();
+    // Re-widen: the guard above narrowed `this.inFlight` to null and TS
+    // keeps that narrowing across the kickProvision() call that re-set it
+    // (same limitation the doReconcile state re-read works around).
+    const pending = this.inFlight as Promise<void> | null;
+    if (pending) await pending.catch(() => {});
   }
 
   /**

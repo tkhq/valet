@@ -146,4 +146,6 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 
 **DDL runbook lives in `deploy/README.md`** (commit 215c4ca8). The pre-1.0 restructure (`image_sources`/`bakes`) requires manual DDL on live clusters. The runnable block is in `deploy/README.md`; the commit-body placeholder was not executable.
 
+**User-requested replace: `SandboxAttachment.replace()`** (added 2026-08-14). The spec made image-drift the only replace trigger. A caller-driven variant now exists for the "my sandbox is wedged" case: same semantics as the drift path (epoch bump, handle drop, release-else-destroy, re-provision from persisted `createOpts`), but invoked via `POST /api/sessions/:id/sandbox/replace`. It rejects while a provision is in flight and the route 409s while any submission is unsettled, so it cannot race a run. Prep steps re-apply through the normal cold-provision plan.
+
 **Deferred items still open.** Cascade + scheduler double-dispatch guard landed (I3). The `packages/web` package is not yet in the root `tsc --build` graph (CI follow-up tracked separately). The manual-rebuild path uses the stock ref as FROM when no base bake exists — documented escape hatch, not a spec violation.

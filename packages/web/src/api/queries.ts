@@ -40,6 +40,7 @@ export const qk = {
   sessions: () => ["sessions"] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
+  threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
     threadId
       ? (["sessions", id, "messages", threadId] as const)
@@ -73,6 +74,18 @@ export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsRespons
   return useQuery<ListThreadsResponse>({
     queryKey: qk.threads(id),
     queryFn: () => api.listThreads(id),
+    enabled: !!id,
+    ...opts,
+  });
+}
+
+/** Archived threads (`GET /threads?archived=1`) — display state only; an
+ * archived thread's history is intact and unarchive restores it to the
+ * default list. */
+export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<ListThreadsResponse>>) {
+  return useQuery<ListThreadsResponse>({
+    queryKey: qk.threadsArchived(id),
+    queryFn: () => api.listThreads(id, { archived: true }),
     enabled: !!id,
     ...opts,
   });
@@ -134,6 +147,20 @@ export function usePauseSession(sessionId: string) {
   });
 }
 
+/** POST /:id/sandbox/replace — re-provision the session's sandbox in
+ * place. Threads and history are untouched; the new sandbox's state
+ * arrives over the `sandbox.status` stream, so no query invalidation is
+ * needed beyond the session row. */
+export function useReplaceSandbox(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, void>({
+    mutationFn: () => api.replaceSandbox(sessionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
+  });
+}
+
 export function useCreateThread(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<CreateThreadResponse, Error, CreateThreadRequest | void>({
@@ -166,6 +193,18 @@ export function useSetThreadModel(sessionId: string) {
       api.patchThread(sessionId, threadId, { model }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+    },
+  });
+}
+
+export function useSetThreadArchived(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
+    mutationFn: ({ threadId, archived }) =>
+      api.patchThread(sessionId, threadId, { archived }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
   });
 }

@@ -487,6 +487,59 @@ sessionsRouter.post("/:id/pause", async (c) => {
   return c.json(body, 200);
 });
 
+// ── Replace sandbox ───────────────────────────────────────────────────────
+
+/** POST /:id/sandbox/replace — tear down the session's sandbox and
+ * re-provision a fresh one. Threads and history are untouched; prep steps
+ * re-apply on the new sandbox. Same busy rule as pause: ANY unsettled
+ * submission blocks, so a queued turn is never orphaned mid-replace. */
+sessionsRouter.post("/:id/sandbox/replace", async (c) => {
+  const { db, engineHost, engineStore } = c.var.providers;
+  const id = c.req.param("id");
+  const userId = c.var.user.id;
+
+  const rows = await db
+    .select()
+    .from(agentSessions)
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return c.json({ error: "session not found" }, 404);
+
+  const unsettled = await engineStore.listUnsettledSubmissions(id);
+  if (unsettled.length > 0) {
+    return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
+  }
+
+  const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+
+  // Re-check immediately before replacing — a submission admitted while
+  // sessionFor built the session wins (same TOCTOU rule as the idle
+  // sweep's re-check before suspend).
+  const recheck = await engineStore.listUnsettledSubmissions(id);
+  if (recheck.length > 0) {
+    return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
+  }
+
+  try {
+    await session.attachment.replace();
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 409);
+  }
+
+  // `replace()` resolves once the re-provision settles, but a provision
+  // that fails lands in `error` state without throwing — don't report ok
+  // for a sandbox that never came up.
+  if (session.attachment.state !== "ready") {
+    return c.json(
+      { error: "sandbox replacement failed to provision. Check the sandbox backend, then retry." },
+      502,
+    );
+  }
+
+  return c.json({ ok: true }, 200);
+});
+
 // ── Delete ────────────────────────────────────────────────────────────────
 
 sessionsRouter.delete("/:id", async (c) => {

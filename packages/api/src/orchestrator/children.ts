@@ -34,6 +34,7 @@ import { agentSessions, childWatches, type ChildWatchRow } from "../schema/index
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
+import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
@@ -354,6 +355,11 @@ export class ChildWatcher {
       }
       console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
       await this.markSettled(watch.childSessionId);
+      // No sandbox teardown here, deliberately: a permanent denial means
+      // the parent never received the settlement, so keep the sandbox and
+      // cached session around for debugging. The idle sweep owns the
+      // eventual reclaim. Only the delivered-settlement path (attempt)
+      // tears down eagerly.
     }
   }
 
@@ -406,6 +412,7 @@ export class ChildWatcher {
     });
 
     await this.markSettled(watch.childSessionId);
+    await this.teardownChildSandbox(watch.childSessionId);
   }
 
   private async markSettled(childSessionId: string): Promise<void> {
@@ -413,6 +420,36 @@ export class ChildWatcher {
       .update(childWatches)
       .set({ settled: true })
       .where(eq(childWatches.childSessionId, childSessionId));
+  }
+
+  /**
+   * Reclaim a settled child's compute. The orchestrator has no tool to
+   * message an existing child (`task` spawns, `child_read` reads), so once
+   * the settlement signal is admitted the sandbox is dead weight — destroy
+   * it now instead of waiting for the idle sweep (which only truly
+   * hibernates on the kubernetes backend). Session data stays: `child_read`
+   * and the Sessions page keep working, and a user message to the child
+   * cold-starts a fresh sandbox. Best-effort — a teardown failure never
+   * un-settles the watch.
+   */
+  private async teardownChildSandbox(childSessionId: string): Promise<void> {
+    try {
+      const live = this.deps.engineHost.liveSession(childSessionId);
+      if (!live) return;
+      // A user can wake a settled child from the Sessions page. A prompt
+      // admitted between the settle and this teardown must not lose its
+      // sandbox mid-turn — skip and let the idle sweep own the reclaim.
+      const unsettled = await this.deps.engineStore.listUnsettledSubmissions(childSessionId);
+      if (unsettled.length > 0) return;
+      await live.attachment.destroy();
+      this.deps.engineHost.evictCache(childSessionId);
+      // The sandbox bearer token outlives the container on backends whose
+      // creds live outside it (docker host-dir mount) — revoke like
+      // `EngineHost.destroy` does.
+      await revokeSandboxTokens(this.deps.db, childSessionId);
+    } catch (err) {
+      console.error(`ChildWatcher: sandbox teardown failed for settled child ${childSessionId}:`, err);
+    }
   }
 
   /**

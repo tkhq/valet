@@ -40,6 +40,18 @@ export function useOrchestratorChildren(
   });
 }
 
+/** Dismiss a settled child from the thread tree. Display state only — the
+ * child session and its history stay reachable from the Sessions page. */
+export function useDismissChild() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (childSessionId) => api.dismissChild(childSessionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkOrchestrator.children() });
+    },
+  });
+}
+
 /**
  * `/chat`'s mount-time ensure (brief for Task 5): `GET /info` never
  * creates the engine session (decision 4), so an assistant that has a name

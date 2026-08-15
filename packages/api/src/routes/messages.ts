@@ -29,6 +29,7 @@ import type {
   Message,
   MessagePart,
   MessageRole,
+  PatchThreadRequest,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -88,8 +89,9 @@ function threadToSummary(
   title?: string,
   model?: string,
   key?: string,
+  archivedAt?: number,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key };
+  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt };
 }
 
 async function loadEngineSession(
@@ -117,28 +119,39 @@ messagesRouter.get("/:id/threads", async (c) => {
   await engineSession.ensureDefaultThread();
   const threads = engineSession.listThreads();
 
-  // Titles live in the app-side `session_threads` mirror (populated by
-  // auto-title). One lookup by id set — small, since a session has O(few)
-  // threads. Missing rows → undefined title, same as before.
+  // Titles + archive state live in the app-side `session_threads` mirror
+  // (titles populated by auto-title). One lookup by id set — small, since a
+  // session has O(few) threads. Missing rows → undefined title, not archived.
   const ids = threads.map((t) => t.id);
-  const titleRows = ids.length
+  const metaRows = ids.length
     ? await db
-        .select({ id: sessionThreads.id, title: sessionThreads.title })
+        .select({
+          id: sessionThreads.id,
+          title: sessionThreads.title,
+          archivedAt: sessionThreads.archivedAt,
+        })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
     : [];
-  const titleById = new Map(titleRows.map((r) => [r.id, r.title ?? undefined] as const));
-
-  const summaries = threads.map((t) =>
-    threadToSummary(
-      t.id,
-      t.toThreadData().createdAt,
-      session.id,
-      titleById.get(t.id),
-      t.modelId(),
-      t.key,
-    ),
+  const metaById = new Map(
+    metaRows.map((r) => [r.id, { title: r.title ?? undefined, archivedAt: r.archivedAt ?? undefined }] as const),
   );
+
+  // Default list excludes archived threads; `?archived=1` lists only them.
+  const wantArchived = c.req.query("archived") === "1";
+  const summaries = threads
+    .filter((t) => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .map((t) =>
+      threadToSummary(
+        t.id,
+        t.toThreadData().createdAt,
+        session.id,
+        metaById.get(t.id)?.title,
+        t.modelId(),
+        t.key,
+        metaById.get(t.id)?.archivedAt,
+      ),
+    );
   const body: ListThreadsResponse = { threads: summaries };
   return c.json(body);
 });
@@ -189,27 +202,59 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
+  const { db } = c.var.providers;
 
   const threadId = c.req.param("threadId");
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  let body: { model?: string | null };
+  let body: PatchThreadRequest;
   try {
-    body = (await c.req.json()) as { model?: string | null };
+    body = (await c.req.json()) as PatchThreadRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.model === undefined) {
-    return c.json({ error: "model is required (use null to clear)" }, 400);
+  if (body.model === undefined && body.archived === undefined) {
+    return c.json(
+      { error: "nothing to patch: send model (null to clear) and/or archived" },
+      400,
+    );
   }
 
-  try {
-    await thread.setModel(
-      typeof body.model === "string" ? body.model : null,
-    );
-  } catch (err) {
-    return c.json({ error: (err as Error).message }, 400);
+  if (body.model !== undefined) {
+    try {
+      await thread.setModel(
+        typeof body.model === "string" ? body.model : null,
+      );
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  }
+
+  let archivedAt: number | undefined;
+  if (body.archived !== undefined) {
+    // Upsert — the mirror row may not exist yet (auto-title hasn't run).
+    const next = body.archived ? Date.now() : null;
+    await db
+      .insert(sessionThreads)
+      .values({
+        id: thread.id,
+        sessionId: session.id,
+        createdAt: thread.toThreadData().createdAt,
+        archivedAt: next,
+      })
+      .onConflictDoUpdate({
+        target: sessionThreads.id,
+        set: { archivedAt: next },
+      });
+    archivedAt = next ?? undefined;
+  } else {
+    const rows = await db
+      .select({ archivedAt: sessionThreads.archivedAt })
+      .from(sessionThreads)
+      .where(eq(sessionThreads.id, thread.id))
+      .limit(1);
+    archivedAt = rows[0]?.archivedAt ?? undefined;
   }
 
   const summary = threadToSummary(
@@ -219,6 +264,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     undefined,
     thread.modelId(),
     thread.key,
+    archivedAt,
   );
   return c.json(summary);
 });
