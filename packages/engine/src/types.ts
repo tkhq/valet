@@ -921,6 +921,15 @@ export interface SandboxCreateOpts {
    * Absent: no creds volume is mounted.
    */
   credsFiles?: Record<string, string>;
+  /**
+   * Request a rootless docker daemon inside the sandbox. Providers that
+   * support it (capabilities().dockerSupport) relax seccomp/AppArmor to
+   * unconfined, add /dev/fuse, and set VALET_SANDBOX_DOCKER=1 so the image
+   * start scripts launch dockerd-rootless. Never privileged. Providers
+   * without support ignore the flag.
+   * See docs/specs/2026-08-15-sandbox-docker-design.md.
+   */
+  docker?: boolean;
 }
 
 /**
@@ -943,6 +952,11 @@ export interface SandboxCapabilities {
    * NOT isolated.
    */
   isolated?: boolean;
+  /**
+   * Whether the backend honors SandboxCreateOpts.docker (rootless
+   * docker-in-sandbox). Absent means not supported; the flag is ignored.
+   */
+  dockerSupport?: boolean;
   /**
    * Whether the backend can scale an idle sandbox to zero and later wake it
    * with its workspace intact (hibernation). When true, the provider MUST
