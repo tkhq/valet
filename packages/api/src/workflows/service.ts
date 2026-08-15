@@ -6,8 +6,11 @@
  */
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
+  resolveTriggerInput,
+  triggerDataSchema,
   validateWorkflowDefinition,
   type RunParams,
+  type TriggerInputError,
   type ValidateEnvironment,
   type WorkflowDefinition,
   type WorkflowStore,
@@ -384,13 +387,15 @@ export async function deleteWorkflowDefinition(
   return "deleted";
 }
 
-/** Returns null when the workflow doesn't exist (or isn't owned). */
+/** Returns null when the workflow doesn't exist (or isn't owned); an
+ * `invalidInput` result when the caller's input fails the trigger's
+ * declared dataSchema (routes map that to 400). */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   input?: Record<string, unknown>,
-): Promise<{ runId: string } | null> {
+): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
@@ -398,10 +403,13 @@ export async function startWorkflowRun(
   const versionId = definitionVersionId(definition);
   const runId = newWorkflowId("wfrun");
 
+  const resolved = resolveTriggerInput(triggerDataSchema(definition), input ?? {});
+  if (resolved.errors.length > 0) return { invalidInput: resolved.errors };
+
   const trigger: WorkflowTriggerPayload = {
     type: "manual",
     timestamp: new Date().toISOString(),
-    data: input ?? {},
+    data: resolved.input,
     metadata: {},
   };
   const params: RunParams = {
@@ -540,6 +548,7 @@ export async function cancelWorkflowRun(
 
 export type RetryWorkflowRunResult =
   | { runId: string }
+  | { invalidInput: TriggerInputError[] }
   | "not_found"
   | "not_retryable"
   | "workflow_deleted";
@@ -549,7 +558,9 @@ export type RetryWorkflowRunResult =
  * input. Only settled runs with outcome `failed` or `cancelled` are
  * retryable. The new run snapshots the CURRENT definition, not the old run's
  * snapshot — the usual retry motive is "I fixed the workflow; run it again".
- * `not_found` covers unknown AND un-owned run ids.
+ * `invalidInput` surfaces when the current definition's trigger schema no
+ * longer accepts the original input. `not_found` covers unknown AND un-owned
+ * run ids.
  */
 export async function retryWorkflowRun(
   deps: WorkflowServiceDeps,

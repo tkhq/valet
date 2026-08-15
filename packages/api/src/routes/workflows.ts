@@ -179,6 +179,15 @@ workflowsRouter.post("/:id/runs", async (c) => {
 
   const started = await startWorkflowRun(deps, owner, id, body.input);
   if (!started) return c.json({ error: "workflow not found" }, 404);
+  if ("invalidInput" in started) {
+    return c.json(
+      {
+        error: `run input is invalid: ${started.invalidInput.map((e) => e.message).join(" ")}`,
+        fields: started.invalidInput,
+      },
+      400,
+    );
+  }
 
   const resp: StartWorkflowRunResponse = { runId: started.runId };
   return c.json(resp, 201);
@@ -324,6 +333,17 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
     return c.json(
       { error: "Only failed or cancelled runs can be retried. Wait for the run to settle, or cancel it first." },
       409,
+    );
+  }
+  if ("invalidInput" in result) {
+    // The workflow's trigger schema changed since the original run; mirror
+    // the start route's invalid-input shape.
+    return c.json(
+      {
+        error: `The original input no longer matches the workflow's input schema: ${result.invalidInput.map((e) => e.message).join(" ")} Start a new run with valid input.`,
+        fields: result.invalidInput,
+      },
+      400,
     );
   }
 

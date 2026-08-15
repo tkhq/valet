@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import type { WorkflowDefinition } from "@valet/workflow";
+import { triggerDataSchema, type WorkflowDefinition } from "@valet/workflow";
 import type { ListWorkflowRunsResponse } from "@valet/api/wire";
 import {
   useStartRun,
@@ -12,6 +12,7 @@ import {
   type UpdateWorkflowMutation,
 } from "~/api/workflows";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Editor } from "~/components/workflows/editor/editor";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { Badge, Button, Spinner } from "~/components/primitives";
@@ -112,6 +113,13 @@ function WorkflowEditorPane({
   const [name, setName] = useState(initialName);
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
+  const [runOpen, setRunOpen] = useState(false);
+
+  // Run executes the SAVED definition (the api snapshots the stored row),
+  // so the run dialog's schema comes from `initialDefinition`, not the
+  // editor's in-progress draft.
+  const schema = triggerDataSchema(initialDefinition);
+  const hasSchema = schema !== undefined && Object.keys(schema).length > 0;
 
   async function handleSave(next: WorkflowDefinition) {
     await update.mutateAsync({ name, definition: next });
@@ -122,9 +130,17 @@ function WorkflowEditorPane({
     setName(committedName);
   }
 
+  function goToRun(runId: string) {
+    void navigate({ to: "/workflows/runs/$runId", params: { runId } });
+  }
+
   async function handleRun() {
+    if (hasSchema) {
+      setRunOpen(true);
+      return;
+    }
     const result = await startRun.mutateAsync();
-    void navigate({ to: "/workflows/runs/$runId", params: { runId: result.runId } });
+    goToRun(result.runId);
   }
 
   return (
@@ -162,6 +178,17 @@ function WorkflowEditorPane({
           </Button>
         </div>
       </div>
+
+      {hasSchema && schema && (
+        <RunWorkflowDialog
+          workflowId={workflowId}
+          workflowName={committedName}
+          schema={schema}
+          open={runOpen}
+          onOpenChange={setRunOpen}
+          onStarted={goToRun}
+        />
+      )}
 
       <div className="relative min-h-0 flex-1">
         <Editor

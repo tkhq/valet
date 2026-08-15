@@ -224,6 +224,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const started = await startWorkflowRun(getDeps(), owner, workflow_id, input);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
+      if ("invalidInput" in started) {
+        return {
+          success: false,
+          error:
+            `run input is invalid: ${started.invalidInput.map((e) => e.message).join(" ")} ` +
+            "Fix the listed inputs and start the run again.",
+        };
+      }
       return {
         success: true,
         data: { runId: started.runId, workflowId: workflow_id, status: "pending" },

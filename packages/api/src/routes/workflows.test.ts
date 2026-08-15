@@ -325,6 +325,82 @@ describe("POST /api/workflows/:id/runs", () => {
     expect(res.status).toBe(404);
     expect(stub.started).toHaveLength(0);
   });
+
+  const SCHEMA_DEFINITION = {
+    version: "dag/v1",
+    nodes: [
+      {
+        id: "trigger",
+        type: "trigger",
+        dataSchema: {
+          name: { type: "string", required: true },
+          retries: { type: "number", default: 3 },
+        },
+      },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [{ from: "trigger", to: "stop" }],
+  };
+
+  async function createSchemaWorkflow(baseUrl: string): Promise<CreateWorkflowResponse> {
+    const res = await fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "schema-workflow", definition: SCHEMA_DEFINITION }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateWorkflowResponse;
+  }
+
+  it("merges trigger dataSchema defaults into the run's trigger data", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { name: "deploy" } }),
+    });
+    expect(res.status).toBe(201);
+
+    expect(stub.started).toHaveLength(1);
+    const params = stub.started[0].params as { input: { data: Record<string, unknown> } };
+    expect(params.input.data).toEqual({ name: "deploy", retries: 3 });
+  });
+
+  it("400s a run missing a required trigger input, naming the field", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: {} }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: Array<{ field: string; message: string }> };
+    expect(body.fields.map((f) => f.field)).toEqual(["name"]);
+    expect(body.error).toContain("name");
+    expect(stub.started).toHaveLength(0);
+  });
+
+  it("400s a type mismatch against the trigger dataSchema", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { name: "deploy", retries: "three" } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { fields: Array<{ field: string }> };
+    expect(body.fields.map((f) => f.field)).toEqual(["retries"]);
+    expect(stub.started).toHaveLength(0);
+  });
 });
 
 describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
@@ -463,6 +539,45 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     await api.providers.workflowStore.settleRun(completedId, "completed");
     const completedRes = await fetch(`${api.baseUrl}/api/workflows/runs/${completedId}/retry`, { method: "POST" });
     expect(completedRes.status).toBe(409);
+  });
+
+  it("400s a retry when the current trigger schema no longer accepts the original input", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+
+    const runId = "wfrun_schema_drift";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    // The definition gains a required input AFTER the original run — the
+    // retry validates against the CURRENT definition, so it must 400.
+    const updateRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        definition: {
+          ...VALID_DEFINITION,
+          nodes: [
+            { id: "trigger", type: "trigger", dataSchema: { name: { type: "string", required: true } } },
+            { id: "stop", type: "stop" },
+          ],
+        },
+      }),
+    });
+    expect(updateRes.status).toBe(200);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: Array<{ field: string }> };
+    expect(body.fields[0]?.field).toBe("name");
+    expect(stub.started.find((s) => s.runId !== runId)).toBeUndefined();
   });
 
   it("404s retrying another owner's settled run", async () => {
