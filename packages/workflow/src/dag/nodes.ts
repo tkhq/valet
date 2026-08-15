@@ -152,6 +152,13 @@ export interface ToolNode {
    * template when the workflow runs unattended.
    */
   credential?: ToolCredentialMode;
+  /** What a denied (or timed-out) policy gate does. 'fail' (default) fails
+   * the node; 'skip' completes it with { approved: false, policyDenied:
+   * true, resolvedBy } so fromOutput:'false' edges activate. */
+  onDeny?: 'fail' | 'skip';
+  /** Duration (e.g. "24h"). A gate unresolved past it is a denial with
+   * resolvedBy 'timeout'. Omit = wait forever. */
+  approvalTimeout?: string;
 }
 
 /**

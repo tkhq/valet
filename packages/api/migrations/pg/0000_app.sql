@@ -656,7 +656,8 @@ CREATE TABLE "action_invocations" (
 	"params_truncated" boolean,
 	"duration_ms" bigint,
 	"error" text,
-	"started_at" bigint
+	"started_at" bigint,
+	"resolved_by" text
 );
 --> statement-breakpoint
 CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");

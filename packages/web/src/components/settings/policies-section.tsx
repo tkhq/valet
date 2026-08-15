@@ -8,6 +8,7 @@ import type {
   RiskLevelWire,
 } from "@valet/api/wire";
 import { Badge, Button, Input, Label, Switch } from "~/components/primitives";
+import { ServiceActionCombobox } from "./service-action-combobox";
 import { Section } from "~/components/settings/section";
 import { usePlugins } from "~/api/integrations";
 import {
@@ -358,38 +359,30 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
         {targetKind === "service" && (
           <div>
             <Label htmlFor="policy-service">Service</Label>
-            <select
-              id="policy-service"
-              value={service}
-              onChange={(e) => setService(e.target.value)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
-            >
-              <option value="">Select a service…</option>
-              {serviceOptions.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+            <div className="mt-1">
+              <ServiceActionCombobox
+                mode="service"
+                id="policy-service"
+                value={service}
+                onChange={setService}
+                placeholder="Select or type a service…"
+              />
+            </div>
           </div>
         )}
 
         {targetKind === "actionId" && (
           <div>
             <Label htmlFor="policy-action">Action</Label>
-            <select
-              id="policy-action"
-              value={actionId}
-              onChange={(e) => setActionId(e.target.value)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
-            >
-              <option value="">Select an action…</option>
-              {actionOptions.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name} ({a.id})
-                </option>
-              ))}
-            </select>
+            <div className="mt-1">
+              <ServiceActionCombobox
+                mode="action"
+                id="policy-action"
+                value={actionId}
+                onChange={setActionId}
+                placeholder="Select or type an action id…"
+              />
+            </div>
           </div>
         )}
 

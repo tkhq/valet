@@ -29,9 +29,29 @@ import type { NodeCheckpoint, RunWaitCondition, WorkflowRun, WorkflowStore } fro
 export type OnApprovalPending = (info: {
   runId: string;
   nodeId: string;
-  prompt: string;
+  /** 'approval' = explicit approval node (prompt REQUIRED there by
+   * convention); 'policy_gate' = tool node gated by policy. Absent reads
+   * as 'approval' for backward compatibility. */
+  kind?: 'approval' | 'policy_gate';
+  prompt?: string;           // was required; now optional (policy gates have none)
   summary?: string;
   details?: unknown;
+  service?: string;          // policy gates only
+  action?: string;
+  params?: unknown;
+  iteration?: number;        // set only when > 0
+}) => Promise<void> | void;
+
+/** Host audit seam: the tool executor reports gate settlements the HTTP
+ * route cannot see (timeout; denial consumed by the executor). Best-effort
+ * — a throw must not abort the node. */
+export type OnGateResolved = (info: {
+  runId: string;
+  nodeId: string;
+  iteration: number;
+  invocationId: string;
+  outcome: 'denied' | 'timeout';
+  resolvedBy: string;
 }) => Promise<void> | void;
 
 /**
@@ -84,6 +104,7 @@ export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
   engine: WorkflowEngineDeps;
   onApprovalPending?: OnApprovalPending;
   onApprovalGrant?: OnApprovalGrant;
+  onGateResolved?: OnGateResolved;
 }
 
 /**

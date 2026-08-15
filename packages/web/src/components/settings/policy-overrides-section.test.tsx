@@ -26,6 +26,12 @@ vi.mock("~/api/policies", async () => {
   };
 });
 
+// ServiceActionCombobox uses usePlugins internally; return empty catalog so
+// any typed value is committed as free text.
+vi.mock("~/api/integrations", () => ({
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false }),
+}));
+
 import { PolicyOverridesSection } from "./policy-overrides-section";
 
 beforeEach(() => {
@@ -38,7 +44,10 @@ describe("PolicyOverridesSection — create", () => {
     const user = userEvent.setup();
     render(<PolicyOverridesSection />);
 
-    await user.type(screen.getByLabelText("Service", { selector: "#override-service" }), "gmail");
+    // Click the combobox, type the service name, press Enter to commit (free-text)
+    const serviceInput = screen.getByRole("combobox", { name: /service/i });
+    await user.click(serviceInput);
+    await user.keyboard("gmail{Enter}");
     await user.click(screen.getByRole("button", { name: "Save override" }));
 
     const call = putMutate.mock.calls[0][0];
@@ -50,7 +59,10 @@ describe("PolicyOverridesSection — create", () => {
     render(<PolicyOverridesSection />);
 
     await user.click(screen.getByRole("radio", { name: "Action" }));
-    await user.type(screen.getByLabelText("Action id"), "gmail.send_email");
+    // Click the combobox, type the action id, press Enter to commit (free-text)
+    const actionInput = screen.getByRole("combobox", { name: /action id/i });
+    await user.click(actionInput);
+    await user.keyboard("gmail.send_email{Enter}");
     await user.click(screen.getByRole("button", { name: "Save override" }));
 
     const call = putMutate.mock.calls[0][0];
@@ -68,7 +80,9 @@ describe("PolicyOverridesSection — create", () => {
     });
     render(<PolicyOverridesSection />);
 
-    await user.type(screen.getByLabelText("Service", { selector: "#override-service" }), "gmail");
+    const serviceInput = screen.getByRole("combobox", { name: /service/i });
+    await user.click(serviceInput);
+    await user.keyboard("gmail{Enter}");
     await user.click(screen.getByRole("button", { name: "Save override" }));
 
     expect(

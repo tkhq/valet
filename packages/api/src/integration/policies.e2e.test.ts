@@ -505,6 +505,33 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(startNoGrantRes.status).toBe(201);
       const { runId: runNoGrant } = (await startNoGrantRes.json()) as StartWorkflowRunResponse;
 
+      // Under the new contract a require_approval tool node parks the run
+      // (waiting for a human decision) instead of immediately failing it.
+      const parkedNoGrant = await poll(
+        async () => {
+          const r = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}`);
+          expect(r.status).toBe(200);
+          return (await r.json()) as GetWorkflowRunResponse;
+        },
+        (r) => r.run.status === "parked",
+        15_000,
+      );
+      const approvalWait = (parkedNoGrant.run.waitingOn as Array<Record<string, unknown>>).find(
+        (w) => w.kind === "signal" && w.signalType === "approval:call",
+      );
+      expect(approvalWait).toBeDefined();
+      const pendingCheckpoint = parkedNoGrant.checkpoints.find((c) => c.nodeId === "call");
+      expect(pendingCheckpoint?.status).toBe("intent");
+
+      // Deny the gate — the run must settle as failed.
+      const denyRes = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}/approvals/call`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ approved: false }),
+      });
+      expect(denyRes.status).toBe(200);
+      expect(((await denyRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
+
       const settledNoGrant = await poll(
         async () => {
           const r = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}`);
@@ -517,7 +544,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(settledNoGrant.run.outcome).toBe("failed");
       const failedCheckpoint = settledNoGrant.checkpoints.find((c) => c.nodeId === "call");
       expect(failedCheckpoint?.status).toBe("failed");
-      expect(failedCheckpoint?.error).toContain("requires an approval node or a runtime grant");
+      expect(failedCheckpoint?.error).toContain("denied by");
 
       // A second run with an upstream approval node that grants the rest of
       // the run lets the same tool node pass.
@@ -562,15 +589,38 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         15_000,
       );
 
-      // Grant the rest of this run: the SAME fully-qualified actionId the
-      // session path uses — the conventions are unified (module doc).
-      const approveRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/approve`, {
+      // Approve the upstream approval node (not a policy gate — plain approval).
+      const approveNodeRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/approve`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ approved: true, grantActions: [{ service: "widgets", actionId: "widgets.nuke" }] }),
+        body: JSON.stringify({ approved: true }),
       });
-      expect(approveRes.status).toBe(200);
-      expect(((await approveRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
+      expect(approveNodeRes.status).toBe(200);
+      expect(((await approveNodeRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
+
+      // Poll for the run to park again on the tool gate (policy gate for `call`).
+      await poll(
+        async () => {
+          const r = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}`);
+          expect(r.status).toBe(200);
+          return (await r.json()) as GetWorkflowRunResponse;
+        },
+        (r) =>
+          r.run.status === "parked" &&
+          (r.run.waitingOn as Array<Record<string, unknown>>).some(
+            (w) => w.kind === "signal" && w.signalType === "approval:call",
+          ),
+        15_000,
+      );
+
+      // Resolve the tool gate with scope=run so downstream nodes get the grant.
+      const approveGateRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/call`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ approved: true, scope: "run" }),
+      });
+      expect(approveGateRes.status).toBe(200);
+      expect(((await approveGateRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
 
       const settledGrant = await poll(
         async () => {
@@ -593,12 +643,19 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const wfRows = allEntries.filter((e) => e.workflowExecutionId === runNoGrant || e.workflowExecutionId === runGrant);
       expect(wfRows.length).toBeGreaterThanOrEqual(2);
       const wfDeniedRow = wfRows.find((e) => e.workflowExecutionId === runNoGrant);
+      // The gate audit row is written as "pending" when the run parks; the
+      // denial resolves it — the HTTP route stamps "denied" via updateInvocationOutcome.
       expect(wfDeniedRow).toMatchObject({ resolvedMode: "require_approval", status: "denied" });
-      const wfAllowedRow = wfRows.find((e) => e.workflowExecutionId === runGrant);
-      expect(wfAllowedRow).toMatchObject({ resolvedMode: "allow", status: "completed" });
-      // The decision row was stamped with the execution outcome + result
-      // (spec Deviations T6 #6, fixed).
-      expect(wfAllowedRow?.result).toEqual({ success: true, data: { nuked: true } });
+      // The scope:run grant flow: the policy gate parks the run (pending), the
+      // human approves via HTTP, and the tool runs with the approval field.
+      // The audit row ends up require_approval/completed — the enforcer writes
+      // "approved" when the approval field is present, then updateInvocationOutcome
+      // stamps "completed" after the action actually executes.
+      const wfGrantedRow = wfRows.find((e) => e.workflowExecutionId === runGrant);
+      expect(wfGrantedRow).toMatchObject({ resolvedMode: "require_approval", status: "completed" });
+      // The decision row is stamped with the execution outcome + result when
+      // the node eventually completes (spec Deviations T6 #6, fixed).
+      expect(wfGrantedRow?.result).toEqual({ success: true, data: { nuked: true } });
     },
     60_000,
   );

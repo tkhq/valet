@@ -805,6 +805,8 @@ export interface WorkflowRunSummary {
   outcome?: WorkflowRunOutcome;
   createdAt: number;
   updatedAt: number;
+  /** True when the run is parked waiting for at least one human approval. */
+  needsApproval?: boolean;
 }
 
 export interface ListWorkflowRunsResponse {
@@ -837,6 +839,26 @@ export interface WorkflowRunCheckpoint {
   createdAt: number;
 }
 
+/** One pending approval gate on a parked workflow run. */
+export interface WorkflowPendingGate {
+  nodeId: string;
+  kind: "approval" | "policy_gate";
+  iteration?: number;
+  /** Approval nodes: the human-readable prompt from the definition. */
+  prompt?: string;
+  /** Policy gates: the service that owns the action. */
+  service?: string;
+  /** Policy gates: the action identifier. */
+  action?: string;
+  riskLevel?: string;
+  provenance?: string;
+  gateParams?: unknown;
+  gateParamsTruncated?: boolean;
+  gateItem?: unknown;
+  timeoutAt?: number;
+  onDeny?: "fail" | "skip";
+}
+
 export interface WorkflowRunSignal {
   signalId: string;
   signalType: string;
@@ -852,6 +874,7 @@ export interface WorkflowRunDetail {
   };
   checkpoints: WorkflowRunCheckpoint[];
   signals: WorkflowRunSignal[];
+  pendingGates: WorkflowPendingGate[];
 }
 
 export type GetWorkflowRunResponse = WorkflowRunDetail;
@@ -859,11 +882,13 @@ export type GetWorkflowRunResponse = WorkflowRunDetail;
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
   note?: string;
-  /** "Grant the rest of this run" (action-policies plan, Task 3/6): exact
-   *  `(service, actionId)` pairs to authorize for the remainder of the run
-   *  via an exec-scoped runtime grant. Only consulted by the approval node
-   *  executor when `approved` is `true`; ignored on a denial. */
-  grantActions?: Array<{ service: string; actionId: string }>;
+  /** Approve scope (policy gates): 'once' (default) authorizes only this
+   * invocation; 'run' writes a run-scoped grant for the gated action;
+   * 'always' (org admin only) writes a durable org allow policy. Ignored on
+   * approval-node gates and on denials. */
+  scope?: "once" | "run" | "always";
+  /** Foreach-iteration disambiguation; omit or 0 for top-level nodes. */
+  iteration?: number;
 }
 
 export interface ResolveWorkflowApprovalResponse {
@@ -2099,7 +2124,7 @@ export interface PreviewOrgPolicyResponse {
   };
 }
 
-export type ActionInvocationStatusWire = "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
+export type ActionInvocationStatusWire = "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed" | "cancelled" | "timeout";
 
 export interface ActionLogEntryWire {
   invocationId: string;

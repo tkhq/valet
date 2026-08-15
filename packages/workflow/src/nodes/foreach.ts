@@ -211,6 +211,7 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
       clock,
       engine: args.engine,
       onApprovalPending: args.onApprovalPending,
+      onGateResolved: args.onGateResolved,
     };
 
     const outcome = await invokeBody(node.body, bodyArgs);

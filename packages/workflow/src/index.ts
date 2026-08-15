@@ -87,6 +87,7 @@ export type {
   NodeExecutorRegistry,
   OnApprovalGrant,
   OnApprovalPending,
+  OnGateResolved,
 } from './nodes/index.js';
 
 export { driveUntilPark } from './interpreter.js';

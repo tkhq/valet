@@ -641,4 +641,31 @@ describe("GET /api/org/action-log — keyset pagination", () => {
     const body = (await res.json()) as ListActionLogResponse;
     expect(body.entries.map((e) => e.invocationId)).toEqual(["inv_approved"]);
   });
+
+  it("status=pending filter returns 200 and the pending row", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const now = 4_000_000;
+    await db.insert(actionInvocations).values({
+      invocationId: "inv_pending", createdAt: now, service: "demo", actionId: "demo.deploy",
+      riskLevel: "high", resolvedMode: "require_approval", baseMode: "require_approval",
+      status: "pending", sessionId: null, userId: "local-user", orgId: "local-org",
+      durationMs: null, startedAt: null, matchedPolicyId: null, matchedGrantId: null,
+      matchedOverrideId: null, workflowExecutionId: "run_wf_pending", params: null,
+      paramsTruncated: null, result: null, resultTruncated: null, error: null,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/org/action-log?status=pending`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListActionLogResponse;
+    expect(body.entries.map((e) => e.invocationId)).toContain("inv_pending");
+  });
+
+  it("invalid status value returns 400", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/action-log?status=invalid_status`, { headers: HEADERS });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("pending");
+  });
 });

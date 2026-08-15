@@ -49,6 +49,7 @@ import {
   type NodeExecutorRegistry,
   type OnApprovalGrant,
   type OnApprovalPending,
+  type OnGateResolved,
 } from './nodes/index.js';
 import type { NodeCheckpoint, RunParkState, RunWaitCondition, WorkflowRun, WorkflowStore } from './store.js';
 
@@ -59,6 +60,7 @@ export interface InterpreterDeps {
   executors?: NodeExecutorRegistry;
   onApprovalPending?: OnApprovalPending;
   onApprovalGrant?: OnApprovalGrant;
+  onGateResolved?: OnGateResolved;
   /**
    * Host-only extension point (Phase 5 plan decision 20): invoked
    * synchronously right after `store.beginTerminalize` succeeds, before
@@ -111,7 +113,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 }
 
 async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, span: Span): Promise<RunParkState> {
-  const { store, engine, clock, onApprovalPending, onApprovalGrant, onBeginTerminalize } = deps;
+  const { store, engine, clock, onApprovalPending, onApprovalGrant, onGateResolved, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
 
   // `valet.workflow.id` is fixed for a run's whole lifetime (written once by
@@ -204,6 +206,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
       engine,
       onApprovalPending,
       onApprovalGrant,
+      onGateResolved,
     }));
 
     for (let i = 0; i < runnable.length; i++) {
@@ -564,15 +567,20 @@ function isSettled(cpAll: Map<string, NodeCheckpoint>, nodeId: string): boolean 
 
 interface CompiledGraph {
   incomingByNode: Map<string, WorkflowEdge[]>;
+  nodeById: Map<string, WorkflowNode>;
 }
 
 function compile(definition: WorkflowDefinition): CompiledGraph {
   const incomingByNode = new Map<string, WorkflowEdge[]>();
-  for (const node of definition.nodes) incomingByNode.set(node.id, []);
+  const nodeById = new Map<string, WorkflowNode>();
+  for (const node of definition.nodes) {
+    incomingByNode.set(node.id, []);
+    nodeById.set(node.id, node);
+  }
   for (const edge of definition.edges) {
     incomingByNode.get(edge.to)?.push(edge);
   }
-  return { incomingByNode };
+  return { incomingByNode, nodeById };
 }
 
 /** An edge is resolved when its source has a terminal checkpoint (completed/failed/skipped). */
@@ -585,12 +593,13 @@ function edgeResolved(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>): b
  * matches the source's boolean output) AND (no `when` or it evaluates
  * truthy). A `failed`/`skipped` source never activates an outgoing edge.
  */
-function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, templateContext: TemplateContext): boolean {
+function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, templateContext: TemplateContext, graph: CompiledGraph): boolean {
   const source = cpAll.get(edge.from);
   if (!source || source.status !== 'completed') return false;
 
   if (edge.fromOutput !== undefined) {
-    const actual = booleanOutputOf(source.result);
+    const sourceType = graph.nodeById.get(edge.from)?.type;
+    const actual = booleanOutputOf(source.result, sourceType);
     if (actual === undefined) return false;
     return actual === (edge.fromOutput === 'true');
   }
@@ -608,13 +617,17 @@ function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, temp
   return true;
 }
 
-/** `if` nodes carry `{ result: boolean }`; `approval` nodes (Task 5) carry `{ approved: boolean }`. */
-function booleanOutputOf(result: unknown): boolean | undefined {
+/** `if` → { result: boolean }; `approval` → { approved: boolean };
+ * `tool` (policy gates) → boolean-true on any completed result EXCEPT the
+ * deny-skip marker { policyDenied: true }. */
+function booleanOutputOf(result: unknown, sourceType?: WorkflowNode['type']): boolean | undefined {
   if (result && typeof result === 'object') {
     const r = result as Record<string, unknown>;
     if (typeof r.result === 'boolean') return r.result;
     if (typeof r.approved === 'boolean') return r.approved;
+    if (sourceType === 'tool') return r.policyDenied !== true;
   }
+  if (sourceType === 'tool') return true; // completed with a non-object result
   return undefined;
 }
 
@@ -647,7 +660,7 @@ async function propagateSkips(
     const incoming = graph.incomingByNode.get(node.id) ?? [];
     if (incoming.length === 0) continue; // runnable, not skippable
     if (!incoming.every((e) => edgeResolved(e, cpAll))) continue;
-    if (incoming.some((e) => edgeActive(e, cpAll, templateContext))) continue;
+    if (incoming.some((e) => edgeActive(e, cpAll, templateContext, graph))) continue;
 
     await store.putIntent({
       runId: run.runId,
@@ -687,7 +700,7 @@ function computeRunnable(
       continue;
     }
     if (!incoming.every((e) => edgeResolved(e, cpAll))) continue;
-    if (incoming.some((e) => edgeActive(e, cpAll, templateContext))) runnable.push(node);
+    if (incoming.some((e) => edgeActive(e, cpAll, templateContext, graph))) runnable.push(node);
   }
   return runnable;
 }

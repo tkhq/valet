@@ -12,7 +12,7 @@ const MODE_BADGE: Record<ApprovalModeWire, "success" | "accent" | "danger"> = {
 };
 
 const RESOLVED_MODES: readonly ApprovalModeWire[] = ["allow", "require_approval", "deny"];
-const STATUSES = ["allowed", "denied", "approved", "rejected", "error", "completed"] as const;
+const STATUSES = ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"] as const;
 
 /**
  * Organization · Action log (action-policies plan, Task 5). Keyset-paginated

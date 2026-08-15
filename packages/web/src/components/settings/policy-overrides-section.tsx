@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
 import type { ApprovalModeWire, RiskLevelWire } from "@valet/api/wire";
-import { Badge, Button, Input, Label } from "~/components/primitives";
+import { Badge, Button, Label } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import {
   apiErrorMessage,
@@ -9,6 +9,7 @@ import {
   useMyPolicyOverrides,
   usePutMyPolicyOverride,
 } from "~/api/policies";
+import { ServiceActionCombobox } from "./service-action-combobox";
 
 const MODES: readonly ApprovalModeWire[] = ["allow", "require_approval", "deny"];
 const RISK_LEVELS: readonly RiskLevelWire[] = ["low", "medium", "high", "critical"];
@@ -126,23 +127,29 @@ export function PolicyOverridesSection() {
           {targetKind === "service" && (
             <div>
               <Label htmlFor="override-service">Service</Label>
-              <Input
-                id="override-service"
-                value={service}
-                onChange={(e) => setService(e.target.value)}
-                className="mt-1 w-64"
-              />
+              <div className="mt-1 w-64">
+                <ServiceActionCombobox
+                  mode="service"
+                  id="override-service"
+                  value={service}
+                  onChange={setService}
+                  placeholder="Select or type a service…"
+                />
+              </div>
             </div>
           )}
           {targetKind === "actionId" && (
             <div>
               <Label htmlFor="override-action">Action id</Label>
-              <Input
-                id="override-action"
-                value={actionId}
-                onChange={(e) => setActionId(e.target.value)}
-                className="mt-1 w-64"
-              />
+              <div className="mt-1 w-64">
+                <ServiceActionCombobox
+                  mode="action"
+                  id="override-action"
+                  value={actionId}
+                  onChange={setActionId}
+                  placeholder="Select or type an action id…"
+                />
+              </div>
             </div>
           )}
           {targetKind === "riskLevel" && (

@@ -6,6 +6,7 @@ import type { WorkflowEngineDeps, WorkflowInvokeActionRequest, WorkflowInvokeAct
 import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
+import { type OnApprovalPending, type OnGateResolved } from './index.js';
 import { executeTool } from './tool.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
@@ -299,6 +300,74 @@ describe('executeTool: invokeAction throws', () => {
   });
 });
 
+// ─── makeArgs helper (used by policy gate suite) ─────────────────────────────
+
+const GATE_NODE: ToolNode = {
+  id: 't1',
+  type: 'tool',
+  service: 'linear',
+  action: 'save_issue',
+  params: { title: 'hello' },
+};
+
+interface MakeArgsOverrides {
+  engine?: Partial<WorkflowEngineDeps>;
+  node?: Partial<ToolNode>;
+  onApprovalPending?: OnApprovalPending;
+  onGateResolved?: OnGateResolved;
+  iteration?: number;
+}
+
+async function makeArgs(overrides: MakeArgsOverrides = {}) {
+  const store = new InMemoryWorkflowStore();
+  const clock = makeClock(10_000);
+  const runId = `gate-run-${Math.random().toString(36).slice(2)}`;
+  const node: ToolNode = { ...GATE_NODE, ...(overrides.node ?? {}) };
+  const def: WorkflowDefinition = {
+    version: 'dag/v1',
+    nodes: [{ id: 't', type: 'trigger' }, node, { id: 'e', type: 'stop', outcome: 'success' }],
+    edges: [{ from: 't', to: node.id }, { from: node.id, to: 'e' }],
+  };
+  await store.createRun(runId, runParams(), def, 'v1');
+  const attempt = await claimAttempt(store, runId);
+  const run = await store.getRun(runId);
+  if (!run) throw new Error('run vanished');
+
+  const baseEngine: WorkflowEngineDeps = {
+    createSession: async () => { throw new Error('not exercised'); },
+    prompt: async () => { throw new Error('not exercised'); },
+    awaitResult: async () => { throw new Error('not exercised'); },
+    abort: async () => { throw new Error('not exercised'); },
+    isSettled: async () => { throw new Error('not exercised'); },
+    llmComplete: async () => { throw new Error('not exercised'); },
+    promptOrchestrator: async () => { throw new Error('not exercised'); },
+    invokeAction: async () => ({ ok: true, result: {} }),
+    ...(overrides.engine ?? {}),
+  };
+
+  return {
+    run,
+    node,
+    attempt,
+    iteration: overrides.iteration ?? 0,
+    templateContext: { trigger: undefined, nodes: {} },
+    store,
+    clock: clock.now,
+    clockObj: clock,
+    engine: baseEngine,
+    existingCheckpoint: undefined as Parameters<typeof executeTool>[0]['existingCheckpoint'],
+    onApprovalPending: overrides.onApprovalPending,
+    onGateResolved: overrides.onGateResolved,
+  };
+}
+
+const GATE_RESPONSE: WorkflowInvokeActionResult = {
+  ok: false as const,
+  requiresApproval: true as const,
+  riskLevel: 'high',
+  provenance: 'org_policy',
+};
+
 // ─── 7. Crash-after-intent re-drive: re-invokes with the SAME invocationId ───
 
 describe('executeTool: crash after the intent write, before the terminal checkpoint', () => {
@@ -342,5 +411,187 @@ describe('executeTool: crash after the intent write, before the terminal checkpo
 
     const byNode = new Map((await store.getCheckpoints('run-7')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('tl')?.status).toBe('completed');
+  });
+});
+
+// ─── 8. Policy gate suite ─────────────────────────────────────────────────────
+
+describe('policy gate', () => {
+  it('parks on requiresApproval, persists gate effects, and notifies once', async () => {
+    const pending: unknown[] = [];
+    const args = await makeArgs({
+      engine: { invokeAction: async () => GATE_RESPONSE },
+      onApprovalPending: (info) => { pending.push(info); },
+    });
+    const first = await executeTool(args);
+    expect(first.status).toBe('parked');
+    if (first.status !== 'parked') throw new Error('unreachable');
+    const w = first.waitingOn[0];
+    expect(w?.kind).toBe('signal');
+    if (w?.kind !== 'signal') throw new Error('unreachable');
+    expect(w.nodeId).toBe('t1');
+    expect(w.signalType).toBe('approval:t1');
+    expect('timeoutAt' in w).toBe(false);
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    expect(cp?.effects?.gate).toBe(true);
+    expect(cp?.effects?.gateParams).toEqual({ title: 'hello' });
+    expect(cp?.effects?.riskLevel).toBe('high');
+    // re-drive: still parked, no second notification
+    const second = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(second.status).toBe('parked');
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ kind: 'policy_gate', service: 'linear', action: 'save_issue' });
+  });
+
+  it('approved signal: invokes with the approval field, then consumes signal atomically', async () => {
+    const seen: WorkflowInvokeActionRequest[] = [];
+    const args = await makeArgs({
+      engine: {
+        invokeAction: async (req) => {
+          seen.push(req);
+          return seen.length === 1 ? GATE_RESPONSE : { ok: true, result: { id: 9 } };
+        },
+      },
+    });
+    await executeTool(args); // parks
+    await args.store.insertSignal({
+      runId: args.run.runId,
+      signalId: 'approval:t1:resolution',
+      signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'u1', note: 'go' },
+      createdAt: 1,
+    });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    const done = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(done).toEqual({ status: 'completed', result: { id: 9 } });
+    expect(seen[1]?.approval).toEqual({ resolvedBy: 'u1', note: 'go' });
+    const signals = await args.store.listSignals(args.run.runId, { unconsumed: true });
+    expect(signals).toHaveLength(0); // consumed with the terminal checkpoint
+  });
+
+  it('denied signal with default onDeny fails the node naming the denier', async () => {
+    const args = await makeArgs({
+      engine: {
+        invokeAction: async (req) => {
+          // First call (no approval) → gate; second call should not be reached for denial
+          if (!req.approval) return GATE_RESPONSE;
+          return { ok: true, result: {} };
+        },
+      },
+    });
+    await executeTool(args); // parks
+    await args.store.insertSignal({
+      runId: args.run.runId,
+      signalId: 'approval:t1:resolution',
+      signalType: 'approval:t1',
+      payload: { approved: false, resolvedBy: 'u2' },
+      createdAt: 1,
+    });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.error).toContain('u2');
+    const signals = await args.store.listSignals(args.run.runId, { unconsumed: true });
+    expect(signals).toHaveLength(0); // consumed
+  });
+
+  it("denied signal with onDeny:'skip' completes with policyDenied output", async () => {
+    const args = await makeArgs({
+      node: { onDeny: 'skip' },
+      engine: { invokeAction: async () => GATE_RESPONSE },
+    });
+    await executeTool(args); // parks
+    await args.store.insertSignal({
+      runId: args.run.runId,
+      signalId: 'approval:t1:resolution',
+      signalType: 'approval:t1',
+      payload: { approved: false, resolvedBy: 'u2' },
+      createdAt: 1,
+    });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result).toEqual({
+      status: 'completed',
+      result: { approved: false, policyDenied: true, resolvedBy: 'u2', note: undefined },
+    });
+  });
+
+  it('timeout parks with timeoutAt on the wait condition and denies after it', async () => {
+    const args = await makeArgs({
+      node: { approvalTimeout: '1h' },
+      engine: { invokeAction: async () => GATE_RESPONSE },
+    });
+    // clock starts at 10_000 (from makeClock)
+    const t0 = args.clock();
+    const first = await executeTool(args);
+    expect(first.status).toBe('parked');
+    if (first.status !== 'parked') throw new Error('unreachable');
+    const w0 = first.waitingOn[0];
+    if (!w0 || w0.kind !== 'signal') throw new Error('expected signal wait');
+    expect(w0.timeoutAt).toBe(t0 + 3_600_000);
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    expect(cp?.effects?.timeoutAt).toBe(t0 + 3_600_000);
+    // Advance past timeout and re-drive with no signal
+    args.clockObj.advance(3_600_001);
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.error).toContain('timed out');
+  });
+
+  it('foreach iteration gets the suffixed signal type', async () => {
+    const args = await makeArgs({ iteration: 3 });
+    // Override engine to return gate so we park
+    args.engine.invokeAction = async () => GATE_RESPONSE;
+    const result = await executeTool(args);
+    expect(result.status).toBe('parked');
+    if (result.status !== 'parked') throw new Error('unreachable');
+    const w = result.waitingOn[0];
+    if (!w || w.kind !== 'signal') throw new Error('expected signal wait');
+    expect(w.signalType).toBe('approval:t1:3');
+  });
+
+  it('requiresApproval WITH approval field is a defensive terminal failure, not a re-park', async () => {
+    const args = await makeArgs({
+      engine: { invokeAction: async () => GATE_RESPONSE },
+    });
+    await executeTool(args); // parks
+    await args.store.insertSignal({
+      runId: args.run.runId,
+      signalId: 'approval:t1:resolution',
+      signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'u1', note: 'go' },
+      createdAt: 1,
+    });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    // Engine always returns GATE_RESPONSE even when approval is provided
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.error).toContain('approval was recorded but policy enforcement still requires approval');
+    // Signal was consumed
+    const signals = await args.store.listSignals(args.run.runId, { unconsumed: true });
+    expect(signals).toHaveLength(0);
+  });
+
+  it('reports timeout through onGateResolved', async () => {
+    const resolved: unknown[] = [];
+    const args = await makeArgs({
+      node: { approvalTimeout: '1h' },
+      engine: { invokeAction: async () => GATE_RESPONSE },
+      onGateResolved: (info) => { resolved.push(info); },
+    });
+    await executeTool(args); // parks
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    args.clockObj.advance(3_600_001);
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result.status).toBe('failed');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toMatchObject({
+      outcome: 'timeout',
+      resolvedBy: 'timeout',
+      invocationId: expect.stringContaining('workflow:'),
+    });
   });
 });
