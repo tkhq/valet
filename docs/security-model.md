@@ -106,6 +106,33 @@ Consequences:
 - The `local` sandbox backend has **no isolation** (host fs/processes) and is
   for dev/test only.
 
+## Docker-in-sandbox (`docker: true`)
+
+A session can request a rootless Docker daemon inside its sandbox by setting
+`docker: true` at session create, or `docker: true` in the repo's
+`.valet/prebuild.yaml`. For that sandbox only, the provider relaxes:
+
+- seccomp: unconfined (larger kernel syscall attack surface)
+- AppArmor: unconfined
+- system paths: unconfined (unmasked `/proc/sys` so rootlesskit can set
+  sysctls in its network namespace)
+- capabilities: adds CAP_SYS_ADMIN and CAP_NET_ADMIN
+- devices: adds `/dev/fuse` (overlay storage) and `/dev/net/tun` (rootlesskit
+  networking)
+
+CAP_SYS_ADMIN is the largest single relaxation. It is confined to opted-in
+sandboxes and is weaker than `--privileged`: the sandbox has no raw block
+devices, all other capabilities are dropped, and system paths are selectively
+unmasked rather than fully exposed.
+
+The daemon and every container it runs live inside the sandbox's user
+namespace. An escape from an inner container lands in the rootless daemon's
+user namespace, not on the host. It does NOT make the sandbox privileged,
+mount the host Docker socket, or add any capability beyond SYS_ADMIN and
+NET_ADMIN. The residual risk is kernel attack surface through unconfined
+seccomp and SYS_ADMIN — the same trade already accepted for rootless BuildKit
+build pods. Sandboxes that do not opt in are unchanged.
+
 ## Tool-Call Safety
 
 Tool and action definitions carry a `riskLevel` (`low → critical`) and may

@@ -63,6 +63,7 @@ function baseSession(): SessionDetail {
     updatedAt: Date.now(),
     messageCount: 3,
     profile: "headless",
+    docker: false,
   };
 }
 
