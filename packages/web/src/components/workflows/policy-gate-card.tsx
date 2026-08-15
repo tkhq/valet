@@ -10,8 +10,7 @@
 import { useState } from "react";
 import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
-import { useQueryClient } from "@tanstack/react-query";
-import { useResolveApproval, qkWorkflows } from "~/api/workflows";
+import { useResolveApproval } from "~/api/workflows";
 import { useMe } from "~/api/settings";
 import {
   Button,
@@ -38,7 +37,6 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
   const [busyScope, setBusyScope] = useState<"once" | "run" | "always" | "deny" | null>(null);
   const resolve = useResolveApproval(runId);
   const meQ = useMe();
-  const qc = useQueryClient();
   const isAdmin = meQ.data?.orgRole === "admin";
 
   const service = gate.service ?? "";
@@ -47,13 +45,12 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
 
   const busy = resolve.isPending;
 
-  function fire(approved: boolean, scope: "once" | "run" | "always") {
-    const scopeKey = approved ? scope : "deny";
-    setBusyScope(scopeKey as typeof busyScope);
+  function fireApprove(scope: "once" | "run" | "always") {
+    setBusyScope(scope);
     resolve.mutate({
       nodeId: gate.nodeId,
       body: {
-        approved,
+        approved: true,
         scope,
         note: note.trim() || undefined,
         iteration: gate.iteration,
@@ -73,18 +70,14 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
         iteration: gate.iteration,
       },
     });
+    setConfirmAlways(false);
   }
 
-  // 409 → invalidate the run query so stale card disappears
   const errorMsg =
     resolve.isError && resolve.error
       ? (resolve.error as { message?: string }).message ?? String(resolve.error)
       : null;
   const is409 = errorMsg != null && errorMsg.includes("already resolved");
-
-  if (is409) {
-    void qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
-  }
 
   const denyMicrocopy =
     gate.onDeny === "skip"
@@ -161,7 +154,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
             </a>
           </div>
           <div className="flex gap-2">
-            <Button size="sm" onClick={() => fire(true, "always")} disabled={busy}>
+            <Button size="sm" onClick={() => fireApprove("always")} disabled={busy}>
               {busy && busyScope === "always" ? <Spinner size={12} /> : null}
               Confirm
             </Button>
@@ -179,7 +172,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
           <Button
             size="sm"
             className="rounded-r-none"
-            onClick={() => fire(true, "once")}
+            onClick={() => fireApprove("once")}
             disabled={busy}
           >
             {busy && busyScope === "once" ? <Spinner size={12} /> : null}
@@ -199,8 +192,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuItem
-                role="menuitem"
-                onSelect={() => fire(true, "run")}
+                onSelect={() => fireApprove("run")}
                 disabled={busy}
               >
                 <div>
@@ -211,13 +203,10 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Elemen
                 </div>
               </DropdownMenuItem>
               <DropdownMenuItem
-                role="menuitem"
                 onSelect={() => {
                   if (isAdmin) setConfirmAlways(true);
                 }}
                 disabled={!isAdmin || busy}
-                aria-disabled={!isAdmin || undefined}
-                data-disabled={!isAdmin ? "true" : undefined}
               >
                 <div>
                   <div>
