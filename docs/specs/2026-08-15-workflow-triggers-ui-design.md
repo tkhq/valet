@@ -160,6 +160,33 @@ aggregate list.
   tab rendering, trigger list rows, new-trigger dialog validation.
 - Full `make e2e` scorecard before the PR.
 
+## Deviations (as built, 2026-08-15)
+
+- **Schedule PATCH: target kind is immutable.** "Partial update of the same
+  fields" left kind-switching ambiguous against the exactly-one-of
+  workflowId/prompt invariant. To switch target kind, delete the schedule
+  and create a new one. The 400 message says so.
+- **Fire-now works on disabled schedules.** Manual fire is how you test a
+  schedule; it uses `now` as the slot (a distinct idempotent runId per
+  press), updates `lastFiredAt`, and never moves `nextFireAt`.
+- **Triggers tab is a flat list, not grouped by workflow.** Each row shows
+  its workflow name in the summary; orchestrator-target schedules show
+  "orchestrator" instead. Grouping added no information at current trigger
+  counts.
+- **Tabs are search-param buttons (`role="tablist"`), not Radix Tabs.** The
+  repo has no Tabs primitive; the linkable-URL requirement drove the
+  search-param design.
+- **Event-trigger filters are a raw JSON textarea** in the dialog, not
+  per-field pickers. The catalog drives the event-key select; a filter
+  builder is deferred until the filter vocabulary stabilizes.
+- **No client-side cron preview.** The list shows next-fire times from API
+  data; no cron library was added to the web bundle.
+- **Infra: `@valet/plugin-github`'s `./plugin` export and `valet.plugin`
+  field now point at `src/plugin.ts`** (matching its `./actions`/`./repo`
+  exports). The dist build is broken on dev-v2 and the stack runs
+  TypeScript directly via tsx, so dist-pointing exports failed to resolve
+  in fresh worktrees.
+
 ## Delivery
 
 - Branch `conner/workflow-triggers-ui` off `dev-v2`, PR against `dev-v2`.
