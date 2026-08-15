@@ -7,7 +7,7 @@
  * only). Deny is a separate danger button. Note field rides whichever action
  * fires. On 409 the query key is invalidated so the stale card disappears.
  */
-import { useState } from "react";
+import { type ReactElement, useState } from "react";
 import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
 import { useResolveApproval } from "~/api/workflows";
@@ -30,7 +30,7 @@ export interface PolicyGateCardProps {
   gate: WorkflowPendingGate; // kind === "policy_gate"
 }
 
-export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): JSX.Element {
+export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactElement {
   const [note, setNote] = useState("");
   const [confirmAlways, setConfirmAlways] = useState(false);
   const [busyScope, setBusyScope] = useState<"once" | "run" | "always" | "deny" | null>(null);

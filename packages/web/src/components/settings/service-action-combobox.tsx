@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import { usePlugins } from "~/api/integrations";
 import { Badge, Input, Spinner } from "~/components/primitives";
 import { RiskBadge } from "~/components/workflows/risk-badge";
@@ -40,7 +40,7 @@ export function ServiceActionCombobox({
   onChange: (v: string) => void;
   id?: string;
   placeholder?: string;
-}): JSX.Element {
+}): ReactElement {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
