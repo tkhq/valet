@@ -1477,6 +1477,27 @@ export class EngineHost {
   }
 
   /**
+   * Whether the sandbox backend can suspend/resume (hibernation). The
+   * child retention path consults this at settle time: capable backends
+   * park a settled child's sandbox for later revival; the rest destroy it
+   * eagerly, exactly as before retention existed.
+   */
+  sandboxHibernationCapable(): boolean {
+    return this.opts.sandboxProvider.capabilities().hibernation;
+  }
+
+  /**
+   * Destroy one sandbox by its provider id, without touching any session
+   * state. The child retention sweep uses this for a parked child whose
+   * session is no longer cached (an api restart evicted it) — the
+   * `child_watches.parkedSandboxId` recorded at park time is the only
+   * remaining handle.
+   */
+  async destroySandbox(sandboxId: string): Promise<void> {
+    await this.opts.sandboxProvider.destroy(sandboxId);
+  }
+
+  /**
    * The host `resolveModel` seam (engine `ResolvedModel`, Task 1) bound to one
    * org's provider config — passed into every `createSession`/`restoreSession`
    * options object so the engine resolves the effective model spec + per-turn

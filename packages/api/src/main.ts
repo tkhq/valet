@@ -269,6 +269,11 @@ await providers.childWatcher.rearm().catch((err) => {
   console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
 });
 
+// Parked-child retention (child_send arc): destroy suspended child
+// sandboxes whose retention window has passed. No-op when retention is
+// off; the interval is unref'd so it never holds the process open.
+providers.childWatcher.startRetentionSweep();
+
 // Channel ingress (Task 8): resolves credentials into transports, then
 // starts webhook registration or the long-poll loop per transport. A
 // failure here must never block boot — channels are best-effort.
@@ -429,6 +434,11 @@ async function close(): Promise<void> {
     rotateSweep.stop();
   } catch (err) {
     console.error("rotateSweep.stop failed:", err);
+  }
+  try {
+    providers.childWatcher.stopRetentionSweep();
+  } catch (err) {
+    console.error("childWatcher.stopRetentionSweep failed:", err);
   }
   try {
     await providers.channelHost.stop();

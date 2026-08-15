@@ -295,7 +295,10 @@ CREATE TABLE "child_watches" (
 	"org_id" text NOT NULL,
 	"settled" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
-	"dismissed_at" bigint
+	"dismissed_at" bigint,
+	"settled_at" bigint,
+	"sandbox_reclaimed_at" bigint,
+	"parked_sandbox_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");

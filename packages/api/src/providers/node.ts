@@ -44,7 +44,7 @@ import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
-import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
+import { buildSandboxProvider, resolveChildRetentionMs, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
@@ -376,10 +376,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
   });
 
-  const childWatcher = new ChildWatcher({ db, engineHost, engineStore, prebuildService });
-  spawnerRef = buildChildSpawner({ db, engineHost, engineStore, prebuildService }, childWatcher);
-  readerRef = buildChildReader({ db, engineHost, engineStore, prebuildService });
-  senderRef = buildChildSender({ db, engineHost, engineStore, prebuildService }, childWatcher);
+  const childrenDeps = {
+    db,
+    engineHost,
+    engineStore,
+    prebuildService,
+    retentionMs: resolveChildRetentionMs(process.env),
+  };
+  const childWatcher = new ChildWatcher(childrenDeps);
+  spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
+  readerRef = buildChildReader(childrenDeps);
+  senderRef = buildChildSender(childrenDeps, childWatcher);
 
   const channelHost = new ChannelHost({
     db,
