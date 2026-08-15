@@ -174,6 +174,12 @@ export function useResolveApproval(runId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
     },
+    onError: () => {
+      // Invalidate on error too: a 409 "already resolved" means the run has
+      // moved on, and the 5-s poll would leave the stale card visible until
+      // the next tick. Invalidating here collapses the wait.
+      qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+    },
   });
 }
 

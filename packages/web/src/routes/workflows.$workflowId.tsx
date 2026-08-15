@@ -239,14 +239,16 @@ function RunsDrawer({
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-medium",
-                  r.outcome === "completed"
-                    ? "bg-moss-wash text-moss"
-                    : r.outcome === "failed"
-                      ? "bg-rose-50 text-danger-500 dark:bg-rose-950/40"
-                      : "bg-neutral-500/10 text-muted",
+                  r.needsApproval
+                    ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                    : r.outcome === "completed"
+                      ? "bg-moss-wash text-moss"
+                      : r.outcome === "failed"
+                        ? "bg-rose-50 text-danger-500 dark:bg-rose-950/40"
+                        : "bg-neutral-500/10 text-muted",
                 )}
               >
-                {r.outcome ?? r.status}
+                {r.needsApproval ? "needs approval" : (r.outcome ?? r.status)}
               </span>
               <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">{r.runId}</span>
               <span className="shrink-0 text-[10px] text-muted">{relativeTime(r.createdAt)}</span>
