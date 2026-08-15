@@ -28,7 +28,7 @@ function RunDetailPage() {
   const { runId } = Route.useParams();
   const { data, isLoading, error } = useRunDetail(runId);
   const cancelRun = useCancelRun(runId);
-  const retryRun = useRetryRun(runId, data?.run.workflowId ?? "");
+  const retryRun = useRetryRun(runId);
   const navigate = useNavigate();
 
   if (isLoading) {

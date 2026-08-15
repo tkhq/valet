@@ -187,14 +187,20 @@ export function useResolveApproval(runId: string) {
 /**
  * Retry a settled failed/cancelled run — starts a fresh run of the same
  * workflow with the original input and returns the new runId. Invalidates the
- * workflow's runs list so the new run appears in the runs drawer.
+ * workflow's runs list so the new run appears in the runs drawer. The
+ * workflowId is read from the cached run detail inside `onSuccess` (not taken
+ * as a parameter) so a hook created before the detail query resolves never
+ * closes over a placeholder id.
  */
-export function useRetryRun(runId: string, workflowId: string) {
+export function useRetryRun(runId: string) {
   const qc = useQueryClient();
   return useMutation<RetryWorkflowRunResponse, Error, void>({
     mutationFn: () => api.retryWorkflowRun(runId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkWorkflows.runs(workflowId) });
+      const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
+      if (detail) {
+        qc.invalidateQueries({ queryKey: qkWorkflows.runs(detail.run.workflowId) });
+      }
     },
   });
 }

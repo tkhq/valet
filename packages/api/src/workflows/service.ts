@@ -570,7 +570,13 @@ export async function retryWorkflowRun(
   return started;
 }
 
-/** Extracts the `data` field from a stored trigger payload (`unknown` at rest). */
+/**
+ * Extracts the `data` field from a stored trigger payload (`unknown` at
+ * rest). Every trigger path (manual start, webhook, schedule) writes a
+ * `WorkflowTriggerPayload` whose `data` is an object, so a missing or
+ * non-object `data` can only come from a run predating that shape — the
+ * retry then starts with no input rather than failing.
+ */
 function triggerData(input: unknown): Record<string, unknown> | undefined {
   if (typeof input !== "object" || input === null) return undefined;
   const data = (input as Record<string, unknown>).data;
