@@ -4,6 +4,7 @@
  * workflow service tests.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { eventSubscriptions, workflowSchedules } from "../schema/index.js";
@@ -76,6 +77,37 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
     });
     if (!trigger.ok) throw new Error(trigger.error);
 
+    // Seed a second workflow with a trigger that must survive
+    const def2 = await createWorkflowDefinition(deps, OWNER, {
+      name: "survivor-workflow",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+    });
+
+    const trigger2 = await createWorkflowTrigger(db, [githubPlugin], USER, {
+      workflowId: def2.id,
+      name: "survivor-trigger",
+      eventKeys: ["github.pull_request.closed"],
+    });
+    if (!trigger2.ok) throw new Error(trigger2.error);
+
+    // Seed an orchestrator-target subscription that must survive
+    const orchSubId = randomUUID();
+    const now = Date.now();
+    await db.insert(eventSubscriptions).values({
+      id: orchSubId,
+      orgId: OWNER.orgId,
+      ownerType: "user",
+      ownerId: OWNER.userId,
+      name: "orch sub",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [],
+      target: { kind: "orchestrator" },
+      enabled: true,
+      createdBy: OWNER.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
     // Verify they exist before delete
     const schedBefore = await db
       .select()
@@ -93,19 +125,33 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
     const result = await deleteWorkflowDefinition(deps, OWNER, def.id);
     expect(result).toBe("deleted");
 
-    // Schedules must be gone
+    // Schedules for the deleted workflow must be gone
     const schedAfter = await db
       .select()
       .from(workflowSchedules)
       .where(eq(workflowSchedules.workflowId, def.id));
     expect(schedAfter).toHaveLength(0);
 
-    // Event subscriptions must be gone
+    // Event subscriptions for the deleted workflow must be gone
     const subAfter = await db
       .select()
       .from(eventSubscriptions)
       .where(eq(eventSubscriptions.id, trigger.trigger.triggerId));
     expect(subAfter).toHaveLength(0);
+
+    // But the second workflow's trigger must survive
+    const trigger2After = await db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, trigger2.trigger.triggerId));
+    expect(trigger2After).toHaveLength(1);
+
+    // And the orchestrator subscription must survive
+    const orchSubAfter = await db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, orchSubId));
+    expect(orchSubAfter).toHaveLength(1);
   });
 });
 
