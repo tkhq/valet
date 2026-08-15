@@ -32,6 +32,29 @@ function matchesType(value: unknown, type: WorkflowInputDefinition['type']): boo
   }
 }
 
+/** Extract the trigger node's declared input schema from a stored (unknown)
+ * definition. Returns undefined when there is no trigger node or it declares
+ * no schema — callers then skip input validation entirely. The cast at the
+ * end is the usual unknown-JSON seam: the container shape was checked
+ * structurally, and field *contents* are only ever read through
+ * `resolveTriggerInput`, which type-checks each definition it uses. */
+export function triggerDataSchema(
+  definition: unknown,
+): Record<string, WorkflowInputDefinition> | undefined {
+  if (typeof definition !== 'object' || definition === null) return undefined;
+  const def = definition as Record<string, unknown>;
+  if (!Array.isArray(def.nodes)) return undefined;
+  for (const node of def.nodes) {
+    if (typeof node !== 'object' || node === null) continue;
+    const n = node as Record<string, unknown>;
+    if (n.type !== 'trigger') continue;
+    const schema = n.dataSchema;
+    if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) return undefined;
+    return schema as Record<string, WorkflowInputDefinition>;
+  }
+  return undefined;
+}
+
 export function resolveTriggerInput(
   schema: Record<string, WorkflowInputDefinition> | undefined,
   input: Record<string, unknown>,

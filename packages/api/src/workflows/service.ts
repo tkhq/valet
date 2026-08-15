@@ -7,12 +7,12 @@
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   resolveTriggerInput,
+  triggerDataSchema,
   validateWorkflowDefinition,
   type RunParams,
   type TriggerInputError,
   type ValidateEnvironment,
   type WorkflowDefinition,
-  type WorkflowInputDefinition,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
@@ -385,29 +385,6 @@ export async function deleteWorkflowDefinition(
   // which is now gone) but never actually removed.
   await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
   return "deleted";
-}
-
-/** Extract the trigger node's declared input schema from a stored (unknown)
- * definition. Returns undefined when there is no trigger node or it declares
- * no schema — callers then skip input validation entirely. The cast at the
- * end is the same unknown-JSON seam as `findNodeInDefinition`: the shape was
- * checked structurally (object map) and field *contents* are only ever read
- * through `resolveTriggerInput`, which type-checks each definition it uses. */
-export function triggerDataSchema(
-  definition: unknown,
-): Record<string, WorkflowInputDefinition> | undefined {
-  if (typeof definition !== "object" || definition === null) return undefined;
-  const def = definition as Record<string, unknown>;
-  if (!Array.isArray(def.nodes)) return undefined;
-  for (const node of def.nodes) {
-    if (typeof node !== "object" || node === null) continue;
-    const n = node as Record<string, unknown>;
-    if (n.type !== "trigger") continue;
-    const schema = n.dataSchema;
-    if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return undefined;
-    return schema as Record<string, WorkflowInputDefinition>;
-  }
-  return undefined;
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an
