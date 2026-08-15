@@ -5,6 +5,7 @@ import {
   resolveRecipe,
   generateDockerfile,
   type RecipeStep,
+  type ResolvedRecipe,
 } from "./recipe.js";
 
 function readerFor(fileMap: Record<string, string>): (path: string) => Promise<string | null> {
@@ -258,5 +259,41 @@ LABEL valet.prebuild.identity="ghcr.io/valet/sandbox-base:v12|https://github.com
     const dockerfile = generateDockerfile({ ...baseOpts, recipe: [], setup: ["make bootstrap"] });
     expect(dockerfile).not.toContain("pnpm install");
     expect(dockerfile).toContain("RUN make bootstrap");
+  });
+});
+
+describe("docker key", () => {
+  const read = (yaml: string) => async (p: string) =>
+    p === ".valet/prebuild.yaml" ? yaml : null;
+
+  it("parses docker: true", async () => {
+    const o = await loadPrebuildOverride(read("docker: true"));
+    expect(o?.docker).toBe(true);
+  });
+
+  it("rejects a non-boolean docker value with a corrective error", async () => {
+    await expect(loadPrebuildOverride(read("docker: yes please"))).rejects.toThrow(
+      ".valet/prebuild.yaml: docker must be a boolean",
+    );
+  });
+
+  it("does not leak into the identity hash inputs", async () => {
+    // generateDockerfile's inputs are (baseImage, cloneUrl, commitSha,
+    // recipe, setup) — docker is not among them, so two overrides that
+    // differ only in `docker` must produce byte-identical Dockerfiles.
+    const withDocker = await resolveRecipe([], read("setup: [x]\ndocker: true"));
+    const without = await resolveRecipe([], read("setup: [x]"));
+    const df = (r: ResolvedRecipe) =>
+      generateDockerfile({
+        baseImage: "b", cloneUrl: "u", commitSha: "s",
+        recipe: r.recipe, setup: r.setup,
+      });
+    expect(df(withDocker)).toBe(df(without));
+  });
+
+  it("resolveRecipe forwards docker", async () => {
+    const resolved = await resolveRecipe([], read("docker: true\nskipDetect: true"));
+    expect(resolved.docker).toBe(true);
+    expect(resolved.recipe).toEqual([]);
   });
 });

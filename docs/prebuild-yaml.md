@@ -28,6 +28,12 @@ Set `true` to suppress lockfile auto-detection. No install step runs unless your
 
 Use `skipDetect` when your repo brings its own toolchain that the base image does not provide and that auto-detection cannot handle. You must supply the full install sequence in `setup`.
 
+### `docker`
+
+Type: `boolean` (default `false`)
+
+Set `true` to give this repo's sessions a rootless docker daemon inside the sandbox. The daemon runs as a non-root user; the sandbox is never privileged. Docker state is ephemeral — images pull again after the sandbox restarts. See `docs/specs/2026-08-15-sandbox-docker-design.md`.
+
 ## Dockerfile step order
 
 The bake produces a Dockerfile in this order:
