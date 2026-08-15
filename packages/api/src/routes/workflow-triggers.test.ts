@@ -5,7 +5,7 @@
  * seed rows under a second org id (stub auth pins the caller to `local-org`).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
@@ -168,7 +168,7 @@ describe("POST /api/workflows/schedules", () => {
     // The service's exactly-one-of validation: workflow_id "" is treated as
     // absent (falsy), and no prompt was given — so service returns the
     // exactly-one-of error.
-    expect(body.error).toBeTruthy();
+    expect(body.error).toContain("exactly one of");
   });
 });
 
@@ -400,6 +400,32 @@ describe("cross-org invisibility", () => {
 
     // DELETE → 404
     const deleteRes = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_other`, {
+      method: "DELETE",
+    });
+    expect(deleteRes.status).toBe(404);
+  });
+
+  it("event-trigger in other org is excluded from GET /triggers and 404s on PATCH/DELETE", async () => {
+    const a = await boot();
+    const wfId = await createWorkflow(a.baseUrl, "wf_other_evt");
+    await seedEventTriggerRow(a, "trig_other", "org_other", wfId);
+
+    // GET /triggers must not include the other org's event-trigger
+    const getRes = await fetch(`${a.baseUrl}/api/workflows/triggers`);
+    expect(getRes.status).toBe(200);
+    const body = (await getRes.json()) as ListWorkflowTriggersResponse;
+    expect(body.triggers.map((t) => t.id)).not.toContain("trig_other");
+
+    // PATCH → 404
+    const patchRes = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_other`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patchRes.status).toBe(404);
+
+    // DELETE → 404
+    const deleteRes = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_other`, {
       method: "DELETE",
     });
     expect(deleteRes.status).toBe(404);
