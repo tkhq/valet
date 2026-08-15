@@ -38,7 +38,7 @@ function baseDefinition(): WorkflowDefinition {
         type: 'if',
         // `left` is a bare expression, not a `{{…}}` template — the
         // runtime if-executor calls parseExpression on it directly.
-        conditions: [{ left: 'nodes.start.data.ok', dataType: 'boolean', operation: 'equals', right: true }],
+        conditions: [{ left: 'nodes.start.result.ok', dataType: 'boolean', operation: 'equals', right: true }],
       },
       { id: 'done', type: 'stop', outcome: 'success', message: 'Finished' },
     ],
