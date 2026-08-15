@@ -87,15 +87,18 @@ function newChildSessionId(): string {
  * Host policy for `SpawnChildRequest.repo` (the `task` tool's free-form repo
  * string). Accepts `owner/repo` shorthand, an `https://host/owner/repo[.git]`
  * URL, or a `git@host:owner/repo[.git]` remote — all normalized to a GitHub
- * https clone URL, matching what the REST create route stores. Returns
- * undefined for anything else; exported for direct unit tests.
+ * https clone URL, matching what the REST create route stores. The shorthand
+ * follows GitHub naming: an owner is alphanumeric + hyphen with an
+ * alphanumeric first character; a repo also allows dots and underscores
+ * (`.github` is legal) but not a leading hyphen. Returns undefined for
+ * anything else; exported for direct unit tests.
  */
 export function parseTaskRepo(repo: string, branch?: string): RepoBinding | undefined {
   const trimmed = repo.trim();
   const m =
     /^git@[^:/\s]+:([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(trimmed) ??
     /^https?:\/\/[^/\s]+\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(trimmed) ??
-    /^([\w.-]+)\/([\w.-]+)$/.exec(trimmed);
+    /^([A-Za-z0-9][A-Za-z0-9-]*)\/([\w.][\w.-]*)$/.exec(trimmed);
   if (!m) return undefined;
   const fullName = `${m[1]}/${m[2]}`;
   return {

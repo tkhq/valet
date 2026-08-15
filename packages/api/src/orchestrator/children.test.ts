@@ -1306,4 +1306,19 @@ describe("parseTaskRepo", () => {
     expect(parseTaskRepo("")).toBeUndefined();
     expect(parseTaskRepo("three/part/name")).toBeUndefined();
   });
+
+  it("rejects shorthand owners GitHub disallows", () => {
+    // Owners are alphanumeric + hyphen, first char alphanumeric — no
+    // leading -/., no dots or underscores anywhere.
+    expect(parseTaskRepo("-owner/repo")).toBeUndefined();
+    expect(parseTaskRepo(".owner/repo")).toBeUndefined();
+    expect(parseTaskRepo("1.0/2.0")).toBeUndefined();
+    expect(parseTaskRepo("own_er/repo")).toBeUndefined();
+  });
+
+  it("accepts dotted repo names but not a leading hyphen", () => {
+    expect(parseTaskRepo("tkhq/.github")?.fullName).toBe("tkhq/.github");
+    expect(parseTaskRepo("tkhq/sdk.js")?.fullName).toBe("tkhq/sdk.js");
+    expect(parseTaskRepo("tkhq/-repo")).toBeUndefined();
+  });
 });
