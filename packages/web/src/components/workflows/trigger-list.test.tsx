@@ -104,4 +104,16 @@ describe("TriggerList", () => {
     fireEvent.click(screen.getAllByLabelText(/run now/i)[0]);
     expect(runNowMutateAsync).toHaveBeenCalledWith("sch_1");
   });
+
+  it("shows global empty-state copy when no workflowId and no triggers", () => {
+    useWorkflowTriggersMock.mockReturnValueOnce({ data: { triggers: [] }, isLoading: false, error: null });
+    render(<TriggerList />);
+    expect(screen.getByText(/run a workflow on a schedule or on an event/)).toBeTruthy();
+  });
+
+  it("shows scoped empty-state copy when workflowId is set and no triggers", () => {
+    useWorkflowTriggersMock.mockReturnValueOnce({ data: { triggers: [] }, isLoading: false, error: null });
+    render(<TriggerList workflowId="wf_1" />);
+    expect(screen.getByText(/run this on a schedule or on an event/)).toBeTruthy();
+  });
 });

@@ -234,6 +234,18 @@ describe("PATCH /api/workflows/schedules/:id", () => {
     });
     expect(notFound.status).toBe(404);
   });
+
+  it("404 error body contains corrective suffix", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_missing`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Confirm the id");
+  });
 });
 
 // ── 7. DELETE /api/workflows/schedules/:id ───────────────────────────────
@@ -278,6 +290,18 @@ describe("POST /api/workflows/schedules/:id/run", () => {
 // ── 9. POST/PATCH/DELETE /api/workflows/event-triggers round trip + 400 ──
 
 describe("event-trigger CRUD", () => {
+  it("PATCH 404 error body contains corrective suffix", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_missing`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Confirm the id");
+  });
+
   it("round-trips create/patch/delete and 400s a bogus event key on create", async () => {
     const a = await boot();
     const wfId = await createWorkflow(a.baseUrl, "wf_evt");

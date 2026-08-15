@@ -88,6 +88,43 @@ describe("TriggerDialog", () => {
     await waitFor(() => expect(screen.getByText(/Use 5 fields/)).toBeTruthy());
   });
 
+  it("disables the workflow select when editing a schedule trigger", async () => {
+    const editingSchedule = {
+      kind: "schedule" as const,
+      id: "sch_edit",
+      workflowId: "wf_existing",
+      name: "digest",
+      enabled: true,
+      detail: {
+        cron: "0 9 * * *",
+        timezone: "UTC",
+        targetKind: "workflow" as const,
+        nextFireAt: Date.now() + 3_600_000,
+        lastFiredAt: null,
+      },
+    };
+    render(<TriggerDialog open onOpenChange={() => {}} editing={editingSchedule} />);
+    const select = screen.getByLabelText(/workflow/i) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+  });
+
+  it("disables the workflow select when editing an event trigger", async () => {
+    const editingEvent = {
+      kind: "event" as const,
+      id: "ev_edit",
+      workflowId: "wf_existing",
+      name: "on pr",
+      enabled: true,
+      detail: {
+        eventKeys: ["github.pull_request.opened"],
+        filters: [],
+      },
+    };
+    render(<TriggerDialog open onOpenChange={() => {}} editing={editingEvent} />);
+    const select = screen.getByLabelText(/workflow/i) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+  });
+
   it("creates an event trigger with a catalog-picked key", async () => {
     createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
     render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);

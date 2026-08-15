@@ -134,14 +134,18 @@ export function TriggerDialog({
     }
   }, [open, editing, workflowId, lockedKind]);
 
-  function parseJson(raw: string, setError: (msg: string | null) => void): unknown {
+  function parseJson(
+    raw: string,
+    setError: (msg: string | null) => void,
+    errorMessage = 'Input must be valid JSON, for example {"env": "prod"}',
+  ): unknown {
     if (!raw.trim()) return [];
     try {
       const parsed: unknown = JSON.parse(raw);
       setError(null);
       return parsed;
     } catch {
-      setError('Input must be valid JSON, for example {"env": "prod"}');
+      setError(errorMessage);
       return null;
     }
   }
@@ -210,7 +214,11 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
-        const filtersResult = parseJson(filtersJson, setFiltersJsonError);
+        const filtersResult = parseJson(
+          filtersJson,
+          setFiltersJsonError,
+          "Filters must be valid JSON, for example []",
+        );
         if (filtersResult === null) return;
         if (!Array.isArray(filtersResult)) {
           setFiltersJsonError("Filters must be a JSON array, for example []");
@@ -355,6 +363,7 @@ export function TriggerDialog({
                     id="trigger-workflow"
                     value={selectedWorkflowId}
                     onChange={(e) => setSelectedWorkflowId(e.target.value)}
+                    disabled={isEditing}
                     className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
                   >
                     <option value="">— select workflow —</option>
@@ -420,6 +429,7 @@ export function TriggerDialog({
                     id="trigger-event-workflow"
                     value={selectedWorkflowId}
                     onChange={(e) => setSelectedWorkflowId(e.target.value)}
+                    disabled={isEditing}
                     className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
                   >
                     <option value="">— select workflow —</option>

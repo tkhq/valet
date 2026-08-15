@@ -152,7 +152,13 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
   const result = await updateWorkflowSchedule(db, c.var.user.orgId, c.req.param("id"), body);
-  if (!result.ok) return c.json({ error: withCronHint(result.error) }, result.status);
+  if (!result.ok) {
+    const msg =
+      result.status === 404
+        ? `${result.error} Confirm the id and that it belongs to this org.`
+        : withCronHint(result.error);
+    return c.json({ error: msg }, result.status);
+  }
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };
   return c.json(resp);
 });
@@ -206,7 +212,13 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
   const result = await updateWorkflowTrigger(db, plugins, c.var.user.orgId, c.req.param("id"), body);
-  if (!result.ok) return c.json({ error: result.error }, result.status);
+  if (!result.ok) {
+    const msg =
+      result.status === 404
+        ? `${result.error} Confirm the id and that it belongs to this org.`
+        : result.error;
+    return c.json({ error: msg }, result.status);
+  }
   const resp: WorkflowEventTriggerResponse = { trigger: result.trigger };
   return c.json(resp);
 });

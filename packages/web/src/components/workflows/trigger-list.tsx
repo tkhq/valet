@@ -103,7 +103,9 @@ export function TriggerList({ workflowId }: { workflowId?: string }) {
       )}
       {!isLoading && !error && triggers.length === 0 && (
         <div className="text-sm text-muted">
-          No triggers yet. Create one to run this on a schedule or on an event.
+          {workflowId
+            ? "No triggers yet. Create one to run this on a schedule or on an event."
+            : "No triggers yet. Create one to run a workflow on a schedule or on an event."}
         </div>
       )}
 
