@@ -18,6 +18,8 @@ function summarizeForLog(ev: WireEvent): string {
       return `session=${ev.session.id}`;
     case "text_delta":
       return JSON.stringify(ev.delta).slice(0, 80);
+    case "tool_call_update":
+      return `${ev.toolName} ${ev.callId} +${ev.argsDelta.length}ch`;
     case "tool_start":
       return `${ev.toolName} ${JSON.stringify(ev.args ?? {}).slice(0, 80)}`;
     case "tool_end":
