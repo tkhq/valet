@@ -48,7 +48,7 @@ export function EdgeInspector({ edge, sourceNodeType, onChange, onRemove }: Edge
         label="When (condition expression)"
         value={edge.data.when ?? ""}
         onChange={(value) => onChange({ when: value === "" ? undefined : value })}
-        placeholder="e.g. {{nodes.check.output.true}}"
+        placeholder='e.g. nodes.check.result.severity == "high"'
       />
 
       <Button variant="danger" size="sm" onClick={onRemove}>
