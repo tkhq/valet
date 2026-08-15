@@ -301,9 +301,26 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       return readerRef(req, ctx);
     },
   });
+  // Prebuilds are out of scope for the integration harness (no real
+  // docker/kubernetes builder wired here unless a test injects one); routes
+  // must treat this as "unavailable", same as a `local` sandbox-backend
+  // boot. Constructed before the child spawner, whose zero-config repo
+  // binding needs it.
+  const prebuildService = new SourceService({
+    db,
+    builder: opts.imageBuilder ?? null,
+    githubTokenDeps: {
+      db,
+      credentials: engineCredentials,
+      key: deriveSecretKey("test-key"),
+      apiUrl: opts.githubApiUrl,
+      githubUrl: opts.githubApiUrl,
+    },
+  });
+
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
-  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(blobsRoot, "children") };
+  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
@@ -402,21 +419,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const skillSync = new SkillSyncService({
     db,
     reader: new PublicSkillRepoReader({ apiUrl: opts.githubApiUrl }),
-  });
-
-  // Prebuilds are out of scope for the integration harness (no real
-  // docker/kubernetes builder wired here); routes must treat this as
-  // "unavailable", same as a `local` sandbox-backend boot.
-  const prebuildService = new SourceService({
-    db,
-    builder: opts.imageBuilder ?? null,
-    githubTokenDeps: {
-      db,
-      credentials: engineCredentials,
-      key: deriveSecretKey("test-key"),
-      apiUrl: opts.githubApiUrl,
-      githubUrl: opts.githubApiUrl,
-    },
   });
 
   const providers: Providers = {

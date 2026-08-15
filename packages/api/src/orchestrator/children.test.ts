@@ -20,10 +20,11 @@ import {
   classifyWatcherError,
   type ChildrenDeps,
   resultBody,
+  parseTaskRepo,
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, childWatches, eventDropLog, sandboxTokens } from "../schema/index.js";
+import { agentSessions, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -39,6 +40,7 @@ function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): Childr
     db: a.providers.db,
     engineHost: a.providers.engineHost,
     engineStore: a.providers.engineStore,
+    prebuildService: a.providers.prebuildService,
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-children-test-")),
     ...overrides,
   };
@@ -130,6 +132,111 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
+  });
+
+  it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    const parent = await api.providers.engineHost.sessionFor("parent-repo", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const result = await spawner(
+      { prompt: "explore the repo", repo: "tkhq/sdk", branch: "main" },
+      {
+        parentSessionId: "parent-repo",
+        parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // The binding row mirrors what the REST create route writes.
+    const rows = await api.providers.db
+      .select()
+      .from(sessionRepos)
+      .where(eq(sessionRepos.sessionId, result.childSessionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      host: "github",
+      fullName: "tkhq/sdk",
+      cloneUrl: "https://github.com/tkhq/sdk.git",
+      ref: "main",
+      auth: "auto",
+      position: 0,
+    });
+    expect(rows[0]?.targetDir).toBeTruthy();
+
+    // The child session's build saw the binding: clone prep is wired.
+    const child = api.providers.engineHost.liveSession(result.childSessionId);
+    expect(child?.options.specProvider).toBeDefined();
+
+    // Zero-config generation (spec decision 13) fires for children too —
+    // the image source row appears even though no builder is wired here.
+    await waitFor(async () => {
+      const sources = await api!.providers.db
+        .select()
+        .from(imageSources)
+        .where(and(eq(imageSources.orgId, "local-org"), eq(imageSources.repoFullName, "tkhq/sdk")));
+      return sources.length === 1;
+    });
+  });
+
+  it("spawns without repo: no session_repos row, no clone prep", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    const parent = await api.providers.engineHost.sessionFor("parent-norepo", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const result = await spawner(
+      { prompt: "no repo here" },
+      {
+        parentSessionId: "parent-norepo",
+        parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    const rows = await api.providers.db
+      .select()
+      .from(sessionRepos)
+      .where(eq(sessionRepos.sessionId, result.childSessionId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejects an unparseable repo before creating anything", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    const parent = await api.providers.engineHost.sessionFor("parent-badrepo", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await expect(
+      spawner(
+        { prompt: "x", repo: "not a repo!!" },
+        {
+          parentSessionId: "parent-badrepo",
+          parentThreadId: parent.thread("web:default").id,
+          actorUserId: "local-user",
+          owner: { type: "user", id: "local-user" },
+        },
+      ),
+    ).rejects.toThrow(/owner\/repo/);
+    const watches = await api.providers.db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.parentSessionId, "parent-badrepo"));
+    expect(watches).toHaveLength(0);
   });
 
   it("rejects the 11th active child with [child_cap] naming the running children, and drop-logs", async () => {
@@ -1166,5 +1273,52 @@ describe("buildChildReader", () => {
     );
     expect(entries).toBeNull();
     expect(await api.providers.engineStore.getSession(spawned.childSessionId)).toBeNull();
+  });
+});
+
+describe("parseTaskRepo", () => {
+  it("parses owner/repo shorthand", () => {
+    expect(parseTaskRepo("tkhq/sdk")).toEqual({
+      host: "github",
+      fullName: "tkhq/sdk",
+      cloneUrl: "https://github.com/tkhq/sdk.git",
+      auth: "auto",
+    });
+  });
+
+  it("parses an https clone URL, with and without .git", () => {
+    for (const url of ["https://github.com/tkhq/sdk.git", "https://github.com/tkhq/sdk"]) {
+      expect(parseTaskRepo(url)?.fullName).toBe("tkhq/sdk");
+      expect(parseTaskRepo(url)?.cloneUrl).toBe("https://github.com/tkhq/sdk.git");
+    }
+  });
+
+  it("parses an ssh remote", () => {
+    expect(parseTaskRepo("git@github.com:tkhq/sdk.git")?.fullName).toBe("tkhq/sdk");
+  });
+
+  it("carries the branch as ref", () => {
+    expect(parseTaskRepo("tkhq/sdk", "release-1")?.ref).toBe("release-1");
+  });
+
+  it("returns undefined for garbage", () => {
+    expect(parseTaskRepo("not a repo!!")).toBeUndefined();
+    expect(parseTaskRepo("")).toBeUndefined();
+    expect(parseTaskRepo("three/part/name")).toBeUndefined();
+  });
+
+  it("rejects shorthand owners GitHub disallows", () => {
+    // Owners are alphanumeric + hyphen, first char alphanumeric — no
+    // leading -/., no dots or underscores anywhere.
+    expect(parseTaskRepo("-owner/repo")).toBeUndefined();
+    expect(parseTaskRepo(".owner/repo")).toBeUndefined();
+    expect(parseTaskRepo("1.0/2.0")).toBeUndefined();
+    expect(parseTaskRepo("own_er/repo")).toBeUndefined();
+  });
+
+  it("accepts dotted repo names but not a leading hyphen", () => {
+    expect(parseTaskRepo("tkhq/.github")?.fullName).toBe("tkhq/.github");
+    expect(parseTaskRepo("tkhq/sdk.js")?.fullName).toBe("tkhq/sdk.js");
+    expect(parseTaskRepo("tkhq/-repo")).toBeUndefined();
   });
 });
