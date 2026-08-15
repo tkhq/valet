@@ -6,10 +6,13 @@
  */
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
+  resolveTriggerInput,
   validateWorkflowDefinition,
   type RunParams,
+  type TriggerInputError,
   type ValidateEnvironment,
   type WorkflowDefinition,
+  type WorkflowInputDefinition,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
@@ -384,13 +387,38 @@ export async function deleteWorkflowDefinition(
   return "deleted";
 }
 
-/** Returns null when the workflow doesn't exist (or isn't owned). */
+/** Extract the trigger node's declared input schema from a stored (unknown)
+ * definition. Returns undefined when there is no trigger node or it declares
+ * no schema — callers then skip input validation entirely. The cast at the
+ * end is the same unknown-JSON seam as `findNodeInDefinition`: the shape was
+ * checked structurally (object map) and field *contents* are only ever read
+ * through `resolveTriggerInput`, which type-checks each definition it uses. */
+export function triggerDataSchema(
+  definition: unknown,
+): Record<string, WorkflowInputDefinition> | undefined {
+  if (typeof definition !== "object" || definition === null) return undefined;
+  const def = definition as Record<string, unknown>;
+  if (!Array.isArray(def.nodes)) return undefined;
+  for (const node of def.nodes) {
+    if (typeof node !== "object" || node === null) continue;
+    const n = node as Record<string, unknown>;
+    if (n.type !== "trigger") continue;
+    const schema = n.dataSchema;
+    if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return undefined;
+    return schema as Record<string, WorkflowInputDefinition>;
+  }
+  return undefined;
+}
+
+/** Returns null when the workflow doesn't exist (or isn't owned); an
+ * `invalidInput` result when the caller's input fails the trigger's
+ * declared dataSchema (routes map that to 400). */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   input?: Record<string, unknown>,
-): Promise<{ runId: string } | null> {
+): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
@@ -398,10 +426,13 @@ export async function startWorkflowRun(
   const versionId = definitionVersionId(definition);
   const runId = newWorkflowId("wfrun");
 
+  const resolved = resolveTriggerInput(triggerDataSchema(definition), input ?? {});
+  if (resolved.errors.length > 0) return { invalidInput: resolved.errors };
+
   const trigger: WorkflowTriggerPayload = {
     type: "manual",
     timestamp: new Date().toISOString(),
-    data: input ?? {},
+    data: resolved.input,
     metadata: {},
   };
   const params: RunParams = {

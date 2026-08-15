@@ -177,6 +177,15 @@ workflowsRouter.post("/:id/runs", async (c) => {
 
   const started = await startWorkflowRun(deps, owner, id, body.input);
   if (!started) return c.json({ error: "workflow not found" }, 404);
+  if ("invalidInput" in started) {
+    return c.json(
+      {
+        error: `run input is invalid: ${started.invalidInput.map((e) => e.message).join(" ")}`,
+        fields: started.invalidInput,
+      },
+      400,
+    );
+  }
 
   const resp: StartWorkflowRunResponse = { runId: started.runId };
   return c.json(resp, 201);
