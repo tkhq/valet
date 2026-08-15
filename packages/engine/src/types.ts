@@ -1887,7 +1887,10 @@ export type ChildReader = (
  *
  * The host re-points its settlement watch at the new submission, so the
  * parent's next `child.settled` signal reports the steered work, not the
- * superseded original.
+ * superseded original. The signal lands on the thread that spawned the
+ * child (the durable edge), not necessarily the thread the send came from.
+ * A send that re-opens a settled child pays the host's active-children
+ * limits and may reject.
  *
  * Returns `null` when `childSessionId` is not a child of `parentSessionId`,
  * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.

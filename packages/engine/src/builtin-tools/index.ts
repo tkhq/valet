@@ -351,7 +351,8 @@ export const childSendTool = defineTool({
     "behind the child's current work; set `interrupt: true` to supersede " +
     "that work (use it when the child is heading the wrong direction). " +
     "Either way the settlement watch re-arms: the child's next result " +
-    "arrives in this thread as a fresh `child.settled` signal.",
+    "arrives as a fresh `child.settled` signal on the thread that spawned " +
+    "the child.",
   parameters: Type.Object({
     child_session_id: Type.String({
       description: "The child session to message, as returned by `task` or named in a child.settled signal.",
@@ -394,7 +395,7 @@ export const childSendTool = defineTool({
     return {
       text:
         `sent to child ${args.child_session_id} (submission ${result.queueItemId}, ${mode}). ` +
-        `Its next result will arrive in this thread as a child.settled signal.`,
+        `Its next result will arrive as a child.settled signal on the thread that spawned it.`,
     };
   },
 });

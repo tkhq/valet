@@ -305,6 +305,8 @@ CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
 --> statement-breakpoint
+CREATE INDEX "child_watches_retention" ON "child_watches" ("settled_at") WHERE "settled" = true AND "sandbox_reclaimed_at" IS NULL;
+--> statement-breakpoint
 CREATE TABLE "notifications" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,

@@ -439,7 +439,7 @@ export class ChildWatcher {
         });
       }
       console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
-      await this.markSettled(watch.childSessionId);
+      await this.markSettled(watch.childSessionId, watch.queueItemId);
       // No sandbox teardown here, deliberately: a permanent denial means
       // the parent never received the settlement, so keep the sandbox and
       // cached session around for debugging. The idle sweep owns the
@@ -471,32 +471,57 @@ export class ChildWatcher {
 
     // Re-point guard (`child_send`): the sender moves the watch row to its
     // new submission and arms a fresh watcher on it. A watcher that wakes
-    // for a submission the row no longer tracks must stay silent — its
-    // settlement (typically outcome "superseded" from an interrupt) is not
-    // the one the parent is owed. The row is the durable source of truth;
-    // the superseded-with-live-replacement check covers the moment between
-    // the steer's atomic supersession and the sender's row update landing.
+    // for a submission the row no longer tracks must stay silent — the
+    // settlement the parent is owed belongs to the row's current item.
     //
-    // A followup send has the mirror-image race: the original submission
-    // can complete between the sender's prompt() and its row update, and
-    // the stale watcher then reports that completion. That signal is
-    // truthful — the child really finished the original work — and is the
-    // same two-signal sequence the parent gets when a send lands just
-    // after settlement (the re-open path). Only a superseded settlement
-    // must never reach the parent, because it is not a result at all.
-    // Admission and the row update cannot be one transaction: the engine
-    // store and the app db are separate pluggable contracts (the spawner's
-    // prompt-then-insert window is the same shape).
+    // A followup send has a benign race: the original submission can
+    // complete between the sender's prompt() and its row update, and the
+    // stale watcher then reports that completion. That signal is truthful
+    // — the child really finished the original work — and is the same
+    // two-signal sequence the parent gets when a send lands just after
+    // settlement (the re-open path). Admission and the row update cannot
+    // be one transaction: the engine store and the app db are separate
+    // pluggable contracts (the spawner's prompt-then-insert window is the
+    // same shape).
     const rows = await this.deps.db
-      .select()
+      .select({ queueItemId: childWatches.queueItemId, settled: childWatches.settled })
       .from(childWatches)
       .where(eq(childWatches.childSessionId, watch.childSessionId))
       .limit(1);
     const row = rows[0];
     if (!row || row.settled || row.queueItemId !== watch.queueItemId) return;
+
+    // A superseded settlement is never reported — it is not a result. The
+    // steer that superseded this item stamped its replacement on the queue
+    // item; move the watch to the successor and watch that instead. This
+    // self-heals a `child_send` that crashed between its steer admission
+    // and its row update, and it follows a user's direct takeover of the
+    // child (the parent then hears about the takeover's outcome). The
+    // UPDATE is conditioned on the old queueItemId so a sender re-point
+    // landing in between wins; double-arming the same successor is safe
+    // (dispatchId idempotency + this guard).
     if (result.outcome === "superseded") {
-      const live = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
-      if (live.length > 0) return;
+      const item = await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId);
+      const successor = item?.supersededByItemId;
+      if (!successor) {
+        // Steer supersession always stamps a successor; a missing one is
+        // unexpected. Leave the row unsettled for the next boot's rearm.
+        console.error(
+          `ChildWatcher: ${watch.queueItemId} superseded with no successor; leaving ${watch.childSessionId} unsettled`,
+        );
+        return;
+      }
+      await this.deps.db
+        .update(childWatches)
+        .set({ queueItemId: successor, settled: false })
+        .where(
+          and(
+            eq(childWatches.childSessionId, watch.childSessionId),
+            eq(childWatches.queueItemId, watch.queueItemId),
+          ),
+        );
+      this.arm({ ...watch, queueItemId: successor });
+      return;
     }
 
     // Optional title attribute (decision 11): the spawn request's title is
@@ -526,18 +551,23 @@ export class ChildWatcher {
       dispatchId: `settled:${watch.childSessionId}:${watch.queueItemId}`,
     });
 
-    await this.markSettled(watch.childSessionId);
+    await this.markSettled(watch.childSessionId, watch.queueItemId);
     await this.parkChildSandbox(watch.childSessionId);
   }
 
-  private async markSettled(childSessionId: string): Promise<void> {
-    // `settledAt` starts (or restarts) the retention clock; clearing
-    // `sandboxReclaimedAt` opens a fresh reclaim cycle for a child that a
-    // `child_send` re-opened after an earlier reclaim.
+  private async markSettled(childSessionId: string, queueItemId: string): Promise<void> {
+    // Conditioned on the queueItemId this watcher tracked: a sender
+    // re-point that landed after this watcher's row check must not be
+    // clobbered back to settled, or the re-pointed submission's watcher
+    // goes silent and the settlement is lost. `settledAt` starts (or
+    // restarts) the retention clock; clearing `sandboxReclaimedAt` opens a
+    // fresh reclaim cycle for a re-opened child. `parkedSandboxId` is
+    // deliberately kept — it is the only durable handle to a sandbox a
+    // prior cycle parked, and the next park overwrites it anyway.
     await this.deps.db
       .update(childWatches)
-      .set({ settled: true, settledAt: Date.now(), sandboxReclaimedAt: null, parkedSandboxId: null })
-      .where(eq(childWatches.childSessionId, childSessionId));
+      .set({ settled: true, settledAt: Date.now(), sandboxReclaimedAt: null })
+      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
   }
 
   private async markReclaimed(childSessionId: string, now: number): Promise<void> {
@@ -569,11 +599,22 @@ export class ChildWatcher {
       if (unsettled.length > 0) return;
 
       const retentionMs = this.deps.retentionMs ?? 0;
-      if (
-        retentionMs > 0 &&
-        this.deps.engineHost.sandboxHibernationCapable() &&
-        live.attachment.state === "ready"
-      ) {
+      const retainable = retentionMs > 0 && this.deps.engineHost.sandboxHibernationCapable();
+      if (retainable && live.attachment.state === "suspended") {
+        // Already suspended (the idle sweep got there first): the sandbox
+        // is parked as-is. Record the handle — suspend keeps it live on
+        // the attachment — and leave the reclaim to `sweepRetention`.
+        const sandboxId = live.attachment.sandboxId;
+        if (sandboxId) {
+          await this.deps.db
+            .update(childWatches)
+            .set({ parkedSandboxId: sandboxId })
+            .where(eq(childWatches.childSessionId, childSessionId));
+        }
+        await writeHibernated(this.deps.db, childSessionId);
+        return;
+      }
+      if (retainable && live.attachment.state === "ready") {
         // Record the provider handle BEFORE suspending: the retention
         // sweep needs it once an api restart evicts the cached session,
         // and nothing else durably tracks a provisioned sandbox's id.
@@ -613,9 +654,17 @@ export class ChildWatcher {
    * directly callable for tests. Per-row best-effort: one bad child never
    * blocks the rest.
    *
-   * A child the user woke after the park (unsettled submissions) is
-   * skipped — its next settlement restarts the clock via `markSettled`.
-   * A child no longer in the host cache (an api restart evicted it) is
+   * Eligibility needs BOTH clocks stale: `settledAt` (the watcher's
+   * settlement stamp) and the engine's `latestActivityAt`. A user can
+   * converse with a parked child from the Sessions page without touching
+   * `child_watches` — the activity clock is what keeps the sweep from
+   * destroying a sandbox out from under that conversation (the same clock
+   * the host idle sweep trusts).
+   *
+   * A child with unsettled submissions is skipped, with the check
+   * re-checked immediately before the destroy (the idle sweep's race
+   * rule): a `child_send` or user prompt admitted in between wins. A
+   * child no longer in the host cache (an api restart evicted it) is
    * reclaimed through the `parkedSandboxId` recorded at park time.
    */
   async sweepRetention(now = Date.now()): Promise<void> {
@@ -636,12 +685,28 @@ export class ChildWatcher {
       try {
         const unsettled = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
         if (unsettled.length > 0) continue;
+        const activityAt = await this.deps.engineStore.latestActivityAt(row.childSessionId);
+        if (activityAt != null && activityAt > cutoff) continue;
         const live = this.deps.engineHost.liveSession(row.childSessionId);
         if (live) {
+          // Race rule (mirrors `maybeSuspendIdleSession`): re-check
+          // immediately before the destroy — a submission admitted since
+          // the check above wins and the reclaim waits for the next pass.
+          const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
+          if (recheck.length > 0) continue;
           await live.attachment.destroy();
           this.deps.engineHost.evictCache(row.childSessionId);
         } else if (row.parkedSandboxId) {
           await this.deps.engineHost.destroySandbox(row.parkedSandboxId);
+        } else {
+          // Nothing destroyable from here: no cached session and no
+          // recorded handle. Stamp the reclaim so the row stops sweeping,
+          // but say so — if a sandbox exists (e.g. kept by the
+          // permanent-denial path and orphaned by a restart), the idle
+          // sweep or operator owns it now.
+          console.warn(
+            `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
+          );
         }
         await revokeSandboxTokens(this.deps.db, row.childSessionId);
         await this.markReclaimed(row.childSessionId, now);
@@ -749,14 +814,31 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
  * already settled) so the queue actually runs the new submission.
  *
  * After admitting the message, the watch row is re-pointed at the new
- * submission (`settled: false`) and the watcher re-armed, so the parent's
- * next `child.settled` signal reports the steered work. `interrupt: true`
- * admits with queue-mode steer, superseding the child's in-flight work; the
- * stale watcher on the superseded submission goes quiet via the re-point
- * guard in `ChildWatcher.attempt`.
+ * submission (`settled: false`, dismissal cleared) and the watcher
+ * re-armed, so the parent's next `child.settled` signal reports the steered
+ * work. `parentThreadId` is deliberately NOT re-pointed: the spawn origin
+ * is the durable edge the UI's child grouping and the child's approval-gate
+ * routing resolve through, so the settlement lands on the thread that
+ * commissioned the work even when the steer came from another thread.
+ * `interrupt: true` admits with queue-mode steer, superseding the child's
+ * in-flight work; the stale watcher on the superseded submission follows
+ * the successor via the re-point guard in `ChildWatcher.attempt`.
+ *
+ * Re-opening a settled child re-enters the active-children population, so
+ * it pays the same decision-21 limit check as a spawn. Sends to one child
+ * are serialized in-process so two concurrent sends cannot leave the row
+ * tracking the older of their two submissions.
  */
 export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): ChildSender {
-  return async (req, ctx) => {
+  // Per-child promise chain. The api is a single process, so this is the
+  // only writer path for sender re-points; serializing here keeps the row's
+  // queueItemId tracking the LAST admitted submission.
+  const chains = new Map<string, Promise<{ queueItemId: string } | null>>();
+
+  const send = async (
+    req: { childSessionId: string; message: string; interrupt?: boolean },
+    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
       .select()
       .from(childWatches)
@@ -780,6 +862,13 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     const child = childRows[0];
     if (!child || child.status === "deleted") return null;
 
+    // A settled child rejoins the active-children population — enforce the
+    // same caps a spawn pays, BEFORE waking anything. A steer/followup to a
+    // still-running child changes no counts and pays nothing.
+    if (watchRow.settled) {
+      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId);
+    }
+
     const childData = await deps.engineStore.getSession(req.childSessionId);
     if (!childData) return null;
 
@@ -800,13 +889,15 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
     // Re-point BEFORE arming: the fresh watcher must find the row already
     // tracking its submission, and the stale watcher (if any) must find it
-    // no longer tracking the old one.
+    // no longer tracking the old one. Clearing `dismissedAt` keeps a
+    // re-opened child visible in the orchestrator's child list — a hidden
+    // row must never be running.
     await deps.db
       .update(childWatches)
       .set({
         queueItemId: receipt.queueItemId,
-        parentThreadId: ctx.parentThreadId,
         settled: false,
+        dismissedAt: null,
       })
       .where(eq(childWatches.childSessionId, req.childSessionId));
 
@@ -814,12 +905,23 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       childSessionId: req.childSessionId,
       queueItemId: receipt.queueItemId,
       parentSessionId: ctx.parentSessionId,
-      parentThreadId: ctx.parentThreadId,
+      parentThreadId: watchRow.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId: watchRow.orgId,
     });
 
     return { queueItemId: receipt.queueItemId };
+  };
+
+  return async (req, ctx) => {
+    const prev = chains.get(req.childSessionId) ?? Promise.resolve(null);
+    const next = prev.catch(() => null).then(() => send(req, ctx));
+    chains.set(req.childSessionId, next);
+    try {
+      return await next;
+    } finally {
+      if (chains.get(req.childSessionId) === next) chains.delete(req.childSessionId);
+    }
   };
 }
 

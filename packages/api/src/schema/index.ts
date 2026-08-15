@@ -483,6 +483,12 @@ export const childWatches = pgTable(
   (t) => [
     index("child_watches_parent").on(t.parentSessionId),
     index("child_watches_settled").on(t.settled),
+    // Partial index for the retention sweep: rows are never deleted and
+    // every historical child ends settled, so the sweep's candidate scan
+    // must be bounded by the (small) unreclaimed set, not table history.
+    index("child_watches_retention")
+      .on(t.settledAt)
+      .where(sql`${t.settled} = true AND ${t.sandboxReclaimedAt} IS NULL`),
   ],
 );
 
