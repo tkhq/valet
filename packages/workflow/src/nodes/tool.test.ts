@@ -426,9 +426,12 @@ describe('policy gate', () => {
     const first = await executeTool(args);
     expect(first.status).toBe('parked');
     if (first.status !== 'parked') throw new Error('unreachable');
-    expect(first.waitingOn).toEqual([
-      { kind: 'signal', nodeId: 't1', signalType: 'approval:t1', timeoutAt: undefined },
-    ]);
+    const w = first.waitingOn[0];
+    expect(w?.kind).toBe('signal');
+    if (w?.kind !== 'signal') throw new Error('unreachable');
+    expect(w.nodeId).toBe('t1');
+    expect(w.signalType).toBe('approval:t1');
+    expect('timeoutAt' in w).toBe(false);
     const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
     expect(cp?.effects?.gate).toBe(true);
     expect(cp?.effects?.gateParams).toEqual({ title: 'hello' });

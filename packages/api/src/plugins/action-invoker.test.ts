@@ -974,6 +974,6 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     // but if one exists the invoker must throw rather than silently returning it.
     await expect(
       invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "corrupt:n9" }, wfCtx),
-    ).rejects.toThrow("corrupt stored result");
+    ).rejects.toThrow("stored requiresApproval outcome should never exist for");
   });
 });

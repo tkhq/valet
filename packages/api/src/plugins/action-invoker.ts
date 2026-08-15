@@ -177,7 +177,7 @@ function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
   // A requiresApproval row must never land in the dedup table (the guard in
   // buildActionInvoker skips the insert). If one exists, the data is corrupt.
   if (record.ok === false && record.requiresApproval === true) {
-    throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
+    throw new Error(`action-invoker: stored requiresApproval outcome should never exist for ${JSON.stringify(value)}`);
   }
   throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
 }

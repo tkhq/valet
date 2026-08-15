@@ -290,7 +290,7 @@ function park(node: ToolNode, signalType: string, timeoutAt: number | undefined)
         kind: 'signal',
         nodeId: node.id,
         signalType,
-        ...(timeoutAt !== undefined ? { timeoutAt } : { timeoutAt: undefined }),
+        ...(timeoutAt !== undefined ? { timeoutAt } : {}),
       },
     ],
   };
