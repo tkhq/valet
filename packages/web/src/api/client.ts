@@ -117,6 +117,7 @@ import type {
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunResponse,
   RevokeInviteResponse,
   SandboxJwtResponse,
   SendPromptRequest,
@@ -409,6 +410,11 @@ export const api = {
     request<CancelWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
+    ),
+  retryWorkflowRun: (runId: string) =>
+    request<RetryWorkflowRunResponse>(
+      "POST",
+      `/workflows/runs/${encodeURIComponent(runId)}/retry`,
     ),
 
   // settings shell (split-settings design): per-user profile, org, models

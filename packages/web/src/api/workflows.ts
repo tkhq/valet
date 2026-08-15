@@ -17,6 +17,7 @@ import type {
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
+  RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
@@ -179,6 +180,27 @@ export function useResolveApproval(runId: string) {
       // moved on, and the 5-s poll would leave the stale card visible until
       // the next tick. Invalidating here collapses the wait.
       qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+    },
+  });
+}
+
+/**
+ * Retry a settled failed/cancelled run — starts a fresh run of the same
+ * workflow with the original input and returns the new runId. Invalidates the
+ * workflow's runs list so the new run appears in the runs drawer. The
+ * workflowId is read from the cached run detail inside `onSuccess` (not taken
+ * as a parameter) so a hook created before the detail query resolves never
+ * closes over a placeholder id.
+ */
+export function useRetryRun(runId: string) {
+  const qc = useQueryClient();
+  return useMutation<RetryWorkflowRunResponse, Error, void>({
+    mutationFn: () => api.retryWorkflowRun(runId),
+    onSuccess: () => {
+      const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
+      if (detail) {
+        qc.invalidateQueries({ queryKey: qkWorkflows.runs(detail.run.workflowId) });
+      }
     },
   });
 }

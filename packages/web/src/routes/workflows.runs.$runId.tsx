@@ -1,6 +1,6 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunCheckpoint, WorkflowRunDetail } from "@valet/api/wire";
-import { useCancelRun, useRunDetail } from "~/api/workflows";
+import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
 import { ApprovalCard } from "~/components/workflows/approval-card";
 import { PolicyGateCard } from "~/components/workflows/policy-gate-card";
 import {
@@ -28,6 +28,8 @@ function RunDetailPage() {
   const { runId } = Route.useParams();
   const { data, isLoading, error } = useRunDetail(runId);
   const cancelRun = useCancelRun(runId);
+  const retryRun = useRetryRun(runId);
+  const navigate = useNavigate();
 
   if (isLoading) {
     return (
@@ -52,6 +54,13 @@ function RunDetailPage() {
         data={data}
         onCancel={() => cancelRun.mutate()}
         cancelPending={cancelRun.isPending}
+        onRetry={() =>
+          retryRun.mutate(undefined, {
+            onSuccess: ({ runId: newRunId }) =>
+              navigate({ to: "/workflows/runs/$runId", params: { runId: newRunId } }),
+          })
+        }
+        retryPending={retryRun.isPending}
       />
     </div>
   );
@@ -62,6 +71,8 @@ export interface RunDetailBodyProps {
   data: WorkflowRunDetail;
   onCancel: () => void;
   cancelPending: boolean;
+  onRetry: () => void;
+  retryPending: boolean;
 }
 
 /**
@@ -70,11 +81,20 @@ export interface RunDetailBodyProps {
  * router `<Link>` above is the only thing that needs real router context, and
  * it's kept out of this component.
  */
-export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetailBodyProps) {
+export function RunDetailBody({
+  runId,
+  data,
+  onCancel,
+  cancelPending,
+  onRetry,
+  retryPending,
+}: RunDetailBodyProps) {
   const { run, checkpoints } = data;
   const pendingGates = data.pendingGates ?? [];
   const needsApproval = runNeedsApproval(run, pendingGates);
   const nonTerminal = run.status !== "settled";
+  const retryable =
+    run.status === "settled" && (run.outcome === "failed" || run.outcome === "cancelled");
   const nodeStatuses = statusByNodeId(run, checkpoints);
 
   // Legacy signal-based approval: still resolve the prompt for approval-kind
@@ -102,6 +122,11 @@ export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetai
           {nonTerminal && (
             <Button size="sm" variant="danger" onClick={onCancel} disabled={cancelPending}>
               Cancel run
+            </Button>
+          )}
+          {retryable && (
+            <Button size="sm" onClick={onRetry} disabled={retryPending}>
+              Retry run
             </Button>
           )}
         </div>

@@ -24,6 +24,7 @@ import type {
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
+  RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   WorkflowWebhookResponse,
 } from "../wire/types.js";
@@ -46,7 +47,7 @@ const VALID_DEFINITION = {
 
 /** A `RunHost` stub that records every call instead of driving anything. */
 class StubRunHost implements RunHost {
-  started: Array<{ runId: string; params?: unknown; owner?: { ownerType: string; ownerId: string } }> = [];
+  started: Array<{ runId: string; params: unknown; owner?: { ownerType: string; ownerId: string } }> = [];
   woken: string[] = [];
   terminated: string[] = [];
 
@@ -483,6 +484,117 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     );
 
     const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
+    expect(res.status).toBe(404);
+  });
+
+  it("retries a settled failed run with the original input; 409s while non-settled and after completion", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+
+    const runId = "wfrun_retry_me";
+    await api.providers.workflowStore.createRun(
+      runId,
+      {
+        workflowId: created.id,
+        definitionVersionId: "v1",
+        input: {
+          type: "manual",
+          timestamp: "2026-08-14T00:00:00.000Z",
+          data: { foo: "bar" },
+          metadata: {},
+        },
+      },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+
+    // Not settled yet → 409.
+    const early = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(early.status).toBe(409);
+
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(res.status).toBe(201);
+    const { runId: newRunId } = (await res.json()) as RetryWorkflowRunResponse;
+    expect(newRunId).not.toBe(runId);
+
+    const startedRetry = stub.started.find((s) => s.runId === newRunId);
+    expect(startedRetry).toBeDefined();
+    // The retry's trigger payload must carry the original run's input data.
+    const params = startedRetry?.params as { input?: { data?: unknown } };
+    expect(params.input?.data).toEqual({ foo: "bar" });
+
+    // A completed run is not retryable.
+    const completedId = "wfrun_completed";
+    await api.providers.workflowStore.createRun(
+      completedId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await api.providers.workflowStore.settleRun(completedId, "completed");
+    const completedRes = await fetch(`${api.baseUrl}/api/workflows/runs/${completedId}/retry`, { method: "POST" });
+    expect(completedRes.status).toBe(409);
+  });
+
+  it("400s a retry when the current trigger schema no longer accepts the original input", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+
+    const runId = "wfrun_schema_drift";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    // The definition gains a required input AFTER the original run — the
+    // retry validates against the CURRENT definition, so it must 400.
+    const updateRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        definition: {
+          ...VALID_DEFINITION,
+          nodes: [
+            { id: "trigger", type: "trigger", dataSchema: { name: { type: "string", required: true } } },
+            { id: "stop", type: "stop" },
+          ],
+        },
+      }),
+    });
+    expect(updateRes.status).toBe(200);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: Array<{ field: string }> };
+    expect(body.fields[0]?.field).toBe("name");
+    expect(stub.started.find((s) => s.runId !== runId)).toBeUndefined();
+  });
+
+  it("404s retrying another owner's settled run", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_cross_owner_retry";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "test-member" },
+    );
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
     expect(res.status).toBe(404);
   });
 

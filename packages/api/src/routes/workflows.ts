@@ -22,6 +22,7 @@ import {
   listWorkflowRuns,
   listWorkflowVersions,
   resolveWorkflowApproval,
+  retryWorkflowRun,
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
@@ -46,6 +47,7 @@ import type {
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunResponse,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
@@ -313,6 +315,40 @@ workflowsRouter.post("/runs/:runId/cancel", async (c) => {
 
   const resp: CancelWorkflowRunResponse = { ok: true };
   return c.json(resp);
+});
+
+workflowsRouter.post("/runs/:runId/retry", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const runId = c.req.param("runId");
+
+  const result = await retryWorkflowRun(deps, owner, runId);
+  if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "workflow_deleted") {
+    return c.json(
+      { error: "This run's workflow was deleted. Create the workflow again, then start a new run." },
+      404,
+    );
+  }
+  if (result === "not_retryable") {
+    return c.json(
+      { error: "Only failed or cancelled runs can be retried. Wait for the run to settle, or cancel it first." },
+      409,
+    );
+  }
+  if ("invalidInput" in result) {
+    // The workflow's trigger schema changed since the original run; mirror
+    // the start route's invalid-input shape.
+    return c.json(
+      {
+        error: `The original input no longer matches the workflow's input schema: ${result.invalidInput.map((e) => e.message).join(" ")} Start a new run with valid input.`,
+        fields: result.invalidInput,
+      },
+      400,
+    );
+  }
+
+  const resp: RetryWorkflowRunResponse = { runId: result.runId };
+  return c.json(resp, 201);
 });
 
 export type WorkflowsRouter = typeof workflowsRouter;
