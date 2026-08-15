@@ -134,12 +134,12 @@ export function TriggerDialog({
     }
   }, [open, editing, workflowId, lockedKind]);
 
-  function parseJson(raw: string, setError: (msg: string | null) => void): unknown[] | null {
+  function parseJson(raw: string, setError: (msg: string | null) => void): unknown {
     if (!raw.trim()) return [];
     try {
       const parsed: unknown = JSON.parse(raw);
       setError(null);
-      return parsed as unknown[];
+      return parsed;
     } catch {
       setError('Input must be valid JSON, for example {"env": "prod"}');
       return null;
@@ -165,11 +165,13 @@ export function TriggerDialog({
         if (inputJson.trim()) {
           const result = parseJson(inputJson, setInputJsonError);
           if (result === null) return;
+          // Schedule input can be any JSON value; we pass it as-is.
           parsedInput = result;
         }
 
         if (isEditing) {
           // Send only changed fields.
+          // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
           const orig = editing as Extract<WorkflowTriggerItem, { kind: "schedule" }>;
           type ScheduleUpdate = {
             name?: string;
@@ -208,10 +210,16 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
-        const filters = parseJson(filtersJson, setFiltersJsonError);
-        if (filters === null) return;
+        const filtersResult = parseJson(filtersJson, setFiltersJsonError);
+        if (filtersResult === null) return;
+        if (!Array.isArray(filtersResult)) {
+          setFiltersJsonError("Filters must be a JSON array, for example []");
+          return;
+        }
+        const filters = filtersResult;
 
         if (isEditing) {
+          // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
           const orig = editing as Extract<WorkflowTriggerItem, { kind: "event" }>;
           type EventUpdate = {
             name?: string;
@@ -362,6 +370,7 @@ export function TriggerDialog({
               {/* Prompt textarea — orchestrator target */}
               {(targetKind === "orchestrator" ||
                 (isEditing &&
+                  // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
                   (editing as Extract<WorkflowTriggerItem, { kind: "schedule" }>).detail
                     .targetKind === "orchestrator")) && (
                 <div className="grid gap-1">
@@ -380,6 +389,7 @@ export function TriggerDialog({
               {/* Input JSON textarea — workflow target */}
               {(targetKind === "workflow" ||
                 (isEditing &&
+                  // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
                   (editing as Extract<WorkflowTriggerItem, { kind: "schedule" }>).detail
                     .targetKind === "workflow")) && (
                 <div className="grid gap-1">
