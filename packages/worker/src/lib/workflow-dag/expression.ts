@@ -370,6 +370,18 @@ function readPath(ctx: TemplateContext, segments: string[]): unknown {
   let cur: unknown = ctx;
   for (const seg of segments) {
     if (cur === null || cur === undefined) return undefined;
+    // If we encounter a JSON string and still have more path segments to traverse,
+    // auto-parse it so drilling continues into the payload. This handles the case
+    // where node outputs are stringified (e.g. tool outputs stored as JSON strings
+    // in the trace, or serialized through Cloudflare Workflows steps).
+    if (typeof cur === 'string') {
+      try {
+        cur = JSON.parse(cur);
+      } catch {
+        // Not valid JSON; can't drill further into a string
+        return undefined;
+      }
+    }
     if (typeof cur !== 'object') return undefined;
     cur = (cur as Record<string, unknown>)[seg];
   }

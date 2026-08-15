@@ -244,3 +244,85 @@ describe('parseTemplate isSingle with whitespace', () => {
     expect(renderTemplate('prefix {{trigger.data.obj}}', c)).toBe('prefix {"a":1}');
   });
 });
+
+describe('JSON string auto-parsing in path drilling', () => {
+  it('auto-parses JSON strings to drill into nested properties', () => {
+    // Simulates tool outputs that are stringified (e.g. from storage or CF Workflows serialization)
+    const c = {
+      nodes: {
+        get_pr: { data: JSON.stringify({ url: 'https://github.com/...', files: ['a.ts', 'b.ts'] }) },
+      },
+    };
+    expect(renderTemplate('{{nodes.get_pr.data.url}}', c)).toBe('https://github.com/...');
+    expect(renderTemplate('{{nodes.get_pr.data.files}}', c)).toEqual(['a.ts', 'b.ts']);
+  });
+
+  it('handles nested object drilling through stringified layers', () => {
+    const c = {
+      nodes: {
+        fetch: {
+          data: JSON.stringify({
+            response: {
+              status: 200,
+              body: JSON.stringify({ id: 123, name: 'test' }),
+            },
+          }),
+        },
+      },
+    };
+    expect(renderTemplate('{{nodes.fetch.data.response.status}}', c)).toBe(200);
+    // Double-stringified body can't be drilled further without additional JSON.parse
+    // This is expected: we only auto-parse one level
+    expect(renderTemplate('{{nodes.fetch.data.response.body}}', c)).toBe(JSON.stringify({ id: 123, name: 'test' }));
+  });
+
+  it('returns undefined when drilling into non-object after parsing fails', () => {
+    const c = {
+      nodes: {
+        bad: { data: 'not json {]' },
+      },
+    };
+    expect(renderTemplate('{{nodes.bad.data.field}}', c)).toBeNull();
+  });
+
+  it('works in mixed-text templates too', () => {
+    const c = {
+      nodes: {
+        get_pr: { data: JSON.stringify({ files: 3 }) },
+      },
+    };
+    expect(renderTemplate('PR has {{nodes.get_pr.data.files}} files', c)).toBe('PR has 3 files');
+  });
+});
+
+describe('LLM node output with outputSchema', () => {
+  it('drills into structured output wrapped under .output', () => {
+    const c = {
+      nodes: {
+        generate_review: {
+          data: {
+            response: 'some text',
+            output: { verdict: 'APPROVE', body: '...' },
+            usage: { inputTokens: 100 },
+          },
+        },
+      },
+    };
+    expect(renderTemplate('{{nodes.generate_review.data.output.verdict}}', c)).toBe('APPROVE');
+  });
+
+  it('works even if the entire data is stringified', () => {
+    const c = {
+      nodes: {
+        generate_review: {
+          data: JSON.stringify({
+            response: 'text',
+            output: { verdict: 'REQUEST_CHANGES' },
+            usage: {},
+          }),
+        },
+      },
+    };
+    expect(renderTemplate('{{nodes.generate_review.data.output.verdict}}', c)).toBe('REQUEST_CHANGES');
+  });
+});
