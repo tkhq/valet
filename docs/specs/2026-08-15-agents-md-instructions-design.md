@@ -1,7 +1,7 @@
 # AGENTS.md repo instructions — design
 
 Date: 2026-08-15
-Status: proposed
+Status: implemented
 Scope: `@valet/engine` (prompt assembly), `packages/api` (workspace read seam)
 
 ## Problem
@@ -53,6 +53,15 @@ the file at natural boundaries.
 The content lives in memory on the `Session` for the current attachment
 epoch. Nothing is persisted; a stale copy cannot outlive the sandbox state it
 was read from.
+
+The ready-transition refresh is async and unawaited, so the FIRST turn would
+race it. The engine closes that gap with `Session.ensureRepoInstructions()`,
+awaited by the thread at run start (right after the reconcile window): when a
+provider exists, the attachment is `ready`, and no refresh has completed yet,
+it awaits one load. It is a no-op after the first successful load — a
+workspace with no instructions is scanned once, not per turn — and a failed
+load leaves the flag unset so the next turn retries. Errors degrade to
+running without the fragment, never fail the turn.
 
 ### 2. One exec discovers and reads all AGENTS.md files
 
@@ -131,7 +140,7 @@ repoInstructionsProvider?: () => Promise<RepoInstructions | null>;
 interface RepoInstructions {
   /** Root AGENTS.md content of the primary binding, already size-capped. */
   content: string;
-  /** Workspace-relative paths of other AGENTS.md files (nested + secondary bindings). */
+  /** Absolute in-sandbox paths of other AGENTS.md files (nested + secondary bindings). */
   nestedPaths: string[];
 }
 ```
@@ -179,17 +188,36 @@ to promise precedence behavior for them.
 
 ## Testing
 
-- Engine unit test: overlay composition order and restore nesting with role +
-  cold hint + repo instructions all active in one turn; a turn with no
-  provider and a turn where the provider returns null.
-- Engine unit test: a `refreshRepoInstructions()` that resolves mid-turn does
-  not change the in-flight turn's system prompt; the next turn carries the new
-  content (the turn-start snapshot contract, decision 4).
-- Api unit test: the scan exec output parses into `RepoInstructions` — root
-  content, nested paths, cap + truncation marker, CLAUDE.md fallback,
-  missing-file → null.
-- Api integration test: a session against a fixture repo containing a root
-  `AGENTS.md` and one nested file; assert the turn's system prompt contains
-  the root content and the nested path list after the attachment is ready.
-- Regression: `pnpm --filter @valet/engine test happy-path` and the api
-  integration suite stay green with no provider wired.
+Implemented in `packages/engine/test/repo-instructions.test.ts` and
+`packages/api/src/engine/repo-instructions.test.ts`:
+
+- Engine (faux model + fake sandbox provider, the lazy-attachment idiom):
+  fragment framing (preamble, nested list, empty cases); a cold turn runs
+  without the fragment and a ready turn composes base → instructions → role
+  in order; the turn-start snapshot only changes after an explicit
+  `refreshRepoInstructions()` (decision 4's contract); a throwing provider
+  degrades the turn and retries on the next one; a `null` result is cached —
+  one provider call across turns.
+- Api (pure parse + stubbed sandbox exec): found-path/content split, root
+  path excluded from `nestedPaths`, nested-only workspaces, CLAUDE.md
+  fallback, cap + truncation marker, delimiter-lookalike content, legacy
+  `"."` target-dir normalization, not-ready and failed-exec rejections,
+  shell quoting.
+- Regression: `pnpm --filter @valet/engine test happy-path` and
+  `lazy-attachment` stay green with no provider wired.
+
+## Deviations
+
+- `RepoInstructions.nestedPaths` carries absolute in-sandbox paths, not
+  workspace-relative ones — the model feeds them straight to its `read`
+  tool.
+- The first load happens at run start via `Session.ensureRepoInstructions()`
+  (decision 1), not only through the ready-transition hook — the hook alone
+  loses the race for the first turn.
+- The fixture-repo api integration test was replaced by the engine turn test
+  plus api unit coverage of the exec/parse pair; the host wiring reuses the
+  `workspaceSkillsProvider` accessor pattern that `host.skill-tool` tests
+  already exercise.
+- Child sessions spawned with a repo binding get the provider too (same
+  clone prep, same instructions); workflow sessions clone nothing and are
+  excluded.

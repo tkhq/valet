@@ -68,8 +68,8 @@ const DEFAULT_USER_EMAIL = "agent@valet.local";
 
 
 /** POSIX single-quote escaping for values interpolated into `sh` command
- * strings passed to `Sandbox.exec`. */
-function shQuote(value: string): string {
+ * strings passed to `Sandbox.exec`. Exported for repo-instructions.ts. */
+export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

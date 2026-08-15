@@ -49,6 +49,7 @@ export {
   parseOrchestratorSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export { buildRepoInstructionsFragment } from "./repo-instructions.js";
 export {
   capturePatch,
   patchBlobKey,
