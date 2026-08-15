@@ -1,0 +1,109 @@
+// @vitest-environment jsdom
+/**
+ * TriggerDialog — creates schedules and event triggers, shows server errors
+ * verbatim, and picks event keys from the catalog.
+ */
+import { describe, expect, it, vi } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+
+const createScheduleMutateAsync = vi.fn().mockResolvedValue({});
+const createEventTriggerMutateAsync = vi.fn().mockResolvedValue({});
+const updateScheduleMutateAsync = vi.fn().mockResolvedValue({});
+const updateEventMutateAsync = vi.fn().mockResolvedValue({});
+
+vi.mock("~/api/workflows", () => ({
+  useWorkflows: () => ({ data: { workflows: [] }, isLoading: false }),
+  useCreateSchedule: () => ({
+    mutateAsync: createScheduleMutateAsync,
+    isPending: false,
+    error: null,
+  }),
+  useCreateEventTrigger: () => ({
+    mutateAsync: createEventTriggerMutateAsync,
+    isPending: false,
+    error: null,
+  }),
+  useUpdateSchedule: () => ({
+    mutateAsync: updateScheduleMutateAsync,
+    isPending: false,
+    error: null,
+  }),
+  useUpdateEventTrigger: () => ({
+    mutateAsync: updateEventMutateAsync,
+    isPending: false,
+    error: null,
+  }),
+  useTriggerCatalog: () => ({
+    data: {
+      catalog: [
+        {
+          service: "github",
+          entries: [
+            {
+              key: "github.pull_request.opened",
+              description: "A pull request was opened",
+              filters: [],
+            },
+          ],
+        },
+      ],
+    },
+  }),
+  useWorkflowTriggers: () => ({ data: { triggers: [] }, isLoading: false, error: null }),
+}));
+
+import { TriggerDialog } from "./trigger-dialog";
+
+describe("TriggerDialog", () => {
+  it("creates an orchestrator schedule from the form", async () => {
+    createScheduleMutateAsync.mockClear().mockResolvedValue({});
+    render(<TriggerDialog open onOpenChange={() => {}} />);
+    fireEvent.click(screen.getByText(/^Schedule$/));
+    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "digest" } });
+    fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
+    fireEvent.click(screen.getByLabelText(/orchestrator/i));
+    fireEvent.change(screen.getByLabelText(/prompt/i), { target: { value: "summarize" } });
+    fireEvent.click(screen.getByText(/^Create$/));
+    await waitFor(() =>
+      expect(createScheduleMutateAsync).toHaveBeenCalledWith({
+        name: "digest",
+        cron: "0 9 * * *",
+        timezone: expect.any(String),
+        target: { kind: "orchestrator", prompt: "summarize" },
+      }),
+    );
+  });
+
+  it("shows the server's corrective error on failure", async () => {
+    createScheduleMutateAsync
+      .mockClear()
+      .mockRejectedValueOnce(
+        new Error('invalid cron "x". Use 5 fields, for example "0 9 * * 1-5".'),
+      );
+    render(<TriggerDialog open onOpenChange={() => {}} />);
+    fireEvent.click(screen.getByText(/^Schedule$/));
+    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "bad" } });
+    fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "x" } });
+    fireEvent.click(screen.getByText(/^Create$/));
+    await waitFor(() => expect(screen.getByText(/Use 5 fields/)).toBeTruthy());
+  });
+
+  it("creates an event trigger with a catalog-picked key", async () => {
+    createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
+    render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);
+    fireEvent.click(screen.getByText(/^Event$/));
+    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "on pr" } });
+    fireEvent.change(screen.getByLabelText(/event/i), {
+      target: { value: "github.pull_request.opened" },
+    });
+    fireEvent.click(screen.getByText(/^Create$/));
+    await waitFor(() =>
+      expect(createEventTriggerMutateAsync).toHaveBeenCalledWith({
+        workflowId: "wf_1",
+        name: "on pr",
+        eventKeys: ["github.pull_request.opened"],
+        filters: [],
+      }),
+    );
+  });
+});
