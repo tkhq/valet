@@ -6,7 +6,7 @@
  * lifecycle scenarios (poll sync, retention, orphan sweep, manual rebuild).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
@@ -781,6 +781,30 @@ describe("SourceService", () => {
       expect(headless[0].name).toBe("default-headless");
       expect(full).toHaveLength(1);
       expect(full[0].name).toBe("default-full");
+    });
+
+    it("partial state self-heals: a missing full base is re-seeded on the next call", async () => {
+      // Simulate a crash between Step 2 and Step 3: external + headless rows
+      // exist, the full base does not.
+      await service.seedDefaultBasesIfMissing(orgId);
+      await db
+        .delete(imageSources)
+        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.profile, "full")));
+
+      const before = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      expect(before).toHaveLength(2);
+      const externalBefore = before.find((s) => s.name === "stock-full")!;
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const after = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      expect(after).toHaveLength(3);
+      const full = after.find((s) => s.kind === "base" && s.profile === "full")!;
+      expect(full).toBeDefined();
+      // The restored full base parents at the pre-existing external row, not a
+      // duplicate.
+      expect(full.parentId).toBe(externalBefore.id);
+      expect(after.filter((s) => s.name === "stock-full")).toHaveLength(1);
     });
 
     it("two orgs seeded: 6 rows total (3 per org)", async () => {
