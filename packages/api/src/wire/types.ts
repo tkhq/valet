@@ -782,6 +782,10 @@ export interface CancelWorkflowRunResponse {
   ok: true;
 }
 
+export interface GlobalWorkflowRunSummary extends WorkflowRunSummary {
+  workflowName: string;
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }

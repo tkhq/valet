@@ -4,7 +4,7 @@
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   validateWorkflowDefinition,
   type RunParams,
@@ -16,10 +16,17 @@ import {
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowRuns, workflowVersions } from "../schema/index.js";
+import {
+  eventSubscriptions,
+  workflowDefinitions,
+  workflowRuns,
+  workflowSchedules,
+  workflowVersions,
+} from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import type {
   GetWorkflowRunResponse,
+  GlobalWorkflowRunSummary,
   WorkflowDefinitionSummary,
   WorkflowRunSummary,
 } from "../wire/types.js";
@@ -303,6 +310,20 @@ export async function deleteWorkflowDefinition(
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
+
+  // Triggers must not outlive the workflow: orphaned schedules would be
+  // disabled by the scheduler eventually, but the triggers list would show
+  // ghosts until then. Event subscriptions targeting the workflow are
+  // app-db rows with no FK, so remove them explicitly.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
+  const subs = await deps.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId));
+  for (const sub of subs) {
+    const target = sub.target as { kind?: string; workflowId?: string };
+    if (target?.kind === "workflow" && target.workflowId === id) {
+      await deps.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
+    }
+  }
+
   return "deleted";
 }
 
@@ -460,4 +481,37 @@ export async function getWorkflowRunDetail(
       createdAt: s.createdAt,
     })),
   };
+}
+
+export async function listRecentWorkflowRuns(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  limit = 50,
+): Promise<GlobalWorkflowRunSummary[]> {
+  const defs = await listWorkflowDefinitions(deps, owner);
+  if (defs.length === 0) return [];
+  const nameById = new Map(defs.map((d) => [d.id, d.name]));
+
+  const runRows = await deps.db
+    .select({ id: workflowRuns.id })
+    .from(workflowRuns)
+    .where(inArray(workflowRuns.workflowId, [...nameById.keys()]))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(limit);
+
+  const runs: GlobalWorkflowRunSummary[] = [];
+  for (const r of runRows) {
+    const run = await deps.workflowStore.getRun(r.id);
+    if (!run) continue;
+    runs.push({
+      runId: run.runId,
+      workflowId: run.params.workflowId,
+      workflowName: nameById.get(run.params.workflowId) ?? run.params.workflowId,
+      status: run.status,
+      outcome: run.outcome,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+    });
+  }
+  return runs;
 }
