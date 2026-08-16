@@ -15,6 +15,10 @@ mkdir -p "$RUNTIME_DIR" /var/log/valet /home/dockerd/.local/share/docker
 chown -R dockerd:dockerd "$RUNTIME_DIR" /home/dockerd/.local/share/docker
 touch "$LOG"
 chown dockerd:dockerd "$LOG"
+# Make the workspace writable by the workload user. Non-recursive on
+# purpose: at first start the mount is empty or freshly cloned by prep
+# running as dockerd; a recursive chown of a large repo would be slow.
+chown dockerd:dockerd /workspace 2>/dev/null || true
 if [ -S "$SOCK" ] && su -s /bin/sh dockerd -c "DOCKER_HOST=unix://'$SOCK' docker version" >/dev/null 2>&1; then
   exit 0
 fi

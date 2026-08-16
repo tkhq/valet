@@ -125,6 +125,22 @@ describe("installCredentialHelper", () => {
     expect(commands).toContain("rm -rf '.valet-prep'");
   });
 
+  it("runs ONLY the /usr/local/bin install exec privileged; git config execs stay non-privileged", async () => {
+    const sandbox = new RecordingSandbox();
+    await installCredentialHelper(sandbox, API_URL);
+
+    const install = sandbox.execCalls.find((c) => c.command === INSTALL_CMD);
+    expect(install?.opts?.privileged).toBe(true);
+
+    // Every git config (and the staging cleanup) runs as the workload user
+    // so /home/dockerd/.gitconfig — not /root/.gitconfig — gets the config
+    // in docker-enabled sandboxes.
+    for (const call of sandbox.execCalls) {
+      if (call.command === INSTALL_CMD) continue;
+      expect(call.opts?.privileged, call.command).toBeUndefined();
+    }
+  });
+
   it("install failure THROWS before any git config is attempted", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.setResult(INSTALL_CMD, { stdout: "", stderr: "permission denied", exitCode: 1 });
@@ -158,6 +174,16 @@ describe("configureGitIdentity", () => {
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands).toContain("git config --global user.name 'Ada Lovelace'");
     expect(commands).toContain("git config --global user.email 'ada@example.com'");
+  });
+});
+
+describe("prepBinding exec identity", () => {
+  it("git clone runs non-privileged (as the workload user in docker sandboxes)", async () => {
+    const sandbox = new RecordingSandbox();
+    await prepBinding(sandbox, "widgets", binding());
+    const clone = sandbox.execCalls.find((c) => c.command.startsWith("git clone"));
+    expect(clone).toBeDefined();
+    expect(clone?.opts?.privileged).toBeUndefined();
   });
 });
 

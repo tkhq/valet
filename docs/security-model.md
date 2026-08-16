@@ -125,6 +125,10 @@ sandboxes and is weaker than `--privileged`: the sandbox has no raw block
 devices, all other capabilities are dropped, and system paths are selectively
 unmasked rather than fully exposed.
 
+In docker-enabled sandboxes the agent's commands also run as a non-root
+workload user (`dockerd`) rather than container root — a defense-in-depth
+bonus on top of the container boundary.
+
 The daemon and every container it runs live inside the sandbox's user
 namespace. An escape from an inner container lands in the rootless daemon's
 user namespace, not on the host. It does NOT make the sandbox privileged,
