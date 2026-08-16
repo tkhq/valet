@@ -144,6 +144,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-ce-cli=${DOCKER_VERSION} \
         docker-ce=${DOCKER_VERSION} \
         docker-ce-rootless-extras=${DOCKER_VERSION} \
+        docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1500 dockerd \
