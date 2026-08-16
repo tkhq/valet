@@ -117,3 +117,56 @@ helm upgrade --install valet deploy/chart/valet \
   or `--set-file`. Or leave them blank to let the chart generate and
   retain `BETTER_AUTH_SECRET`, `VALET_ENCRYPTION_KEY`, and the bundled
   Postgres password.
+
+## Sessions and profiles
+
+Every Valet session runs under one of two profiles:
+
+- **`headless`** (default) — agent-only sandbox. Starts on a lean `node:22-bookworm-slim` base augmented with git, ripgrep, gh, curl, and openssh-client. Used for all AI-agent sessions and repo-bound workspaces.
+- **`full`** (opt-in) — interactive developer sandbox. FROMs the CI-published `ghcr.io/tkhq/valet-sandbox` image, which ships the compiled `@valet/sandbox-gateway` bundle, ttyd, and code-server in addition to all headless tooling. Required for browser-tab Terminal and VS Code sessions.
+
+### Auto-seeded base sources
+
+On first boot (and idempotently on subsequent boots), Valet seeds three `image_sources` rows per org:
+
+| kind | name | profile | FROM |
+|---|---|---|---|
+| `external` | `stock-full` | — | `VALET_FULL_BASE_IMAGE` (default `ghcr.io/tkhq/valet-sandbox:latest`) |
+| `base` | `default-headless` | `headless` | `VALET_HEADLESS_BASE_IMAGE` (default `node:22-bookworm-slim`) |
+| `base` | `default-full` | `full` | parent = `stock-full` external row |
+
+The headless base's setup commands install the agent tooling layer. The full base has empty setup commands — the full image ships everything.
+
+### Customising base images
+
+To pin a specific CI-published full image for reproducible deploys:
+
+```yaml
+sandbox:
+  fullBaseImage: ghcr.io/tkhq/valet-sandbox:sha-abc1234
+  headlessBaseImage: node:22-bookworm-slim  # or your own image
+```
+
+To layer additional tooling onto the auto-seeded headless base (e.g. python3), patch its `setupCommands` in place — do **not** POST a new `kind='base'` row with the same profile, as the unique index on `(org_id, profile) WHERE kind='base'` would 409:
+
+```sh
+# 1. Find the auto-seeded headless base's id
+GET /api/org/sources
+# → look for the row with name="default-headless" and profile="headless"
+
+# 2. Append your setup commands (supply the full desired list — this replaces, not appends)
+PATCH /api/org/sources/<headless-base-id>
+{
+  "setupCommands": [
+    "apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates coreutils curl procps bash openssh-client && rm -rf /var/lib/apt/lists/*",
+    "apt-get install -y python3"
+  ]
+}
+```
+
+To re-parent a repo source at a different base, use:
+
+```sh
+PATCH /api/org/sources/<repo-source-id>
+{ "parentId": "<base-id>" }
+```

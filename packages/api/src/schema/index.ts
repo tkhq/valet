@@ -468,10 +468,30 @@ export const childWatches = pgTable(
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
+    // Retention clock: stamped by markSettled, re-stamped on every settle.
+    // The retention sweep destroys a parked sandbox once this is older
+    // than the retention window.
+    settledAt: bigint("settled_at", { mode: "number" }),
+    // Set once the child's sandbox is actually destroyed (eagerly on a
+    // non-hibernating backend, by the retention sweep on a hibernating
+    // one). NULL on a settled row means a reclaim is still owed;
+    // markSettled clears it so a re-opened child starts a fresh cycle.
+    sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // Provider sandbox id recorded at park time. The retention sweep needs
+    // it for a child evicted from the host cache (an api restart) — the
+    // engine session row's sandbox_id is only written at creation, before
+    // any sandbox provisions, so it cannot serve as the handle.
+    parkedSandboxId: text("parked_sandbox_id"),
   },
   (t) => [
     index("child_watches_parent").on(t.parentSessionId),
     index("child_watches_settled").on(t.settled),
+    // Partial index for the retention sweep: rows are never deleted and
+    // every historical child ends settled, so the sweep's candidate scan
+    // must be bounded by the (small) unreclaimed set, not table history.
+    index("child_watches_retention")
+      .on(t.settledAt)
+      .where(sql`${t.settled} = true AND ${t.sandboxReclaimedAt} IS NULL`),
   ],
 );
 
@@ -1222,6 +1242,9 @@ export const imageSources = pgTable(
     pullSecretName: text("pull_secret_name"),
     // kind='base' fields
     setupCommands: jsonb("setup_commands"),
+    // Populated only for kind='base' rows. Identifies which session profile
+    // this base image targets. Null for kind='external' and kind='repo'.
+    profile: text("profile", { enum: ["headless", "full"] }),
     // kind='repo' fields
     repoHost: text("repo_host"),
     repoFullName: text("repo_full_name"),

@@ -1,0 +1,28 @@
+# Sandbox prebuild recipe for the valet repo itself (schema:
+# docs/prebuild-yaml.md). Bakes the dev toolchain and the pnpm install
+# into the image so sandbox cold starts skip the slow steps.
+#
+# skipDetect is required: auto-detection would emit a bare
+# `pnpm install --frozen-lockfile` before setup runs, and the sandbox base
+# images ship Node without pnpm on PATH. We enable corepack first, then
+# install ourselves.
+skipDetect: true
+setup:
+  # Base packages the dev loop and e2e suites expect: make (Makefile
+  # targets), python3 (scripts/docs/docs_lint.py), jq, build-essential
+  # (native module builds during pnpm install). curl + ca-certificates are
+  # present on the shipped sandbox images; install them anyway so the helm
+  # and kubectl steps below work on any Debian-based override image.
+  - "apt-get update && apt-get install -y --no-install-recommends make python3 jq build-essential curl ca-certificates && rm -rf /var/lib/apt/lists/*"
+  # pnpm via corepack — pinned to match docker/Dockerfile.api and
+  # docker/Dockerfile.sandbox-k8s.
+  - "corepack enable && corepack prepare pnpm@9.12.3 --activate"
+  - "pnpm install --frozen-lockfile"
+  # helm — the helm-golden e2e suite and deploy/chart work. Pinned; bump
+  # deliberately. Download the tarball plus its published SHA-256 file and
+  # verify before extraction.
+  - "cd /tmp && arch=$(dpkg --print-architecture) && curl -fsSL -O https://get.helm.sh/helm-v3.16.4-linux-${arch}.tar.gz -O https://get.helm.sh/helm-v3.16.4-linux-${arch}.tar.gz.sha256sum && sha256sum -c helm-v3.16.4-linux-${arch}.tar.gz.sha256sum && tar -xzf helm-v3.16.4-linux-${arch}.tar.gz && install -m 0755 linux-${arch}/helm /usr/local/bin/helm && rm -rf helm-v3.16.4-linux-${arch}.tar.gz* linux-${arch} && helm version"
+  # kubectl — make k8s-* targets and the sandbox-kubernetes package. Pinned;
+  # bump deliberately. Download the binary plus its published SHA-256 file and
+  # verify before install.
+  - "cd /tmp && arch=$(dpkg --print-architecture) && curl -fsSL -O https://dl.k8s.io/release/v1.31.4/bin/linux/${arch}/kubectl -O https://dl.k8s.io/release/v1.31.4/bin/linux/${arch}/kubectl.sha256 && echo \"$(cat kubectl.sha256)  kubectl\" | sha256sum -c && install -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl kubectl.sha256 && kubectl version --client"

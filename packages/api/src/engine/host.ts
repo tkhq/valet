@@ -11,6 +11,7 @@ import {
   NoCredentialsError,
   type BlobStore,
   type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type CredentialStore,
   type EventStream,
@@ -91,6 +92,15 @@ export interface EngineHostOpts {
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
+   * Optional per-profile override for the fall-through stock image.
+   * When present, `stockImage` in `resolveSnapshot` uses
+   * `defaultImages[profile] ?? defaultImage` for the session's profile.
+   * Used to keep full-profile sessions from silently falling through to
+   * the headless base image during the boot window (before the org's
+   * default-full base bake lands).
+   */
+  defaultImages?: Partial<Record<"headless" | "full", string>>;
+  /**
    * The app db handle — required by `orchestratorSessionFor` (memory
    * snapshot assembly, journal bootstrap, the compaction hook, and the
    * `orchestrator_identities` upsert). Every session builder also uses it
@@ -136,6 +146,13 @@ export interface EngineHostOpts {
    * session that may read them back.
    */
   childReader?: ChildReader;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childSender`,
+   * which is what the engine's `child_send` built-in calls. Completes the
+   * child toolset (`task` spawns, `child_read` reads, `child_send`
+   * steers); scoped exactly like the other two — children never get it.
+   */
+  childSender?: ChildSender;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -595,10 +612,13 @@ export class EngineHost {
       meta.repos,
       specProvider !== undefined,
     );
-    // Initial sandbox image: the stock default. The specProvider closure may
-    // resolve a prebuild image override at provision time — the engine applies
-    // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImage;
+    // Initial sandbox image: the per-profile stock default. Full-profile
+    // sessions use `defaultImages["full"]` so the boot-window fall-through
+    // (before the org's default-full base bake lands) picks the full image
+    // rather than silently booting the headless base. The specProvider closure
+    // may resolve a prebuild image override at provision time — the engine
+    // applies DesiredSandboxSpec.image when the specProvider returns one.
+    const image = this.opts.defaultImages?.[profile] ?? this.opts.defaultImage;
     // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker key.
     // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
     const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
@@ -784,7 +804,11 @@ export class EngineHost {
 
     const host = this;
     const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
-    const stockImage = this.opts.defaultImage ?? "";
+    const profile: "headless" | "full" = meta.profile ?? "headless";
+    const stockImage =
+      this.opts.defaultImages?.[profile] ??
+      this.opts.defaultImage ??
+      "";
 
     return async () => {
       const snap = await resolveSnapshot({
@@ -1272,6 +1296,7 @@ export class EngineHost {
         internalToken: internalToken(),
         ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
         ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
+        ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
@@ -1579,6 +1604,27 @@ export class EngineHost {
    */
   liveSession(sessionId: string): Session | null {
     return this.cache.get(sessionId)?.session ?? null;
+  }
+
+  /**
+   * Whether the sandbox backend can suspend/resume (hibernation). The
+   * child retention path consults this at settle time: capable backends
+   * park a settled child's sandbox for later revival; the rest destroy it
+   * eagerly, exactly as before retention existed.
+   */
+  sandboxHibernationCapable(): boolean {
+    return this.opts.sandboxProvider.capabilities().hibernation;
+  }
+
+  /**
+   * Destroy one sandbox by its provider id, without touching any session
+   * state. The child retention sweep uses this for a parked child whose
+   * session is no longer cached (an api restart evicted it) — the
+   * `child_watches.parkedSandboxId` recorded at park time is the only
+   * remaining handle.
+   */
+  async destroySandbox(sandboxId: string): Promise<void> {
+    await this.opts.sandboxProvider.destroy(sandboxId);
   }
 
   /**
