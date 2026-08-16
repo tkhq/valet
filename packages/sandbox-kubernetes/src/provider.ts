@@ -635,6 +635,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       // Only advertise credsMount when secretsApi is wired. A provider
       // constructed without secretsApi cannot honor updateCreds().
       credsMount: Boolean(this.deps.secretsApi),
+      dockerSupport: true,
     };
   }
 

@@ -220,6 +220,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
 	"profile" text DEFAULT 'headless' NOT NULL,
+	"docker" boolean DEFAULT false NOT NULL,
 	"bake_id" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL

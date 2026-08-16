@@ -17,6 +17,7 @@ const DETAIL: GetSessionResponse = {
   ...SUMMARY,
   messageCount: 3,
   profile: "headless",
+  docker: false,
   model: "claude",
 };
 

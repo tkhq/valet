@@ -205,3 +205,45 @@ describe("credsCheckScript path-traversal guard", () => {
     expect(() => credsCheckScript({}, ["."])).toThrow(/unsafe key/);
   });
 });
+
+describe("docker flag (rootless DinD)", () => {
+  const base = {
+    containerName: "valet-sandbox-x",
+    image: "img:1",
+    workspaceHostPath: "/tmp/ws",
+    network: "bridge",
+  };
+
+  it("adds exactly the rootless relaxations when docker is true", () => {
+    const args = buildDockerRunArgs({ ...base, docker: true });
+    const joined = args.join(" ");
+    expect(joined).toContain("--security-opt seccomp=unconfined");
+    expect(joined).toContain("--security-opt apparmor=unconfined");
+    expect(joined).toContain("--security-opt systempaths=unconfined");
+    expect(joined).toContain("--cap-add SYS_ADMIN");
+    expect(joined).toContain("--cap-add NET_ADMIN");
+    expect(joined).toContain("--device /dev/fuse");
+    expect(joined).toContain("--device /dev/net/tun");
+    expect(joined).toContain("--env VALET_SANDBOX_DOCKER=1");
+    expect(joined).not.toContain("--privileged");
+  });
+
+  it("headless+docker runs the start-headless probe wrapper", () => {
+    const args = buildDockerRunArgs({ ...base, docker: true });
+    expect(args[args.length - 1]).toBe(
+      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+    );
+  });
+
+  it("emits nothing docker-related when the flag is absent", () => {
+    const joined = buildDockerRunArgs(base).join(" ");
+    expect(joined).not.toContain("seccomp");
+    expect(joined).not.toContain("apparmor");
+    expect(joined).not.toContain("systempaths");
+    expect(joined).not.toContain("/dev/fuse");
+    expect(joined).not.toContain("VALET_SANDBOX_DOCKER");
+    expect(joined).not.toContain("cap-add");
+    expect(joined).not.toContain("SYS_ADMIN");
+    expect(joined).not.toContain("NET_ADMIN");
+  });
+});

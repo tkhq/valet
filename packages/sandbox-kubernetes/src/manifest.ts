@@ -36,6 +36,15 @@ export const CREDS_MOUNT_PATH = "/etc/valet/creds";
 /** Volume name for the per-sandbox credential Secret volume. */
 export const CREDS_VOLUME_NAME = "valet-creds";
 
+/** Volume name for the rootless Docker data-root emptyDir (rootless DinD). */
+export const DOCKER_STATE_VOLUME_NAME = "docker-state";
+/** Mount path for the rootless Docker data-root inside the container. */
+export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
+/** Volume name for the /dev/fuse hostPath device (rootless DinD). */
+export const DEV_FUSE_VOLUME_NAME = "dev-fuse";
+/** Volume name for the /dev/net/tun hostPath device (rootless DinD — needed by rootlesskit). */
+export const DEV_TUN_VOLUME_NAME = "dev-tun";
+
 /** Returns the name of the Kubernetes Secret backing the creds volume for a sandbox. */
 export function credsSecretName(sandboxName: string): string {
   return `valet-creds-${sandboxName}`;
@@ -155,6 +164,32 @@ export function buildSandboxManifest(
     ];
   }
 
+  // Rootless DinD: seccomp Unconfined, VALET_SANDBOX_DOCKER env, docker-state
+  // emptyDir + /dev/fuse hostPath volumes. Mirrors the AppArmor+seccomp
+  // mechanism used by the rootless BuildKit builder in k8s-builder.ts. Never
+  // sets privileged — rootless Docker does not require it.
+  if (opts.docker) {
+    container.securityContext = {
+      seccompProfile: { type: "Unconfined" },
+      capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
+      procMount: "Unmasked",
+    };
+    container.env = [...(container.env ?? []), { name: "VALET_SANDBOX_DOCKER", value: "1" }];
+    container.volumeMounts = [
+      ...(container.volumeMounts ?? []),
+      { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
+      { name: DEV_FUSE_VOLUME_NAME, mountPath: "/dev/fuse" },
+      { name: DEV_TUN_VOLUME_NAME, mountPath: "/dev/net/tun" },
+    ];
+    if (!isFullProfile) {
+      container.command = [
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+      ];
+    }
+  }
+
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     containers: [container],
     restartPolicy: "Always",
@@ -171,8 +206,26 @@ export function buildSandboxManifest(
     podSpec.volumes = [credsVolume];
   }
 
+  if (opts.docker) {
+    podSpec.volumes = [
+      ...(podSpec.volumes ?? []),
+      { name: DOCKER_STATE_VOLUME_NAME, emptyDir: {} },
+      { name: DEV_FUSE_VOLUME_NAME, hostPath: { path: "/dev/fuse", type: "CharDevice" } },
+      { name: DEV_TUN_VOLUME_NAME, hostPath: { path: "/dev/net/tun", type: "CharDevice" } },
+    ];
+  }
+
   const spec: SandboxCR["spec"] = {
     podTemplate: {
+      ...(opts.docker
+        ? {
+            metadata: {
+              annotations: {
+                [`container.apparmor.security.beta.kubernetes.io/${SANDBOX_CONTAINER_NAME}`]: "unconfined",
+              },
+            },
+          }
+        : {}),
       spec: podSpec,
     },
     volumeClaimTemplates: [

@@ -76,6 +76,7 @@ export interface PrebuildOverride {
   image?: string;
   setup?: string[];
   skipDetect?: boolean;
+  docker?: boolean;
 }
 
 /**
@@ -112,6 +113,12 @@ export async function loadPrebuildOverride(
     }
     override.skipDetect = obj.skipDetect;
   }
+  if (obj.docker !== undefined) {
+    if (typeof obj.docker !== "boolean") {
+      throw new Error(".valet/prebuild.yaml: docker must be a boolean");
+    }
+    override.docker = obj.docker;
+  }
   return override;
 }
 
@@ -122,6 +129,8 @@ export interface ResolvedRecipe {
   setup: string[];
   /** Override base image ref, when the repo pins one. */
   image?: string;
+  /** Docker daemon inside sandbox, when the repo enables it. */
+  docker?: boolean;
 }
 
 /**
@@ -143,6 +152,7 @@ export async function resolveRecipe(
     recipe,
     setup: override?.setup ?? [],
     image: override?.image,
+    ...(override?.docker !== undefined ? { docker: override.docker } : {}),
   };
 }
 

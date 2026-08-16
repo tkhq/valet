@@ -332,6 +332,7 @@ describeDocker("DockerSandbox", () => {
       isolated: true,
       coldStartEstimateMs: 8000,
       credsMount: true,
+      dockerSupport: true,
     });
   });
 

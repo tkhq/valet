@@ -58,6 +58,7 @@ function stubDeps(opts: StubOpts = {}): {
         updatedAt: 1,
         messageCount: 0,
         profile: body.profile ?? "headless",
+        docker: body.docker ?? false,
       });
     },
     sendPrompt: (id, body) => {

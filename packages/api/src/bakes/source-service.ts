@@ -45,7 +45,7 @@ import {
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveDefaultImage } from "../providers/sandbox-backend.js";
-import { resolveRecipe, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
+import { resolveRecipe, loadPrebuildOverride, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
 import type { SpawnFn } from "../prebuilds/docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { pushRefFor } from "../prebuilds/k8s-builder.js";
@@ -291,6 +291,53 @@ export async function resolveRecipeFromGitHub(
     if ((await read(lockfile)) !== null) files.push(lockfile);
   }
   return resolveRecipe(files, read);
+}
+
+const repoDockerCache = new Map<string, { value: boolean; at: number }>();
+const REPO_DOCKER_TTL_MS = 10 * 60 * 1000;
+
+/** Clears the module-level `repoDockerFlag` cache. Exposed for test isolation
+ * only — production code must not call this. */
+export function clearRepoDockerCache(): void {
+  repoDockerCache.clear();
+}
+
+/** Best-effort read of `.valet/prebuild.yaml`'s `docker` key for a repo ref.
+ * Errors (auth, rate limit, bad YAML) resolve `false`: the session still
+ * starts, without docker. The session-create `docker` option is the
+ * corrective override when the repo read cannot succeed.
+ *
+ * Results are cached per `owner/repo@ref` for 10 minutes (both `true` and
+ * `false` are cached so a missing file does not generate repeated API calls). */
+export async function repoDockerFlag(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<boolean> {
+  const key = `${owner}/${repo}@${ref}`;
+  const hit = repoDockerCache.get(key);
+  if (hit && Date.now() - hit.at < REPO_DOCKER_TTL_MS) return hit.value;
+  let value = false;
+  try {
+    const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
+    const override = await loadPrebuildOverride(read);
+    value = override?.docker === true;
+  } catch (err) {
+    console.error(
+      `repoDockerFlag: read failed for ${key}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  // Crude size cap: clear the whole map rather than LRU-evict. The map holds
+  // at most ~1000 entries (owner/repo@ref strings + booleans), which is small
+  // enough in memory; clearing is O(1) and avoids the complexity of a real
+  // eviction policy. A hard limit of 1000 is far beyond any realistic session
+  // volume before the 10-min TTL would reclaim entries anyway.
+  if (repoDockerCache.size >= 1000) repoDockerCache.clear();
+  repoDockerCache.set(key, { value, at: Date.now() });
+  return value;
 }
 
 /** Resolves an `api`-purpose GitHub token for `owner/repo`, falling back to

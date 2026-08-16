@@ -2,6 +2,7 @@
 set -euo pipefail
 WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
+if [ -x /start-docker.sh ]; then /start-docker.sh || true; fi
 if [ "${VALET_SANDBOX_PROFILE:-headless}" = "full" ]; then
   code-server --bind-addr "127.0.0.1:8765" --auth none \
     --disable-telemetry --disable-update-check --welcome-text "Valet Workspace" "$WORK_DIR" &

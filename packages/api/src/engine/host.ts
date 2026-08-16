@@ -47,6 +47,7 @@ import {
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -260,6 +261,9 @@ export interface SessionMeta {
   /** Interactive-service profile (sandbox auth gateway plan, Task 5).
    * Defaults to "headless" when omitted. */
   profile?: "headless" | "full";
+  /** Request a rootless docker daemon inside this session's sandbox
+   * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
+  docker?: boolean;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -615,11 +619,15 @@ export class EngineHost {
     // may resolve a prebuild image override at provision time — the engine
     // applies DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImages?.[profile] ?? this.opts.defaultImage;
+    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker key.
+    // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
+    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
       env: sandboxMint?.env,
       profile,
+      ...(dockerFlag ? { docker: true } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
@@ -961,6 +969,71 @@ export class EngineHost {
       }
       return { type: "oauth2", accessToken: resolved.token };
     };
+  }
+
+  /**
+   * Best-effort: reads `.valet/prebuild.yaml`'s `docker` key for the session's
+   * primary repo. Returns `false` on any failure (no token, no repos, non-GitHub
+   * host, network error, bad YAML) — the session still starts without docker.
+   *
+   * Mirrors the guard structure of `buildCredentialResolver`: exits early when
+   * `githubTokenDeps`/`db` are not wired (db-less test environments).
+   */
+  private async resolveRepoDockerFlag(sessionId: string, meta: SessionMeta): Promise<boolean> {
+    const tokenDeps = this.opts.githubTokenDeps;
+    const db = this.opts.db;
+    if (!tokenDeps || !db) return false;
+    try {
+      const primaryRepo = meta.repos?.[0];
+      if (!primaryRepo) return false;
+      const host = primaryRepo.host ?? "github.com";
+      if (host !== "github.com") return false;
+      const [owner, repoName] = primaryRepo.fullName.split("/");
+      if (!owner || !repoName) return false;
+      const ref = primaryRepo.ref ?? "HEAD";
+      const fullDeps = {
+        db,
+        credentials: this.opts.engineCredentials,
+        key: tokenDeps.key,
+        apiUrl: tokenDeps.apiUrl,
+        githubUrl: tokenDeps.githubUrl,
+        fetchImpl: tokenDeps.fetchImpl,
+        now: tokenDeps.now,
+      };
+      const resolved = await resolveSessionGitHubToken(
+        fullDeps,
+        { orgId: meta.orgId, sessionId, purpose: "api" },
+      );
+      const TIMEOUT_MS = 5_000;
+      const timedOut = Symbol("timedOut");
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+        timeoutId = setTimeout(() => resolve(timedOut), TIMEOUT_MS);
+        // Unref so the timer does not keep the process alive after all real work ends.
+        if (timeoutId && typeof (timeoutId as NodeJS.Timeout).unref === "function") {
+          (timeoutId as NodeJS.Timeout).unref();
+        }
+      });
+      const result = await Promise.race([
+        repoDockerFlag(fullDeps, resolved.token, owner, repoName, ref),
+        timeoutPromise,
+      ]);
+      clearTimeout(timeoutId);
+      if (result === timedOut) {
+        // Do not cache — a timeout is not a repo answer.
+        console.error(
+          `EngineHost: resolveRepoDockerFlag timed out for session ${sessionId}`,
+        );
+        return false;
+      }
+      return result;
+    } catch (err) {
+      console.error(
+        `EngineHost: resolveRepoDockerFlag failed for session ${sessionId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return false;
+    }
   }
 
   /**

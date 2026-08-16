@@ -79,6 +79,9 @@ export interface SessionDetail extends SessionSummary {
   /** Session-default model id. Threads inherit when they have no override. */
   model?: string;
   profile: SandboxProfile;
+  /** Request a rootless docker daemon inside this session's sandbox
+   * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
+  docker: boolean;
   /** Repos bound to this session, in position order. Omitted when unbound. */
   repos?: RepoBinding[];
 }
@@ -90,6 +93,9 @@ export interface CreateSessionRequest {
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
   profile?: SandboxProfile;
+  /** Request a rootless docker daemon inside this session's sandbox
+   * (docker-in-sandbox). Defaults to false. */
+  docker?: boolean;
   /** Multiple repo bindings. Mutually exclusive with `repo` (400 if both set). */
   repos?: RepoBinding[];
   /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */

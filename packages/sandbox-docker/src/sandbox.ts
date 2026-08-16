@@ -156,6 +156,10 @@ export interface BuildDockerRunArgsOpts {
    * (create()) is responsible for writing the files BEFORE invoking docker run.
    * When absent, no creds volume is added. */
   credsHostDir?: string;
+  /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). Adds the
+   * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
+   * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
+  docker?: boolean;
 }
 
 /**
@@ -171,6 +175,16 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   runArgs.push("--workdir", CONTAINER_WORKSPACE);
   runArgs.push("-v", `${opts.workspaceHostPath}:${CONTAINER_WORKSPACE}`);
   if (opts.credsHostDir) runArgs.push("-v", `${opts.credsHostDir}:/etc/valet/creds:ro`);
+  if (opts.docker) {
+    runArgs.push("--security-opt", "seccomp=unconfined");
+    runArgs.push("--security-opt", "apparmor=unconfined");
+    runArgs.push("--security-opt", "systempaths=unconfined");
+    runArgs.push("--cap-add", "SYS_ADMIN");
+    runArgs.push("--cap-add", "NET_ADMIN");
+    runArgs.push("--device", "/dev/fuse");
+    runArgs.push("--device", "/dev/net/tun");
+    runArgs.push("--env", "VALET_SANDBOX_DOCKER=1");
+  }
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
@@ -201,6 +215,15 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
       "sh",
       "-c",
       "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+    );
+  } else if (opts.docker) {
+    // Same probe-and-degrade idiom as the full profile: images without the
+    // rootless toolchain still come up (docker commands then fail inside).
+    runArgs.push(
+      opts.image,
+      "sh",
+      "-c",
+      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
     );
   } else {
     // Keep the container alive — most images exit immediately if PID 1 is
@@ -751,6 +774,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       isolated: true,
       coldStartEstimateMs: 8000,
       credsMount: true,
+      dockerSupport: true,
     };
   }
 
@@ -806,6 +830,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       resources: opts.resources,
       profile: opts.profile,
       credsHostDir: sandboxCredsDir,
+      docker: opts.docker,
     });
 
     const startResult = await execProcess("docker", runArgs, {});
