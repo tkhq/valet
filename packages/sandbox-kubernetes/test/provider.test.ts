@@ -7,7 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { credsSecretName, sandboxCrName } from "../src/manifest.js";
+import { credsSecretName, DOCKER_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
 import type { K8sProviderConfig } from "../src/types.js";
 import type {
   CreateSandboxParams,
@@ -372,5 +373,97 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
     await provider.create({ workspace: "test-sandbox", credsFiles: { token: "abc" } });
     expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/credsFiles provided but secretsApi is not wired/));
     errorSpy.mockRestore();
+  });
+});
+
+// ── Exec identity threading (docker-enabled sandboxes) ─────────────────
+
+/** FakeObjectsApi variant whose GET responses carry configurable labels and
+ * the pod-name annotation, so restore() and resolvePodName both work. */
+class LabeledObjectsApi extends FakeObjectsApi {
+  constructor(private labels: Record<string, string> | undefined) {
+    super();
+  }
+
+  override async getNamespacedCustomObject(params: GetSandboxParams): Promise<unknown> {
+    return {
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      metadata: {
+        name: params.name,
+        uid: "cr-uid-123",
+        resourceVersion: "1",
+        labels: this.labels,
+        annotations: { "agents.x-k8s.io/pod-name": "pod-1" },
+      },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+      status: { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] },
+    };
+  }
+}
+
+/** Recording PodExecApi that reports success for every exec. */
+class RecordingExecApi implements PodExecApi {
+  commands: string[][] = [];
+
+  async exec(
+    _namespace: string,
+    _podName: string,
+    _containerName: string,
+    command: string[],
+    _stdout: unknown,
+    _stderr: unknown,
+    _stdin: unknown,
+    _tty: boolean,
+    statusCallback?: (status: ExecStatus) => void,
+  ): Promise<{ close(): void }> {
+    this.commands.push(command);
+    queueMicrotask(() => statusCallback?.({ status: "Success" }));
+    return { close() {} };
+  }
+}
+
+function makeExecProvider(labels: Record<string, string> | undefined) {
+  const execApi = new RecordingExecApi();
+  const livenessApi: PodLivenessApi = { getPodUid: async () => "pod-uid-1" };
+  const provider = new KubernetesSandboxProvider(
+    {
+      objectsApi: new LabeledObjectsApi(labels),
+      podsApi: new FakePodsApi(),
+      execApi,
+      livenessApi,
+    },
+    providerCfg,
+  );
+  return { provider, execApi };
+}
+
+describe("exec identity threading (docker flag → exec layer)", () => {
+  it("restore() of a docker-labeled CR runs non-privileged exec as dockerd", async () => {
+    const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
+    const sandbox = await provider.restore("sb-docker");
+    await sandbox.exec("echo hi");
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi")]);
+  });
+
+  it("restore() of a docker-labeled CR keeps privileged exec unwrapped", async () => {
+    const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
+    const sandbox = await provider.restore("sb-docker");
+    await sandbox.exec("echo hi", { privileged: true });
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+  });
+
+  it("restore() of an unlabeled CR keeps exec unwrapped", async () => {
+    const { provider, execApi } = makeExecProvider(undefined);
+    const sandbox = await provider.restore("sb-plain");
+    await sandbox.exec("echo hi");
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+  });
+
+  it("create({ docker: true }) threads the flag into the exec layer", async () => {
+    const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
+    const sandbox = await provider.create({ workspace: "sb-docker", docker: true });
+    await sandbox.exec("echo hi");
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi")]);
   });
 });

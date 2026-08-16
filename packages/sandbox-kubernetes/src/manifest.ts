@@ -44,6 +44,15 @@ export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
 export const DEV_FUSE_VOLUME_NAME = "dev-fuse";
 /** Volume name for the /dev/net/tun hostPath device (rootless DinD — needed by rootlesskit). */
 export const DEV_TUN_VOLUME_NAME = "dev-tun";
+/** CR label marking a docker-enabled sandbox. `restore()` re-derives the
+ * exec-identity flag from this label (the CR is the only state that
+ * survives an api restart — mirrors how `spec.service` records the
+ * profile). Value is always "true"; the label is absent otherwise. */
+export const DOCKER_LABEL_KEY = "valet.dev/docker";
+/** The `dockerd` workload user's uid/gid (docker/Dockerfile.sandbox-k8s
+ * `useradd -m -u 1500 dockerd`). Used as the pod-level `fsGroup` so the
+ * kubelet makes the workspace PVC group-writable by that user. */
+export const DOCKER_WORKLOAD_FS_GROUP = 1500;
 
 /** Returns the name of the Kubernetes Secret backing the creds volume for a sandbox. */
 export function credsSecretName(sandboxName: string): string {
@@ -194,6 +203,12 @@ export function buildSandboxManifest(
     containers: [container],
     restartPolicy: "Always",
   };
+  if (opts.docker) {
+    // Pod-level fsGroup: the workspace PVC mounts group-owned by the
+    // dockerd user's gid, so non-privileged (dockerd) execs can write
+    // /workspace — the k8s analog of start-docker.sh's `chown /workspace`.
+    podSpec.securityContext = { fsGroup: DOCKER_WORKLOAD_FS_GROUP };
+  }
   if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
     podSpec.imagePullSecrets = cfg.imagePullSecrets;
   }
@@ -244,12 +259,15 @@ export function buildSandboxManifest(
     spec.service = true;
   }
 
+  const labels: Record<string, string> = { [SESSION_LABEL_KEY]: name };
+  if (opts.docker) labels[DOCKER_LABEL_KEY] = "true";
+
   return {
     apiVersion: cfg.apiVersion,
     kind: "Sandbox",
     metadata: {
       name,
-      labels: { [SESSION_LABEL_KEY]: name },
+      labels,
     },
     spec,
   };

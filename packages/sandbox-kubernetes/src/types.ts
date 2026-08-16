@@ -137,9 +137,19 @@ export interface SandboxContainer {
   workingDir?: string;
 }
 
+/** `corev1.PodSecurityContext` subset — pod-level fields the manifest
+ * builder sets. `fsGroup` makes the kubelet chown mounted volumes (the
+ * workspace PVC) to that group, so the dockerd workload user can write
+ * /workspace in docker-enabled sandboxes. */
+export interface PodSecurityContext {
+  fsGroup?: number;
+}
+
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
   containers: SandboxContainer[];
+  /** See `PodSecurityContext` — set only for docker-enabled sandboxes. */
+  securityContext?: PodSecurityContext;
   restartPolicy?: "Always" | "OnFailure" | "Never";
   /** See `K8sProviderConfig.imagePullSecrets`'s docblock. */
   imagePullSecrets?: { name: string }[];

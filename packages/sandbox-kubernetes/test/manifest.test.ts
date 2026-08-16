@@ -5,8 +5,10 @@ import {
   CREDS_VOLUME_NAME,
   DEV_FUSE_VOLUME_NAME,
   DEV_TUN_VOLUME_NAME,
+  DOCKER_LABEL_KEY,
   DOCKER_STATE_MOUNT_PATH,
   DOCKER_STATE_VOLUME_NAME,
+  DOCKER_WORKLOAD_FS_GROUP,
   SANDBOX_CR_API_VERSION,
   buildSandboxManifest,
   credsSecretName,
@@ -315,6 +317,17 @@ describe("docker flag (rootless DinD)", () => {
     expect(JSON.stringify(cr)).not.toContain("privileged");
   });
 
+  it("sets pod-level fsGroup 1500 so the workspace PVC is group-writable by dockerd", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(DOCKER_WORKLOAD_FS_GROUP).toBe(1500);
+    expect(cr.spec.podTemplate.spec.securityContext).toEqual({ fsGroup: 1500 });
+  });
+
+  it("labels the CR docker-enabled so restore() can re-derive the flag", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(cr.metadata.labels[DOCKER_LABEL_KEY]).toBe("true");
+  });
+
   it("headless+docker uses the start-headless probe wrapper command", () => {
     const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
     expect(cr.spec.podTemplate.spec.containers[0]!.command).toEqual([
@@ -334,5 +347,7 @@ describe("docker flag (rootless DinD)", () => {
     expect(s).not.toContain("capabilities");
     expect(s).not.toContain("procMount");
     expect(s).not.toContain(DEV_TUN_VOLUME_NAME);
+    expect(s).not.toContain("fsGroup");
+    expect(s).not.toContain(DOCKER_LABEL_KEY);
   });
 });

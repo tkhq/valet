@@ -57,6 +57,24 @@ export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Wraps an already-composed shell command so it runs as the `dockerd`
+ * workload user instead of the container's root. The k8s `pods/exec` API
+ * has no per-call user parameter (unlike `docker exec -u`), so the identity
+ * switch is synthesized in-shell via `setpriv` — a plain uid/gid drop with
+ * supplementary groups initialized from /etc/group, no PAM session or TTY
+ * side effects (`su`/`sudo` would add both). HOME/USER/LOGNAME are set so
+ * git and friends resolve the workload user's config, mirroring the docker
+ * provider's `--env HOME=/home/dockerd`.
+ */
+export function wrapAsWorkloadUser(shellCommand: string): string {
+  return (
+    "exec setpriv --reuid dockerd --regid dockerd --init-groups " +
+    "env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c " +
+    shQuote(shellCommand)
+  );
+}
+
 /** `^[A-Za-z_][A-Za-z0-9_]*$` — POSIX shell env-var name grammar. */
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -164,6 +182,10 @@ export interface ExecDeps {
    * provisions itself, but left as a parameter so tests / future callers
    * aren't hard-wired to that constant. */
   containerName: string;
+  /** The sandbox is docker-enabled (SandboxCreateOpts.docker). When set,
+   * every non-privileged exec is wrapped by `wrapAsWorkloadUser` so it runs
+   * as the `dockerd` workload user (see `ExecOpts.privileged`). */
+  docker?: boolean;
 }
 
 /** Caps how long a forcibly-closed (timeout/abort) socket capture is given
@@ -194,7 +216,12 @@ export async function execInPod(
   command: string,
   opts?: ExecOpts,
 ): Promise<ExecResult> {
-  const shellCommand = buildShellCommand(command, opts);
+  const composed = buildShellCommand(command, opts);
+  // Exec identity: non-privileged execs in a docker-enabled sandbox run as
+  // the dockerd workload user. Wrapping AFTER env/cwd folding means the
+  // whole composed command (env exports, cd, the caller's command) executes
+  // under the dropped identity, matching `docker exec -u dockerd`'s effect.
+  const shellCommand = deps.docker && !opts?.privileged ? wrapAsWorkloadUser(composed) : composed;
 
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
