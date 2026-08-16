@@ -1,8 +1,8 @@
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { buildDockerRunArgs, credsCheckScript, writeCredsFiles } from "../src/sandbox.js";
+import { buildDockerExecArgs, buildDockerRunArgs, credsCheckScript, writeCredsFiles } from "../src/sandbox.js";
 
 const baseOpts = {
   containerName: "valet-sandbox-test",
@@ -129,6 +129,50 @@ describe("buildDockerRunArgs (pure)", () => {
   });
 });
 
+describe("buildDockerExecArgs (workload exec identity)", () => {
+  const base = { containerId: "cid-1", cwd: "/workspace", command: "echo hi" };
+
+  it("non-docker sandbox — byte-identical baseline pin, no -u either way", () => {
+    expect(buildDockerExecArgs(base)).toEqual([
+      "exec",
+      "--workdir",
+      "/workspace",
+      "cid-1",
+      "sh",
+      "-c",
+      "echo hi",
+    ]);
+    expect(buildDockerExecArgs({ ...base, privileged: true })).not.toContain("-u");
+  });
+
+  it("docker sandbox + non-privileged runs as dockerd with HOME set, before the container id", () => {
+    const args = buildDockerExecArgs({ ...base, docker: true });
+    const uIdx = args.indexOf("-u");
+    expect(uIdx).toBeGreaterThan(-1);
+    expect(args[uIdx + 1]).toBe("dockerd");
+    const joined = args.join(" ");
+    expect(joined).toContain("--env HOME=/home/dockerd");
+    expect(uIdx).toBeLessThan(args.indexOf("cid-1"));
+    expect(args.slice(-4)).toEqual(["cid-1", "sh", "-c", "echo hi"]);
+  });
+
+  it("docker sandbox + privileged keeps the container's default (root) user", () => {
+    const args = buildDockerExecArgs({ ...base, docker: true, privileged: true });
+    expect(args).not.toContain("-u");
+    expect(args.join(" ")).not.toContain("HOME=/home/dockerd");
+  });
+
+  it("keeps env/interactive handling regardless of the docker flag", () => {
+    const args = buildDockerExecArgs({
+      ...base,
+      docker: true,
+      env: { FOO: "bar" },
+      interactive: true,
+    });
+    expect(args).toEqual(expect.arrayContaining(["--env", "FOO=bar", "--interactive"]));
+  });
+});
+
 describe("writeCredsFiles (pure — no Docker required)", () => {
   let tmp: string;
 
@@ -162,6 +206,22 @@ describe("writeCredsFiles (pure — no Docker required)", () => {
     // Both files exist; no error thrown on access.
     await expect(access(join(tmp, "token"))).resolves.toBeUndefined();
     await expect(access(join(tmp, "other"))).resolves.toBeUndefined();
+    const fileMode = (await stat(join(tmp, "token"))).mode & 0o777;
+    expect(fileMode).toBe(0o600);
+  });
+
+  it("docker-enabled sandboxes get world-readable creds (0644 files, 0755 dir)", async () => {
+    const dir = join(tmp, "docker-creds");
+    await writeCredsFiles(dir, { token: "abc" }, { docker: true });
+    expect((await stat(join(dir, "token"))).mode & 0o777).toBe(0o644);
+    expect((await stat(dir)).mode & 0o777).toBe(0o755);
+  });
+
+  it("non-docker sandboxes keep 0600 files and a 0700 dir", async () => {
+    const dir = join(tmp, "plain-creds");
+    await writeCredsFiles(dir, { token: "abc" });
+    expect((await stat(join(dir, "token"))).mode & 0o777).toBe(0o600);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
   });
 });
 
