@@ -106,7 +106,13 @@ import {
   type SandboxPodsApi,
   type SandboxPodStatusApi,
 } from "./lifecycle.js";
-import { buildSandboxManifest, credsSecretName, SANDBOX_CONTAINER_NAME, sandboxCrName } from "./manifest.js";
+import {
+  buildSandboxManifest,
+  credsSecretName,
+  DOCKER_LABEL_KEY,
+  SANDBOX_CONTAINER_NAME,
+  sandboxCrName,
+} from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
@@ -367,6 +373,11 @@ export interface KubernetesSandboxDeps {
   execApi: PodExecApi;
   livenessApi: PodLivenessApi;
   cfg: K8sProviderConfig;
+  /** The sandbox is docker-enabled — non-privileged execs run as the
+   * dockerd workload user (see exec.ts's `ExecDeps.docker`). Derived from
+   * `SandboxCreateOpts.docker` at create, and from the CR's
+   * `DOCKER_LABEL_KEY` label on restore. */
+  docker?: boolean;
 }
 
 /**
@@ -386,7 +397,12 @@ export class KubernetesSandbox implements Sandbox {
   }
 
   private execDeps(): ExecDeps {
-    return { api: this.deps.execApi, namespace: this.deps.cfg.namespace, containerName: SANDBOX_CONTAINER_NAME };
+    return {
+      api: this.deps.execApi,
+      namespace: this.deps.cfg.namespace,
+      containerName: SANDBOX_CONTAINER_NAME,
+      docker: this.deps.docker,
+    };
   }
 
   private nextExecId(): string {
@@ -719,7 +735,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
 
     await this.waitReady(name);
-    return this.makeSandbox(name);
+    return this.makeSandbox(name, Boolean(opts.docker));
   }
 
   /** Re-asserts (GETs) the same CR name — never creates. The engine
@@ -731,7 +747,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     if (cr === null) {
       throw new Error(`KubernetesSandboxProvider.restore: Sandbox CR "${id}" not found`);
     }
-    return this.makeSandbox(id);
+    // Re-derive the exec-identity flag from the CR's own label — the CR is
+    // the only per-sandbox state that survives an api restart (there is no
+    // in-memory registry to consult, unlike sandbox-docker).
+    return this.makeSandbox(id, cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true");
   }
 
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
@@ -860,7 +879,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
-  private makeSandbox(id: string): KubernetesSandbox {
+  private makeSandbox(id: string, docker: boolean): KubernetesSandbox {
     return new KubernetesSandbox(
       {
         objectsApi: this.deps.objectsApi,
@@ -868,6 +887,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         execApi: this.deps.execApi,
         livenessApi: this.deps.livenessApi,
         cfg: this.cfg,
+        docker,
       },
       id,
     );

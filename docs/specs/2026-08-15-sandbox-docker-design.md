@@ -141,6 +141,36 @@ Note: `procMount: Unmasked` requires the ProcMountType feature gate.
 Where that gate is unavailable, the k8s DinD path does not converge.
 This is checked at acceptance.
 
+### Exec identity
+
+Acceptance testing surfaced the root cause of inner-container
+failures (`chdir /workspace: permission denied`): the agent's execs
+ran as container root, and root-owned files have no mapping inside
+the rootless daemon's user namespace. The fix: in a docker-enabled
+sandbox, every non-privileged exec runs as the `dockerd` workload
+user.
+
+- Contract: `ExecOpts.privileged` (engine). Default false. Prep's
+  system steps (the `/usr/local/bin` credential-helper install) pass
+  `privileged: true` and keep root. Everything else — the agent's
+  commands, git clone and config — runs as `dockerd`.
+- sandbox-docker: `buildDockerExecArgs` adds `-u dockerd` and
+  `--env HOME=/home/dockerd`. Creds files are written 0644 (dir
+  0755) so the credential helper can read them as `dockerd`.
+- sandbox-kubernetes: `pods/exec` has no per-call user, so
+  `execInPod` wraps the composed command in
+  `setpriv --reuid dockerd --regid dockerd --init-groups` with
+  HOME/USER/LOGNAME set. The flag reaches the exec layer from
+  `SandboxCreateOpts.docker` at create and from the CR's
+  `valet.dev/docker` label on restore.
+- Workspace ownership: `start-docker.sh` chowns `/workspace` to
+  `dockerd` (non-recursive) on the docker provider; the k8s manifest
+  sets pod-level `securityContext.fsGroup: 1500` so the PVC mounts
+  group-writable.
+
+Sandboxes without `docker: true` are unchanged — `privileged` has no
+effect there.
+
 ### State lifetime
 
 Docker state (images, containers, volumes created inside the sandbox)

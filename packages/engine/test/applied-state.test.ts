@@ -324,3 +324,41 @@ describe("applyPlan — corrupt applied file e2e", () => {
     expect(recovered!.steps).toEqual({ s1: "h1", s2: "h2" });
   });
 });
+
+// ── privileged exec opts ───────────────────────────────────────────────
+
+describe("privileged exec opts", () => {
+  it("readAppliedState passes { privileged: true } to sandbox.exec", async () => {
+    const sb = makeSandbox();
+    const execSpy = vi.spyOn(sb, "exec");
+
+    await readAppliedState(sb);
+
+    expect(execSpy).toHaveBeenCalledOnce();
+    expect(execSpy.mock.calls[0]![1]).toMatchObject({ privileged: true });
+
+    execSpy.mockRestore();
+  });
+
+  it("writeAppliedState (via applyPlan) passes { privileged: true } to sandbox.exec", async () => {
+    const sb = makeSandbox();
+    const execSpy = vi.spyOn(sb, "exec");
+
+    const steps = [makeStep("s1", "h1", false)];
+    const spec = makeSpec(steps, "spec-priv");
+    await applyPlan(sb, spec, "img:v1", null);
+
+    // All exec calls from writeAppliedState must carry privileged: true.
+    // applyPlan only calls sandbox.exec via writeAppliedState (step.apply
+    // is the no-op helper above); every recorded call must be privileged.
+    const writeCalls = execSpy.mock.calls.filter(([cmd]) =>
+      cmd.includes("mkdir -p /etc/valet"),
+    );
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+    for (const [, opts] of writeCalls) {
+      expect(opts).toMatchObject({ privileged: true });
+    }
+
+    execSpy.mockRestore();
+  });
+});

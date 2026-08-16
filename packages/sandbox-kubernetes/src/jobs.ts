@@ -304,7 +304,12 @@ export async function execJobInPod(
 ): Promise<ExecJobHandle> {
   const inner = buildShellCommand(command, opts);
   const kickoff = jobKickoffCommand(execId, inner, opts?.maxOutputBytes);
-  const result = await execInPod(deps, podName, kickoff);
+  // Only `privileged` is forwarded — env/cwd are already folded into
+  // `inner`, and re-passing them would wrongly apply to the kickoff script
+  // itself. Forwarding matters in docker-enabled sandboxes: execInPod runs
+  // the whole kickoff (and thus the detached job) as the dockerd workload
+  // user unless the caller asked for root.
+  const result = await execInPod(deps, podName, kickoff, opts?.privileged ? { privileged: true } : undefined);
   if (result.exitCode !== 0) {
     throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
   }
