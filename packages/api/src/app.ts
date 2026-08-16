@@ -51,6 +51,7 @@ import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
+import { slackAppRouter } from "./routes/slack-app.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { eventsRouter } from "./routes/events.js";
@@ -244,6 +245,7 @@ export function createApp(
   app.route("/api/me/grants", meGrantsRouter);
   app.route("/api/org/github-app", githubAppRouter);
   app.route("/api/org/linear", linearConnectRouter);
+  app.route("/api/org/slack", slackAppRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/sources", sourcesPublicRouter);
   app.route("/api/repos", reposRouter);
