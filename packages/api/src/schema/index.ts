@@ -579,6 +579,39 @@ export const identityLinkCodes = pgTable(
   (t) => [index("identity_link_codes_provider").on(t.provider, t.codeHash)],
 );
 
+// One row per provider stream the api has started and not yet stopped.
+//
+// The engine publishes `text_delta` through `publishEphemeral` — live-only,
+// no offset, no replay. An api that dies mid-stream therefore cannot rebuild
+// the text, and the reader keeps a message that shimmers forever because
+// Slack documents no timeout for an unclosed stream. This table is the
+// durable "a stream is open" fact that lets the next boot close it. The text
+// itself is not recoverable here and is not meant to be: the `message_end`
+// entry in `engine_entries` is the source of truth, and the web UI shows it.
+export const channelActiveStreams = pgTable(
+  "channel_active_streams",
+  {
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    /** Provider handle for the streaming message (Slack: chat.startStream's `ts`). */
+    messageId: text("message_id").notNull(),
+    threadTs: text("thread_ts").notNull(),
+    sessionId: text("session_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    /** Engine message this stream renders. Null until the first message_start. */
+    engineMessageId: text("engine_message_id"),
+    orgId: text("org_id").notNull(),
+    startedAt: bigint("started_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({
+      name: "channel_active_streams_pk",
+      columns: [t.channelType, t.conversationKey, t.messageId],
+    }),
+    index("channel_active_streams_started").on(t.startedAt),
+  ],
+);
+
 // ─── Memory (OKF) ────────────────────────────────────────────────────────────
 //
 // Owner-tuple scoped memory store (decision 13, exact). `search_vector` is a
@@ -1434,6 +1467,7 @@ export type EventDropLogRow = typeof eventDropLog.$inferSelect;
 export type ChannelBindingRow = typeof channelBindings.$inferSelect;
 export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
+export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 /** One tracked skill repository. Not the engine's `SkillSource`. */

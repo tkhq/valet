@@ -372,6 +372,30 @@ CREATE TABLE "identity_link_codes" (
 --> statement-breakpoint
 CREATE INDEX "identity_link_codes_provider" ON "identity_link_codes" ("provider","code_hash");
 --> statement-breakpoint
+-- Open streaming messages, one row per provider stream the api has started
+-- and not yet stopped. The engine's `text_delta` plane is ephemeral: it is
+-- never appended to the event log and is never replayed. So an api that dies
+-- mid-stream cannot reconstruct the text, and the reader is left with a
+-- message that shimmers forever. This table is the only durable trace of
+-- "a stream is open", and it exists so the next boot can close it.
+--
+-- Not Slack-specific: any transport that implements the start/append/stop
+-- triple gets swept by the same code.
+CREATE TABLE "channel_active_streams" (
+	"channel_type" text NOT NULL,
+	"conversation_key" text NOT NULL,
+	"message_id" text NOT NULL,
+	"thread_ts" text NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text NOT NULL,
+	"engine_message_id" text,
+	"org_id" text NOT NULL,
+	"started_at" bigint NOT NULL,
+	CONSTRAINT "channel_active_streams_pk" PRIMARY KEY("channel_type","conversation_key","message_id")
+);
+--> statement-breakpoint
+CREATE INDEX "channel_active_streams_started" ON "channel_active_streams" ("started_at");
+--> statement-breakpoint
 CREATE TABLE "memory_files" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
