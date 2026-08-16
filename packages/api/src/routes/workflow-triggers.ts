@@ -94,7 +94,8 @@ workflowTriggersRouter.get("/trigger-catalog", (c) => {
 workflowTriggersRouter.get("/runs", async (c) => {
   const { db, workflowStore, workflowRunHost, actionPluginByService } = c.var.providers;
   const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
-  const rawLimit = Number(c.req.query("limit") ?? 50);
+  // An absent param parses to NaN and takes the 50 fallback below.
+  const rawLimit = Number(c.req.query("limit"));
   const limit = Number.isInteger(rawLimit) && rawLimit > 0 && rawLimit <= 200 ? rawLimit : 50;
   const runs = await listRecentWorkflowRuns(
     { db, workflowStore, workflowRunHost, actionPluginByService },

@@ -12,11 +12,7 @@
     "./actions": "./src/actions/index.ts",
     "./repo": "./src/repo.ts",
     "./repo-contents": "./src/actions/repo-directory.ts",
-    "./plugin": {
-      "types": "./src/plugin.ts",
-      "import": "./src/plugin.ts",
-      "default": "./src/plugin.ts"
-    }
+    "./plugin": "./src/plugin.ts"
   },
   "scripts": {
     "build": "tsc",

@@ -139,12 +139,14 @@ export function TriggerDialog({
     }
   }, [open, editing, workflowId, lockedKind]);
 
+  /** Parse a JSON textarea. Empty input returns undefined (the caller picks
+   * the default); a parse failure sets the field error and returns null. */
   function parseJson(
     raw: string,
     setError: (msg: string | null) => void,
     errorMessage = 'Input must be valid JSON, for example {"env": "prod"}',
   ): unknown {
-    if (!raw.trim()) return [];
+    if (!raw.trim()) return undefined;
     try {
       const parsed: unknown = JSON.parse(raw);
       setError(null);
@@ -242,11 +244,11 @@ export function TriggerDialog({
           "Filters must be valid JSON, for example []",
         );
         if (filtersResult === null) return;
-        if (!Array.isArray(filtersResult)) {
+        const filters = filtersResult === undefined ? [] : filtersResult;
+        if (!Array.isArray(filters)) {
           setFiltersJsonError("Filters must be a JSON array, for example []");
           return;
         }
-        const filters = filtersResult;
 
         if (isEditing) {
           // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState

@@ -395,8 +395,11 @@ export async function deleteWorkflowDefinition(
   await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
   const subs = await deps.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId));
   for (const sub of subs) {
+    // `target` is a free-form jsonb column; guard the shape before reading
+    // so a malformed row cannot abort the cleanup loop mid-delete.
+    if (typeof sub.target !== "object" || sub.target === null) continue;
     const target = sub.target as { kind?: string; workflowId?: string };
-    if (target?.kind === "workflow" && target.workflowId === id) {
+    if (target.kind === "workflow" && target.workflowId === id) {
       await deps.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
     }
   }
