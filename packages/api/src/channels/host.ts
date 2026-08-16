@@ -112,6 +112,15 @@ function chatIdFromKey(conversationKey: string): string {
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
 }
 
+/** Feature-detects a transport that opens a direct conversation with one of
+ * its users. A provider whose user id is not also a conversation id (Slack:
+ * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
+function hasOpenDirect(
+  transport: ChannelTransport,
+): transport is ChannelTransport & { openDirectConversation(externalId: string): Promise<string> } {
+  return typeof (transport as { openDirectConversation?: unknown }).openDirectConversation === "function";
+}
+
 export class ChannelHost {
   private transports = new Map<string, ChannelTransport>();
   private botUsernames = new Map<string, string>();
@@ -180,7 +189,19 @@ export class ChannelHost {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;
         }
-        const transport = factory.create({ credential, config: {} });
+        // A factory rejects a credential it cannot serve — the Slack one
+        // throws when `metadata.teamId` is absent, because every outbound
+        // conversation key embeds it. Contained per transport: one bad
+        // credential must not stop the transports after it in this loop, nor
+        // the outbound queue and the boot stream sweep below. The message
+        // names the fix, so the operator reads it in the startup log.
+        let transport: ChannelTransport;
+        try {
+          transport = factory.create({ credential, config: {} });
+        } catch (err) {
+          console.error(`[channels] ${factory.channelType}: transport not started`, err);
+          continue;
+        }
         this.transports.set(factory.channelType, transport);
         if (hasGetMe(transport)) {
           try {
@@ -333,13 +354,31 @@ export class ChannelHost {
     }
   }
 
-  /** Locked convention: split `key` on the FIRST `:`; the first segment must name a running transport. */
+  /**
+   * Locked convention: split `key` on the FIRST `:`; the first segment must
+   * name a running transport.
+   *
+   * The `${channelType}:dm:${rest}` default is Telegram's key shape, where the
+   * chat id is the whole address. A transport whose conversationKey carries
+   * more than that — Slack's holds the workspace id, which lives on the
+   * credential and never reaches the thread key — rebuilds the key itself
+   * through `conversationKeyFromThreadKey`. Without this hop every outbound
+   * call for such a transport is handed a key it did not mint.
+   */
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
     const idx = key.indexOf(":");
     if (idx === -1) return null;
     const channelType = key.slice(0, idx);
     const rest = key.slice(idx + 1);
     if (rest === "" || !this.isRunning(channelType)) return null;
+    const transport = this.transports.get(channelType);
+    const rebuilt = transport?.conversationKeyFromThreadKey?.(key);
+    if (rebuilt !== undefined) {
+      // `null` means the transport disowns the key. Delivering it under the
+      // default shape would post somewhere it did not choose, so stop instead.
+      if (rebuilt === null) return null;
+      return { channelType, conversationKey: rebuilt };
+    }
     return { channelType, conversationKey: `${channelType}:dm:${rest}` };
   }
 
@@ -533,6 +572,16 @@ export class ChannelHost {
       return;
     }
 
+    if (event.kind === "surface_opened") {
+      // Someone opened the conversation and said nothing. There is no turn to
+      // start, so this ends here — but it is not a dropped update, and a
+      // drop-log row per DM open would bury the reasons that matter. The
+      // useful work for a linked user is a set of suggested prompts, which
+      // needs prompt copy this host does not own yet; the unlinked case
+      // already answered above with the link instructions.
+      return;
+    }
+
     // Rule 6: anything else.
     await this.dropLog(orgId, "unsupported_kind", event.conversationKey, `kind=${event.kind}`);
   }
@@ -598,8 +647,13 @@ export class ChannelHost {
       orgId,
     });
 
-    const chatId = chatIdFromKey(event.conversationKey);
-    const thread = session.thread(`${channelType}:${chatId}`);
+    // Ask the transport for the thread key when it owns the mapping, so this
+    // half and `channelThreadFor`'s inverse cannot drift apart. The default
+    // below is the same derivation Telegram has always used.
+    const threadKey =
+      transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
+      `${channelType}:${chatIdFromKey(event.conversationKey)}`;
+    const thread = session.thread(threadKey);
 
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];
@@ -704,7 +758,14 @@ export class ChannelHost {
             if (!link || link.notifyAttention === false) continue;
             const transport = this.transports.get(channelType);
             if (!transport) continue;
-            await transport.send(`${channelType}:dm:${link.externalId}`, {
+            // `${channelType}:dm:${externalId}` assumes the sender's id is also
+            // the address to answer on, which holds for Telegram and not for
+            // Slack: `U…` names a person, `D…` names the DM with them. Ask the
+            // transport to open the conversation when it knows the difference.
+            const conversationKey = hasOpenDirect(transport)
+              ? await transport.openDirectConversation(link.externalId)
+              : `${channelType}:dm:${link.externalId}`;
+            await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),
             });
           } catch (err) {
