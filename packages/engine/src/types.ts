@@ -837,6 +837,15 @@ export interface ExecOpts {
   signal?: AbortSignal;
   stdin?: string;
   maxOutputBytes?: number;
+  /**
+   * Run this exec with the sandbox's full (root) privileges. Default false:
+   * in a docker-enabled sandbox (SandboxCreateOpts.docker) providers run
+   * non-privileged execs as the dedicated workload user (`dockerd`) so
+   * files the workload creates are mapped inside the rootless docker
+   * daemon's user namespace. In sandboxes without docker, this flag has no
+   * effect — every exec keeps the container's default user.
+   */
+  privileged?: boolean;
 }
 
 export interface ExecResult {
