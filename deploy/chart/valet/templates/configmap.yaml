@@ -18,7 +18,7 @@ data:
        `sandbox.image: null` to omit it entirely — the api then resolves
        every sandbox through the seeded per-profile base sources. */}}
   {{- if and .Values.sandbox.image .Values.sandbox.image.repository }}
-  VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
+  VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository (required "sandbox.image.tag is required when sandbox.image.repository is set" .Values.sandbox.image.tag) | quote }}
   {{- end }}
   # Per-profile base image refs (used by seedDefaultBasesIfMissing at boot).
   VALET_HEADLESS_BASE_IMAGE: {{ .Values.sandbox.headlessBaseImage | quote }}

@@ -412,4 +412,10 @@ echo "$NULL_IMAGE_RENDER" | grep -q 'VALET_FULL_BASE_IMAGE:' \
   || fail "sandbox.image=null render: per-profile base env vars must still render"
 pass "sandbox.image=null omits VALET_SANDBOX_IMAGE, keeps per-profile base vars"
 
+echo "== helm template (sandbox.image.repository without tag — must fail loudly) =="
+if helm template valet "$CHART_DIR" --kube-version 1.30.0 --set sandbox.image.repository=example.com/foo --set-json 'sandbox.image.tag=null' >/dev/null 2>&1; then
+  fail "repository-without-tag render: must fail (a silent \"foo:\" ref is a malformed image), got a clean render"
+fi
+pass "sandbox.image.repository without tag fails the render (required tag)"
+
 echo "All golden assertions passed."
