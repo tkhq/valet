@@ -127,6 +127,11 @@ export {
 } from "./plugin-catalog.js";
 export {
   validateValetPlugin,
+  canStream,
+  ChannelStreamError,
+  type ChannelStreamErrorKind,
+  type StreamRef,
+  type SuggestedPrompt,
   type ValetPlugin,
   type CredentialDeclaration,
   type OAuthDeclaration,
