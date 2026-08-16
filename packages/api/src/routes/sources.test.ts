@@ -86,7 +86,7 @@ async function createBase(baseUrl: string, overrides: Record<string, unknown> = 
 }
 
 // Insert a repo-kind source directly (since POST rejects kind='repo').
-async function seedRepoSource(apiInstance: TestApi, overrides: Partial<Record<string, unknown>> = {}): Promise<SourceJson> {
+async function seedRepoSource(apiInstance: TestApi): Promise<SourceJson> {
   const { db } = apiInstance.providers;
   // Use the schema table directly via Drizzle
   const { imageSources } = await import("../schema/index.js");
@@ -101,7 +101,7 @@ async function seedRepoSource(apiInstance: TestApi, overrides: Partial<Record<st
     pullSecretName: null,
     setupCommands: null,
     // profile is null for kind='repo' sources.
-    profile: null as null,
+    profile: null,
     repoHost: "github",
     repoFullName: "acme/widgets",
     cloneUrl: "https://github.com/acme/widgets.git",
@@ -110,10 +110,11 @@ async function seedRepoSource(apiInstance: TestApi, overrides: Partial<Record<st
     lastBoundAt: null,
     createdAt: now,
     updatedAt: now,
-    ...overrides,
   };
   await db.insert(imageSources).values(row);
-  return row as unknown as SourceJson;
+  // SourceJson is the wire shape: the row minus the DB-only lastBoundAt.
+  const { lastBoundAt: _lastBoundAt, ...source } = row;
+  return source;
 }
 
 // ── GET /api/org/sources ──────────────────────────────────────────────────────
