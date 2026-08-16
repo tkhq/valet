@@ -227,23 +227,11 @@ export async function ensureAssistantSession(
 
 // ── Listing ───────────────────────────────────────────────────────────────
 
-/** Live assistants owned by one principal, default first, then oldest first. */
-export async function listAssistantsForOwner(
-  db: AppDb,
-  orgId: string,
-  principal: Principal,
-): Promise<AssistantRow[]> {
-  return db
-    .select()
-    .from(assistants)
-    .where(and(ownerMatch(orgId, principal), isNull(assistants.archivedAt)))
-    .orderBy(desc(assistants.isDefault), asc(assistants.createdAt));
-}
-
 /**
- * Live assistants owned by any of `owners`, in one query. Used for the
- * unfiltered list, whose owner set is the caller plus every team the caller
- * belongs to.
+ * Live assistants owned by any of `owners`, default first, then oldest
+ * first, in one query. The unfiltered list passes the caller plus every
+ * team the caller belongs to; the filtered list passes the one owner it was
+ * asked for.
  */
 export async function listAssistantsForOwners(
   db: AppDb,

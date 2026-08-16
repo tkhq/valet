@@ -27,7 +27,6 @@ import {
   createAssistant,
   DefaultAssistantArchiveError,
   ensureAssistantSession,
-  listAssistantsForOwner,
   listAssistantsForOwners,
   loadAssistant,
   patchAssistant,
@@ -88,7 +87,7 @@ assistantsRouter.get("/", async (c) => {
     if (!(await canViewAssistantOwner(db, filter.owner, user.id))) {
       return c.json({ error: "owner not found" }, 404);
     }
-    const rows = await listAssistantsForOwner(db, user.orgId, filter.owner);
+    const rows = await listAssistantsForOwners(db, user.orgId, [filter.owner]);
     const body: ListAssistantsResponse = { assistants: rows.map(toAssistantSummary) };
     return c.json(body);
   }

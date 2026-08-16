@@ -12,7 +12,7 @@
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 import type { RepoListItem } from "@valet/sdk/repos";
-import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
+import type { CommandInfo, RegistryDiagnostic, RiskLevel } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
 
 // ── Common ────────────────────────────────────────────────────────────────
@@ -241,8 +241,9 @@ export interface GetOrchestratorInfoResponse {
   activeChildren: number;
 }
 
-/** PATCH /api/orchestrator/info — `name` upserts `orchestrator_identities.handle`;
- * `personality` writes the `assistant/personality.md` memory file (decision 5). */
+/** PATCH /api/orchestrator/info — `name` sets `assistants.name` on the
+ * caller's default assistant; `personality` writes the
+ * `assistant/personality.md` memory file (decision 5). */
 export interface PatchOrchestratorInfoRequest {
   name?: string;
   personality?: string;
@@ -1030,6 +1031,42 @@ export interface PluginServiceSummary {
      * service's actions need. */
     identityOnly?: boolean;
   };
+  /**
+   * The actions THIS credential unlocks, for the connect UI to state what a
+   * user is about to hand over before they hand it over.
+   *
+   * Joined on the key the runtime actually reads — `credentialService ??
+   * service` on each `ActionPlugin`, the same expression `invokeAction` uses
+   * to scope a credential provider. The join is deliberate, not incidental:
+   * it makes the list true by construction. When a plugin's credential
+   * declaration and its `ActionPlugin` disagree about the key (they do for
+   * google-calendar, which writes "google-calendar" and reads
+   * "google_calendar"), this array comes back EMPTY rather than borrowing
+   * the plugin's actions — an empty array is the honest report that this
+   * token unlocks nothing, and the UI says so instead of inventing a list.
+   *
+   * Always empty for a `dynamic` service: its actions do not exist until a
+   * credential is connected and the upstream server is asked.
+   */
+  actions: PluginActionSummary[];
+}
+
+/**
+ * One action, reduced to what a user needs to judge a connection by. Names
+ * and risk only — parameter schemas and descriptions stay server-side.
+ */
+export interface PluginActionSummary {
+  /** Human-readable label, the same string the approval gate shows. */
+  name: string;
+  riskLevel: RiskLevel;
+  /**
+   * True when the engine's approval gate stops this action and asks the user
+   * before it runs. Resolved server-side through the engine's own
+   * `approvalModeForAction`, never re-derived from `riskLevel` by a client:
+   * a plugin may pin `defaultApprovalMode` and override risk entirely, and a
+   * client that guessed would promise a gate that never fires.
+   */
+  requiresApproval: boolean;
 }
 
 export interface PluginSummary {

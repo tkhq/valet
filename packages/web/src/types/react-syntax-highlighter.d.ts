@@ -1,8 +1,8 @@
 /**
- * `@types/react-syntax-highlighter` types only the v15 top-level default
- * export. `code-block.tsx` imports the v16 `dist/esm/prism-light` +
- * per-language subpaths (to register a handful of languages instead of the
- * full ~290-language bundle), which ship no types of their own.
+ * `react-syntax-highlighter` v16 ships no type declarations at all.
+ * `code-block.tsx` imports `dist/esm/prism-light` + per-language subpaths
+ * (to register a handful of languages instead of the full ~290-language
+ * bundle), so those two module shapes are declared here.
  */
 declare module "react-syntax-highlighter/dist/esm/prism-light" {
   import type { ComponentType, ReactNode } from "react";

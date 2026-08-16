@@ -150,7 +150,7 @@ describe("canAdministerSession", () => {
   });
 
   it("denies the member stamped on the row when that member is not a team admin", async () => {
-    // The bug this check exists for: `ensureOrchestratorSession` writes
+    // The bug this check exists for: `ensureDefaultAssistantSession` writes
     // `agent_sessions.userId = meta.actorUserId`, so the first member to
     // open the team's assistant lands on the row. That stamp must not make
     // them the owner of an agent the whole team shares.

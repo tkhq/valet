@@ -9,11 +9,11 @@
  * an alert buzzer would contradict it and get muted on the first day, which
  * would cost more than the sound is worth.
  *
- * Browsers block audio until the page has seen a real user gesture. Rather
- * than fail silently at the moment we most need to be heard, `unlock()`
- * resumes the context on the first interaction and `isBlocked()` reports
- * when we still cannot make a sound, so the UI can fall back to the title
- * badge instead of pretending it pinged.
+ * Browsers block audio until the page has seen a real user gesture, so
+ * `unlock()` resumes the context on the first interaction. A context that
+ * stays blocked costs the user nothing: the tab title in
+ * `use-attention-ping.ts` carries the count on every poll, so a ping that
+ * makes no sound still leaves a visible signal.
  */
 
 /** Rising perfect fifth. Low enough not to pierce, high enough to carry. */
@@ -56,13 +56,6 @@ export function unlock(): void {
   if (c && c.state === "suspended") void c.resume().catch(() => undefined);
 }
 
-/** True when the browser will not let us make a sound yet. The caller
- * should still show a visible signal in that case. */
-export function isBlocked(): boolean {
-  const c = context();
-  return c === null || c.state !== "running";
-}
-
 /**
  * Play the chime. Never throws and never rejects — this runs inside
  * notification handling, where an audio failure must not take the UI with
@@ -100,9 +93,4 @@ export function playAttentionChime(): boolean {
   } catch {
     return false;
   }
-}
-
-/** Test seam: drops the cached context so a suite can start clean. */
-export function resetAudioContextForTests(): void {
-  ctx = null;
 }

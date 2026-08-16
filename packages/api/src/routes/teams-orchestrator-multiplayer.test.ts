@@ -135,7 +135,7 @@ describe("team orchestrator — access is the team's, not the opener's", () => {
 
     expect(asOpener.status).toBe(200);
     // The member who did NOT create the session must not be second-class:
-    // `ensureOrchestratorSession` stamps `agent_sessions.userId` with whoever
+    // `ensureDefaultAssistantSession` stamps `agent_sessions.userId` with whoever
     // opened it first, and reading that stamp as ownership is the exact bug
     // `canViewSession` exists to avoid.
     expect(asOther.status).toBe(asOpener.status);

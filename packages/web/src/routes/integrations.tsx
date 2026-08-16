@@ -55,7 +55,7 @@ export function IntegrationsPage() {
         {connectResult?.kind === "connected" && (
           <div
             role="status"
-            className="mt-4 rounded border border-moss/30 bg-moss/10 px-3 py-2 text-sm text-ink"
+            className="mt-4 rounded border border-line bg-moss-wash px-3 py-2 text-sm text-ink"
           >
             Connected {connectResult.value}.
           </div>
@@ -63,7 +63,7 @@ export function IntegrationsPage() {
         {connectResult?.kind === "error" && (
           <div
             role="status"
-            className="mt-4 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-sm text-danger-600"
+            className="mt-4 rounded border border-line bg-danger-wash px-3 py-2 text-sm text-danger-600"
           >
             Connection failed: {connectResult.value}
           </div>

@@ -17,6 +17,7 @@ function service(overrides: Partial<PluginServiceSummary> = {}): PluginServiceSu
     configKeys: ["accessToken"],
     connected: true,
     connect: "oauth",
+    actions: [],
     ...overrides,
   };
 }

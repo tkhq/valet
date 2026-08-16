@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
 import { useNotifications } from "~/api/queries";
-import { isBlocked, playAttentionChime } from "./notification-sound";
+import { playAttentionChime } from "./notification-sound";
 
 /**
  * Tells you when the assistant is waiting on you, out loud.
@@ -185,10 +185,4 @@ export function useAttentionPing(): void {
       document.title = base;
     };
   }, [notifications]);
-}
-
-/** True when we owe the user a visible signal because we cannot make an
- * audible one. */
-export function soundUnavailable(): boolean {
-  return isAttentionSoundEnabled() && isBlocked();
 }

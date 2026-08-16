@@ -410,11 +410,7 @@ export const teamMembers = pgTable(
   ],
 );
 
-// ─── Orchestrator identities ────────────────────────────────────────────────
-//
-// One durable identity per orchestrator (user/team/org), never rotated.
-// Unique per (orgId, ownerType, ownerId); handles unique per org (enforced
-// in service code once handles are assigned — no logic this phase).
+// ─── Assistants ─────────────────────────────────────────────────────────────
 
 /**
  * An assistant: a named agent a principal owns, with its own session.

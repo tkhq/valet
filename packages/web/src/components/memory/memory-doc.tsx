@@ -37,7 +37,7 @@ export interface MemoryDocProps {
 
 /**
  * Right pane of the memory explorer (Task 6 brief): the notebook-style
- * document view. Title + body render in the display face (Newsreader);
+ * document view. Title + body render in the display face;
  * frontmatter is never shown raw — `splitFrontmatter` (display-only, tolerant)
  * pulls `type`/`tags`/`sensitivity`/`origin` out as quiet badges and the
  * component renders only the body markdown.

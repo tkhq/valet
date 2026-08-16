@@ -115,6 +115,7 @@ export {
   buildPluginCatalog,
   invokeAction,
   prepareActionArgs,
+  approvalModeForAction,
   RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,

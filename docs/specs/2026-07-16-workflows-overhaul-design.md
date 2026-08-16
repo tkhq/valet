@@ -77,8 +77,10 @@ were HTTP/agent-only before:
   carries orchestrator-prompt schedules; this surface manages only the
   workflow-scoped kind.
 
-The New-workflow dialog gains an owner picker (personal, or a team the
-caller belongs to — `CreateWorkflowRequest.teamId` existed on the wire but
-had no UI), and the workflows list badges team-owned rows with the team
-name. `TeamSummary` gains `callerRole` so the teams settings panel can
-hide mutation controls the API's `canAdministerTeam` gate would 404 anyway.
+The New-workflow dialog takes its owner from the nav's active workspace
+(`CreateWorkflowRequest.teamId` existed on the wire but had no UI). It
+carries no Owner select of its own: a second control would duplicate the
+workspace switcher and could contradict it. The workflows list badges
+team-owned rows with the team name. `TeamSummary` gains `callerRole` so
+the teams settings panel can hide mutation controls the API's
+`canAdministerTeam` gate would 404 anyway.

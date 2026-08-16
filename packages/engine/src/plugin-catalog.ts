@@ -579,9 +579,22 @@ function makeCallTool(catalog: Catalog): ToolDef {
 
 // ── helpers ──────────────────────────────────────────────────────
 
-function approvalModeFor(entry: CatalogEntry): ApprovalMode {
-  if (entry.plugin.defaultApprovalMode) return entry.plugin.defaultApprovalMode;
-  switch (entry.action.riskLevel) {
+/**
+ * The approval rule, as a pure function of the two inputs that decide it.
+ *
+ * Exported because the connect UI states — before a user connects — how many
+ * of a service's tools stop and ask them first. That claim has to be the same
+ * rule the gate below actually applies, so it is resolved through this
+ * function rather than re-derived from `riskLevel` at the wire or in the
+ * client. A plugin that pins `defaultApprovalMode` overrides risk entirely,
+ * and a caller that forgot that would advertise a gate that never fires.
+ */
+export function approvalModeForAction(
+  riskLevel: RiskLevel,
+  defaultApprovalMode?: ApprovalMode,
+): ApprovalMode {
+  if (defaultApprovalMode) return defaultApprovalMode;
+  switch (riskLevel) {
     case "low":
     case "medium":
       return "allow";
@@ -589,6 +602,10 @@ function approvalModeFor(entry: CatalogEntry): ApprovalMode {
     case "critical":
       return "require_approval";
   }
+}
+
+function approvalModeFor(entry: CatalogEntry): ApprovalMode {
+  return approvalModeForAction(entry.action.riskLevel, entry.plugin.defaultApprovalMode);
 }
 
 function qualifiedId(entry: CatalogEntry): string {

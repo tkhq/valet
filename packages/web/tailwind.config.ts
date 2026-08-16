@@ -111,10 +111,10 @@ export default {
           "Consolas",
           "monospace",
         ],
-        // Headings share the body sans (2026-08-11 brand refresh — the
-        // prior serif `display` face was never actually loaded, so this
-        // changes nothing about what renders today, only the fallback
-        // intent). See docs/specs/2026-08-11-brand-refresh-design.md.
+        // Headings share the body sans (2026-08-11 brand refresh). The
+        // prior serif `Newsreader` face WAS loaded, so this flattened every
+        // `font-display` heading to sans — verified live afterward.
+        // See docs/specs/2026-08-11-brand-refresh-design.md.
         display: [
           "ui-sans-serif",
           "system-ui",

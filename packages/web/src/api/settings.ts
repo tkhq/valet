@@ -18,7 +18,6 @@ import type {
   CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
-  EnsureOrchestratorResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,

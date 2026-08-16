@@ -79,6 +79,10 @@ describe("GET /api/plugins", () => {
         connected: false,
         dynamic: true,
         connect: "manual",
+        actions: [
+          { name: "fixture.ping", riskLevel: "low", requiresApproval: false },
+          { name: "fixture.pong", riskLevel: "low", requiresApproval: false },
+        ],
       },
     ]);
 
@@ -314,5 +318,119 @@ describe("GET /api/plugins toolCount (connected dynamic services)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListPluginsResponse;
     expect(body.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+  });
+});
+
+/**
+ * The per-service `actions` array backs the connect screen's central claim —
+ * "your assistant gets these tools, and these ones stop to ask you first".
+ * These pin the two properties that make the claim safe to print: the
+ * approval flag comes from the engine's rule, and the join is the credential
+ * key the runtime reads, so a mismatch under-reports instead of inventing.
+ */
+describe("GET /api/plugins — actions a credential unlocks", () => {
+  function riskyAction(id: string, riskLevel: PluginAction["riskLevel"]): PluginAction {
+    return { ...pingAction(id), riskLevel };
+  }
+
+  it("reports each action's risk and whether the approval gate stops it", async () => {
+    const plugin: ValetPlugin = {
+      name: "mixed",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "mixed",
+          actions: [
+            riskyAction("mixed.read", "low"),
+            riskyAction("mixed.update", "medium"),
+            riskyAction("mixed.send", "high"),
+            riskyAction("mixed.purge", "critical"),
+          ],
+        },
+      ],
+      credentials: [{ service: "mixed", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const actions = plugins.find((p) => p.name === "mixed")?.services[0]?.actions ?? [];
+
+    expect(actions).toHaveLength(4);
+    expect(actions.map((a) => a.name)).toEqual([
+      "mixed.read",
+      "mixed.update",
+      "mixed.send",
+      "mixed.purge",
+    ]);
+    // low/medium run; high/critical ask first.
+    expect(actions.map((a) => a.requiresApproval)).toEqual([false, false, true, true]);
+  });
+
+  it("honours a plugin's defaultApprovalMode over its actions' risk levels", async () => {
+    const plugin: ValetPlugin = {
+      name: "trusted",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "trusted",
+          // Pinned "allow" outranks risk. A client re-deriving the flag from
+          // `riskLevel` alone would promise a gate that never fires.
+          defaultApprovalMode: "allow",
+          actions: [riskyAction("trusted.purge", "critical")],
+        },
+      ],
+      credentials: [{ service: "trusted", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const actions = plugins.find((p) => p.name === "trusted")?.services[0]?.actions ?? [];
+
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.riskLevel).toBe("critical");
+    expect(actions[0]?.requiresApproval).toBe(false);
+  });
+
+  it("reports no actions when the credential key the tools read differs from the one declared", async () => {
+    // The google-calendar shape: the connect UI writes the declaration's key
+    // while the actions read `credentialService`. Connecting the declared key
+    // unlocks nothing, so the row must not borrow the plugin's action list.
+    const plugin: ValetPlugin = {
+      name: "skewed",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "skewed",
+          credentialService: "skewed_underscored",
+          actions: [pingAction("skewed.list")],
+        },
+      ],
+      credentials: [{ service: "skewed", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const skewed = plugins.find((p) => p.name === "skewed");
+
+    // The plugin still counts its action at the plugin level…
+    expect(skewed?.actionCount).toBe(1);
+    // …but the credential a user can actually connect unlocks none of it.
+    expect(skewed?.services[0]?.actions).toEqual([]);
+  });
+
+  it("reports no actions for a dynamic service, whose tools resolve only after connecting", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const fixture = plugins.find((p) => p.name === "fixture-plugin")?.services[0];
+
+    expect(fixture?.dynamic).toBe(true);
+    // Static actions still list; `resolveActions`' extra tool is not among
+    // them, because it does not exist until a credential is connected.
+    expect(fixture?.actions.map((a) => a.name)).toEqual(["fixture.ping", "fixture.pong"]);
   });
 });

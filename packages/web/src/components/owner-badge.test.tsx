@@ -5,10 +5,10 @@
  * neutral word when the team cannot be resolved, and links to that team's
  * assistant.
  *
- * Mocks `~/api/settings` the way `owner-picker.test.tsx` does, and
- * `@tanstack/react-router` the way the route suites do — the real `Link`
- * wants a router this suite has no reason to mount. `search` is serialized
- * onto the stub so a test can read the query the badge would navigate with.
+ * Mocks `~/api/settings` for the teams list, and `@tanstack/react-router`
+ * the way the route suites do — the real `Link` wants a router this suite
+ * has no reason to mount. `search` is serialized onto the stub so a test can
+ * read the query the badge would navigate with.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";

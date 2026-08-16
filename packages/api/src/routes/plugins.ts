@@ -16,9 +16,14 @@
  * credential row already knows — this route calls no vendor.
  */
 import { Hono } from "hono";
-import type { CredentialOwner, StoredCredential } from "@valet/engine";
+import { approvalModeForAction, type CredentialOwner, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import type { ListPluginsResponse, PluginServiceSummary, PluginSummary } from "../wire/types.js";
+import type {
+  ListPluginsResponse,
+  PluginActionSummary,
+  PluginServiceSummary,
+  PluginSummary,
+} from "../wire/types.js";
 import { findOAuthDeclaration, authCodeEnvReady } from "../services/integration-oauth.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
 
@@ -75,6 +80,29 @@ pluginsRouter.get("/", async (c) => {
   const summaries: PluginSummary[] = plugins.map((plugin) => {
     const actionPlugins = plugin.actions ?? [];
     const actionCount = actionPlugins.reduce((sum, actionPlugin) => sum + actionPlugin.actions.length, 0);
+
+    // Actions keyed by the credential they actually read. `invokeAction`
+    // scopes a plugin's credential lookups to `credentialService ?? service`,
+    // so that same expression is the only correct join between a credential
+    // declaration and the tools connecting it unlocks. Anything looser (say,
+    // grouping by plugin) would let a row advertise tools its token cannot
+    // reach — google-calendar declares the credential as "google-calendar"
+    // and reads "google_calendar", so it must resolve to nothing here.
+    const actionsByCredentialKey = new Map<string, PluginActionSummary[]>();
+    for (const actionPlugin of actionPlugins) {
+      const key = actionPlugin.credentialService ?? actionPlugin.service;
+      const unlocked = actionsByCredentialKey.get(key) ?? [];
+      for (const action of actionPlugin.actions) {
+        unlocked.push({
+          name: action.name,
+          riskLevel: action.riskLevel,
+          requiresApproval:
+            approvalModeForAction(action.riskLevel, actionPlugin.defaultApprovalMode) ===
+            "require_approval",
+        });
+      }
+      actionsByCredentialKey.set(key, unlocked);
+    }
     // Service → whether any ActionPlugin claiming it declares `resolveActions`
     // (dynamic action discovery, e.g. an MCP-proxy-style plugin).
     const dynamicServices = new Set(
@@ -104,6 +132,7 @@ pluginsRouter.get("/", async (c) => {
         // itself takes its own slug when one exists.
         iconSlug: pluginIconSlugs[service] ?? pluginIconSlugs[plugin.name],
         health: health.get(service),
+        actions: actionsByCredentialKey.get(service) ?? [],
       };
     });
 

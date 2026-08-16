@@ -62,7 +62,7 @@ export interface EventDispatcherDeps {
   db: AppDb;
   workflowRunHost: RunHost;
   workflowStore: WorkflowStore;
-  /** Seam over `ensureOrchestratorSession` + `thread("events").submitPrompt` — see `orchestrator-target.ts`. */
+  /** Seam over `ensureDefaultAssistantSession` + `thread("events").submitPrompt` — see `orchestrator-target.ts`. */
   deliverToOrchestrator: OrchestratorDeliverFn;
 }
 

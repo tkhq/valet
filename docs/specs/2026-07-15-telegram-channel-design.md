@@ -19,7 +19,7 @@ This pass turns those shapes into the first working channel, and in doing so pin
 
 ## Decisions (locked)
 
-1. **Orchestrator-first DMs.** A Telegram DM maps to the sender's **user orchestrator session** (`orchestrator:{userId}` identity in engine v2 terms). The orchestrator routes work and relays child sessions; there is no direct chat↔session binding this pass. Thread key: `telegram:{chatId}` on the orchestrator session — one durable thread per DM chat, created on first message via the existing thread-resolution path.
+1. **Orchestrator-first DMs.** A Telegram DM maps to the sender's **default assistant session** (`assistant:{assistantId}` in engine v2 terms; an inbound message names a user, never one of that user's assistants). The orchestrator routes work and relays child sessions; there is no direct chat↔session binding this pass. Thread key: `telegram:{chatId}` on the orchestrator session — one durable thread per DM chat, created on first message via the existing thread-resolution path.
 
 2. **Engine grows the v2 `ChannelTransport` contract (additive).** `ValetPlugin` gains `transports?: ChannelTransportFactory[]`; the structural validator (`validateValetPlugin`) validates it like the other capability arrays. The contract lives next to `TriggerDef` in `valet-plugin.ts` and follows the same verify-before-parse philosophy:
    - `ChannelTransportFactory`: `{ channelType: string; create(ctx: TransportContext): ChannelTransport }` where `TransportContext` carries the resolved `StoredCredential` and a config record — the factory never reads env vars.

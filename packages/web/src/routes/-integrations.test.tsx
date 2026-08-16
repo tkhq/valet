@@ -27,6 +27,7 @@ const pluginsData = {
           connectLabel: "Connect GitHub (via GitHub App)",
           connected: false,
           connect: "manual" as const,
+          actions: [],
         },
       ],
     },
@@ -44,6 +45,7 @@ const pluginsData = {
           connected: false,
           dynamic: true as const,
           connect: "manual" as const,
+          actions: [],
         },
       ],
     },
@@ -58,6 +60,7 @@ const pluginsData = {
           configKeys: ["accessToken"],
           connected: true,
           connect: "manual" as const,
+          actions: [],
         },
       ],
     },
@@ -88,7 +91,10 @@ const oauthPluginsData = {
       name: "linear",
       version: "0.1.0",
       description: "Linear issue tracking",
-      actionCount: 5,
+      // Linear resolves its tools from an MCP server, so it declares none
+      // statically and reports `dynamic` — the real shape on the wire.
+      actionCount: 0,
+      dynamic: true as const,
       services: [
         {
           service: "linear",
@@ -96,6 +102,8 @@ const oauthPluginsData = {
           configKeys: ["accessToken"],
           connected: false,
           connect: "oauth" as const,
+          dynamic: true as const,
+          actions: [],
         },
       ],
     },
@@ -118,6 +126,7 @@ const manualOnlyPluginsData = {
           connected: false,
           dynamic: true as const,
           connect: "manual" as const,
+          actions: [],
         },
       ],
     },
@@ -131,6 +140,22 @@ const disconnectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+}));
+
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({
+    data: {
+      id: "u1",
+      email: "person@example.com",
+      name: "Signed In Person",
+      avatarUrl: null,
+      role: "member",
+      orgId: "o1",
+      orgRole: "member",
+      defaultModel: null,
+    },
+  }),
+  useTeams: () => ({ data: { teams: [] } }),
 }));
 
 vi.mock("~/api/repos", () => ({
@@ -182,23 +207,27 @@ describe("IntegrationsPage", () => {
   it("built-in plugins get no connect affordance; deepwiki (keyless) gets none either", () => {
     render(<IntegrationsPage />);
     // Only github + typefully are connectable → exactly two Connect buttons.
-    expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(2);
+    // Each names its own service, so a screen reader can tell them apart.
+    expect(screen.getAllByRole("button", { name: /^Connect / })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect Typefully" })).toBeTruthy();
   });
 
-  it("reveals the token form and connects via PUT — the action is named Connect throughout", async () => {
+  it("connects via PUT after the pre-connect screen — the action is named Connect throughout", async () => {
     render(<IntegrationsPage />);
 
-    // Typefully's Connect (api_key) — buttons are ordered by display name (GitHub first).
-    const [, typefullyConnect] = screen.getAllByRole("button", { name: "Connect" });
-    fireEvent.click(typefullyConnect);
+    fireEvent.click(screen.getByRole("button", { name: "Connect Typefully" }));
+
+    // The disclosure comes first; the token field is one step behind it.
+    expect(screen.getByText("Set up your Typefully connection")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
     const textarea = screen.getByLabelText("API key") as HTMLTextAreaElement;
     expect(screen.getByText("Typefully API key")).toBeTruthy(); // connectLabel as guidance copy
     fireEvent.change(textarea, { target: { value: "tf-key-123" } });
 
-    // The form's submit is also "Connect" (never "Save").
-    const buttons = screen.getAllByRole("button", { name: "Connect" });
-    fireEvent.click(buttons[buttons.length - 1]);
+    // The submit is still "Connect" (never "Save").
+    fireEvent.click(screen.getByRole("button", { name: "Connect Typefully" }));
 
     await waitFor(() => expect(connectMutateAsync).toHaveBeenCalledTimes(1));
     expect(connectMutateAsync).toHaveBeenCalledWith({
@@ -210,31 +239,40 @@ describe("IntegrationsPage", () => {
   it("confirms then disconnects a connected service", async () => {
     render(<IntegrationsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
 
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith("slack"));
   });
 
-  it("renders an anchor Connect button pointing at the connect route when connect is oauth", () => {
+  it("opens the pre-connect screen for an oauth service instead of redirecting on click", () => {
+    // This used to be a bare anchor straight at /api/credentials/:s/connect,
+    // which left no moment to say what the credential gives away.
     currentPluginsData = oauthPluginsData;
     render(<IntegrationsPage />);
-    const link = screen.getByRole("link", { name: "Connect" });
-    expect(link.getAttribute("href")).toBe("/api/credentials/linear/connect");
+
+    expect(screen.queryByRole("link", { name: "Connect Linear" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
+
+    expect(screen.getByText("Set up your Linear connection")).toBeTruthy();
+    expect(screen.getByLabelText("What your assistant can do")).toBeTruthy();
+    expect(screen.getByLabelText("Who can reach it")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
-  it("oauth services still offer manual token entry behind a secondary toggle", () => {
+  it("oauth services still offer manual token entry, behind the disclosure", () => {
     currentPluginsData = oauthPluginsData;
     render(<IntegrationsPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Enter token manually" }));
-    expect(screen.getByText(/Access token/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
+    fireEvent.click(screen.getByRole("button", { name: "Enter a token instead" }));
+    expect(screen.getByLabelText("Access token")).toBeTruthy();
   });
 
   it("manual services render the token-entry Connect button, not an anchor", () => {
     currentPluginsData = manualOnlyPluginsData;
     render(<IntegrationsPage />);
-    expect(screen.queryByRole("link", { name: "Connect" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Connect Typefully" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect Typefully" })).toBeTruthy();
   });
 
   it("shows a success notice for ?connected= and an error notice for ?error=", () => {
@@ -263,6 +301,7 @@ describe("brand marks", () => {
             configKeys: ["accessToken"],
             connected: false,
             connect: "manual" as const,
+            actions: [],
             iconSlug: name,
           },
         ],
@@ -290,6 +329,7 @@ describe("connection health", () => {
               configKeys: ["accessToken"],
               connected: true,
               connect: "oauth" as const,
+              actions: [],
               iconSlug: "gmail",
               health,
             },
@@ -304,7 +344,7 @@ describe("connection health", () => {
     render(<IntegrationsPage />);
     expect(screen.getByText(/someone@example.com/)).toBeTruthy();
     expect(screen.getByText("Connected")).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "Reconnect" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 
   it("shows the fix and a Reconnect control when the token expired", () => {
@@ -314,11 +354,10 @@ describe("connection health", () => {
     expect(screen.getByText("Expired")).toBeTruthy();
     expect(screen.queryByText("Connected")).toBeNull();
     expect(screen.getByText(/Select Reconnect to sign in again/)).toBeTruthy();
-    // The repair is an OAuth redirect, and Disconnect stays available.
-    expect(screen.getByRole("link", { name: "Reconnect" }).getAttribute("href")).toBe(
-      "/api/credentials/gmail/connect",
-    );
-    expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
+    // The repair opens the same pre-connect screen, and Disconnect stays available.
+    expect(screen.queryByRole("link", { name: "Reconnect Gmail" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Reconnect Gmail" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect Gmail" })).toBeTruthy();
   });
 
   it("shows the fix when the last refresh failed", () => {
@@ -339,7 +378,7 @@ describe("connection health", () => {
     currentPluginsData = connectedGmail(undefined);
     render(<IntegrationsPage />);
     expect(screen.getByText("Connected")).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "Reconnect" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 });
 
@@ -360,6 +399,7 @@ describe("connected dynamic service tool count", () => {
               connected: true,
               dynamic: true as const,
               connect: "oauth" as const,
+              actions: [],
               toolCount: 52,
             },
           ],
@@ -384,6 +424,7 @@ describe("connected dynamic service tool count", () => {
               service: "linear",
               type: "oauth2" as const,
               configKeys: ["accessToken"],
+              actions: [],
               connected: true,
               dynamic: true as const,
               connect: "oauth" as const,
