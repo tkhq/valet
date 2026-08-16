@@ -1,13 +1,14 @@
-const SLACK_API = 'https://slack.com/api';
+export const SLACK_API = 'https://slack.com/api';
 
 /** Authenticated POST against the Slack Web API. Automatically retries on 429 rate limits. */
 export async function slackFetch(
   method: string,
   token: string,
   body?: Record<string, unknown>,
+  baseUrl: string = SLACK_API,
 ): Promise<Response> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(`${SLACK_API}/${method}`, {
+    const res = await fetch(`${baseUrl}/${method}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -34,8 +35,9 @@ export async function slackGet(
   method: string,
   token: string,
   params?: Record<string, unknown>,
+  baseUrl: string = SLACK_API,
 ): Promise<Response> {
-  const url = new URL(`${SLACK_API}/${method}`);
+  const url = new URL(`${baseUrl}/${method}`);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));

@@ -42,7 +42,7 @@ First time reading a channel, use `slack.get_channel_info` to understand its top
 
 ## People
 
-Messages include `user_display` (e.g., `@conner <Conner Swann> (U123)`) and `bot_display` fields. These tell you who said what without needing to call `slack.list_users`.
+Messages include `user_display` (e.g., `@handle <Display Name> (U123)`) and `bot_display` fields. These tell you who said what without needing to call `slack.list_users`.
 
 Use `slack.get_reactions` when you need to know **who specifically** agreed or acknowledged something, not just the count.
 
