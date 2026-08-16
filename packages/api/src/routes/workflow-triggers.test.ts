@@ -151,6 +151,18 @@ describe("POST /api/workflows/schedules", () => {
 
   // ── 3. Exactly-one-of workflowId+prompt ───────────────────────────────
 
+  it("400s with object-required message when body is JSON null", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "null",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Request body must be a JSON object.");
+  });
+
   it("400s when neither workflowId nor prompt is provided (service message passes through)", async () => {
     const a = await boot();
     // Send a raw object that bypasses the union constraint at the type level

@@ -217,7 +217,7 @@ export async function updateWorkflowSchedule(
       nextFireAt: nextAt,
       updatedAt: now,
     })
-    .where(eq(workflowSchedules.id, scheduleId))
+    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
     .returning();
   return { ok: true, schedule: rowToSummary(updated[0]!) };
 }
@@ -233,6 +233,6 @@ export async function deleteWorkflowSchedule(
     .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
     .limit(1);
   if (rows.length === 0) return "not_found";
-  await db.delete(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
+  await db.delete(workflowSchedules).where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)));
   return "ok";
 }

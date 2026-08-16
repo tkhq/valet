@@ -198,7 +198,7 @@ export class WorkflowScheduler {
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, updatedAt: now })
-      .where(eq(workflowSchedules.id, scheduleId));
+      .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)));
     return "ok";
   }
 }

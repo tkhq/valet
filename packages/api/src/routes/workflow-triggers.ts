@@ -117,6 +117,9 @@ workflowTriggersRouter.post("/schedules", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return c.json({ error: "Request body must be a JSON object." }, 400);
+  }
   if (!body.name || typeof body.name !== "string") {
     return c.json({ error: "name is required" }, 400);
   }
@@ -150,6 +153,9 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
     body = (await c.req.json()) as UpdateWorkflowScheduleRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return c.json({ error: "Request body must be a JSON object." }, 400);
   }
   const result = await updateWorkflowSchedule(db, c.var.user.orgId, c.req.param("id"), body);
   if (!result.ok) {
@@ -192,6 +198,9 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return c.json({ error: "Request body must be a JSON object." }, 400);
+  }
   const result = await createWorkflowTrigger(db, plugins, user, {
     workflowId: body.workflowId,
     name: body.name,
@@ -210,6 +219,9 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
     body = (await c.req.json()) as UpdateWorkflowEventTriggerRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return c.json({ error: "Request body must be a JSON object." }, 400);
   }
   const result = await updateWorkflowTrigger(db, plugins, c.var.user.orgId, c.req.param("id"), body);
   if (!result.ok) {

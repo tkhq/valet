@@ -153,7 +153,7 @@ export async function updateWorkflowTrigger(
   const updated = await db
     .update(eventSubscriptions)
     .set({ name, eventKeys, filters, enabled: patch.enabled ?? current.enabled, updatedAt: Date.now() })
-    .where(eq(eventSubscriptions.id, triggerId))
+    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)))
     .returning();
   const trigger = rowToTrigger(updated[0]!);
   if (!trigger) return { ok: false, status: 400, error: "trigger update produced an unexpected row shape" };
@@ -174,6 +174,6 @@ export async function deleteWorkflowTrigger(
   // Refuse to delete non-workflow subscriptions through this seam — those
   // belong to the orchestrator subscription surface.
   if (!row || rowToTrigger(row) === null) return "not_found";
-  await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, triggerId));
+  await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)));
   return "ok";
 }

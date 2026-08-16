@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { workflowsActionPlugin, ownerFromContext } from "./actions.js";
 import type { PluginActionContext } from "@valet/engine";
 import type { WorkflowServiceDeps } from "./service.js";
+import githubPlugin from "@valet/plugin-github/plugin";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { eventSubscriptions, workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import type { AppDb } from "../lib/drizzle.js";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -40,6 +44,8 @@ describe("workflowsActionPlugin", () => {
       "workflows.resolve_approval",
       "workflows.save_workflow",
       "workflows.start_run",
+      "workflows.update_schedule",
+      "workflows.update_trigger",
     ]);
   });
 
@@ -78,5 +84,146 @@ describe("save_workflow validation", () => {
     const result = await save.execute({ definition: { nodes: "nope" } }, ctx());
     expect(result.success).toBe(false);
     expect(result.error).toContain("definition.nodes");
+  });
+});
+
+// ── update_schedule / update_trigger — DB-backed ─────────────────────────
+
+let db: AppDb;
+let dbCleanup: () => Promise<void>;
+
+const DB_USER = { id: "user_1", orgId: "org_1" };
+const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
+
+beforeAll(async () => {
+  const boot = await freshTestPgDb();
+  db = boot.appDb;
+  dbCleanup = boot.cleanup;
+
+  await db.insert(workflowDefinitions).values({
+    id: "wf_actions_1",
+    orgId: DB_USER.orgId,
+    ownerType: "user",
+    ownerId: DB_USER.id,
+    name: "test workflow",
+    definition: { version: "dag/v1", nodes: [], edges: [] },
+    createdAt: NOW,
+    updatedAt: NOW,
+  });
+});
+
+afterAll(async () => {
+  await dbCleanup();
+});
+
+function makeDeps(overrides: Partial<WorkflowServiceDeps> = {}): WorkflowServiceDeps {
+  return {
+    db,
+    workflowStore: undefined as unknown as WorkflowServiceDeps["workflowStore"],
+    workflowRunHost: undefined as unknown as WorkflowServiceDeps["workflowRunHost"],
+    plugins: [githubPlugin],
+    ...overrides,
+  };
+}
+
+describe("workflows.update_schedule action", () => {
+  it("updates an existing schedule and returns the summary", async () => {
+    const schedId = `sched_act_${Date.now()}`;
+    await db.insert(workflowSchedules).values({
+      id: schedId,
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      targetKind: "orchestrator",
+      workflowId: null,
+      prompt: "hello",
+      name: "original name",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      nextFireAt: NOW + 3600_000,
+      lastFiredAt: null,
+      createdBy: DB_USER.id,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+
+    const deps = makeDeps();
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = plugin.actions.find((a) => a.id === "workflows.update_schedule");
+    if (!action) throw new Error("update_schedule action missing");
+
+    const result = await action.execute(
+      { schedule_id: schedId, name: "renamed" },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.data as { name: string }).name).toBe("renamed");
+    }
+  });
+
+  it("returns error for unknown schedule id", async () => {
+    const deps = makeDeps();
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = plugin.actions.find((a) => a.id === "workflows.update_schedule");
+    if (!action) throw new Error("update_schedule action missing");
+
+    const result = await action.execute(
+      { schedule_id: "no_such_schedule" },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not found");
+  });
+});
+
+describe("workflows.update_trigger action", () => {
+  it("updates an existing trigger and returns the summary", async () => {
+    const trigId = `trig_act_${Date.now()}`;
+    await db.insert(eventSubscriptions).values({
+      id: trigId,
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      name: "original trigger",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [],
+      target: { kind: "workflow", workflowId: "wf_actions_1" },
+      enabled: true,
+      createdBy: DB_USER.id,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+
+    const deps = makeDeps();
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = plugin.actions.find((a) => a.id === "workflows.update_trigger");
+    if (!action) throw new Error("update_trigger action missing");
+
+    const result = await action.execute(
+      { trigger_id: trigId, name: "renamed trigger", enabled: false },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const data = result.data as { name: string; enabled: boolean };
+      expect(data.name).toBe("renamed trigger");
+      expect(data.enabled).toBe(false);
+    }
+  });
+
+  it("returns error for unknown trigger id", async () => {
+    const deps = makeDeps();
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = plugin.actions.find((a) => a.id === "workflows.update_trigger");
+    if (!action) throw new Error("update_trigger action missing");
+
+    const result = await action.execute(
+      { trigger_id: "no_such_trigger" },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not found");
   });
 });
