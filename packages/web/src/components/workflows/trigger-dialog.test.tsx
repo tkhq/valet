@@ -80,7 +80,8 @@ describe("TriggerDialog", () => {
       .mockRejectedValueOnce(
         new Error('invalid cron "x". Use 5 fields, for example "0 9 * * 1-5".'),
       );
-    render(<TriggerDialog open onOpenChange={() => {}} />);
+    // Provide workflowId prop so the client-side workflow-required check is bypassed.
+    render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_test" />);
     fireEvent.click(screen.getByText(/^Schedule$/));
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "bad" } });
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "x" } });
@@ -142,5 +143,44 @@ describe("TriggerDialog", () => {
         filters: [],
       }),
     );
+  });
+
+  // ── Item 3: workflow-required check ─────────────────────────────────────
+
+  it("shows 'Select a workflow.' error and skips create mutation when no workflow is selected (schedule + workflow target)", async () => {
+    createScheduleMutateAsync.mockClear();
+    // No workflowId prop — dialog shows the workflow select. Leave it empty.
+    render(<TriggerDialog open onOpenChange={() => {}} />);
+    fireEvent.click(screen.getByText(/^Schedule$/));
+    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "no wf" } });
+    fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
+    // targetKind defaults to "workflow" and no workflow is selected.
+    fireEvent.click(screen.getByText(/^Create$/));
+    await waitFor(() => expect(screen.getByText("Select a workflow.")).toBeTruthy());
+    expect(createScheduleMutateAsync).not.toHaveBeenCalled();
+  });
+
+  // ── Item 4: emptying textarea on EDIT clears the stored value ────────────
+
+  it("sends filters: [] when the filters textarea is cleared on EDIT", async () => {
+    updateEventMutateAsync.mockClear().mockResolvedValue({});
+    const editingEvent = {
+      kind: "event" as const,
+      id: "ev_edit_clear",
+      workflowId: "wf_1",
+      name: "on pr",
+      enabled: true,
+      detail: {
+        eventKeys: ["github.pull_request.opened"],
+        filters: [{ field: "branch", op: "eq" as const, value: "main" }],
+      },
+    };
+    render(<TriggerDialog open onOpenChange={() => {}} editing={editingEvent} />);
+    // Clear the filters textarea (it was pre-filled with JSON from editing.detail.filters).
+    fireEvent.change(screen.getByLabelText(/filters/i), { target: { value: "" } });
+    fireEvent.click(screen.getByText(/^Save$/));
+    await waitFor(() => expect(updateEventMutateAsync).toHaveBeenCalled());
+    const callArg = updateEventMutateAsync.mock.calls[updateEventMutateAsync.mock.calls.length - 1][0];
+    expect(callArg.body.filters).toEqual([]);
   });
 });

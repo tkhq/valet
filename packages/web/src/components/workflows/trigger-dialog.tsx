@@ -76,6 +76,9 @@ export function TriggerDialog({
   const [filtersJson, setFiltersJson] = useState("");
   const [filtersJsonError, setFiltersJsonError] = useState<string | null>(null);
 
+  // ── form error (client-side validation) ────────────────────────────────
+  const [formError, setFormError] = useState<string | null>(null);
+
   // ── server error ───────────────────────────────────────────────────────
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -97,6 +100,7 @@ export function TriggerDialog({
     if (editing) {
       setKind(editing.kind);
       setName(editing.name);
+      setFormError(null);
       setServerError(null);
       if (editing.kind === "schedule") {
         setCron(editing.detail.cron);
@@ -130,6 +134,7 @@ export function TriggerDialog({
       setEventKey("");
       setFiltersJson("");
       setFiltersJsonError(null);
+      setFormError(null);
       setServerError(null);
     }
   }, [open, editing, workflowId, lockedKind]);
@@ -159,8 +164,20 @@ export function TriggerDialog({
 
   async function submit() {
     setServerError(null);
+    setFormError(null);
     setInputJsonError(null);
     setFiltersJsonError(null);
+
+    // Client-side: require a workflow selection on create when the workflowId
+    // prop is absent and a workflow target is needed.
+    if (!isEditing) {
+      const needsWorkflow =
+        (kind === "schedule" && targetKind === "workflow") || kind === "event";
+      if (needsWorkflow && !workflowId && !selectedWorkflowId) {
+        setFormError("Select a workflow.");
+        return;
+      }
+    }
 
     try {
       if (kind === "schedule") {
@@ -191,8 +208,13 @@ export function TriggerDialog({
           if (orig.detail.targetKind === "orchestrator" && prompt !== (orig.detail.prompt ?? "")) {
             body.prompt = prompt;
           }
-          if (orig.detail.targetKind === "workflow" && parsedInput !== undefined) {
-            body.input = parsedInput;
+          if (orig.detail.targetKind === "workflow") {
+            if (parsedInput !== undefined) {
+              body.input = parsedInput;
+            } else if (!inputJson.trim() && orig.detail.input != null) {
+              // Emptied the textarea on edit — clear the stored input.
+              body.input = null;
+            }
           }
           await updateSchedule.mutateAsync({ id: orig.id, body });
         } else {
@@ -239,7 +261,12 @@ export function TriggerDialog({
           if (eventKey !== (orig.detail.eventKeys[0] ?? "")) {
             body.eventKeys = [eventKey];
           }
-          if (filtersJson.trim()) body.filters = filters;
+          if (filtersJson.trim()) {
+            body.filters = filters;
+          } else if (orig.detail.filters.length > 0) {
+            // Emptied the textarea on edit — clear the stored filters.
+            body.filters = [];
+          }
           await updateEvent.mutateAsync({ id: orig.id, body });
         } else {
           const wfId = workflowId ?? selectedWorkflowId;
@@ -476,6 +503,13 @@ export function TriggerDialog({
                 )}
               </div>
             </>
+          )}
+
+          {/* Form validation error */}
+          {formError && (
+            <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+              {formError}
+            </div>
           )}
 
           {/* Server error */}
