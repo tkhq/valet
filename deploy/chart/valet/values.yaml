@@ -129,8 +129,10 @@ sandbox:
   #   repository: ghcr.io/tkhq/valet-sandbox
   #   tag: latest
 
-  # Same CI-publishing story as api.image: for remote clusters use
-  # ghcr.io/<owner>/valet-sandbox pinned to a sha-<shortsha> tag.
+  # Local-dev default for the DEPRECATED legacy pin above. Remote deploys
+  # set `sandbox.image: null` — the ConfigMap then omits
+  # VALET_SANDBOX_IMAGE and the api resolves sandboxes through the seeded
+  # per-profile base sources instead.
   image:
     # Pull-hosted through the bundled registry (NodePort) so BuildKit base
     # bakes can FROM the stock image via the push-host rewrite, and so the
