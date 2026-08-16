@@ -1,7 +1,7 @@
 # Observability — OTel engine-trace export + bundled Grafana LGTM stack
 
 **Date:** 2026-07-28
-**Status:** Implemented (rev 3 — metrics + provisioned dashboard, 2026-07-29)
+**Status:** Implemented (rev 4 — Postgres cost attribution, 2026-08-05)
 **Scope:** Env-gated OpenTelemetry trace export from `packages/api` (a pure
 consumer of the engine event bus) and a bundled local observability stack
 (`grafana/otel-lgtm`) in the Helm chart. Builds directly on the engine
@@ -92,6 +92,29 @@ cost on the `turn_end` event and patch-capture records on
    sits on a small PVC (`observability.storageSize`, default 2Gi; Recreate
    strategy) so telemetry history survives restarts. Golden assertions pin
    the ConfigMap render and its observability.enabled gate.
+
+7. **Cost attribution reads Postgres, not the metric (rev 4).**
+   `valet.cost.usd` carries a `model` label and nothing else. Adding a
+   per-user or per-workflow label would make the series count grow with the
+   tenant, which is the unbounded-cardinality mistake. So per-user,
+   per-workflow, and per-org spend comes from Postgres instead: the
+   `cost_entries` view (`packages/api/migrations/pg/0000_app.sql`) resolves
+   the owner of every billable turn and exposes `created_at`, `org_id`,
+   `user_id`, `owner_type`, `owner_id`, `model`, `workflow_id`,
+   `workflow_run_id`, the four token counts plus `total_tokens`,
+   `cost_total`, and `priced`. Grafana reads that view through a Postgres
+   datasource and `/api/usage/summary` aggregates the same columns, so the
+   dashboard and the in-app card cannot drift. The metric keeps its job:
+   a low-cardinality, real-time spend rate by model.
+
+   Two rules the view encodes and every consumer inherits:
+
+   - A workflow session has no `agent_sessions` row, so it resolves through
+     `workflow_runs` and then `workflow_definitions` (the only one of the
+     three tables with an `org_id`). Any query that joins `agent_sessions`
+     alone drops all workflow spend.
+   - `cost_total` NULL means unpriced, never free. The engine omits cost for
+     a model it has no price for. Read `priced` before you present a total.
 
 ## Out of scope
 

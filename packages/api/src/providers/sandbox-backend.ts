@@ -128,6 +128,21 @@ export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
   return n;
 }
 
+/**
+ * Retention window for a settled child's suspended sandbox
+ * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 72). `0`, a negative
+ * number, or a non-number disables retention: settled children get the
+ * eager destroy-on-settle. Only consulted on hibernation-capable backends —
+ * elsewhere the child watcher never parks in the first place.
+ */
+export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_CHILD_SANDBOX_RETENTION_HOURS;
+  if (raw === undefined || raw === "") return 72 * 3_600_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 3_600_000;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
@@ -158,7 +173,10 @@ export function buildSandboxProvider(
       const namespace = env.VALET_SANDBOX_NAMESPACE ?? "valet-sandboxes";
       const image = env.VALET_SANDBOX_IMAGE;
       if (!image) {
-        throw new Error("VALET_SANDBOX_IMAGE is required when VALET_SANDBOX_BACKEND=kubernetes.");
+        console.warn(
+          "VALET_SANDBOX_IMAGE unset; falling back to seeded base sources. " +
+          "Set VALET_HEADLESS_BASE_IMAGE / VALET_FULL_BASE_IMAGE via chart values if you need to override.",
+        );
       }
       const kc = deps.kubeConfig ?? resolveKubeConfig(env);
       const coreApi = kc.makeApiClient(k8s.CoreV1Api);
@@ -171,7 +189,7 @@ export function buildSandboxProvider(
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const cfg: K8sProviderConfig = {
         namespace,
-        defaultImage: image,
+        defaultImage: image ?? env.VALET_HEADLESS_BASE_IMAGE ?? "node:22-bookworm-slim",
         apiVersion: SANDBOX_CR_API_VERSION,
         // Sandbox images v2 plan, Task 5: threaded when an external prebuild
         // registry requires authenticated pulls (`externalRegistry.pullSecret`

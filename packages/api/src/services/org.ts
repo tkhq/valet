@@ -10,6 +10,7 @@ import { and, eq } from "drizzle-orm";
 import { ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
+import type { SourceService } from "../bakes/source-service.js";
 
 export type OrgRole = "admin" | "member";
 
@@ -41,14 +42,29 @@ export const MEMBER_NOT_FOUND_ERROR = "member not found";
  * creates one named "My organization". Used by the auth provisioning hooks
  * (`auth/provisioning.ts`) to guarantee an org exists before the first
  * `org_members` row is inserted — this app has exactly one org today.
+ *
+ * When `sourceService` is provided, seeds the default base sources for a
+ * newly-created org (best-effort — never fails org creation on seed error).
  */
-export async function ensureOrg(db: AppQueryable): Promise<{ id: string }> {
+export async function ensureOrg(
+  db: AppQueryable,
+  sourceService?: SourceService,
+): Promise<{ id: string }> {
   const existingRows = await db.select({ id: orgs.id }).from(orgs).limit(1);
   const existing = existingRows[0];
   if (existing) return existing;
 
   const id = `org_${randomUUID()}`;
   await db.insert(orgs).values({ id, name: "My organization", createdAt: Date.now() });
+
+  if (sourceService) {
+    try {
+      await sourceService.seedDefaultBasesIfMissing(id);
+    } catch (err) {
+      console.error(`ensureOrg: seedDefaultBasesIfMissing(${id}) failed (non-fatal):`, err);
+    }
+  }
+
   return { id };
 }
 
@@ -60,6 +76,16 @@ export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string
     .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
     .limit(1);
   return rows[0]?.role === "admin";
+}
+
+/** True when `userId` has any `org_members` row in `orgId` (any role). */
+export async function isOrgMember(db: AppQueryable, orgId: string, userId: string): Promise<boolean> {
+  const rows = await db
+    .select({ userId: orgMembers.userId })
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
+    .limit(1);
+  return rows.length > 0;
 }
 
 /** Reads `orgs.features` (jsonb); an absent `organizations` key reads as false. */

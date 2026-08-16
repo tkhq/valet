@@ -31,7 +31,7 @@ stub applies. Provider variable pairs are all-or-none.
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | GitHub social login |
-| `VALET_LOCAL_AUTH` | `1` → stub identity for local dev (only when real auth is not configured) |
+| `VALET_LOCAL_AUTH` | `1` → stub identity for local dev. Mutually exclusive with `BETTER_AUTH_SECRET` — the server refuses to boot when both are set |
 | `VALET_SANDBOX_JWT_MASTER` | Master key for per-session sandbox gateway JWT secrets (falls back to `BETTER_AUTH_SECRET`) |
 | `VALET_INTERNAL_TOKEN` | Token for the server's internal self-calls (generated if unset) |
 
@@ -50,6 +50,28 @@ stub applies. Provider variable pairs are all-or-none.
 Inside each sandbox, the provider injects: `VALET_SANDBOX_TOKEN`,
 `VALET_API_URL`, `VALET_SANDBOX_JWT_SECRET`, `VALET_SESSION_ID`,
 `VALET_SANDBOX_PROFILE`.
+
+## GitHub App fallback
+
+Optional. These variables point the deployment at a pre-existing GitHub
+App, as an alternative to the in-app manifest flow. The env is the config
+— nothing lands in the database. An org that later creates an App in the
+UI shadows the fallback. Set all required variables or none. If the set
+is partial, GitHub App operations fail and name the missing variables.
+Point the App's webhook URL at `{public URL}/webhooks/github-app`. Point
+its callback URL at `{public URL}/api/me/github/callback`. The
+env-fallback entry in
+`docs/specs/2026-07-16-github-repo-integration-design.md` has the full
+semantics.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GITHUB_APP_ID` | Yes | The App's numeric id |
+| `GITHUB_APP_SLUG` | Yes | The App's URL slug (drives the install link) |
+| `GITHUB_APP_CLIENT_ID` | Yes | OAuth client id (user connect flow) |
+| `GITHUB_APP_CLIENT_SECRET` | Yes | OAuth client secret |
+| `GITHUB_APP_PRIVATE_KEY` | Yes | The App's private key PEM, raw or base64-encoded |
+| `GITHUB_APP_WEBHOOK_SECRET` | No | Webhook HMAC secret. Leave unset for a webhook-less App |
 
 ## Channels
 

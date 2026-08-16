@@ -97,6 +97,130 @@ describe('driveUntilPark: linear trigger → set → stop', () => {
   });
 });
 
+// ─── 1b. `nodes.<id>.result` alias ──────────────────────────────────────────
+
+describe('driveUntilPark: nodes.<id>.result alias', () => {
+  it('resolves node outputs via .result (the documented form) and via .output', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 's', type: 'set', values: { greeting: 'hello {{trigger.data.name}}', n: 5 } },
+        { id: 'big', type: 'set', values: { branch: 'big' } },
+        {
+          id: 'e',
+          type: 'stop',
+          outcome: 'success',
+          output: { viaResult: '{{nodes.s.result.greeting}}', viaOutput: '{{nodes.s.output.greeting}}' },
+        },
+      ],
+      edges: [
+        { from: 't', to: 's' },
+        { from: 's', to: 'big', when: 'nodes.s.result.n > 3' },
+        { from: 'big', to: 'e' },
+      ],
+    };
+    const params = runParams({
+      input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { name: 'world' }, metadata: {} },
+    });
+    await store.createRun('run-alias', params, definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-alias');
+
+    const park = await driveUntilPark('run-alias', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+    const checkpoints = await store.getCheckpoints('run-alias');
+    const byNode = new Map(checkpoints.map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('big')?.status).toBe('completed');
+    expect(byNode.get('e')?.result).toMatchObject({
+      output: { viaResult: 'hello world', viaOutput: 'hello world' },
+    });
+  });
+});
+
+// ─── 2a. Tool-node fromOutput edges (policy gate pass / deny) ────────────────
+
+describe('driveUntilPark: tool-node fromOutput edges', () => {
+  function toolBranchDefinition(): WorkflowDefinition {
+    return {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'tool1', type: 'tool', service: 'svc', action: 'act', params: {} },
+        { id: 'a', type: 'set', values: { branch: 'approved' } },
+        { id: 'b', type: 'set', values: { branch: 'denied' } },
+      ],
+      edges: [
+        { from: 't', to: 'tool1' },
+        { from: 'tool1', to: 'a', fromOutput: 'true' },
+        { from: 'tool1', to: 'b', fromOutput: 'false' },
+      ],
+    };
+  }
+
+  it('activates the true branch when tool completes with an ordinary result', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    (engine.invokeAction as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, result: { id: 1 } });
+    const params = runParams();
+    await store.createRun('run-tool-true', params, toolBranchDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-tool-true');
+
+    const park = await driveUntilPark('run-tool-true', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+
+    const byNode = new Map((await store.getCheckpoints('run-tool-true')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('tool1')?.status).toBe('completed');
+    expect(byNode.get('a')?.status).toBe('completed');
+    expect(byNode.get('b')?.status).toBe('skipped');
+  });
+
+  it('activates the false branch when tool is deny-skipped (policyDenied: true)', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const params = runParams();
+    await store.createRun('run-tool-deny', params, toolBranchDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-tool-deny');
+
+    // Seed a completed tool checkpoint with the deny-skip marker directly.
+    await store.putIntent({
+      runId: 'run-tool-deny',
+      nodeId: 'tool1',
+      iteration: 0,
+      status: 'intent',
+      attempt,
+      createdAt: clock.now(),
+    });
+    await store.completeCheckpoint('run-tool-deny', 'tool1', 0, attempt, {
+      runId: 'run-tool-deny',
+      nodeId: 'tool1',
+      iteration: 0,
+      status: 'completed',
+      result: { approved: false, policyDenied: true, resolvedBy: 'admin' },
+      attempt,
+      createdAt: clock.now(),
+    });
+
+    const park = await driveUntilPark('run-tool-deny', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+
+    const byNode = new Map((await store.getCheckpoints('run-tool-deny')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('tool1')?.status).toBe('completed');
+    expect(byNode.get('a')?.status).toBe('skipped');
+    expect(byNode.get('b')?.status).toBe('completed');
+  });
+});
+
 // ─── 2. If-node branch activation + skip propagation ────────────────────────
 
 describe('driveUntilPark: if-node branches and skip propagation', () => {

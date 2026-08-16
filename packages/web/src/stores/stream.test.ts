@@ -468,6 +468,205 @@ describe("setThreadMessages", () => {
   });
 });
 
+describe("streaming tool calls", () => {
+  beforeEach(reset);
+
+  function toolCallUpdate(callId: string, argsDelta: string): WireEvent {
+    return {
+      seq: 0,
+      ts: Date.now(),
+      type: "tool_call_update",
+      threadId: THREAD,
+      callId,
+      toolName: "write",
+      argsDelta,
+    };
+  }
+
+  it("creates a streaming tool_call part and fills args as deltas accumulate", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", ""));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x",'));
+
+    let m1 = useStreamStore.getState().bySession[SESSION].messages[0];
+    expect(m1.parts).toHaveLength(1);
+    let part = m1.parts[0];
+    if (part.kind !== "tool_call") throw new Error("expected tool_call part");
+    expect(part.callId).toBe("tc1");
+    expect(part.toolName).toBe("write");
+    expect(part.status).toBe("streaming");
+    expect(part.args).toEqual({ path: "/tmp/x" });
+
+    ingest(SESSION, toolCallUpdate("tc1", '"content":"hel'));
+    m1 = useStreamStore.getState().bySession[SESSION].messages[0];
+    part = m1.parts[0];
+    if (part.kind !== "tool_call") throw new Error("expected tool_call part");
+    expect(part.args).toEqual({ path: "/tmp/x", content: "hel" });
+  });
+
+  it("keeps the last parseable args when a delta leaves the JSON mid-key", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, toolCallUpdate("tc1", ',"conte'));
+    const m1 = useStreamStore.getState().bySession[SESSION].messages[0];
+    const part = m1.parts[0];
+    if (part.kind !== "tool_call") throw new Error("expected tool_call part");
+    expect(part.args).toEqual({ path: "/tmp/x" });
+  });
+
+  it("tool_start upgrades the streaming part in place (no duplicate) with final args", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "tool_start",
+      threadId: THREAD,
+      toolName: "write",
+      callId: "tc1",
+      args: { path: "/tmp/x", content: "full" },
+    });
+
+    const m1 = useStreamStore.getState().bySession[SESSION].messages[0];
+    expect(m1.parts).toHaveLength(1);
+    const part = m1.parts[0];
+    if (part.kind !== "tool_call") throw new Error("expected tool_call part");
+    expect(part.status).toBe("running");
+    expect(part.args).toEqual({ path: "/tmp/x", content: "full" });
+  });
+
+  it("tool_start without a matching streaming part still appends (legacy path)", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "tool_start",
+      threadId: THREAD,
+      toolName: "bash",
+      args: { cmd: "ls" },
+    });
+    const m1 = useStreamStore.getState().bySession[SESSION].messages[0];
+    expect(m1.parts).toHaveLength(1);
+    expect(m1.parts[0]).toMatchObject({ kind: "tool_call", toolName: "bash", status: "running" });
+  });
+
+  it("tool_end resolves the part by callId, not just tool name", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    // Two same-name calls: tc1 running, tc2 running.
+    ingest(SESSION, {
+      seq: 2, ts: Date.now(), offset: offset(2), type: "tool_start",
+      threadId: THREAD, toolName: "bash", callId: "tc1", args: { cmd: "a" },
+    });
+    ingest(SESSION, {
+      seq: 3, ts: Date.now(), offset: offset(3), type: "tool_start",
+      threadId: THREAD, toolName: "bash", callId: "tc2", args: { cmd: "b" },
+    });
+    // End tc1 (the OLDER one) — name-recency matching would hit tc2.
+    ingest(SESSION, {
+      seq: 4, ts: Date.now(), offset: offset(4), type: "tool_end",
+      threadId: THREAD, toolName: "bash", callId: "tc1", result: "done-a", isError: false,
+    });
+    const m1 = useStreamStore.getState().bySession[SESSION].messages[0];
+    const byCall = Object.fromEntries(
+      m1.parts.flatMap((p) => (p.kind === "tool_call" ? [[p.callId, p.status]] : [])),
+    );
+    expect(byCall).toEqual({ tc1: "completed", tc2: "running" });
+  });
+
+  it("message_end abort removes parts still streaming (they were never persisted)", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "abort",
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages[0].parts).toHaveLength(0);
+    // The accumulated args scratch dies with the part.
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+
+  it("message_end abort with an unknown messageId still sweeps the thread's streaming parts", () => {
+    // A client that connected mid-turn never saw message_start for the
+    // in-flight message; the streaming part sits on an older message.
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m-never-seen",
+      reason: "abort",
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages[0].parts).toHaveLength(0);
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+
+  it("turn_end sweeps parts still streaming and their scratch (zombie deltas cannot outlive the turn)", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    // tool_start never arrives (e.g. superseded attempt) — turn ends.
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "turn_end",
+      threadId: THREAD,
+      reason: "end_turn",
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages[0].parts).toHaveLength(0);
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+
+  it("message_start sweeps stale streaming parts left by a zombie delta from a prior aborted run", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, toolCallUpdate("tc1", '{"path":"/tmp/x"'));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "abort",
+    });
+    // Zombie delta from the aborted attempt lands after cleanup and
+    // re-synthesizes a streaming part on m1.
+    ingest(SESSION, toolCallUpdate("tc1", ',"content":"stale"'));
+    expect(
+      useStreamStore.getState().bySession[SESSION].messages[0].parts.length,
+    ).toBeGreaterThan(0);
+    // The next run's message_start clears it.
+    ingest(SESSION, messageStart("m2", 3));
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const streamingParts = slice.messages.flatMap((m) =>
+      m.parts.filter((p) => p.kind === "tool_call" && p.status === "streaming"),
+    );
+    expect(streamingParts).toHaveLength(0);
+    expect(slice.streamingArgs ?? {}).toEqual({});
+  });
+});
+
 describe("turn error visibility", () => {
   beforeEach(reset);
 

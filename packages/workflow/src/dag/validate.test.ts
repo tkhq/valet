@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import { validateWorkflowDefinition } from './validate.js';
 import type { WorkflowDefinition } from './shape.js';
+import type { ToolNode } from './nodes.js';
 
 /** Deliberately-malformed node for linter-behavior tests. The validator's
  * real-world input is LLM-authored JSON, so tests must hand it shapes the
@@ -359,7 +360,7 @@ describe('validateWorkflowDefinition', () => {
   });
 
   describe('tool node', () => {
-    function toolDefinition(overrides: Partial<{ service: string; action: string }>): WorkflowDefinition {
+    function toolDefinition(overrides: Partial<Pick<ToolNode, 'service' | 'action' | 'credential'>>): WorkflowDefinition {
       return definition({
         nodes: [
           { id: 'trigger', type: 'trigger' },
@@ -390,6 +391,35 @@ describe('validateWorkflowDefinition', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.errors.some((e) => e.includes('tool.action must be a non-empty string'))).toBe(true);
+      }
+    });
+
+    it('accepts every credential selection, and a node that omits it', () => {
+      expect(validateWorkflowDefinition(toolDefinition({ credential: 'auto' }))).toEqual({ ok: true });
+      expect(validateWorkflowDefinition(toolDefinition({ credential: 'app' }))).toEqual({ ok: true });
+      expect(validateWorkflowDefinition(toolDefinition({ credential: 'user' }))).toEqual({ ok: true });
+      expect(validateWorkflowDefinition(toolDefinition({}))).toEqual({ ok: true });
+    });
+
+    it('rejects an unknown credential selection', () => {
+      const result = validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            rawNode({ id: 'call', type: 'tool', service: 'github', action: 'create_comment', params: {}, credential: 'bot' }),
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'call' },
+            { from: 'call', to: 'stop' },
+          ],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) => e.includes('tool.credential must be "auto", "app" or "user"')),
+        ).toBe(true);
       }
     });
   });
@@ -466,6 +496,27 @@ describe('validateWorkflowDefinition', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.errors.some((e) => e.includes('is not allowed'))).toBe(true);
+      }
+    });
+
+    // A body id reaches the runtime as a session-id part and as a workspace
+    // path segment (`wf:{runId}:{nodeId}[:{iteration}]` ->
+    // `~/.valet/workflows/{runId}/{nodeId}/{iteration}`). The per-node loop
+    // in `validateWorkflowDefinition` only sees `definition.nodes`, so a body
+    // id gets no id-pattern check unless `validateForeachNode` applies one.
+    it.each(['bad:id', 'bad/id', '..', 'bad id'])('rejects a foreach body id %s', (bodyId) => {
+      const result = validateWorkflowDefinition(foreachDefinition({ body: { id: bodyId, type: 'set', values: {} } }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.body id') && e.includes('must match'))).toBe(true);
+      }
+    });
+
+    it('rejects a foreach body with no id', () => {
+      const result = validateWorkflowDefinition(foreachDefinition({ body: { type: 'set', values: {} } }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.body is missing its "id"'))).toBe(true);
       }
     });
 
@@ -649,6 +700,35 @@ describe('validateWorkflowDefinition — linter checks', () => {
     if (!result.ok) {
       expect(result.errors.some((e) => e.includes('unknown root "classify"') && e.includes('nodes.classify'))).toBe(true);
     }
+  });
+
+  it('rejects a nodes.<id> path whose next segment is not result/output', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'extract', type: 'set', values: { owner: 'tkhq' } },
+        { id: 'gen', type: 'llm', model: 'm', prompt: 'owner: {{nodes.extract.values.owner}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => e.includes('"values"') && e.includes('nodes.extract.result.owner')),
+      ).toBe(true);
+    }
+  });
+
+  it('accepts nodes.<id>.result and nodes.<id>.output paths', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'extract', type: 'set', values: { owner: 'tkhq' } },
+        { id: 'gen', type: 'llm', model: 'm', prompt: '{{nodes.extract.result.owner}} {{nodes.extract.output.owner}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(true);
   });
 
   it('requires fromOutput on edges leaving an if node', () => {

@@ -45,3 +45,42 @@ Usage:
 {{- randAlphaNum (.length | default 32) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Digest of the Secret material the api container reads, for its pod-template
+`checksum/secret` annotation.
+
+Env vars from `envFrom`/`secretKeyRef` are injected once, at pod start. An
+upgrade that only changes a Secret leaves the pod template byte-identical, so
+Kubernetes keeps the running pod and the OLD value stays live while
+`helm upgrade --wait` reports success. This digest puts the material into the
+pod template, which makes the upgrade roll the Deployment.
+
+It covers everything an operator can supply:
+  - api.secrets.*        — the app Secret's supplied keys
+  - externalDatabase.url — DATABASE_URL in the app Secret
+  - postgres.*           — the bundled Postgres credentials the api composes
+                           DATABASE_URL from
+
+It deliberately does NOT hash the rendered Secret, which is the usual Helm
+idiom. `valet.retainedSecretValue` returns a fresh `randAlphaNum` string
+whenever `lookup` reads nothing back — on `helm install`, and on every
+`helm template`/`--dry-run`. A digest over the rendered Secret therefore
+differs between two renders of identical input, and the first upgrade after
+an install would restart the api pod for no reason. A retained value never
+changes on its own, so leaving it out costs no rollout that is needed.
+
+`toYaml` sorts map keys, so equal input always gives an equal digest. A new
+key under `api.secrets` is covered without an edit here.
+*/}}
+{{- define "valet.apiSecretChecksum" -}}
+{{- $material := dict
+      "apiSecrets" .Values.api.secrets
+      "externalDatabaseUrl" .Values.externalDatabase.url
+      "postgres" (dict
+        "user" .Values.postgres.user
+        "database" .Values.postgres.database
+        "password" .Values.postgres.password)
+-}}
+{{- toYaml $material | sha256sum -}}
+{{- end -}}

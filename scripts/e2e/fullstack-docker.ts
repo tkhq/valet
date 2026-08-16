@@ -26,14 +26,20 @@ if (!process.env.ANTHROPIC_API_KEY) {
 rmSync(SCRATCH, { recursive: true, force: true });
 mkdirSync(WORKSPACE, { recursive: true });
 
+const serverEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  PORT: String(PORT),
+  VALET_LOCAL_AUTH: "1",
+  VALET_DATA_DIR: DATA_DIR,
+};
+// This step runs the api on STUB auth. An ambient BETTER_AUTH_SECRET (e.g.
+// from .env.e2e) would pair real auth with the stub above, which the api
+// refuses to boot (see packages/api/src/auth/config.ts).
+delete serverEnv.BETTER_AUTH_SECRET;
+
 const child = spawn("pnpm", ["--filter", "@valet/api", "start"], {
   cwd: ROOT,
-  env: {
-    ...process.env,
-    PORT: String(PORT),
-    VALET_LOCAL_AUTH: "1",
-    VALET_DATA_DIR: DATA_DIR,
-  },
+  env: serverEnv,
   stdio: ["ignore", "pipe", "pipe"],
   detached: true,
 });

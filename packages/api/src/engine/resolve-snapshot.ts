@@ -40,6 +40,7 @@ export interface ResolveSnapshotDeps {
 async function resolveBaseImage(
   db: AppDb,
   orgId: string,
+  profile: "headless" | "full",
   provider: SandboxProvider,
   preflight?: PrebuildPreflightOpts,
 ): Promise<string | null> {
@@ -49,7 +50,13 @@ async function resolveBaseImage(
     const sourceRows = await db
       .select()
       .from(imageSources)
-      .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base")))
+      .where(
+        and(
+          eq(imageSources.orgId, orgId),
+          eq(imageSources.kind, "base"),
+          eq(imageSources.profile, profile),
+        ),
+      )
       .limit(1);
     const source = sourceRows[0];
     if (!source || !source.enabled) return null;
@@ -103,9 +110,11 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
 
   const repos = meta.repos ?? [];
 
+  const sessionProfile: "headless" | "full" = meta.profile ?? "headless";
+
   const [prebuild, baseBakeRef] = await Promise.all([
     resolvePrebuildImage(db, meta, provider, preflight),
-    db ? resolveBaseImage(db, meta.orgId, provider, preflight) : Promise.resolve(null),
+    db ? resolveBaseImage(db, meta.orgId, sessionProfile, provider, preflight) : Promise.resolve(null),
   ]);
 
   return {

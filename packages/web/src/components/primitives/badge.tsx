@@ -5,7 +5,12 @@ type Variant = "neutral" | "accent" | "success" | "danger";
 
 const VARIANT: Record<Variant, string> = {
   neutral: "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
-  accent: "bg-accent-100 text-accent-700 dark:bg-accent-700/30 dark:text-accent-100",
+  // Solid dark background, not `dark:bg-accent-700/30`: the accent scale is
+  // raw `oklch(...)` strings, so Tailwind cannot inject an alpha channel and
+  // the slash-opacity class silently no-ops (see the OPACITY-MODIFIER TRAP
+  // note in theme.css). That left light-mode `bg-accent-100` under
+  // `dark:text-accent-100` — identical colours, an invisible badge.
+  accent: "bg-accent-100 text-accent-700 dark:bg-accent-700 dark:text-accent-50",
   success: "bg-success-500/15 text-success-600 dark:text-success-500",
   danger: "bg-danger-500/15 text-danger-600 dark:text-danger-500",
 };

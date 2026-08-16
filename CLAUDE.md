@@ -16,15 +16,37 @@ make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Do
                         # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ~/.valet/pg
 ```
 
+### Start the local stack cleanly (one stack at a time)
+
+The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns `~/.valet/pg`. PGlite allows exactly one owner. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
+
+1. Check the ports: `lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN`.
+2. If a listener exists, find its checkout: `lsof -p <pid> | grep cwd`. A stack from another worktree serves stale code, so your changes do not appear in the UI.
+3. If the old stack is stale, kill its listeners.
+4. Confirm nothing still holds the database: `lsof +D ~/.valet/pg` must return nothing. An orphaned api process here makes the next api crash at startup.
+5. Run `make dev-local`.
+6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
+
+Symptom → cause:
+
+- Vite proxy `ECONNREFUSED /api/...` → the api is down (crashed, or it lost the port race to another stack).
+- PGlite WASM `Aborted()` stack trace at api startup → another process owns `~/.valet/pg` (step 4).
+- The UI does not show your changes → :5173 is served from a different checkout (step 2).
+
+`make e2e` isolates its own state (scratch `VALET_DATA_DIR`, random ports 18790+), so it can run beside the dev stack — but Docker-heavy suites can flake from daemon contention while the dev stack's sandboxes run. If a Docker row goes red during concurrent work, re-run it in isolation before you treat it as real: `make e2e E2E_ARGS="--only <suite-id>"`.
+
 While iterating:
 
 ```bash
 pnpm typecheck                                  # all packages (worker excluded)
-pnpm --filter @valet/<pkg> test [-- <filter>]   # targeted suites for what you touched
+pnpm --filter @valet/<pkg> test [<filter>]      # targeted suites (NO "--" before the filter
+                        #   - vitest drops args after "--" and runs the FULL suite)
 make smoke-orchestrator                         # fastest agent-loop-alive check (real Anthropic, no Docker)
 ```
 
 **Before calling any change finished, run `make e2e` and get a clean scorecard.** It loads `.env.e2e`, probes your daemons/creds, and runs every suite it can — this is THE validation, not an optional extra. Pre-existing environmental failures (dead keys, missing creds) are the only acceptable red rows, and you must be able to name why each one is unrelated to your change.
+
+Capture the FULL `make e2e` output — never pipe it through `tail`, `head`, or `grep`. The scorecard is small, and a truncated capture drops the failing rows, which forces a full re-run just to see what failed. If you need the output later, use `make e2e 2>&1 | tee /tmp/e2e.log`.
 
 ```bash
 make e2e                          # full scorecard
@@ -83,7 +105,7 @@ We've broken tool-call rendering on reload three times; the root cause is always
 3. REST reads: `entryToMessage` (`packages/api/src/routes/messages.ts`). If REST drops `parts`, the UI looks fine live and breaks on reload.
 4. Frontend extracts: `resultText` (`packages/web/src/components/session/tool-renderers/types.ts`) must handle `{ text }`, pi-agent-core's `{ content: [{ type: "text", text }] }`, and bare `string`.
 
-Regression suites (run before claiming done): `pnpm --filter @valet/engine test -- happy-path`, `-- in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
+Regression suites (run before claiming done): `pnpm --filter @valet/engine test happy-path`, `pnpm --filter @valet/engine test in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
 
 "(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
 

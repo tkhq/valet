@@ -4,6 +4,8 @@ import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useCommands } from "~/hooks/use-commands";
+import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 
 export function Composer({
   sessionId,
@@ -28,6 +30,63 @@ export function Composer({
   // from under whatever the user is typing.
   const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Slash-command autocomplete: two popup modes derived from the text.
+  // COMMAND mode while the message is a lone "/token"; ARGUMENT mode while it
+  // is "/command <partial-first-arg>" and the command enumerates completions
+  // (e.g. /model's model ids). Dispatch remains server-side; the composer
+  // sends text unchanged.
+  const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
+  const argMatch = /^\/(\S+) (\S*)$/.exec(text);
+  const { data: commandsData } = useCommands(sessionId);
+  const allCommands = commandsData?.commands ?? [];
+  const filteredCommands = commandQuery !== null
+    ? allCommands.filter((c) => c.name.startsWith(commandQuery))
+    : [];
+  const argCommand = argMatch ? allCommands.find((c) => c.name === argMatch[1]) : undefined;
+  const argPrefix = argMatch?.[2] ?? "";
+  const argOptions = argCommand?.argOptions ?? [];
+  const argPrefixLower = argPrefix.toLowerCase();
+  const filteredArgs = argCommand
+    ? argOptions.filter((o) => {
+        if (argPrefixLower === "") return true;
+        // Match the full value, the value after a provider prefix
+        // ("anthropic/claude-…" ⇒ "claude-…"), or the display label —
+        // users type "claude-o" or "opus", not "anthropic/claude-o".
+        const v = o.value.toLowerCase();
+        const tail = v.slice(v.indexOf("/") + 1);
+        return (
+          v.startsWith(argPrefixLower) ||
+          tail.startsWith(argPrefixLower) ||
+          (o.label?.toLowerCase().includes(argPrefixLower) ?? false)
+        );
+      })
+    : [];
+  const popupItems: PopupItem[] =
+    commandQuery !== null
+      ? commandsToItems(filteredCommands)
+      : filteredArgs.map((o) => ({
+          id: o.value,
+          label: o.value,
+          detail: o.label,
+          group: "Arguments",
+        }));
+  // A command whose first argument is free text (argHint, no options) gets a
+  // passive hint row while the argument is still empty — discoverability
+  // without pretending we can complete it.
+  const argNotice =
+    argCommand && argOptions.length === 0 && argPrefix === "" && argCommand.argHint
+      ? argCommand.argHint
+      : undefined;
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const popupOpen = !dismissed && popupItems.length > 0;
+  const noticeOpen = !dismissed && !popupOpen && argNotice !== undefined;
+  // Reset selection and dismissed flag when the query changes (user typed new chars).
+  useEffect(() => {
+    setSelectedIndex(0);
+    setDismissed(false);
+  }, [popupItems.length, commandQuery, argPrefix]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
   // request fires, so a mount-time consume would miss it.
@@ -37,6 +96,14 @@ export function Composer({
   }, [focusNonce]);
   const send = useSendPrompt(sessionId);
   const abort = useAbortThread(sessionId);
+  // The textarea disables while a send is in flight, which drops focus to
+  // <body>. Refocus when the send settles so the user can type the next
+  // message or command immediately (covers Enter sends and Send clicks).
+  const sendWasPending = useRef(false);
+  useEffect(() => {
+    if (sendWasPending.current && !send.isPending) inputRef.current?.focus();
+    sendWasPending.current = send.isPending;
+  }, [send.isPending]);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
@@ -62,8 +129,9 @@ export function Composer({
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of
-      // falling back to a recency heuristic.
-      setMessageQueueItemId(sessionId, localId, res.messageId);
+      // falling back to a recency heuristic. Null for slash commands —
+      // they never queue, so there is nothing to link.
+      if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
       // message stays visible — they can see what they sent + retry; on the
@@ -82,7 +150,74 @@ export function Composer({
     }
   }
 
+  // Escape interrupts the running turn — parity with the Stop button —
+  // from anywhere on the chat tab, not just the textarea. Window-level
+  // because focus often sits outside the textarea mid-turn (it disables
+  // while a send is in flight). Layered dismissals keep priority: any
+  // handler that claims Escape first (the command popup above, the child
+  // panel's close) calls preventDefault, and a claimed event is skipped.
+  const abortMutate = abort.mutate;
+  const abortPending = abort.isPending;
+  useEffect(() => {
+    function onEscape(e: globalThis.KeyboardEvent) {
+      if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
+      if (!busy || !threadId || abortPending) return;
+      e.preventDefault();
+      abortMutate(
+        { threadId },
+        { onError: (err) => console.error("abort failed:", err) },
+      );
+    }
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [busy, threadId, abortPending, abortMutate]);
+
+  function insertSelection(id: string) {
+    if (commandQuery !== null) {
+      setText(`/${id} `);
+    } else if (argCommand) {
+      setText(`/${argCommand.name} ${id} `);
+    }
+    setSelectedIndex(0);
+    // Mouse selection would otherwise leave focus off the textarea.
+    inputRef.current?.focus();
+  }
+
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // While the popup is open, intercept navigation keys. IME composition
+    // guard applies here too — composition events must not trigger navigation.
+    if (popupOpen && !e.nativeEvent.isComposing) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((i) => Math.min(i + 1, popupItems.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        insertSelection(popupItems[selectedIndex].id);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Mark dismissed — the popup closes without modifying the text.
+        // dismissed resets automatically when commandQuery changes (user types).
+        setDismissed(true);
+        return;
+      }
+      if (e.key === "Enter") {
+        // Confirm selection — do NOT send.
+        if (e.shiftKey || e.nativeEvent.isComposing) return;
+        e.preventDefault();
+        insertSelection(popupItems[selectedIndex].id);
+        return;
+      }
+    }
+
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
     // sending a half-finished message.
@@ -101,7 +236,21 @@ export function Composer({
       className="border-t border-[--border] p-3 bg-[--bg]"
     >
       <QueueIndicator queueState={queueState} />
-      <div className="flex gap-2 items-end">
+      <div className="relative flex gap-2 items-end">
+        {(popupOpen || noticeOpen) && (
+          <CommandPopup
+            items={popupOpen ? popupItems : []}
+            notice={argNotice}
+            ariaLabel={
+              commandQuery !== null
+                ? `Slash command suggestions for /${commandQuery}`
+                : `Argument suggestions for /${argCommand?.name ?? ""}`
+            }
+            selectedIndex={selectedIndex}
+            onSelect={insertSelection}
+            onHover={setSelectedIndex}
+          />
+        )}
         <Textarea
           ref={inputRef}
           value={text}
@@ -125,6 +274,7 @@ export function Composer({
             onClick={() => void stop()}
             disabled={!threadId || abort.isPending}
             aria-label="Stop"
+            title="Stop (Esc)"
           >
             <Square className="h-3.5 w-3.5 fill-current" />
             <span>Stop</span>

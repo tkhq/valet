@@ -30,6 +30,7 @@ import { notificationsRouter } from "./routes/notifications.js";
 import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
@@ -38,6 +39,7 @@ import { modelsRouter } from "./routes/models.js";
 import { usageRouter } from "./routes/usage.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
+import { orgSettingsRouter } from "./routes/org-settings.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
@@ -45,10 +47,13 @@ import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { policiesRouter, actionLogRouter } from "./routes/policies.js";
+import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
@@ -138,6 +143,15 @@ export function createApp(
   // the raw bytes) inside the router itself, not the auth gate below.
   app.route("/webhooks/events", eventWebhooksRouter);
 
+  // PUBLIC arbitrary-URL workflow trigger ingress (overhaul design decision
+  // 5) — same reasoning as the mounts above: the hookId in the URL IS the
+  // credential (no logged-in Valet user), verified constant-time inside the
+  // router itself (`workflow-hooks.ts`), not the auth gate below. This IS
+  // under `/api/*`, so mounting it here, before `buildAuthMiddleware`'s
+  // `/api/*` registration, is what keeps it public — do not move it below
+  // that line.
+  app.route("/api/hooks", workflowHooksRouter);
+
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
@@ -206,6 +220,7 @@ export function createApp(
   app.route("/api/workflows", workflowTriggersRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
+  app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
   // Mounted BEFORE /api/me — defensive ordering only: meRouter today
@@ -220,8 +235,17 @@ export function createApp(
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/org", orgRouter);
+  app.route("/api/org/settings", orgSettingsRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
+  app.route("/api/org/policies", policiesRouter);
+  app.route("/api/org/action-log", actionLogRouter);
+  // Same defensive-ordering note as identityLinksRouter/githubConnectRouter
+  // above: meRouter has no wildcard route today, so there's no real
+  // collision — mounted after /api/me for readability (grouped with the
+  // other policy routes) rather than before it.
+  app.route("/api/me/policy-overrides", mePolicyOverridesRouter);
+  app.route("/api/me/grants", meGrantsRouter);
   app.route("/api/org/github-app", githubAppRouter);
   app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/sources", sourcesRouter);

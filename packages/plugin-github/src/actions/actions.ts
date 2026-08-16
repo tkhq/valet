@@ -8,6 +8,13 @@ import type {
 } from "@valet/engine";
 import { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
+import {
+  collectDirectoryEntries,
+  contentsKind,
+  wrongPathKindError,
+  MAX_DIRECTORY_ENTRIES,
+} from "./repo-directory.js";
+import { resolveGithubApiUrl } from "./api.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -19,7 +26,29 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
       "Missing GitHub access token. Connect the GitHub integration in Settings.",
     );
   }
-  return new Octokit({ auth: token });
+  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+}
+
+/**
+ * Virtual credential service for an explicit App-installation-token request.
+ * Mirrors `GITHUB_INSTALLATION_CREDENTIAL_SERVICE` in the api package's
+ * `services/github-tokens.ts` — the two literals must stay identical, and
+ * this package cannot import it (`@valet/api` depends on this package).
+ */
+const GITHUB_INSTALLATION_CREDENTIAL_SERVICE = "github:installation";
+
+/**
+ * Octokit bound to the org's App installation token, or `null` when the host
+ * resolves none (no App installation, or a host without the resolver seam).
+ * Default credential resolution prefers a linked user token, and
+ * `GET /installation/repositories` rejects user tokens outright — the
+ * installation listing must switch the CREDENTIAL, not only the endpoint.
+ */
+async function getInstallationOctokit(ctx: PluginActionContext): Promise<Octokit | null> {
+  const cred = await ctx.credentials.get(GITHUB_INSTALLATION_CREDENTIAL_SERVICE);
+  const token = cred?.accessToken;
+  if (!token) return null;
+  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
 }
 
 const PERMISSION_HINTS: Record<string, string> = {
@@ -33,6 +62,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.create_issue": "issues:write",
   "github.update_issue": "issues:write",
   "github.create_comment": "issues:write",
+  "github.create_review": "pull_requests:write",
   "github.create_pull_request": "pull_requests:write",
   "github.update_pull_request": "pull_requests:write",
   "github.merge_pull_request": "pull_requests:write + contents:write",
@@ -41,6 +71,8 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.create_release": "contents:write",
   "github.inspect_pull_request": "pull_requests:read (+ checks:read for check runs)",
   "github.fork_repository": "contents:write",
+  "github.read_repo_file": "contents:read",
+  "github.list_repo_directory": "contents:read",
 };
 
 function handleOctokitError(
@@ -143,20 +175,40 @@ const listRepos = action(Type.Object({
     const octokit = await getOctokit(ctx);
     const scope = args.scope ?? "auto";
 
-    // GET /user/repos is user-token-only; an App installation token gets
-    // "403 Resource not accessible by integration" there and must use
-    // GET /installation/repositories instead. "auto" makes the tool work
-    // regardless of which credential tier resolution handed us.
+    // GET /user/repos is user-token-only; GET /installation/repositories is
+    // installation-token-only. The endpoint AND the credential must switch
+    // together: the default credential is a user token whenever the user has
+    // one linked, so the installation listing asks the host for the
+    // installation token explicitly and falls back to the default credential
+    // only when the host resolves none (then the default credential already
+    // IS the installation token, or there is no App to list from).
     async function listInstallation() {
-      const { data } = await octokit.request("GET /installation/repositories", {
+      const installationOctokit = (await getInstallationOctokit(ctx)) ?? octokit;
+      const { data } = await installationOctokit.request("GET /installation/repositories", {
         per_page: args.perPage,
         page: args.page,
       });
       return { success: true as const, data: data.repositories };
     }
 
+    if (scope === "installation") {
+      try {
+        return await listInstallation();
+      } catch (err) {
+        if (isForbidden(err)) {
+          return {
+            success: false,
+            error:
+              "List repos (installation): GitHub returned 403 Forbidden. No installation " +
+              "token could be resolved, so the request used a credential the endpoint " +
+              "rejects. Install the GitHub App for this organization in Settings.",
+          };
+        }
+        return handleOctokitError(err, "github.list_repos", "List repos (installation)");
+      }
+    }
+
     try {
-      if (scope === "installation") return await listInstallation();
       const { data } = await octokit.request("GET /user/repos", {
         sort: args.sort,
         per_page: args.perPage,
@@ -338,6 +390,151 @@ const listPullRequests = action(Type.Object({
   },
 });
 
+/** GitHub caps `per_page` at 100 on every list endpoint. A larger value is
+ * silently clamped, so a single request can never return more than 100 files. */
+const GITHUB_MAX_PER_PAGE = 100;
+
+/** Default byte budget for the patches of one inspect call. 64 KiB is a few
+ * thousand diff lines — large enough for a normal review, small enough to
+ * leave room in an LLM prompt for the instructions and the reply. */
+const PATCH_BYTES_DEFAULT = 65536;
+
+const textEncoder = new TextEncoder();
+
+function byteLength(text: string): number {
+  return textEncoder.encode(text).length;
+}
+
+/** One entry of `GET /pulls/{n}/files`. `patch` is absent for binary files and
+ * for files whose diff GitHub considers too large. */
+interface PullRequestFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
+/**
+ * Reads up to `limit` files, in pages of at most 100. The old single request
+ * asked for `per_page: filesLimit`, so any limit above 100 returned 100 files
+ * and the caller could not tell. A short file list makes `matched_file_count`
+ * too low, which makes a workflow gate skip a pull request it should review.
+ */
+async function fetchPullRequestFiles(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  limit: number,
+): Promise<PullRequestFile[]> {
+  const files: PullRequestFile[] = [];
+  for (let page = 1; files.length < limit; page++) {
+    const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit - files.length);
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      { owner, repo, pull_number: pullNumber, per_page: perPage, page },
+    );
+    for (const file of data) {
+      files.push({
+        filename: file.filename,
+        status: file.status,
+        additions: file.additions,
+        deletions: file.deletions,
+        patch: file.patch,
+      });
+    }
+    if (data.length < perPage) break;
+  }
+  return files;
+}
+
+/** Cuts a patch at the last whole line that fits in `budgetBytes`. Cutting on a
+ * line boundary keeps every retained diff line readable and cannot split a
+ * multi-byte character. */
+function truncatePatch(patch: string, budgetBytes: number): { text: string; bytes: number } {
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of patch.split("\n")) {
+    const cost = byteLength(line) + 1;
+    if (used + cost > budgetBytes) break;
+    kept.push(line);
+    used += cost;
+  }
+  if (kept.length === 0) return { text: "", bytes: 0 };
+  return { text: kept.join("\n") + "\n", bytes: used };
+}
+
+interface InspectedFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+  /** The patch is a prefix of the real diff. */
+  patch_truncated?: true;
+  /** Why this file has no patch. */
+  patch_omitted?: "byte_budget" | "not_provided_by_github";
+}
+
+interface PatchSummary {
+  limit_bytes: number;
+  included_bytes: number;
+  truncated_files: number;
+  omitted_files: number;
+}
+
+/** Spends `limitBytes` on patches in file order and records every cut, so a
+ * reader never mistakes a shortened diff for the whole one. */
+function attachPatches(
+  files: PullRequestFile[],
+  limitBytes: number,
+): { files: InspectedFile[]; summary: PatchSummary } {
+  let remaining = limitBytes;
+  let truncatedFiles = 0;
+  let omittedFiles = 0;
+
+  const withPatches = files.map((file): InspectedFile => {
+    const base = {
+      filename: file.filename,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+    };
+    if (file.patch === undefined) {
+      omittedFiles++;
+      return { ...base, patch_omitted: "not_provided_by_github" };
+    }
+    const size = byteLength(file.patch);
+    if (size <= remaining) {
+      remaining -= size;
+      return { ...base, patch: file.patch };
+    }
+    const { text, bytes } = truncatePatch(file.patch, remaining);
+    if (bytes === 0) {
+      omittedFiles++;
+      return { ...base, patch_omitted: "byte_budget" };
+    }
+    remaining -= bytes;
+    truncatedFiles++;
+    return {
+      ...base,
+      patch: `${text}[... patch truncated at the ${limitBytes}-byte budget: ${size - bytes} of ${size} bytes omitted. Raise patchBytesLimit or narrow pathPrefixes to see the rest ...]`,
+      patch_truncated: true,
+    };
+  });
+
+  return {
+    files: withPatches,
+    summary: {
+      limit_bytes: limitBytes,
+      included_bytes: limitBytes - remaining,
+      truncated_files: truncatedFiles,
+      omitted_files: omittedFiles,
+    },
+  };
+}
+
 const inspectPullRequest = action(Type.Object({
     owner: Type.String({ description: "Repository owner" }),
     repo: Type.String({ description: "Repository name" }),
@@ -348,30 +545,57 @@ const inspectPullRequest = action(Type.Object({
     commentsLimit: Type.Optional(
       Type.Integer({ minimum: 1, maximum: 300, description: "Max review comments (default: 100)" }),
     ),
+    includePatch: Type.Optional(
+      Type.Boolean({
+        description:
+          "Include each file's unified diff in the `patch` field (default: false). " +
+          "Needed to review the code itself; costs prompt space.",
+      }),
+    ),
+    patchBytesLimit: Type.Optional(
+      Type.Integer({
+        minimum: 1024,
+        maximum: 1048576,
+        description:
+          "Total byte budget for all patches (default: 65536). Files are filled in order. " +
+          "Every cut is reported in `patch_truncated`, `patch_omitted`, and `patch_summary`.",
+      }),
+    ),
+    pathPrefixes: Type.Optional(
+      Type.Array(Type.String(), {
+        description:
+          "Keep only files whose path starts with one of these prefixes. " +
+          'End a prefix with "/" to scope to a folder exactly — "source/rest" also matches ' +
+          '"source/restore.go". The count of kept files is returned as `matched_file_count`.',
+      }),
+    ),
   }))({
   id: "github.inspect_pull_request",
   name: "Inspect Pull Request",
-  description: "Get detailed PR info including files changed, review comments, and check status",
+  description:
+    "Get detailed PR info including files changed, review comments, and check status. " +
+    "Set includePatch to read the diff, and pathPrefixes to scope to a folder; " +
+    "`matched_file_count` is a scalar a workflow if-node can compare against a number.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     const filesLimit = Math.min(Math.max(args.filesLimit ?? 100, 1), 300);
     const commentsLimit = Math.min(Math.max(args.commentsLimit ?? 100, 1), 300);
+    const patchBytesLimit = Math.min(
+      Math.max(args.patchBytesLimit ?? PATCH_BYTES_DEFAULT, 1024),
+      1048576,
+    );
     try {
-      const [prResp, filesResp, reviewsResp, commentsResp] = await Promise.all([
+      const [prResp, allFiles, reviewsResp, commentsResp] = await Promise.all([
         octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
           owner: args.owner,
           repo: args.repo,
           pull_number: args.pullNumber,
         }),
-        octokit
-          .request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
-            owner: args.owner,
-            repo: args.repo,
-            pull_number: args.pullNumber,
-            per_page: filesLimit,
-          })
-          .catch(() => ({ data: [] as unknown[] })),
+        // Not wrapped in a catch, unlike the enrichment calls below: the file
+        // list drives `matched_file_count`, and an empty list on failure reads
+        // as "this pull request touches nothing I care about".
+        fetchPullRequestFiles(octokit, args.owner, args.repo, args.pullNumber, filesLimit),
         octokit
           .request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
             owner: args.owner,
@@ -390,12 +614,23 @@ const inspectPullRequest = action(Type.Object({
       ]);
 
       const pr = prResp.data;
-      const files = filesResp.data as Array<{
-        filename: string;
-        status: string;
-        additions: number;
-        deletions: number;
-      }>;
+      const prefixes = args.pathPrefixes ?? [];
+      const matched =
+        prefixes.length === 0
+          ? allFiles
+          : allFiles.filter((f) => prefixes.some((prefix) => f.filename.startsWith(prefix)));
+      const patched = args.includePatch ? attachPatches(matched, patchBytesLimit) : undefined;
+      const files: InspectedFile[] = patched?.files ?? matched.map((f) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
+      // `changed_files` is the repository's own count. A smaller fetched count
+      // means `filesLimit` cut the list, so `matched_file_count` is a floor.
+      const filesComplete =
+        typeof pr.changed_files === "number" ? allFiles.length >= pr.changed_files : true;
+
       const reviews = reviewsResp.data as Array<{
         user?: { login: string };
         state: string;
@@ -444,12 +679,17 @@ const inspectPullRequest = action(Type.Object({
           additions: pr.additions,
           deletions: pr.deletions,
           changed_files: pr.changed_files,
-          files: files.map((f) => ({
-            filename: f.filename,
-            status: f.status,
-            additions: f.additions,
-            deletions: f.deletions,
-          })),
+          files,
+          /** Files kept by `pathPrefixes`, or every fetched file when no prefix
+           * was given. A scalar, so a workflow if-node can compare it with the
+           * number operators — the GitHub pull_request webhook carries no
+           * changed-file list, so folder scoping cannot happen at the
+           * subscription filter. */
+          matched_file_count: files.length,
+          /** False when `filesLimit` cut the list short, which makes
+           * `matched_file_count` a lower bound. */
+          files_complete: filesComplete,
+          ...(patched ? { patch_summary: patched.summary } : {}),
           reviews: reviews
             .filter((r) => r.state !== "DISMISSED")
             .map((r) => ({ user: r.user?.login, state: r.state, body: r.body })),
@@ -464,6 +704,300 @@ const inspectPullRequest = action(Type.Object({
       };
     } catch (err) {
       return handleOctokitError(err, "github.inspect_pull_request", "Inspect pull request");
+    }
+  },
+});
+
+/**
+ * The tag this action writes into every review body it creates. HTML comments
+ * do not render on GitHub, so it is invisible to a human reader.
+ *
+ * It is also the identity `updateExisting` matches on. The legacy action
+ * matched `review.user.login` against a `botLogin` that the host put on the
+ * action context, derived from the GitHub App slug as `{slug}[bot]`. V2's
+ * PluginActionContext carries no such field, and that identity exists only for
+ * an App installation credential: under a user OAuth token the legacy action
+ * found no login and quietly created a second review instead of updating.
+ * The tag needs no host identity, works under both credential tiers, and
+ * `updateKey` keeps two review workflows on one pull request apart.
+ */
+function reviewMarker(updateKey: string): string {
+  return `<!-- valet-review:${updateKey} -->`;
+}
+
+/**
+ * Reads every review on a pull request, in pages of at most 100. GitHub
+ * returns reviews oldest-first, so a single first page holds none of ours on
+ * a pull request with more than 100 reviews — `updateExisting` would then add
+ * another review instead of replacing one, on exactly the pull requests that
+ * accumulate reviews fastest. Paged the same way as the file list rather than
+ * via `octokit.paginate`, which needs `Link` headers.
+ */
+async function fetchPullRequestReviews(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+): Promise<{ id: number; body?: string | null }[]> {
+  const reviews: { id: number; body?: string | null }[] = [];
+  for (let page = 1; ; page++) {
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      { owner, repo, pull_number: pullNumber, per_page: GITHUB_MAX_PER_PAGE, page },
+    );
+    reviews.push(...data);
+    if (data.length < GITHUB_MAX_PER_PAGE) break;
+  }
+  return reviews;
+}
+
+const REVIEW_COMMENT_SIDE = Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]);
+
+interface ReviewCommentInput {
+  path: string;
+  body: string;
+  line?: number;
+  side?: "LEFT" | "RIGHT";
+  startLine?: number;
+  startSide?: "LEFT" | "RIGHT";
+  position?: number;
+}
+
+/**
+ * Rejects the anchor combinations GitHub answers with a 422. A review comment
+ * uses either the legacy `position` (an offset from the first @@ hunk header)
+ * or the line anchor (`line`, plus `side`/`startLine`/`startSide`), never both.
+ * Returns an error message, or null when every comment is valid.
+ */
+function validateReviewComments(comments: ReviewCommentInput[]): string | null {
+  for (const [index, comment] of comments.entries()) {
+    const at = `comments[${index}] on "${comment.path}"`;
+    const hasPosition = comment.position !== undefined;
+    const hasLineAnchor =
+      comment.line !== undefined ||
+      comment.side !== undefined ||
+      comment.startLine !== undefined ||
+      comment.startSide !== undefined;
+
+    if (hasPosition && hasLineAnchor) {
+      return `Create review: ${at} sets both position and a line anchor. GitHub accepts one or the other. Remove position, or remove line/side/startLine/startSide.`;
+    }
+    if ((comment.startLine !== undefined || comment.startSide !== undefined) && comment.line === undefined) {
+      return `Create review: ${at} sets startLine or startSide without line. Set line to the last line of the range.`;
+    }
+    if (!hasPosition && comment.line === undefined) {
+      return `Create review: ${at} has no anchor. Set line to a line of the diff, or set position.`;
+    }
+  }
+  return null;
+}
+
+const createReview = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    pullNumber: Type.Integer({ description: "Pull request number" }),
+    body: Type.Optional(
+      Type.String({
+        description:
+          "Review summary in markdown. GitHub requires it when event is COMMENT or REQUEST_CHANGES.",
+      }),
+    ),
+    // Deliberate divergence: the legacy action accepted APPROVE as a third
+    // event. An approving review can satisfy a branch-protection rule and let a
+    // merge through, so it decides authorization rather than reporting a review
+    // finding. Add it back only with an explicit decision on who may approve.
+    event: Type.Optional(
+      Type.Union([Type.Literal("COMMENT"), Type.Literal("REQUEST_CHANGES")], {
+        description:
+          "Review verdict. Omit it to leave the review PENDING, which stages the comments " +
+          "until someone submits them. APPROVE is not available here: an approving review " +
+          "can satisfy branch protection, which is a merge authorization and not a review remark.",
+      }),
+    ),
+    commitId: Type.Optional(
+      Type.String({
+        description:
+          "SHA the review applies to (defaults to the head commit at post time). Pass the SHA " +
+          "the diff was read at — on a busy pull request a new push can land between the two " +
+          "calls, which moves the line anchors.",
+      }),
+    ),
+    comments: Type.Optional(
+      Type.Array(
+        Type.Object({
+          path: Type.String({ description: "File path, relative to the repository root" }),
+          body: Type.String({ description: "Comment text in markdown" }),
+          line: Type.Optional(
+            Type.Integer({
+              description:
+                "Line number in the file, as it appears in the pull request diff. " +
+                "A line that is not in the diff makes GitHub reject the whole review.",
+            }),
+          ),
+          side: Type.Optional(
+            Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")], {
+              description: 'LEFT for a removed line, RIGHT for an added or unchanged line (default: RIGHT)',
+            }),
+          ),
+          startLine: Type.Optional(
+            Type.Integer({ description: "First line of a multi-line comment. `line` is the last." }),
+          ),
+          startSide: Type.Optional(REVIEW_COMMENT_SIDE),
+          position: Type.Optional(
+            Type.Integer({
+              description:
+                "Legacy anchor: offset from the first @@ hunk header. Prefer line. " +
+                "It cannot be combined with line, side, startLine, or startSide.",
+            }),
+          ),
+        }),
+        { description: "Inline comments, anchored to a file and a line of the diff" },
+      ),
+    ),
+    updateExisting: Type.Optional(
+      Type.Boolean({
+        description:
+          "Replace the body of this action's previous review on the pull request instead of " +
+          "adding another one (default: false). Use it for a re-review, so repeated runs do " +
+          "not stack duplicates. It cannot carry inline comments — GitHub's review-update " +
+          "endpoint changes the summary body only.",
+      }),
+    ),
+    updateKey: Type.Optional(
+      Type.String({
+        description:
+          'Names the review stream `updateExisting` replaces (default: "default"). Give two ' +
+          "review workflows on one repository different keys, so each updates only its own review.",
+      }),
+    ),
+  }))({
+  id: "github.create_review",
+  name: "Create Pull Request Review",
+  description:
+    "Submit a review on a pull request, with an optional set of inline comments anchored to " +
+    "diff lines. Omit event to leave the review pending. Set updateExisting to replace this " +
+    "action's previous review instead of adding another one.",
+  riskLevel: "medium",
+  execute: async (args, ctx) => {
+    const octokit = await getOctokit(ctx);
+    const marker = reviewMarker(args.updateKey ?? "default");
+    // A review with no body stays untouched: GitHub allows a bodyless PENDING
+    // review, and a marker-only body would turn it into a visible remark.
+    const body = args.body === undefined ? undefined : `${args.body}\n\n${marker}`;
+    const inputComments: ReviewCommentInput[] = args.comments ?? [];
+    const comments = inputComments.map((comment) => ({
+      path: comment.path,
+      body: comment.body,
+      ...(comment.line === undefined ? {} : { line: comment.line }),
+      ...(comment.side === undefined ? {} : { side: comment.side }),
+      ...(comment.startLine === undefined ? {} : { start_line: comment.startLine }),
+      ...(comment.startSide === undefined ? {} : { start_side: comment.startSide }),
+      ...(comment.position === undefined ? {} : { position: comment.position }),
+    }));
+
+    if ((args.event === "COMMENT" || args.event === "REQUEST_CHANGES") && !args.body?.trim()) {
+      return {
+        success: false,
+        error: `Create review: a ${args.event} review needs a body. Set body, or omit event to leave the review pending.`,
+      };
+    }
+    if (args.updateExisting && args.body === undefined) {
+      return {
+        success: false,
+        error:
+          "Create review: updateExisting needs a body — it replaces the body of the previous " +
+          "review, so there is nothing to write. Set body, or set updateExisting to false.",
+      };
+    }
+    if (args.updateExisting && comments.length > 0) {
+      return {
+        success: false,
+        error:
+          "Create review: updateExisting cannot carry comments. GitHub's review-update " +
+          "endpoint changes the summary body only, so the inline comments would be lost. " +
+          "Set updateExisting to false, or move the findings into the body.",
+      };
+    }
+    const commentError = validateReviewComments(inputComments);
+    if (commentError) return { success: false, error: commentError };
+
+    try {
+      // The guard above already returned when a body is missing. Testing `body`
+      // again is what narrows it to a string for the update endpoint, which
+      // has no bodyless form.
+      if (args.updateExisting && body !== undefined) {
+        const priorReviews = await fetchPullRequestReviews(
+          octokit,
+          args.owner,
+          args.repo,
+          args.pullNumber,
+        );
+        // Newest first: a re-review updates the latest of our reviews, not the
+        // first one we ever left on this pull request.
+        const previous = [...priorReviews]
+          .reverse()
+          .find((review) => typeof review.body === "string" && review.body.includes(marker));
+        if (previous) {
+          const { data: updated } = await octokit.request(
+            "PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}",
+            {
+              owner: args.owner,
+              repo: args.repo,
+              pull_number: args.pullNumber,
+              review_id: previous.id,
+              body,
+            },
+          );
+          return {
+            success: true,
+            data: {
+              review_id: updated.id,
+              state: updated.state,
+              url: updated.html_url,
+              updated: true,
+              inline_comments: 0,
+            },
+          };
+        }
+      }
+
+      const { data: review } = await octokit.request(
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+        {
+          owner: args.owner,
+          repo: args.repo,
+          pull_number: args.pullNumber,
+          ...(body === undefined ? {} : { body }),
+          // No event means GitHub keeps the review PENDING. Sending a default
+          // would submit a review the caller never asked to publish.
+          ...(args.event === undefined ? {} : { event: args.event }),
+          ...(args.commitId === undefined ? {} : { commit_id: args.commitId }),
+          ...(comments.length > 0 ? { comments } : {}),
+        },
+      );
+      return {
+        success: true,
+        data: {
+          review_id: review.id,
+          state: review.state,
+          url: review.html_url,
+          updated: false,
+          inline_comments: comments.length,
+        },
+      };
+    } catch (err) {
+      const e = err as { status?: number };
+      if (e.status === 422 && comments.length > 0) {
+        return {
+          success: false,
+          error:
+            "Create review: GitHub rejected the review (422). Every inline comment must point " +
+            'at a line that appears in the pull request diff for its "path". Run ' +
+            "github.inspect_pull_request with includePatch, read the diff, and take the line " +
+            "numbers from it.",
+        };
+      }
+      return handleOctokitError(err, "github.create_review", "Create review");
     }
   },
 });
@@ -1366,7 +1900,7 @@ const getJobLogs = action(Type.Object({
       if (!token) {
         return { success: false, error: "Missing GitHub access token" };
       }
-      const logsApiUrl = `https://api.github.com/repos/${args.owner}/${args.repo}/actions/jobs/${args.job_id}/logs`;
+      const logsApiUrl = `${resolveGithubApiUrl()}/repos/${args.owner}/${args.repo}/actions/jobs/${args.job_id}/logs`;
       const redirectResp = await fetch(logsApiUrl, {
         headers: {
           Authorization: `token ${token}`,
@@ -1588,8 +2122,7 @@ const readRepoFile = action(Type.Object({
         { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref },
       );
       if (Array.isArray(data) || data.type !== "file") {
-        const kind = Array.isArray(data) ? "directory" : data.type;
-        return { success: false, error: `Path is a ${kind}, not a file` };
+        return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
       const raw = data.content ?? "";
       const content =
@@ -1614,6 +2147,51 @@ const readRepoFile = action(Type.Object({
   },
 });
 
+const listRepoDirectory = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    path: Type.String({
+      description: 'Directory path in the repository. Use "" for the repository root.',
+    }),
+    ref: Type.Optional(
+      Type.String({ description: "Git ref (branch, tag, or commit SHA)" }),
+    ),
+  }))({
+  id: "github.list_repo_directory",
+  name: "List Repository Directory",
+  description:
+    "List one level of a directory in a GitHub repository without cloning it. Each entry reports its type, so a caller can tell a subdirectory from a file. This does not recurse — call it again with a subdirectory path.",
+  riskLevel: "low",
+  execute: async (args, ctx) => {
+    const octokit = await getOctokit(ctx);
+    try {
+      const listing = await collectDirectoryEntries(
+        (params) => octokit.request("GET /repos/{owner}/{repo}/contents/{path}", params),
+        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref },
+        MAX_DIRECTORY_ENTRIES,
+      );
+      if (listing.kind === "not_directory") {
+        return { success: false, error: wrongPathKindError(listing.type, "directory") };
+      }
+      return {
+        success: true,
+        data: {
+          repo: `${args.owner}/${args.repo}`,
+          path: args.path,
+          ref: args.ref,
+          entries: listing.entries,
+          entry_count: listing.entries.length,
+          // False when the cap truncated the listing — there are more
+          // entries in this directory than were returned.
+          entries_complete: listing.complete,
+        },
+      };
+    } catch (err) {
+      return handleOctokitError(err, "github.list_repo_directory", "List repo directory");
+    }
+  },
+});
+
 // ─── Plugin export ───────────────────────────────────────────────────────────
 
 export const githubPlugin: ActionPlugin = {
@@ -1634,6 +2212,7 @@ export const githubPlugin: ActionPlugin = {
     createComment,
     listPullRequests,
     inspectPullRequest,
+    createReview,
     updatePullRequest,
     createPullRequest,
     mergePullRequest,
@@ -1653,5 +2232,6 @@ export const githubPlugin: ActionPlugin = {
     listWorkflows,
     triggerWorkflow,
     readRepoFile,
+    listRepoDirectory,
   ],
 };

@@ -41,7 +41,12 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
-vi.mock("~/api/settings", () => ({
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+  ...actual,
   useLlmProviders: () => ({ data: providersData, isLoading: false, error: null }),
   useCreateLlmProvider: () => ({
     mutate: createLlmProviderMutate,
@@ -81,7 +86,8 @@ vi.mock("~/api/settings", () => ({
     isLoading: false,
     error: null,
   }),
-}));
+  };
+});
 
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
 import { ModelPreferencesSection } from "~/components/settings/model-preferences-section";

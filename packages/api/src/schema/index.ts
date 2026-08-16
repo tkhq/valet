@@ -9,7 +9,10 @@ import {
   index,
   primaryKey,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import type { ParamMatcher } from "../policies/matchers.js";
 
 // Postgres rewrite of `schema/index.ts` (docs/specs/2026-07-15-postgres-backend-design.md,
 // decision 7). Timestamps convert SELECTIVELY, not blanket:
@@ -44,6 +47,9 @@ export const orgs = pgTable("orgs", {
   // — jsonb, mirroring the `features` column above.
   modelPreferences: jsonb("model_preferences").notNull().default([]),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  // Org-level toggle: present skill names as bare slash-commands instead of
+  // prefixed `/skill <name>`. Replaces the deleted per-user `users.bareSkillCommands`.
+  bareSkillCommands: boolean("bare_skill_commands").notNull().default(false),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -347,6 +353,9 @@ export const sessionThreads = pgTable(
     sessionId: text("session_id").notNull(),
     title: text("title"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Display-state only: an archived thread leaves the default sidebar
+    // list. The engine thread and its history are untouched.
+    archivedAt: bigint("archived_at", { mode: "number" }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
@@ -453,10 +462,33 @@ export const childWatches = pgTable(
     orgId: text("org_id").notNull(),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Display-state only: a dismissed watch leaves the thread tree. The
+    // child session row and its history stay reachable from Sessions.
+    dismissedAt: bigint("dismissed_at", { mode: "number" }),
+    // Retention clock: stamped by markSettled, re-stamped on every settle.
+    // The retention sweep destroys a parked sandbox once this is older
+    // than the retention window.
+    settledAt: bigint("settled_at", { mode: "number" }),
+    // Set once the child's sandbox is actually destroyed (eagerly on a
+    // non-hibernating backend, by the retention sweep on a hibernating
+    // one). NULL on a settled row means a reclaim is still owed;
+    // markSettled clears it so a re-opened child starts a fresh cycle.
+    sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // Provider sandbox id recorded at park time. The retention sweep needs
+    // it for a child evicted from the host cache (an api restart) — the
+    // engine session row's sandbox_id is only written at creation, before
+    // any sandbox provisions, so it cannot serve as the handle.
+    parkedSandboxId: text("parked_sandbox_id"),
   },
   (t) => [
     index("child_watches_parent").on(t.parentSessionId),
     index("child_watches_settled").on(t.settled),
+    // Partial index for the retention sweep: rows are never deleted and
+    // every historical child ends settled, so the sweep's candidate scan
+    // must be bounded by the (small) unreclaimed set, not table history.
+    index("child_watches_retention")
+      .on(t.settledAt)
+      .where(sql`${t.settled} = true AND ${t.sandboxReclaimedAt} IS NULL`),
   ],
 );
 
@@ -628,6 +660,121 @@ export const memoryFiles = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
+);
+
+// ─── Skills ─────────────────────────────────────────────────────────────────
+//
+// Stored skills — the markdown playbooks a person writes in the product, and
+// (later) the ones a repository supplies. Plugin skills are NOT here: they
+// ship inside plugin packages and are assembled from the manifest, so the
+// two sets meet only at delivery time (`plugins/assemble.ts`).
+//
+// `content` holds the BODY, with the frontmatter already removed, and
+// `frontmatter` holds the parsed frontmatter map. The split is what keeps a
+// bad row from breaking a session build: delivery reads `name`,
+// `description`, and `content` straight from these columns, so it never
+// parses and never throws. Every frontmatter rule is checked once, on write
+// (`services/skills.ts`).
+//
+// `content_sha` is the SHA-256 of `content`. The repo importer will compare
+// it to decide whether an upstream body changed.
+//
+// `source_id` will point at a `skill_sources` row once repository sync
+// exists. It carries no foreign key yet, because that table is not built.
+//
+// Ownership columns and the owner index mirror `workflow_definitions` below,
+// because skill access follows the same rule: your own rows plus the rows of
+// every team you belong to. The UNIQUE index is the backstop for the one
+// collision the delivery seam must never see twice — two stored skills with
+// one name inside a single owner scope.
+export const skills = pgTable(
+  "skills",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** `local` = authored in the product. `repo` = synced from a repository. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull(),
+    sourceId: text("source_id"),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    content: text("content").notNull(),
+    frontmatter: jsonb("frontmatter").notNull().default({}),
+    contentSha: text("content_sha").notNull(),
+    /** Path of the `SKILL.md` inside its repository. Null for a local skill. */
+    upstreamPath: text("upstream_path"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("skills_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("skills_owner_name").on(t.orgId, t.ownerType, t.ownerId, t.name),
+  ],
+);
+
+// One tracked skill repository. A `repo`-origin row in `skills` above is a
+// MIRROR of a `SKILL.md` in one of these repositories, and sync is the only
+// thing that writes those rows, so a source and the skills it carries are
+// created and destroyed together.
+//
+// Do not confuse this row with the engine's `SkillSource` type, which is one
+// assembled skill on its way into a session. In prose here, "skill source"
+// always means the tracked repository.
+//
+// `ref` empty means the repository's default branch. `subpath` empty means
+// the repository root. Both are part of the UNIQUE key, so one repository can
+// be tracked twice from two different subdirectories.
+//
+// The last four sync columns are the whole change-detection state:
+// `last_sha` is the commit the last sync read, and `last_manifest_hash` is a
+// hash over the skill files that commit held. A poll that finds the same
+// commit stops after one API call; a poll that finds a moved commit with the
+// same manifest records the commit and writes no skill rows.
+//
+// `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
+// and retry state, shaped like `event_deliveries` — see
+// `services/skill-sync.ts` for the claim statement and the backoff ladder.
+// `last_error` carries whatever the last sync needs to tell the reader:
+// the failure for `status='error'`, and the per-skill warnings for
+// `status='warning'` (a sync that succeeded but skipped a malformed file).
+export const skillSources = pgTable(
+  "skill_sources",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** `owner/repo`. */
+    repoFullName: text("repo_full_name").notNull(),
+    /** Branch, tag, or commit. Empty means the default branch. */
+    ref: text("ref").notNull().default(""),
+    /** Directory that holds the skill directories. Empty means the root. */
+    subpath: text("subpath").notNull().default(""),
+    enabled: boolean("enabled").notNull().default(true),
+    status: text("status", { enum: ["pending", "ok", "warning", "error"] })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+    lastSha: text("last_sha"),
+    lastManifestHash: text("last_manifest_hash"),
+    lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
+    lastError: text("last_error"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("skill_sources_owner").on(t.orgId, t.ownerType, t.ownerId),
+    index("skill_sources_due").on(t.enabled, t.nextAttemptAt),
+    uniqueIndex("skill_sources_repo").on(
+      t.orgId,
+      t.ownerType,
+      t.ownerId,
+      t.repoFullName,
+      t.subpath,
+    ),
+  ],
 );
 
 // ─── Workflows (engine v2 Phase 5) ──────────────────────────────────────────
@@ -803,17 +950,161 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });
+// ─── Org action-policy engine (action-policies plan, Task 2) ───────────────
+//
+// Three tables: `action_policies` (durable org-level rules, `principalType:
+// "org"`; `principalType: "user"` rows are reserved for a future admin
+// per-user-policy rung — the adjudicated precedence order in
+// `policies/resolution.ts` only consults `principalType: "org"` rows today),
+// `runtime_grants` (ephemeral "allow for this session/run" quiets, always
+// `mode: "allow"`), `action_policy_overrides` (durable per-user overrides).
+// All three feed `policies/resolution.ts`'s pure `resolvePolicyDecision` —
+// see that module's doc comment for the full precedence order. The
+// "exactly one of service/actionId/riskLevel" and "exactly one of
+// sessionId/workflowExecutionId" CHECK constraints below are the DB-level
+// backstop for `resolution.ts`'s `matchesTarget`/one-of assumptions; a
+// service layer (T3-T5) is expected to validate the same shape before
+// insert so a bad row never reaches the DB in the first place.
+
+export const actionPolicies = pgTable(
+  "action_policies",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    principalType: text("principal_type", { enum: ["org", "user"] }).notNull(),
+    principalId: text("principal_id").notNull(),
+    service: text("service"),
+    actionId: text("action_id"),
+    riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
+    mode: text("mode", { enum: ["allow", "require_approval", "deny"] }).notNull(),
+    paramMatchers: jsonb("param_matchers").notNull().default([]).$type<ParamMatcher[]>(),
+    appliesIn: text("applies_in", { enum: ["any", "workflow", "session"] })
+      .notNull()
+      .default("any"),
+    origin: text("origin", {
+      enum: ["settings", "approval_prompt", "workflow_editor", "admin"],
+    }).notNull(),
+    managedBy: text("managed_by"),
+    expiresAt: bigint("expires_at", { mode: "number" }),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("action_policies_org_revoked").on(t.orgId, t.revokedAt),
+    check(
+      "action_policies_one_of_target",
+      sql`((${t.service} is not null)::int + (${t.actionId} is not null)::int + (${t.riskLevel} is not null)::int) = 1`,
+    ),
+  ],
+);
+
+// Ephemeral allow-only grants scoped to a live session or workflow
+// execution. Hard-deleted by the owning service on terminal-state
+// transition of the parent context (no FK cascade — matches the sibling
+// tables' convention of "cascade by code, not by constraint"). `policyKey`
+// is the exact `service.actionId` idempotency/match key computed by
+// `policies/resolution.ts`'s `grantPolicyKey` — grants quiet ONE exact
+// action, not a broader service/risk-level target.
+export const runtimeGrants = pgTable(
+  "runtime_grants",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    sessionId: text("session_id"),
+    workflowExecutionId: text("workflow_execution_id"),
+    policyKey: text("policy_key").notNull(),
+    mode: text("mode", { enum: ["allow"] }).notNull().default("allow"),
+    grantedBy: text("granted_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+  },
+  (t) => [
+    check(
+      "runtime_grants_one_of_scope",
+      sql`((${t.sessionId} is not null)::int + (${t.workflowExecutionId} is not null)::int) = 1`,
+    ),
+    // Per-scope grant idempotency (mirrors legacy's select-before-insert):
+    // partial unique indexes live in migrations/pg/0000_app.sql directly —
+    // Drizzle's pg-core `uniqueIndex()` has no portable WHERE clause.
+  ],
+);
+
+// Durable per-user overrides. Unlike `action_policies` these have no
+// `appliesIn`/expiry — a user's override applies everywhere until replaced.
+export const actionPolicyOverrides = pgTable(
+  "action_policy_overrides",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    service: text("service"),
+    actionId: text("action_id"),
+    riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
+    mode: text("mode", { enum: ["allow", "require_approval", "deny"] }).notNull(),
+    paramMatchers: jsonb("param_matchers").notNull().default([]).$type<ParamMatcher[]>(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("action_policy_overrides_org_user").on(t.orgId, t.userId),
+    check(
+      "action_policy_overrides_one_of_target",
+      sql`((${t.service} is not null)::int + (${t.actionId} is not null)::int + (${t.riskLevel} is not null)::int) = 1`,
+    ),
+  ],
+);
 
 // `action_invocations` — durable dedup table for the workflow `tool` node's
 // `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is
 // `JSON.stringify`'d by `plugins/action-invoker.ts` and `JSON.parse`'d back
 // — jsonb. A duplicate `invocationId` (crash-and-retry, concurrent
 // dispatch) reads back the original row rather than re-invoking the action.
-export const actionInvocations = pgTable("action_invocations", {
-  invocationId: text("invocation_id").primaryKey(),
-  result: jsonb("result").notNull(),
-  createdAt: bigint("created_at", { mode: "number" }).notNull(),
-});
+//
+// Extended (action-policies plan, Task 2) into a general policy-invocation
+// audit log: every column below `createdAt` is new and NULLABLE, so the
+// original 3-column workflow-node insert shape (`invocationId`, `result`,
+// `createdAt`) keeps working unmodified — see `schema/pg-schema.test.ts`'s
+// pinned regression test. `result` itself is relaxed from NOT NULL to
+// nullable (an audit row for a denied/rejected invocation has no result
+// yet) rather than adding a second column of the same name; existing
+// writers always populate it, so this is additive in practice.
+// `params`/`result` are capped at 8KB by the writer, with the paired
+// `*Truncated` booleans recording when that cap was hit.
+export const actionInvocations = pgTable(
+  "action_invocations",
+  {
+    invocationId: text("invocation_id").primaryKey(),
+    result: jsonb("result"),
+    resultTruncated: boolean("result_truncated"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    service: text("service"),
+    actionId: text("action_id"),
+    riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
+    resolvedMode: text("resolved_mode", { enum: ["allow", "require_approval", "deny"] }),
+    baseMode: text("base_mode", { enum: ["allow", "require_approval", "deny"] }),
+    matchedPolicyId: text("matched_policy_id"),
+    matchedGrantId: text("matched_grant_id"),
+    matchedOverrideId: text("matched_override_id"),
+    status: text("status", {
+      enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"],
+    }),
+    sessionId: text("session_id"),
+    workflowExecutionId: text("workflow_execution_id"),
+    userId: text("user_id"),
+    orgId: text("org_id"),
+    params: jsonb("params"),
+    paramsTruncated: boolean("params_truncated"),
+    durationMs: bigint("duration_ms", { mode: "number" }),
+    error: text("error"),
+    startedAt: bigint("started_at", { mode: "number" }),
+    resolvedBy: text("resolved_by"),
+  },
+  (t) => [
+    index("action_invocations_session").on(t.sessionId),
+    index("action_invocations_org_created").on(t.orgId, t.createdAt),
+  ],
+);
 
 // ─── LLM providers (org BYO keys + custom providers) ────────────────────────
 //
@@ -948,6 +1239,9 @@ export const imageSources = pgTable(
     pullSecretName: text("pull_secret_name"),
     // kind='base' fields
     setupCommands: jsonb("setup_commands"),
+    // Populated only for kind='base' rows. Identifies which session profile
+    // this base image targets. Null for kind='external' and kind='repo'.
+    profile: text("profile", { enum: ["headless", "full"] }),
     // kind='repo' fields
     repoHost: text("repo_host"),
     repoFullName: text("repo_full_name"),
@@ -1089,6 +1383,23 @@ export const workflowSchedules = pgTable(
   ],
 );
 
+// The bearer secret IS the primary key: `id` is the opaque hookId minted
+// into the trigger URL (`POST /api/hooks/workflows/:workflowId/:hookId`),
+// not a surrogate row id. `workflow_id` is unique — one active hook per
+// workflow — so minting again replaces the row and invalidates the old
+// URL (overhaul design decision 5's "regenerable").
+export const workflowWebhooks = pgTable(
+  "workflow_webhooks",
+  {
+    id: text("id").primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    orgId: text("org_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("workflow_webhooks_workflow").on(t.workflowId)],
+);
+
 export const eventDeliveries = pgTable(
   "event_deliveries",
   {
@@ -1154,11 +1465,17 @@ export type ChannelBindingRow = typeof channelBindings.$inferSelect;
 export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
+export type SkillRow = typeof skills.$inferSelect;
+/** One tracked skill repository. Not the engine's `SkillSource`. */
+export type SkillSourceRow = typeof skillSources.$inferSelect;
 export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
 export type WorkflowSignalRow = typeof workflowSignals.$inferSelect;
 export type CredentialRow = typeof credentials.$inferSelect;
+export type ActionPolicyRow = typeof actionPolicies.$inferSelect;
+export type RuntimeGrantRow = typeof runtimeGrants.$inferSelect;
+export type ActionPolicyOverrideRow = typeof actionPolicyOverrides.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
 export type SessionRepoRow = typeof sessionRepos.$inferSelect;

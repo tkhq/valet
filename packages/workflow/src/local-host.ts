@@ -54,9 +54,11 @@
  * mid-write.
  */
 
+import { detachedFromTrace } from '@valet/engine';
+
 import { driveUntilPark } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
-import type { NodeExecutorRegistry, OnApprovalPending } from './nodes/index.js';
+import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
 import type { RunParams, RunParkState, RunWaitCondition, WorkflowStore } from './store.js';
 
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
@@ -86,6 +88,8 @@ export interface LocalRunHostDeps {
   executors?: NodeExecutorRegistry;
   clock?: () => number;
   onApprovalPending?: OnApprovalPending;
+  onApprovalGrant?: OnApprovalGrant;
+  onGateResolved?: OnGateResolved;
   /** Max concurrently-driven runs. Default 4 (decision 16). */
   concurrency?: number;
   /** Poll interval in ms. Default 1000 (decision 16). */
@@ -112,6 +116,8 @@ export class LocalRunHost implements RunHost {
   private readonly executors?: NodeExecutorRegistry;
   private readonly clock: () => number;
   private readonly onApprovalPending?: OnApprovalPending;
+  private readonly onApprovalGrant?: OnApprovalGrant;
+  private readonly onGateResolved?: OnGateResolved;
   private readonly concurrency: number;
   private readonly pollMs: number;
   private readonly leaseMs: number;
@@ -144,6 +150,8 @@ export class LocalRunHost implements RunHost {
     this.executors = deps.executors;
     this.clock = deps.clock ?? (() => Date.now());
     this.onApprovalPending = deps.onApprovalPending;
+    this.onApprovalGrant = deps.onApprovalGrant;
+    this.onGateResolved = deps.onGateResolved;
     this.concurrency = deps.concurrency ?? 4;
     this.pollMs = deps.pollMs ?? 1_000;
     this.leaseMs = deps.leaseMs ?? 30_000;
@@ -197,9 +205,11 @@ export class LocalRunHost implements RunHost {
   startHost(): void {
     if (this.running) return;
     this.running = true;
-    this.pollTimer = setInterval(() => this.nudge(), this.pollMs);
+    // Detached (tracing): an interval armed inside an ambient span context
+    // inherits it on every tick forever (see engine tracing.ts).
+    this.pollTimer = setInterval(() => detachedFromTrace(() => this.nudge()), this.pollMs);
     this.sweepTimer = setInterval(() => {
-      void this.sweepOnce();
+      void detachedFromTrace(() => this.sweepOnce());
     }, this.sweepMs);
     this.nudge();
   }
@@ -256,7 +266,13 @@ export class LocalRunHost implements RunHost {
   private claimAndDrive(runId: string): void {
     if (this.inFlight.has(runId)) return;
     this.inFlight.add(runId);
-    const p = this.driveRun(runId).finally(() => {
+    // Detached (tracing): a nudge often fires inside a request handler's
+    // active span. A drive is minutes-long, and one poll pass can claim
+    // OTHER runnable runs — parenting under the caller's span would append
+    // the whole drive tree (and unrelated runs) to an ended request trace.
+    // `workflow.drive` is always a trace root; linking the triggering
+    // request needs per-run traceparent storage and is future work.
+    const p = detachedFromTrace(() => this.driveRun(runId)).finally(() => {
       this.inFlight.delete(runId);
     });
     this.activeDrives.add(p);
@@ -278,6 +294,8 @@ export class LocalRunHost implements RunHost {
         clock: this.clock,
         executors: this.executors,
         onApprovalPending: this.onApprovalPending,
+        onApprovalGrant: this.onApprovalGrant,
+        onGateResolved: this.onGateResolved,
         onBeginTerminalize:
           this.crashAt === 'terminalizing'
             ? () => {
@@ -325,25 +343,29 @@ export class LocalRunHost implements RunHost {
     const key = `${runId}:${wait.queueItemId}`;
     if (this.submissionWaiters.has(key)) return;
     this.submissionWaiters.add(key);
-    const p = this.engine
-      .awaitResult(wait.sessionId, wait.threadId, wait.queueItemId)
-      .then(() => {
-        // Gate on `running`: after `stopHost()`, a waiter that resolves
-        // must not trigger a new drive. `wake()` already no-ops when
-        // `!running`, but checking here too avoids even the wasted
-        // store round-trip a no-op `wake()` call would still make.
-        if (!this.running) return;
-        return this.wake(runId);
-      })
-      .catch(() => {
-        // Best-effort: a waiter failure (e.g. the engine handle went away)
-        // is not fatal — the lost-wake sweep's `isSettled` check is the
-        // backstop for exactly this case.
-      })
-      .finally(() => {
-        this.submissionWaiters.delete(key);
-        this.waiterPromises.delete(p);
-      });
+    // Detached (tracing): the waiter's continuation can fire hours after
+    // the context it was created in ended — without detaching, the wake's
+    // drive would resurrect that dead trace.
+    const p = detachedFromTrace(() =>
+      this.engine
+        .awaitResult(wait.sessionId, wait.threadId, wait.queueItemId)
+        .then(() => {
+          // Gate on `running`: after `stopHost()`, a waiter that resolves
+          // must not trigger a new drive. `wake()` already no-ops when
+          // `!running`, but checking here too avoids even the wasted
+          // store round-trip a no-op `wake()` call would still make.
+          if (!this.running) return;
+          return this.wake(runId);
+        })
+        .catch(() => {
+          // Best-effort: a waiter failure (e.g. the engine handle went away)
+          // is not fatal — the lost-wake sweep's `isSettled` check is the
+          // backstop for exactly this case.
+        }),
+    ).finally(() => {
+      this.submissionWaiters.delete(key);
+      this.waiterPromises.delete(p);
+    });
     this.waiterPromises.add(p);
   }
 
@@ -358,6 +380,7 @@ export class LocalRunHost implements RunHost {
       if (this.hasDueTimerWait(run.waitingOn, now)) shouldWake = true;
       if (!shouldWake && (await this.hasUnconsumedCancelOrMatchingSignal(run.runId, run.waitingOn))) shouldWake = true;
       if (!shouldWake && (await this.hasSettledSubmissionWait(run.waitingOn))) shouldWake = true;
+      if (!shouldWake && (await this.hasSettledRunWait(run.waitingOn))) shouldWake = true;
       if (!shouldWake && (await this.reconcileUncheckpointedConsumption(run.runId))) shouldWake = true;
 
       if (shouldWake) await this.wake(run.runId);
@@ -391,6 +414,20 @@ export class LocalRunHost implements RunHost {
     for (const wait of waitingOn) {
       if (wait.kind !== 'submission') continue;
       if (await this.engine.isSettled(wait.sessionId, wait.queueItemId)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The `run` wait's lost-wake backstop: a parked parent whose sub-workflow
+   * run has settled is woken even when the settle-time `requestWake` on the
+   * parent was lost (crash between the child's `settleRun` and the wake).
+   */
+  private async hasSettledRunWait(waitingOn: RunWaitCondition[]): Promise<boolean> {
+    for (const wait of waitingOn) {
+      if (wait.kind !== 'run') continue;
+      const child = await this.store.getRun(wait.runId);
+      if (child?.status === 'settled') return true;
     }
     return false;
   }

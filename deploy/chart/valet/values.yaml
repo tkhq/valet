@@ -47,6 +47,19 @@ api:
     trustedOrigins: ""
     allowedEmailDomains: ""
 
+  # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
+  # env fallback). Set these three plus the api.secrets.githubApp* values
+  # to make the deployment GitHub-capable without running the in-app
+  # manifest flow. Nothing is written to the database; the env is the
+  # config. An org that later completes the manifest flow shadows this.
+  # The app's webhook URL must point at
+  # {public URL}/webhooks/github-app. See
+  # docs/specs/2026-07-16-github-repo-integration-design.md.
+  githubApp:
+    appId: ""
+    slug: ""
+    clientId: ""
+
   # Secret values. Leave blank to have the chart generate-and-retain them
   # (see templates/secret.yaml's lookup-based retain guard) — regenerating
   # BETTER_AUTH_SECRET on every `helm upgrade` would invalidate every
@@ -61,6 +74,22 @@ api:
     oidcClientSecret: ""
     googleClientSecret: ""
     githubClientSecret: ""
+    # Secret half of api.githubApp (the `GITHUB_APP_*` env fallback).
+    # githubAppPrivateKey takes the app's PEM, raw or base64-encoded.
+    # githubAppWebhookSecret is optional (leave blank for a webhook-less
+    # app). These are never chart-generated — set them, or deliver them
+    # via api.extraEnvFrom (e.g. External Secrets Operator).
+    githubAppPrivateKey: ""
+    githubAppClientSecret: ""
+    githubAppWebhookSecret: ""
+
+  # Optional instance config file content (multiline YAML string). Supply via
+  # --set-file api.instanceConfig=config/valet.prod.yaml on helm install/upgrade.
+  # When set, the chart creates a ConfigMap (<fullname>-instance-config), mounts
+  # it at /etc/valet, and sets VALET_CONFIG=/etc/valet/valet.yaml on the api
+  # container. Also rolls the Deployment when the content changes (via checksum
+  # annotation). Leave blank to disable the ConfigMap and mount entirely.
+  instanceConfig: ""
 
   # Additional envFrom entries appended to the api Deployment. Use this
   # to load env vars from Secrets/ConfigMaps managed outside the chart
@@ -84,6 +113,22 @@ sandbox:
   # stay narrowly scoped instead of granting pod access next to the api
   # pod itself.
   namespace: valet-sandboxes
+
+  # Public base image the seeded headless base source FROMs. Layered with
+  # agent tooling (git, ripgrep, gh, node) via seed setup_commands.
+  headlessBaseImage: node:22-bookworm-slim
+
+  # Image the seeded full-profile base source FROMs (via an auto-seeded
+  # kind='external' source). Ships gateway + ttyd + code-server. Pin to
+  # sha-<shortsha> for reproducible deploys.
+  fullBaseImage: ghcr.io/tkhq/valet-sandbox:latest
+
+  # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
+  # else resolves. Kept for one release; will be removed in a future v2.x.
+  # image:
+  #   repository: ghcr.io/tkhq/valet-sandbox
+  #   tag: latest
+
   # Same CI-publishing story as api.image: for remote clusters use
   # ghcr.io/<owner>/valet-sandbox pinned to a sha-<shortsha> tag.
   image:

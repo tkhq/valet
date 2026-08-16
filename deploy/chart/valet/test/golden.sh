@@ -166,6 +166,52 @@ grep -q 'valet.retainedSecretValue' "$CHART_DIR/templates/postgres-secret.yaml" 
   || fail "postgres Secret template does not use the retain-guard helper"
 pass "lookup-retain helper present and used by both Secret templates"
 
+# --- pod-template checksums: rotate the material, roll the pod -----------
+# Env vars from envFrom/secretKeyRef are injected once, at pod start. Without
+# these annotations a `helm upgrade` that only changes a Secret leaves the pod
+# template byte-identical, Kubernetes keeps the running pod, and the OLD value
+# stays live while `helm upgrade --wait` reports success.
+render_api_deploy() {
+  helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+    --show-only templates/deployment.yaml "$@"
+}
+
+render_api_deploy --set api.secrets.anthropicApiKey=key-one > "$TMP_DIR/deploy-key-one.yaml"
+grep -q 'checksum/secret:' "$TMP_DIR/deploy-key-one.yaml" \
+  || fail "api pod template missing checksum/secret — a rotated Secret would not roll the pod"
+grep -q 'checksum/config:' "$TMP_DIR/deploy-key-one.yaml" \
+  || fail "api pod template missing checksum/config — a changed ConfigMap would not roll the pod"
+pass "api pod template carries checksum/secret + checksum/config"
+
+# Both digests must be identical for identical input. The chart generates
+# BETTER_AUTH_SECRET, VALET_ENCRYPTION_KEY and the bundled postgres password
+# fresh on every render that cannot `lookup` them, so a digest taken over the
+# RENDERED Secret churns and restarts the api pod on a no-op upgrade.
+render_api_deploy --set api.secrets.anthropicApiKey=key-one > "$TMP_DIR/deploy-key-one-again.yaml"
+CHECKSUMS_ONE=$(grep 'checksum/' "$TMP_DIR/deploy-key-one.yaml")
+[ "$CHECKSUMS_ONE" = "$(grep 'checksum/' "$TMP_DIR/deploy-key-one-again.yaml")" ] \
+  || fail "pod-template checksums differ across two identical renders — a no-op upgrade would restart the api pod"
+pass "pod-template checksums are stable across identical renders (no churn)"
+
+SECRET_SUM_ONE=$(grep 'checksum/secret:' "$TMP_DIR/deploy-key-one.yaml")
+render_api_deploy --set api.secrets.anthropicApiKey=key-two > "$TMP_DIR/deploy-key-two.yaml"
+[ "$SECRET_SUM_ONE" != "$(grep 'checksum/secret:' "$TMP_DIR/deploy-key-two.yaml")" ] \
+  || fail "checksum/secret unchanged after rotating api.secrets.anthropicApiKey — the api pod would keep the old key"
+pass "checksum/secret tracks api.secrets.*"
+
+# The bundled postgres credentials reach the api as DATABASE_URL through
+# secretKeyRef, so they belong in the same digest.
+render_api_deploy --set postgres.password=rotated-pw > "$TMP_DIR/deploy-pg.yaml"
+[ "$SECRET_SUM_ONE" != "$(grep 'checksum/secret:' "$TMP_DIR/deploy-pg.yaml")" ] \
+  || fail "checksum/secret unchanged after rotating postgres.password"
+pass "checksum/secret tracks the bundled postgres credentials"
+
+CONFIG_SUM_ONE=$(grep 'checksum/config:' "$TMP_DIR/deploy-key-one.yaml")
+render_api_deploy --set api.betterAuthUrl=https://rotated.example.com > "$TMP_DIR/deploy-cfg.yaml"
+[ "$CONFIG_SUM_ONE" != "$(grep 'checksum/config:' "$TMP_DIR/deploy-cfg.yaml")" ] \
+  || fail "checksum/config unchanged after changing a ConfigMap value"
+pass "checksum/config tracks the rendered ConfigMap"
+
 # --- initContainer present on the api Deployment (bundled) ---------------
 echo "$API_DEPLOY_BLOCK" | grep -q 'initContainers:' || fail "api Deployment missing initContainers (bundled)"
 echo "$API_DEPLOY_BLOCK" | grep -q 'wait-for-postgres' || fail "api Deployment missing wait-for-postgres initContainer"
@@ -298,6 +344,64 @@ if grep -q 'valet-grafana-dashboards' "$TMP_DIR/no-observability.yaml"; then
   fail "observability.enabled=false still renders the dashboards ConfigMap"
 fi
 pass "observability: valet dashboard ConfigMap rendered and gated on observability.enabled"
+
+# --- instance config: ConfigMap + subPath mount + VALET_CONFIG env ---------
+# api.instanceConfig renders a ConfigMap holding valet.yaml, mounts it as a
+# single file via subPath at /etc/valet/valet.yaml, points VALET_CONFIG at it,
+# and stamps a checksum/instance-config pod annotation so a config edit rolls
+# the pod.
+echo "== helm template (instance config) =="
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set api.instanceConfig="version: 1" \
+  > "$TMP_DIR/instance-config.yaml"
+pass "renders with api.instanceConfig set"
+
+INSTANCE_CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{f=0} f&&/valet-instance-config/{hit=1} hit{print} f==0{hit=0}' "$TMP_DIR/instance-config.yaml")
+grep -q 'name: valet-instance-config' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: no valet-instance-config ConfigMap"
+grep -q 'valet.yaml:' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: ConfigMap has no valet.yaml key"
+pass "instance-config render: ConfigMap with valet.yaml key present"
+
+grep -q 'VALET_CONFIG' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: api container missing VALET_CONFIG env"
+grep -q 'value: /etc/valet/valet.yaml' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: VALET_CONFIG is not /etc/valet/valet.yaml"
+pass "instance-config render: VALET_CONFIG points at /etc/valet/valet.yaml"
+
+grep -q 'mountPath: /etc/valet/valet.yaml' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: volumeMount not at /etc/valet/valet.yaml"
+grep -q 'subPath: valet.yaml' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: volumeMount missing subPath valet.yaml (directory mount would shadow /etc/valet)"
+pass "instance-config render: valet.yaml mounted via subPath (no directory shadowing)"
+
+grep -q 'checksum/instance-config:' "$TMP_DIR/instance-config.yaml" \
+  || fail "instance-config render: pod template missing checksum/instance-config — a config edit would not roll the pod"
+pass "instance-config render: pod template carries checksum/instance-config"
+
+# --- GitHub App env fallback: secret/non-secret split --------------------
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set api.githubApp.appId="123456" \
+  --set api.githubApp.slug="valet-app" \
+  --set api.githubApp.clientId="Iv1.abc" \
+  --set api.secrets.githubAppPrivateKey="base64pem" \
+  --set api.secrets.githubAppClientSecret="cs" \
+  --set api.secrets.githubAppWebhookSecret="whs" \
+  > "$TMP_DIR/github-app.yaml"
+GH_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/github-app.yaml")
+for key in GITHUB_APP_ID GITHUB_APP_SLUG GITHUB_APP_CLIENT_ID; do
+  echo "$GH_CONFIGMAP" | grep -q "$key" || fail "ConfigMap missing $key"
+done
+for key in GITHUB_APP_PRIVATE_KEY GITHUB_APP_CLIENT_SECRET GITHUB_APP_WEBHOOK_SECRET; do
+  if echo "$GH_CONFIGMAP" | grep -q "$key"; then
+    fail "ConfigMap leaks secret key: $key"
+  fi
+  grep -q "$key" "$TMP_DIR/github-app.yaml" || fail "Secret missing $key"
+done
+if grep -qE 'GITHUB_APP_' "$TMP_DIR/bundled.yaml"; then
+  fail "default render carries GITHUB_APP_* keys — the fallback must be opt-in"
+fi
+pass "GitHub App env fallback: non-secret half in ConfigMap, secret half in Secret, opt-in"
 
 echo
 echo "All golden assertions passed."

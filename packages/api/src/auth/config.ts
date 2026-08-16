@@ -30,6 +30,24 @@ export interface AuthConfig {
 }
 
 /**
+ * Reports the stub-vs-real auth conflict, or null when the environment is
+ * coherent. The stub identity (`LOCAL_USER`) is a seeded admin, so a
+ * deployment that sets both variables answers every credential-less request
+ * with admin access. The API refuses to boot on this pair; a confusing
+ * configuration must fail loudly, not grant admin quietly.
+ */
+export function authModeConflict(env: NodeJS.ProcessEnv): string | null {
+  if (!env.BETTER_AUTH_SECRET || env.VALET_LOCAL_AUTH !== "1") {
+    return null;
+  }
+  return (
+    "BETTER_AUTH_SECRET and VALET_LOCAL_AUTH=1 are mutually exclusive: the local stub identity is an admin, " +
+    "so credential-less requests would get admin access. Unset VALET_LOCAL_AUTH to use real auth, " +
+    "or unset BETTER_AUTH_SECRET to use the local dev stub."
+  );
+}
+
+/**
  * Loads and validates auth configuration from environment variables.
  * Returns null if BETTER_AUTH_SECRET is not set (stub-only mode).
  * Throws if any provider configuration is incomplete.

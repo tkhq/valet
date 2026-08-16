@@ -18,10 +18,12 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CRED_VARS,
+  partitionWaves,
   doctorExitCode,
   truncateOutput,
   missingNeeds,
@@ -222,30 +224,44 @@ async function ensureKeycloak(): Promise<string | undefined> {
 
 // ── execution ──────────────────────────────────────────────────────────────
 
-let current: ChildProcess | undefined;
-const results: StepResult[] = [];
+// parallelSafe static steps run in a small pool (see lib.ts partitionWaves).
+// Each vitest child spawns its own workers, so the pool stays small; override
+// with VALET_E2E_JOBS. --verbose forces 1 (inherited stdio cannot interleave).
+const JOBS = VERBOSE
+  ? 1
+  : (() => {
+      const fromEnv = Number(process.env.VALET_E2E_JOBS);
+      if (Number.isInteger(fromEnv) && fromEnv > 0) return fromEnv;
+      return Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4)));
+    })();
+
+const running = new Map<string, ChildProcess>();
+const resultsById = new Map<string, StepResult>();
+
+function orderedResults(): StepResult[] {
+  return steps.filter((s) => resultsById.has(s.id)).map((s) => resultsById.get(s.id) as StepResult);
+}
 
 function finish(extraExit = 0): never {
-  const report = toJsonReport(results);
+  const report = toJsonReport(orderedResults());
   if (JSON_OUT) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    console.log(`\n${renderScorecard(results)}`);
+    console.log(`\n${renderScorecard(orderedResults())}`);
   }
   process.exit(report.exitCode || extraExit);
 }
 
-let currentStepId: string | undefined;
 process.on("SIGINT", () => {
-  if (current?.pid) {
-    try {
-      process.kill(-current.pid, "SIGKILL");
-    } catch {}
-  }
-  // The in-flight step did not finish — record it as failed so an
-  // interrupted run can NEVER exit 0 and read as green downstream.
-  if (currentStepId !== undefined) {
-    results.push({ id: currentStepId, status: "failed", durationMs: 0, skipReason: undefined });
+  // Every in-flight step is recorded as failed so an interrupted run can
+  // NEVER exit 0 and read as green downstream.
+  for (const [id, child] of running) {
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {}
+    }
+    resultsById.set(id, { id, status: "failed", durationMs: 0, skipReason: undefined });
   }
   console.error("\ninterrupted — partial scorecard:");
   finish(130);
@@ -256,7 +272,6 @@ function runStep(step: StepDef): Promise<StepResult> {
   const env: NodeJS.ProcessEnv = { ...process.env, ...step.env };
   if (step.scrubKeys) for (const k of CRED_VARS) delete env[k];
 
-  currentStepId = step.id;
   return new Promise((resolveStep) => {
     const child = spawn(step.command[0], step.command.slice(1), {
       cwd: step.cwd ? resolve(ROOT, step.cwd) : ROOT,
@@ -264,7 +279,7 @@ function runStep(step: StepDef): Promise<StepResult> {
       stdio: VERBOSE ? "inherit" : ["ignore", "pipe", "pipe"],
       detached: true, // own process group so timeouts kill the whole tree
     });
-    current = child;
+    running.set(step.id, child);
     let output = "";
     child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
     child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
@@ -281,8 +296,7 @@ function runStep(step: StepDef): Promise<StepResult> {
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      current = undefined;
-      currentStepId = undefined;
+      running.delete(step.id);
       const durationMs = Date.now() - started;
       const ok = code === 0 && !timedOut;
       if (!ok && !VERBOSE) {
@@ -293,36 +307,63 @@ function runStep(step: StepDef): Promise<StepResult> {
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      current = undefined;
-      currentStepId = undefined;
+      running.delete(step.id);
       process.stderr.write(`── ${step.id} spawn error: ${err.message} ──\n`);
       resolveStep({ id: step.id, status: "failed", durationMs: Date.now() - started });
     });
   });
 }
 
-async function main(): Promise<never> {
-  for (const step of steps) {
-    const missing = missingNeeds(step, probes);
-    if (missing.length > 0) {
-      results.push({
-        id: step.id,
-        status: "skipped",
-        durationMs: 0,
-        skipReason: missing.map(needHint).join("; "),
-      });
-      continue;
-    }
-    if (step.preHook === "keycloak") {
-      const hookErr = await ensureKeycloak();
-      if (hookErr !== undefined) {
-        results.push({ id: step.id, status: "skipped", durationMs: 0, skipReason: hookErr });
-        continue;
-      }
-    }
-    if (!JSON_OUT) console.log(`\n▶ ${step.id} — ${step.title}`);
-    results.push(await runStep(step));
+/** Skip-gate a step; returns true when it should run. */
+function gate(step: StepDef): boolean {
+  const missing = missingNeeds(step, probes);
+  if (missing.length > 0) {
+    resultsById.set(step.id, {
+      id: step.id,
+      status: "skipped",
+      durationMs: 0,
+      skipReason: missing.map(needHint).join("; "),
+    });
+    return false;
   }
+  return true;
+}
+
+async function runSerial(step: StepDef): Promise<void> {
+  if (!gate(step)) return;
+  if (step.preHook === "keycloak") {
+    const hookErr = await ensureKeycloak();
+    if (hookErr !== undefined) {
+      resultsById.set(step.id, { id: step.id, status: "skipped", durationMs: 0, skipReason: hookErr });
+      return;
+    }
+  }
+  if (!JSON_OUT) console.log(`\n▶ ${step.id} — ${step.title}`);
+  resultsById.set(step.id, await runStep(step));
+}
+
+/** Run `pool` steps with at most JOBS in flight. */
+async function runPool(pool: StepDef[]): Promise<void> {
+  const queue = pool.filter(gate);
+  const workers = Array.from({ length: Math.min(JOBS, queue.length) }, async () => {
+    for (;;) {
+      const step = queue.shift();
+      if (!step) return;
+      if (!JSON_OUT) console.log(`▶ ${step.id} — ${step.title}`);
+      resultsById.set(step.id, await runStep(step));
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function main(): Promise<never> {
+  const waves = partitionWaves(steps);
+  for (const step of waves.pre) await runSerial(step);
+  if (waves.parallel.length > 0) {
+    if (!JSON_OUT) console.log(`\n── static pool (${JOBS} jobs) ──`);
+    await runPool(waves.parallel);
+  }
+  for (const step of waves.serial) await runSerial(step);
 
   finish();
 }

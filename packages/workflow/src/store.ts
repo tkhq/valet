@@ -30,7 +30,8 @@ export interface NodeCheckpoint {
 export type RunWaitCondition =
   | { kind: 'timer'; nodeId: string; wakeAt: number }
   | { kind: 'signal'; nodeId: string; signalType: string; timeoutAt?: number }
-  | { kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string };
+  | { kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }
+  | { kind: 'run'; nodeId: string; runId: string };
 
 /** Run status + park/ownership state, independent of the row's params/definition fields. */
 export interface RunParkState {
@@ -49,6 +50,15 @@ export interface RunParams {
   definitionVersionId: string;
   triggerId?: string;
   input?: unknown; // JSON-serializable trigger/manual input
+  /**
+   * Set when this run was started by a `workflow` node in another run
+   * (batch-fanout design decision 1). `parentRunId` wires settle-time
+   * wake-up of the parent; `parentNodeId`/`parentIteration` name the exact
+   * checkpoint waiting on this run. Absent on every top-level run.
+   */
+  parentRunId?: string;
+  parentNodeId?: string;
+  parentIteration?: number;
 }
 
 /**

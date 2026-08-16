@@ -5,17 +5,21 @@
  * creator-auto-admin, are enforced here inside a single sqlite transaction
  * so a role-change and a removal racing on the same team's last admin can
  * never both succeed.
- *
- * Team-owned workflows don't exist yet (Phase 5+); `deleteTeam`'s
- * "blocked while team-owned workflows exist" guard is therefore a no-op
- * hook — see the comment on `assertNoTeamOwnedWorkflows` below.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, teamMembers, teams, type TeamRow } from "../schema/index.js";
+import {
+  orgMembers,
+  skills,
+  skillSources,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+  type TeamRow,
+} from "../schema/index.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -39,6 +43,16 @@ export class LastAdminError extends Error {
   constructor(teamId: string) {
     super(`team ${teamId} must keep at least one admin`);
     this.name = "LastAdminError";
+  }
+}
+
+/** Thrown by `deleteTeam` when the team still owns one or more workflows. */
+export class TeamOwnsWorkflowsError extends Error {
+  readonly code = "team_owns_workflows";
+  readonly statusCode = 409;
+  constructor(teamId: string) {
+    super(`team ${teamId} still owns one or more workflows — reassign or delete them first`);
+    this.name = "TeamOwnsWorkflowsError";
   }
 }
 
@@ -233,6 +247,24 @@ export async function listTeamsForUser(db: AppDb, userId: string): Promise<TeamR
 }
 
 /**
+ * Live membership check — re-queries on every call, never cached. Per the
+ * orchestrator spec's access model: "Eligibility is re-checked at action
+ * time, not delivery time" — a member removed from a team must lose access
+ * to its resources on their very next request, not at the next snapshot.
+ * This is the sole access path to any team-owned resource (memory,
+ * workflows, sessions, credentials): no creator shortcut, no org-visible
+ * fallback.
+ */
+export async function isTeamMember(db: AppQueryable, teamId: string, userId: string): Promise<boolean> {
+  const rows = await db
+    .select()
+    .from(teamMembers)
+    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
  * Lists every team in an org, regardless of the caller's own membership.
  * Org admins manage the whole roster, not just teams they happen to belong
  * to — `listTeamsForUser` alone would hide a team from an admin who isn't
@@ -263,28 +295,67 @@ export async function listTeamMembers(
 }
 
 /**
- * Deletion guard hook: the orchestrator spec blocks team deletion "while
- * team-owned workflows exist." Workflows don't exist in v2 yet (Phase 5/6),
- * so this is a deliberate no-op — wire the real check here once the
- * workflow host lands, before deleteTeam is exposed on any destructive UI
- * path.
+ * Deletion guard: the orchestrator spec blocks team deletion "while
+ * team-owned workflows exist" — a deleted team's `ownerId` would otherwise
+ * strand its workflows (every `ownedDefinitionRow` check reads through live
+ * `team_members`, so an orphaned `ownerId` becomes permanently
+ * inaccessible, not just unowned). Queries `workflow_definitions` directly
+ * rather than importing `workflows/service.ts`, which would create a
+ * services/teams.ts <-> services/workflows.ts import cycle.
  */
-function assertNoTeamOwnedWorkflows(_teamId: string): void {
-  // no-op — see doc comment above.
+async function assertNoTeamOwnedWorkflows(db: AppQueryable, teamId: string): Promise<void> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, teamId)))
+    .limit(1);
+  if (rows.length > 0) throw new TeamOwnsWorkflowsError(teamId);
+}
+
+/**
+ * `pg_advisory_xact_lock` keyed by team id, released automatically at
+ * transaction end. `deleteTeam`'s checks and the team-owned INSERTs in
+ * `workflows/service.ts` and `services/skills.ts` target tables with no FK
+ * between them (a polymorphic `owner_id` can't carry one), so under plain
+ * MVCC a SELECT here never blocks a concurrent INSERT there — this lock is
+ * what actually serializes "is the team still valid to own this" against
+ * "delete the team," not the surrounding `db.transaction` on its own. Every
+ * side must take this same lock for it to do anything.
+ */
+export async function lockTeamForOwnership(tx: AppQueryable, teamId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${teamId}))`);
 }
 
 export interface DeleteTeamOptions {
   teamId: string;
 }
 
-/** Deletes a team and its memberships. */
+/**
+ * Deletes a team, its memberships, the skills it owns, and the skill
+ * repositories it tracks. Rejects while the team owns any workflow.
+ *
+ * Skills are removed rather than blocking, because a skill is a document,
+ * not a running thing — there is nothing to cancel first. They must go
+ * somewhere: every read path for a team-owned skill goes through
+ * `isTeamMember`, so a surviving row would sit in the table forever with no
+ * owner who can ever reach it, the same orphan `deleteWorkflowDefinition`
+ * closes for `workflow_webhooks`. A tracked repository is unreachable the
+ * same way, and it would go on polling GitHub for a team that no longer
+ * exists, so it goes with them.
+ */
 export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<void> {
   const teamRows = await db.select().from(teams).where(eq(teams.id, opts.teamId)).limit(1);
   if (!teamRows[0]) throw new NotFoundError("team", opts.teamId);
 
-  assertNoTeamOwnedWorkflows(opts.teamId);
-
   await db.transaction(async (tx) => {
+    await lockTeamForOwnership(tx, opts.teamId);
+    await assertNoTeamOwnedWorkflows(tx, opts.teamId);
+    await tx
+      .delete(skills)
+      .where(and(eq(skills.ownerType, "team"), eq(skills.ownerId, opts.teamId)));
+    await tx
+      .delete(skillSources)
+      .where(and(eq(skillSources.ownerType, "team"), eq(skillSources.ownerId, opts.teamId)));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

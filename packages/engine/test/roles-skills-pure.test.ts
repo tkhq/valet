@@ -64,6 +64,36 @@ b
     expect(r.frontmatter).toEqual({ name: "x", description: "y" });
   });
 
+  it("parses a one-level nested map, the shape the skill spec's `metadata` uses", () => {
+    const r = parseMarkdownArtifact(`---
+name: pdf-processing
+metadata:
+  author: example-org
+  version: "1.0"
+license: Apache-2.0
+---
+body
+`);
+    expect(r.frontmatter.metadata).toEqual({ author: "example-org", version: "1.0" });
+    // The key after the nested block is read at the top level again.
+    expect(r.frontmatter.license).toBe("Apache-2.0");
+    expect(r.frontmatter.name).toBe("pdf-processing");
+  });
+
+  // YAML reads a key with no value as null, and a null is not a scalar or a
+  // map, so it is dropped. The validators treat a dropped key and an empty
+  // one the same way, and both report the field as required.
+  it("drops an empty-valued key with nothing nested under it", () => {
+    const r = parseMarkdownArtifact(`---
+metadata:
+name: x
+---
+body
+`);
+    expect(r.frontmatter.metadata).toBeUndefined();
+    expect(r.frontmatter.name).toBe("x");
+  });
+
   it("returns content as body when frontmatter is unclosed", () => {
     const r = parseMarkdownArtifact(`---
 name: nope
@@ -71,6 +101,65 @@ no closing fence here
 `);
     expect(r.frontmatter).toEqual({});
     expect(r.body).toContain("name: nope");
+  });
+});
+
+/**
+ * Real `SKILL.md` files write long descriptions as YAML block scalars. The
+ * description is the field the model reads to decide whether a skill is
+ * relevant, so a parser that keeps the `|-` indicator and drops the text
+ * makes the skill undiscoverable.
+ */
+describe("parseMarkdownArtifact: block scalars", () => {
+  // The frontmatter of `skills/claude-api/SKILL.md` in anthropics/skills,
+  // the file that exposed the bug.
+  const CLAUDE_API = `---
+name: claude-api
+description: |-
+  Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use...
+  TRIGGER — read BEFORE opening the target file; ...
+  SKIP only when another provider is being worked on ...
+license: Complete terms in LICENSE.txt
+---
+
+# Claude API
+`;
+
+  it("reads a real skill's multi-line description instead of the indicator", () => {
+    const r = parseMarkdownArtifact(CLAUDE_API);
+    expect(r.frontmatter.description).toBe(
+      "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use...\n" +
+        "TRIGGER — read BEFORE opening the target file; ...\n" +
+        "SKIP only when another provider is being worked on ...",
+    );
+  });
+
+  it("drops the carriage return of a file written on Windows", () => {
+    const r = parseMarkdownArtifact(
+      "---\r\ndescription: |-\r\n  first\r\n  second\r\nlicense: MIT\r\n---\r\nb\r\n",
+    );
+    expect(r.frontmatter.description).toBe("first\nsecond");
+    expect(r.frontmatter.license).toBe("MIT");
+  });
+
+  it("reads a block scalar nested in a one-level map", () => {
+    const r = parseMarkdownArtifact(`---
+metadata:
+  author: example-org
+  notes: |-
+    first
+    second
+  version: "1.0"
+license: Apache-2.0
+---
+b
+`);
+    expect(r.frontmatter.metadata).toEqual({
+      author: "example-org",
+      notes: "first\nsecond",
+      version: "1.0",
+    });
+    expect(r.frontmatter.license).toBe("Apache-2.0");
   });
 });
 
@@ -150,5 +239,94 @@ Research {{topic}} and report back.
       argsSchema: schema,
     });
     expect(skill.content).toContain("Research {{topic}}");
+  });
+
+  it("carries the spec's optional fields, with allowed-tools in camelCase", () => {
+    const skill = loadSkillFromMarkdown(`---
+name: pdf-processing
+description: Extract PDF text. Use when handling PDFs.
+license: Apache-2.0
+compatibility: Requires Python 3.14+ and uv
+metadata:
+  author: example-org
+  version: "1.0"
+allowed-tools: Bash(git:*) Read
+---
+body
+`);
+    expect(skill.license).toBe("Apache-2.0");
+    expect(skill.compatibility).toBe("Requires Python 3.14+ and uv");
+    expect(skill.metadata).toEqual({ author: "example-org", version: "1.0" });
+    expect(skill.allowedTools).toBe("Bash(git:*) Read");
+  });
+
+  it("throws with the corrective action when the name breaks the spec", () => {
+    expect(() =>
+      loadSkillFromMarkdown(`---
+name: PDF-Processing
+description: Extract PDF text.
+---
+body
+`),
+    ).toThrow(/lowercase/);
+  });
+
+  it("throws when the description is missing", () => {
+    expect(() =>
+      loadSkillFromMarkdown(`---
+name: pdf-processing
+---
+body
+`),
+    ).toThrow(/description is required/);
+  });
+
+  it("throws when the name does not match the directory name", () => {
+    expect(() =>
+      loadSkillFromMarkdown(
+        `---
+name: slack
+description: Read and post in Slack.
+---
+body
+`,
+        "plugin",
+        "slack-tools",
+      ),
+    ).toThrow(/slack-tools/);
+  });
+
+  it("carries a block scalar description through to the SkillSource", () => {
+    const skill = loadSkillFromMarkdown(
+      `---
+name: claude-api
+description: |-
+  Reference for the Claude API — model ids, pricing, params.
+  TRIGGER — read before you open the target file.
+license: Complete terms in LICENSE.txt
+---
+body
+`,
+      "plugin",
+      "claude-api",
+    );
+    expect(skill.description).toBe(
+      "Reference for the Claude API — model ids, pricing, params.\n" +
+        "TRIGGER — read before you open the target file.",
+    );
+    expect(skill.license).toBe("Complete terms in LICENSE.txt");
+  });
+
+  it("uses the directory name when the frontmatter omits name", () => {
+    const skill = loadSkillFromMarkdown(
+      `---
+description: Read and post in Slack.
+---
+body
+`,
+      "plugin",
+      "slack-tools",
+    );
+    expect(skill.name).toBe("slack-tools");
   });
 });

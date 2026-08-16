@@ -84,6 +84,7 @@ import type { ForeachBodyNode, ForeachNode } from '../dag/nodes.js';
 import type { NodeCheckpoint, RunWaitCondition } from '../store.js';
 import { executeLlm } from './llm.js';
 import { executeOrchestrator } from './orchestrator.js';
+import { executeWorkflowCall } from './workflow-call.js';
 import { executeSession } from './session.js';
 import { executeSet } from './set.js';
 import { executeTool } from './tool.js';
@@ -210,6 +211,7 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
       clock,
       engine: args.engine,
       onApprovalPending: args.onApprovalPending,
+      onGateResolved: args.onGateResolved,
     };
 
     const outcome = await invokeBody(node.body, bodyArgs);
@@ -252,7 +254,12 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     // sessionId+threadId; a throw from any single abort must not mask the
     // failure this executor is about to return.
     const abortTargets = new Map<string, { sessionId: string; threadId: string }>();
+    const cancelRunIds = new Set<string>();
     for (const wait of waitingOn) {
+      if (wait.kind === 'run') {
+        cancelRunIds.add(wait.runId);
+        continue;
+      }
       if (wait.kind !== 'submission') continue;
       abortTargets.set(`${wait.sessionId}:${wait.threadId}`, { sessionId: wait.sessionId, threadId: wait.threadId });
     }
@@ -269,6 +276,14 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
         await args.engine.abort(target.sessionId, target.threadId);
       } catch {
         // Best-effort: the failure outcome below is authoritative regardless.
+      }
+    }
+    for (const childRunId of cancelRunIds) {
+      try {
+        await store.insertSignal({ runId: childRunId, signalId: 'cancel', signalType: 'cancel', createdAt: clock() });
+        await store.requestWake(childRunId);
+      } catch {
+        // Best-effort, same as submission aborts above.
       }
     }
 
@@ -323,6 +338,8 @@ async function invokeBody(body: ForeachBodyNode, argsBase: Omit<NodeExecutorArgs
       return executeSession({ ...argsBase, node: body });
     case 'orchestrator':
       return executeOrchestrator({ ...argsBase, node: body });
+    case 'workflow':
+      return executeWorkflowCall({ ...argsBase, node: body });
   }
 }
 

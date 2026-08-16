@@ -637,6 +637,19 @@ function credsHostDir(sandboxId: string): string {
   return join(homedir(), ".valet", "creds", sandboxId);
 }
 
+/** Throw when any name is not a plain filename ("../evil", "a/b", ".", "..").
+ * Guards every place a creds key becomes part of a path — host writes and
+ * the in-container check script alike. */
+function assertPlainFilenames(caller: string, names: string[]): void {
+  for (const name of names) {
+    if (name === "." || name === ".." || basename(name) !== name) {
+      throw new Error(
+        `${caller}: unsafe key "${name}" — keys must be plain filenames with no path separators`,
+      );
+    }
+  }
+}
+
 /** Write credential files into the given directory (mode 0600). Creates the
  * directory (mode 0700, mkdir -p equivalent) before writing.
  *
@@ -645,13 +658,7 @@ function credsHostDir(sandboxId: string): string {
  *
  * Exported for unit testing. */
 export async function writeCredsFiles(dir: string, files: Record<string, string>): Promise<void> {
-  for (const name of Object.keys(files)) {
-    if (name === "." || name === ".." || basename(name) !== name) {
-      throw new Error(
-        `writeCredsFiles: unsafe key "${name}" — keys must be plain filenames with no path separators`,
-      );
-    }
-  }
+  assertPlainFilenames("writeCredsFiles", Object.keys(files));
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   for (const [name, content] of Object.entries(files)) {
     // Write to a sibling temp file then rename so the container-side bind
@@ -661,6 +668,70 @@ export async function writeCredsFiles(dir: string, files: Record<string, string>
     const tmp = join(dir, `.${name}.tmp`);
     await fs.writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
     await fs.rename(tmp, join(dir, name));
+  }
+}
+
+/** In-container mount path of the creds dir (the `-v` target above). */
+const CREDS_MOUNT_PATH = "/etc/valet/creds";
+/** Give up waiting for the container view to converge after this long. */
+const CREDS_PROPAGATION_TIMEOUT_MS = 5000;
+const CREDS_PROPAGATION_POLL_MS = 100;
+
+/** Escape a string for a single-quoted POSIX shell context. */
+function shQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Build the in-container shell script that exits 0 only when every entry
+ * of `files` is readable with the expected content (compared base64-encoded
+ * so secrets never appear in shell syntax) and every `removed` name is
+ * absent. Exported for unit testing. */
+export function credsCheckScript(
+  files: Record<string, string>,
+  removed: string[],
+): string {
+  // `files` keys are validated again by writeCredsFiles and `removed` comes
+  // from readdir, but this function builds in-container paths, so it
+  // enforces the invariant itself rather than trusting its callers.
+  assertPlainFilenames("credsCheckScript", [...Object.keys(files), ...removed]);
+  const checks: string[] = [];
+  for (const [name, content] of Object.entries(files)) {
+    const path = shQuote(`${CREDS_MOUNT_PATH}/${name}`);
+    const b64 = Buffer.from(content, "utf8").toString("base64");
+    checks.push(
+      `[ "$(base64 < ${path} 2>/dev/null | tr -d '\\n')" = ${shQuote(b64)} ] || exit 1`,
+    );
+  }
+  for (const name of removed) {
+    checks.push(`[ ! -e ${shQuote(`${CREDS_MOUNT_PATH}/${name}`)} ] || exit 1`);
+  }
+  checks.push("exit 0");
+  return checks.join("\n");
+}
+
+/** Poll the container until its view of the creds mount matches the host
+ * (VirtioFS on macOS Docker Desktop serves stale ENOENT for ~1-2s after a
+ * host-side rename). Best-effort: returns without error when the container
+ * cannot exec (stopped/removed) or the deadline passes — host files are the
+ * source of truth and the mount converges on its own. */
+async function awaitCredsPropagation(
+  sb: DockerSandbox,
+  files: Record<string, string>,
+  removed: string[],
+): Promise<void> {
+  const script = credsCheckScript(files, removed);
+  const deadline = Date.now() + CREDS_PROPAGATION_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const result = await sb.exec(script);
+      if (result.exitCode === 0) return;
+    } catch {
+      // exec transport failure — container stopped or removed. Nothing to
+      // converge against; the host files are already correct.
+      return;
+    }
+    if (Date.now() >= deadline) return;
+    await new Promise((r) => setTimeout(r, CREDS_PROPAGATION_POLL_MS));
   }
 }
 
@@ -763,11 +834,19 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   /** Rewrites the credential files on the host bind dir. The bind mount is
-   * read-only from the container's view, but the host write propagates
-   * instantly — no restart needed. Files present in the existing dir but
-   * absent from `files` are deleted so stale credentials do not survive key
-   * rotation. Throws when the sandbox is not found or was created without a
-   * creds dir.
+   * read-only from the container's view — no restart needed. Files present
+   * in the existing dir but absent from `files` are deleted so stale
+   * credentials do not survive key rotation. Throws when the sandbox is not
+   * found or was created without a creds dir.
+   *
+   * Propagation is NOT instant on macOS Docker Desktop: VirtioFS caches
+   * dentries, so a host-side rename serves ENOENT inside the container for
+   * ~1-2s until the cache expires. After writing, this method polls the
+   * container view (via exec) until every file matches and every removed
+   * file is gone, bounded by CREDS_PROPAGATION_TIMEOUT_MS. The wait is
+   * best-effort: if the container is not running or the deadline passes,
+   * the method returns anyway — the host files are the source of truth and
+   * the mount converges on its own.
    *
    * Known limitation: restore() cannot call updateCreds after an API restart
    * because the in-memory sandbox map is empty — no on-disk inventory lets us
@@ -792,12 +871,12 @@ export class DockerSandboxProvider implements SandboxProvider {
       // Dir may not exist yet if the initial write was skipped — treat as empty.
     }
     const incoming = new Set(Object.keys(files));
+    const removed = existing.filter((f) => !incoming.has(f));
     await Promise.all(
-      existing
-        .filter((f) => !incoming.has(f))
-        .map((f) => fs.unlink(join(dir, f)).catch(() => undefined)),
+      removed.map((f) => fs.unlink(join(dir, f)).catch(() => undefined)),
     );
     await writeCredsFiles(dir, files);
+    await awaitCredsPropagation(sb, files, removed);
   }
 
   async destroy(id: string): Promise<void> {

@@ -3,7 +3,7 @@
  *
  *   GET    /api/teams                       → list teams the caller belongs to
  *   POST   /api/teams                       → create a team (caller auto-admitted as admin)
- *   DELETE /api/teams/:id                   → delete a team (blocked-on-workflows guard is a no-op this phase)
+ *   DELETE /api/teams/:id                   → delete a team (409s while it owns any workflow)
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
@@ -38,6 +38,7 @@ import {
   removeMember,
   setRole,
   TeamNameConflictError,
+  TeamOwnsWorkflowsError,
 } from "../services/teams.js";
 import type {
   AddTeamMemberRequest,
@@ -66,7 +67,7 @@ function isTeamRole(v: unknown): v is TeamRole {
 
 /** Maps service errors to the route's JSON error response. Rethrows unknowns. */
 function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 404 | 409 } | null {
-  if (err instanceof TeamNameConflictError || err instanceof LastAdminError) {
+  if (err instanceof TeamNameConflictError || err instanceof LastAdminError || err instanceof TeamOwnsWorkflowsError) {
     return { body: { error: err.message, code: err.code }, status: 409 };
   }
   if (err instanceof NotTeamMemberError || err instanceof NotFoundError) {

@@ -4,7 +4,36 @@
  * with correct defaults, validations, and error cases.
  */
 import { describe, it, expect } from "vitest";
-import { loadAuthConfig } from "./config.js";
+import { authModeConflict, loadAuthConfig } from "./config.js";
+
+/**
+ * The boot refusal (`main.ts`): stub auth beside real auth resolves every
+ * credential-less request to the seeded ADMIN stub identity instead of 401.
+ * `make dev-api-node` forced `VALET_LOCAL_AUTH=1`, so following the
+ * `make dev-keycloak` instructions produced exactly that pair.
+ */
+describe("authModeConflict", () => {
+  it("reports the conflict when real auth and the stub are both configured", () => {
+    const message = authModeConflict({ BETTER_AUTH_SECRET: "secret", VALET_LOCAL_AUTH: "1" });
+    expect(message).toContain("BETTER_AUTH_SECRET and VALET_LOCAL_AUTH=1 are mutually exclusive");
+    // The corrective action, both ways out.
+    expect(message).toContain("Unset VALET_LOCAL_AUTH");
+    expect(message).toContain("unset BETTER_AUTH_SECRET");
+  });
+
+  it("passes stub-only mode", () => {
+    expect(authModeConflict({ VALET_LOCAL_AUTH: "1" })).toBeNull();
+  });
+
+  it("passes real-auth mode", () => {
+    expect(authModeConflict({ BETTER_AUTH_SECRET: "secret" })).toBeNull();
+    expect(authModeConflict({ BETTER_AUTH_SECRET: "secret", VALET_LOCAL_AUTH: "0" })).toBeNull();
+  });
+
+  it("passes when neither is configured", () => {
+    expect(authModeConflict({})).toBeNull();
+  });
+});
 
 describe("loadAuthConfig", () => {
   // Stub-only mode: no BETTER_AUTH_SECRET

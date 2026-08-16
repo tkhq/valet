@@ -1,11 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { InMemoryWorkflowStore, type RunHost } from "@valet/workflow";
 import { workflowsActionPlugin, ownerFromContext } from "./actions.js";
 import type { PluginActionContext } from "@valet/engine";
-import type { WorkflowServiceDeps } from "./service.js";
+import { createWorkflowDefinition, type WorkflowServiceDeps } from "./service.js";
+import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
+import { eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
-import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventSubscriptions, workflowDefinitions, workflowSchedules } from "../schema/index.js";
-import type { AppDb } from "../lib/drizzle.js";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -29,11 +30,14 @@ describe("workflowsActionPlugin", () => {
       "workflows.cancel_run",
       "workflows.create_schedule",
       "workflows.create_trigger",
+      "workflows.create_webhook",
       "workflows.delete_schedule",
       "workflows.delete_trigger",
+      "workflows.delete_webhook",
       "workflows.delete_workflow",
       "workflows.get_node_result",
       "workflows.get_run",
+      "workflows.get_webhook",
       "workflows.get_workflow",
       "workflows.list_event_types",
       "workflows.list_runs",
@@ -63,6 +67,11 @@ describe("workflowsActionPlugin", () => {
     // High → the plugin catalog's default policy gates it behind a human
     // decision — the agent cannot silently approve its own gates.
     expect(byId.get("workflows.resolve_approval")).toBe("high");
+    // High → minting the hookId grants a new bearer credential that alone
+    // authorizes starting runs, same reasoning as resolve_approval.
+    expect(byId.get("workflows.create_webhook")).toBe("high");
+    expect(byId.get("workflows.get_webhook")).toBe("low");
+    expect(byId.get("workflows.delete_webhook")).toBe("medium");
   });
 });
 
@@ -87,47 +96,254 @@ describe("save_workflow validation", () => {
   });
 });
 
-// ── update_schedule / update_trigger — DB-backed ─────────────────────────
+// DB-backed: create_webhook/get_webhook/delete_webhook go through the real
+// webhook-service.ts (unlike the pure-validation test above, they need a
+// real workflow_definitions/workflow_webhooks round trip).
+describe("webhook actions", () => {
+  let db: AppDb;
+  let pglite: PGlite;
+  let deps: WorkflowServiceDeps;
 
-let db: AppDb;
-let dbCleanup: () => Promise<void>;
+  class StubRunHost implements RunHost {
+    async start(): Promise<void> {}
+    async wake(): Promise<void> {}
+    async scheduleWake(): Promise<void> {}
+    async terminate(): Promise<void> {}
+    startHost(): void {}
+    async stopHost(): Promise<void> {}
+  }
 
-const DB_USER = { id: "user_1", orgId: "org_1" };
-const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
+  beforeAll(async () => {
+    pglite = new PGlite();
+    await applyAppMigrations(buildAppQueryable(pglite));
+    db = buildAppDb(pglite);
+  });
 
-beforeAll(async () => {
-  const boot = await freshTestPgDb();
-  db = boot.appDb;
-  dbCleanup = boot.cleanup;
+  afterAll(async () => {
+    await pglite.close();
+  });
 
-  await db.insert(workflowDefinitions).values({
-    id: "wf_actions_1",
-    orgId: DB_USER.orgId,
-    ownerType: "user",
-    ownerId: DB_USER.id,
-    name: "test workflow",
-    definition: { version: "dag/v1", nodes: [], edges: [] },
-    createdAt: NOW,
-    updatedAt: NOW,
+  beforeEach(async () => {
+    await buildAppQueryable(pglite).query(
+      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
+    );
+    deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new StubRunHost() };
+  });
+
+  async function seedWorkflow(): Promise<string> {
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      { name: "hook-target", definition: { version: "dag/v1", nodes: [], edges: [] } },
+    );
+    return created.id;
+  }
+
+  it("create_webhook mints a hookId and a path-only url (no VALET_PUBLIC_URL in tests)", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const create = plugin.actions.find((a) => a.id === "workflows.create_webhook")!;
+
+    const result = await create.execute({ workflow_id: workflowId }, ctx());
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = result.data as { workflowId: string; hookId: string; url: string };
+    expect(data.workflowId).toBe(workflowId);
+    expect(data.hookId).toMatch(/^[0-9a-f]{64}$/);
+    expect(data.url).toBe(`/api/hooks/workflows/${workflowId}/${data.hookId}`);
+  });
+
+  it("create_webhook called twice rotates — second hookId differs from the first", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const create = plugin.actions.find((a) => a.id === "workflows.create_webhook")!;
+
+    const first = await create.execute({ workflow_id: workflowId }, ctx());
+    const second = await create.execute({ workflow_id: workflowId }, ctx());
+    if (!first.success || !second.success) throw new Error("expected both mints to succeed");
+    expect((second.data as { hookId: string }).hookId).not.toBe((first.data as { hookId: string }).hookId);
+  });
+
+  it("get_webhook returns webhook:null before minting, the summary after", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const get = plugin.actions.find((a) => a.id === "workflows.get_webhook")!;
+    const create = plugin.actions.find((a) => a.id === "workflows.create_webhook")!;
+
+    const before = await get.execute({ workflow_id: workflowId }, ctx());
+    expect(before).toEqual({ success: true, data: { webhook: null } });
+
+    await create.execute({ workflow_id: workflowId }, ctx());
+    const after = await get.execute({ workflow_id: workflowId }, ctx());
+    expect(after.success).toBe(true);
+    if (!after.success) return;
+    expect((after.data as { webhook: { workflowId: string } }).webhook.workflowId).toBe(workflowId);
+  });
+
+  it("get_node_result returns the checkpoint result verbatim when small, a truncation stub when huge", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const getNodeResult = plugin.actions.find((a) => a.id === "workflows.get_node_result")!;
+
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    const params = {
+      workflowId: "wf-x",
+      definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-x", params, definition, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-x", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const base = { runId: "run-x", attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, nodeId: "small", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-x", "small", 0, claim.attempt, {
+      ...base, nodeId: "small", iteration: 0, status: "completed",
+      result: { text: "hello", usage: { totalTokens: 2 } },
+    });
+    await deps.workflowStore.putIntent({ ...base, nodeId: "huge", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-x", "huge", 0, claim.attempt, {
+      ...base, nodeId: "huge", iteration: 0, status: "completed",
+      result: { blob: "x".repeat(30_000) },
+    });
+
+    const small = await getNodeResult.execute({ run_id: "run-x", node_id: "small" }, ctx());
+    expect(small.success).toBe(true);
+    if (!small.success) return;
+    const smallCp = (small.data as { checkpoints: Array<{ result: unknown }> }).checkpoints[0]!;
+    expect(smallCp.result).toEqual({ text: "hello", usage: { totalTokens: 2 } });
+
+    const huge = await getNodeResult.execute({ run_id: "run-x", node_id: "huge" }, ctx());
+    expect(huge.success).toBe(true);
+    if (!huge.success) return;
+    const hugeCp = (huge.data as { checkpoints: Array<{ result: { truncated?: boolean; jsonPrefix?: string } }> })
+      .checkpoints[0]!;
+    expect(hugeCp.result.truncated).toBe(true);
+    expect(typeof hugeCp.result.jsonPrefix).toBe("string");
+  });
+
+  it("list_runs names a parked run's waitingOn conditions", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const listRuns = plugin.actions.find((a) => a.id === "workflows.list_runs")!;
+
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    const params = {
+      workflowId,
+      definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-parked", params, definition, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-parked", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    await deps.workflowStore.parkRun("run-parked", claim.attempt, [
+      { kind: "signal", nodeId: "get_pr", signalType: "approval:get_pr" },
+    ]);
+    // listWorkflowRuns discovers run ids through the app db table.
+    await db.insert(workflowRuns).values({
+      id: "run-parked",
+      workflowId,
+      definitionVersionId: "v1",
+      definition,
+      params,
+      status: "parked",
+      waitingOn: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    const result = await listRuns.execute({ workflow_id: workflowId }, ctx());
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const runs = (result.data as { runs: Array<{ runId: string; needsApproval?: boolean; waitingOn?: unknown }> }).runs;
+    const parked = runs.find((r) => r.runId === "run-parked");
+    expect(parked?.needsApproval).toBe(true);
+    expect(parked?.waitingOn).toEqual([
+      { kind: "signal", nodeId: "get_pr", signalType: "approval:get_pr" },
+    ]);
+  });
+
+  it("get_webhook fails for a workflow the caller doesn't own", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const get = plugin.actions.find((a) => a.id === "workflows.get_webhook")!;
+
+    const result = await get.execute({ workflow_id: workflowId }, ctx({ userId: "someone-else" }));
+    expect(result.success).toBe(false);
+  });
+
+  it("delete_webhook: deleted:true after minting, deleted:false when nothing was configured, fails for an unowned workflow", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const create = plugin.actions.find((a) => a.id === "workflows.create_webhook")!;
+    const del = plugin.actions.find((a) => a.id === "workflows.delete_webhook")!;
+
+    await create.execute({ workflow_id: workflowId }, ctx());
+    const deleted = await del.execute({ workflow_id: workflowId }, ctx());
+    expect(deleted).toEqual({ success: true, data: { workflowId, deleted: true } });
+
+    const nothingToDelete = await del.execute({ workflow_id: workflowId }, ctx());
+    expect(nothingToDelete).toEqual({ success: true, data: { workflowId, deleted: false } });
+
+    const unowned = await del.execute({ workflow_id: workflowId }, ctx({ userId: "someone-else" }));
+    expect(unowned.success).toBe(false);
   });
 });
 
-afterAll(async () => {
-  await dbCleanup();
-});
+// ── update_schedule / update_trigger — DB-backed ─────────────────────────
 
-function makeDeps(overrides: Partial<WorkflowServiceDeps> = {}): WorkflowServiceDeps {
-  return {
-    db,
-    workflowStore: undefined as unknown as WorkflowServiceDeps["workflowStore"],
-    workflowRunHost: undefined as unknown as WorkflowServiceDeps["workflowRunHost"],
-    plugins: [githubPlugin],
-    ...overrides,
-  };
-}
+describe("update actions", () => {
+  let db: AppDb;
+  let pglite: PGlite;
+  let deps: WorkflowServiceDeps;
 
-describe("workflows.update_schedule action", () => {
-  it("updates an existing schedule and returns the summary", async () => {
+  const DB_USER = { id: "user_1", orgId: "org_1" };
+  const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
+
+  class StubRunHost implements RunHost {
+    async start(): Promise<void> {}
+    async wake(): Promise<void> {}
+    async scheduleWake(): Promise<void> {}
+    async terminate(): Promise<void> {}
+    startHost(): void {}
+    async stopHost(): Promise<void> {}
+  }
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    await applyAppMigrations(buildAppQueryable(pglite));
+    db = buildAppDb(pglite);
+    deps = {
+      db,
+      workflowStore: new InMemoryWorkflowStore(),
+      workflowRunHost: new StubRunHost(),
+      plugins: [githubPlugin],
+    };
+
+    await db.insert(workflowDefinitions).values({
+      id: "wf_actions_1",
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      name: "test workflow",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+  });
+
+  afterAll(async () => {
+    await pglite.close();
+  });
+
+  function findAction(id: string) {
+    const plugin = workflowsActionPlugin(() => deps);
+    const found = plugin.actions.find((a) => a.id === id);
+    if (!found) throw new Error(`${id} action missing`);
+    return found;
+  }
+
+  it("update_schedule updates an existing schedule and returns the summary", async () => {
     const schedId = `sched_act_${Date.now()}`;
     await db.insert(workflowSchedules).values({
       id: schedId,
@@ -148,12 +364,7 @@ describe("workflows.update_schedule action", () => {
       updatedAt: NOW,
     });
 
-    const deps = makeDeps();
-    const plugin = workflowsActionPlugin(() => deps);
-    const action = plugin.actions.find((a) => a.id === "workflows.update_schedule");
-    if (!action) throw new Error("update_schedule action missing");
-
-    const result = await action.execute(
+    const result = await findAction("workflows.update_schedule").execute(
       { schedule_id: schedId, name: "renamed" },
       ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
     );
@@ -163,23 +374,16 @@ describe("workflows.update_schedule action", () => {
     }
   });
 
-  it("returns error for unknown schedule id", async () => {
-    const deps = makeDeps();
-    const plugin = workflowsActionPlugin(() => deps);
-    const action = plugin.actions.find((a) => a.id === "workflows.update_schedule");
-    if (!action) throw new Error("update_schedule action missing");
-
-    const result = await action.execute(
+  it("update_schedule returns error for unknown schedule id", async () => {
+    const result = await findAction("workflows.update_schedule").execute(
       { schedule_id: "no_such_schedule" },
       ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
     );
     expect(result.success).toBe(false);
     expect(result.error).toContain("not found");
   });
-});
 
-describe("workflows.update_trigger action", () => {
-  it("updates an existing trigger and returns the summary", async () => {
+  it("update_trigger updates an existing trigger and returns the summary", async () => {
     const trigId = `trig_act_${Date.now()}`;
     await db.insert(eventSubscriptions).values({
       id: trigId,
@@ -196,12 +400,7 @@ describe("workflows.update_trigger action", () => {
       updatedAt: NOW,
     });
 
-    const deps = makeDeps();
-    const plugin = workflowsActionPlugin(() => deps);
-    const action = plugin.actions.find((a) => a.id === "workflows.update_trigger");
-    if (!action) throw new Error("update_trigger action missing");
-
-    const result = await action.execute(
+    const result = await findAction("workflows.update_trigger").execute(
       { trigger_id: trigId, name: "renamed trigger", enabled: false },
       ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
     );
@@ -213,13 +412,8 @@ describe("workflows.update_trigger action", () => {
     }
   });
 
-  it("returns error for unknown trigger id", async () => {
-    const deps = makeDeps();
-    const plugin = workflowsActionPlugin(() => deps);
-    const action = plugin.actions.find((a) => a.id === "workflows.update_trigger");
-    if (!action) throw new Error("update_trigger action missing");
-
-    const result = await action.execute(
+  it("update_trigger returns error for unknown trigger id", async () => {
+    const result = await findAction("workflows.update_trigger").execute(
       { trigger_id: "no_such_trigger" },
       ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
     );

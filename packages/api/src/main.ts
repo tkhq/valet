@@ -20,9 +20,16 @@ import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
 import type { Providers } from "./providers/types.js";
-import { loadAuthConfig } from "./auth/config.js";
+import { authModeConflict, loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
 import { buildAuth } from "./auth/index.js";
+import {
+  loadInstanceConfig,
+  resolveAllowedEmailDomains,
+  InstanceConfigError,
+  type InstanceConfig,
+} from "./config/instance-config.js";
+import { reconcileInstanceConfig } from "./services/config-reconcile.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -131,13 +138,57 @@ if (!anthropicApiKey) {
   process.exit(1);
 }
 
+// Stub auth next to real auth is a privilege escalation, not a preference:
+// the stub identity is an admin, so the ladder's stub rung would answer every
+// credential-less request with admin access. Refuse the pair at boot.
+const authConflict = authModeConflict(process.env);
+if (authConflict) {
+  console.error(authConflict);
+  process.exit(1);
+}
+
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;
+
+// Instance config (`valet.yaml`): load and validate before anything else
+// so a misconfigured file fails boot loudly instead of silently degrading.
+// Fail-fast: print the message only (no stack spam for config mistakes),
+// then exit. `InstanceConfigError` carries a corrective-action message.
+let instanceConfig: InstanceConfig | null;
+try {
+  instanceConfig = loadInstanceConfig(process.env);
+} catch (e) {
+  if (e instanceof InstanceConfigError) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  throw e;
+}
 
 // Real auth (auth-v2 design): only wired when BETTER_AUTH_SECRET resolves a
 // config. Absent → stub-only mode. Loaded before `buildNodeProviders` so
 // `EngineHost` can be constructed with the sandbox JWT master / API base
 // URL it needs at session-provision time — not after boot.
 const authConfig = loadAuthConfig(process.env);
+
+// Both-set guard + merge for allowedEmailDomains. Must run after authConfig
+// is loaded (we need the env-parsed domains) and after instanceConfig
+// (we need the config-declared domains). Throws InstanceConfigError with
+// the corrective-action message if both sources are set simultaneously.
+if (authConfig) {
+  try {
+    authConfig.allowedEmailDomains = resolveAllowedEmailDomains(
+      instanceConfig,
+      process.env,
+      authConfig.allowedEmailDomains,
+    );
+  } catch (e) {
+    if (e instanceof InstanceConfigError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
 
 // The URL injected into every sandbox as `VALET_API_URL` (Task 8, auth-v2
 // plan) must be reachable FROM the sandbox, which `BETTER_AUTH_URL` is not
@@ -158,24 +209,35 @@ const sandboxApiUrl = process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl;
 const telemetry = initTelemetry();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
 
-const providers = await buildNodeProviders({
-  databaseUrl,
-  pgDataDir,
-  blobsRoot,
-  encryptionKey,
-  anthropicApiKey,
-  apiBaseUrl: `http://127.0.0.1:${port}`,
-  workflowCrashAt,
-  sandboxJwtMaster: authConfig?.sandboxJwtMaster,
-  sandboxApiUrl,
-  // Real auth configured → skip seeding the local-dev identity so the
-  // "zero users → first signup becomes admin" provisioning rule can fire
-  // (see `NodeProviderOpts.seedLocalIdentity`). EXCEPT when the stub auth
-  // rung is also enabled: `VALET_LOCAL_AUTH=1` makes the middleware resolve
-  // session-less requests to `local-user`, and an unseeded stub identity
-  // 404s every route that joins the `users` table (`/api/me`, org routes).
-  seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig, process.env),
-});
+// `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins
+// both-set guard). Fail boot with the corrective-action message only — no
+// stack spam for a config mistake. Rethrow anything else.
+let providers: Awaited<ReturnType<typeof buildNodeProviders>>;
+try {
+  providers = await buildNodeProviders({
+    databaseUrl,
+    pgDataDir,
+    blobsRoot,
+    encryptionKey,
+    anthropicApiKey,
+    apiBaseUrl: `http://127.0.0.1:${port}`,
+    workflowCrashAt,
+    sandboxJwtMaster: authConfig?.sandboxJwtMaster,
+    sandboxApiUrl,
+    // Real auth configured → skip seeding the local-dev identity so the
+    // "zero users → first signup becomes admin" provisioning rule can fire
+    // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
+    // here — the boot check above refuses that pair.
+    seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
+    instanceConfig: instanceConfig ?? undefined,
+  });
+} catch (e) {
+  if (e instanceof InstanceConfigError) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  throw e;
+}
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
 // escalation and child-session decision_gate → approval onto the shared
@@ -207,6 +269,11 @@ await providers.childWatcher.rearm().catch((err) => {
   console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
 });
 
+// Parked-child retention (child_send arc): destroy suspended child
+// sandboxes whose retention window has passed. No-op when retention is
+// off; the interval is unref'd so it never holds the process open.
+providers.childWatcher.startRetentionSweep();
+
 // Channel ingress (Task 8): resolves credentials into transports, then
 // starts webhook registration or the long-poll loop per transport. A
 // failure here must never block boot — channels are best-effort.
@@ -227,6 +294,11 @@ providers.workflowScheduler.start();
 // so pending/failed event_deliveries left over from a prior process (and
 // freshly-ingested ones between nudges) get delivered.
 providers.eventDispatcher.start();
+
+// Skill-repository sync (agent-skills design): begin the sweep that re-reads
+// every tracked repository on its own schedule, and imports any source added
+// while this process was down.
+providers.skillSync.start();
 
 // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
 // queued/building rows orphaned by a prior process crash/restart, then begin
@@ -249,6 +321,25 @@ const rotateSweep: RotateSweepHandle = startRotateSweep({
   db: providers.db,
 });
 
+// Instance config reconciliation: apply the declarative config to the live
+// database (org name, members, teams, skill sources, etc.). Runs after all
+// boot-restore passes so the db is settled before we write to it. Failure
+// here fails boot — a half-reconciled config is worse than no config.
+if (instanceConfig) {
+  // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
+  // no admin, or duplicate skill sources). Fail boot with the
+  // corrective-action message only — no stack spam. Rethrow anything else.
+  try {
+    await reconcileInstanceConfig({ db: providers.db, sourceService: providers.prebuildService }, instanceConfig);
+  } catch (e) {
+    if (e instanceof InstanceConfigError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
+
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
 const authWiring: AuthWiring = authConfig
@@ -256,7 +347,13 @@ const authWiring: AuthWiring = authConfig
       auth: buildAuth({
         db: providers.db,
         cfg: authConfig,
-        hooks: buildAuthHooks({ db: providers.db, cfg: authConfig, credentialStore: providers.engineCredentials }),
+        hooks: buildAuthHooks({
+          db: providers.db,
+          cfg: authConfig,
+          credentialStore: providers.engineCredentials,
+          instanceConfig,
+          sourceService: providers.prebuildService,
+        }),
       }),
       authConfig,
     }
@@ -295,6 +392,7 @@ const server = startListening({
     console.log(
       `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
     );
+    console.log(`  config:   ${process.env.VALET_CONFIG ?? "none (VALET_CONFIG unset)"}`);
     console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
   },
 });
@@ -324,6 +422,11 @@ async function close(): Promise<void> {
     console.error("eventDispatcher.stop failed:", err);
   }
   try {
+    await providers.skillSync.stop();
+  } catch (err) {
+    console.error("skillSync.stop failed:", err);
+  }
+  try {
     providers.prebuildService.stop();
   } catch (err) {
     console.error("prebuildService.stop failed:", err);
@@ -332,6 +435,11 @@ async function close(): Promise<void> {
     rotateSweep.stop();
   } catch (err) {
     console.error("rotateSweep.stop failed:", err);
+  }
+  try {
+    providers.childWatcher.stopRetentionSweep();
+  } catch (err) {
+    console.error("childWatcher.stopRetentionSweep failed:", err);
   }
   try {
     await providers.channelHost.stop();
@@ -393,6 +501,14 @@ function installSignalShutdown(handle: ServerHandle): void {
 // bundle), true only when main.ts is itself the script being run.
 const entryHref = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (import.meta.url === entryHref && /\/main\.(ts|js|mjs)$/.test(import.meta.url)) {
-  const handle = await startServer();
-  installSignalShutdown(handle);
+  // A boot rejection (e.g. `loadAuthConfig` on a half-configured provider)
+  // carries the corrective action in its message. Print that message and
+  // exit 1 — an unhandled rejection buries it under a stack trace.
+  try {
+    const handle = await startServer();
+    installSignalShutdown(handle);
+  } catch (err) {
+    console.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }

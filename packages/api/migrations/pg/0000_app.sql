@@ -3,7 +3,8 @@ CREATE TABLE "orgs" (
 	"name" text NOT NULL,
 	"features" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"model_preferences" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"bare_skill_commands" boolean NOT NULL DEFAULT false
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -232,7 +233,8 @@ CREATE TABLE "session_threads" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
 	"title" text,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"archived_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");
@@ -292,12 +294,18 @@ CREATE TABLE "child_watches" (
 	"actor_user_id" text NOT NULL,
 	"org_id" text NOT NULL,
 	"settled" boolean DEFAULT false NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"dismissed_at" bigint,
+	"settled_at" bigint,
+	"sandbox_reclaimed_at" bigint,
+	"parked_sandbox_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
+--> statement-breakpoint
+CREATE INDEX "child_watches_retention" ON "child_watches" ("settled_at") WHERE "settled" = true AND "sandbox_reclaimed_at" IS NULL;
 --> statement-breakpoint
 CREATE TABLE "notifications" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -423,6 +431,53 @@ ALTER TABLE "memory_files" ADD COLUMN "search_vector" tsvector GENERATED ALWAYS 
 --> statement-breakpoint
 CREATE INDEX "memory_files_search_vector_idx" ON "memory_files" USING gin ("search_vector");
 --> statement-breakpoint
+CREATE TABLE "skills" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"origin" text NOT NULL,
+	"source_id" text,
+	"name" text NOT NULL,
+	"description" text NOT NULL,
+	"content" text NOT NULL,
+	"frontmatter" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"content_sha" text NOT NULL,
+	"upstream_path" text,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
+--> statement-breakpoint
+CREATE TABLE "skill_sources" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"repo_full_name" text NOT NULL,
+	"ref" text DEFAULT '' NOT NULL,
+	"subpath" text DEFAULT '' NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"next_attempt_at" bigint NOT NULL,
+	"last_sha" text,
+	"last_manifest_hash" text,
+	"last_synced_at" bigint,
+	"last_error" text,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "skill_sources_owner" ON "skill_sources" ("org_id","owner_type","owner_id");
+--> statement-breakpoint
+CREATE INDEX "skill_sources_due" ON "skill_sources" ("enabled","next_attempt_at");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "skill_sources_repo" ON "skill_sources" ("org_id","owner_type","owner_id","repo_full_name","subpath");
+--> statement-breakpoint
 CREATE TABLE "workflow_definitions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
@@ -529,11 +584,90 @@ CREATE TABLE "mcp_oauth_clients" (
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "action_policies" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"principal_type" text NOT NULL,
+	"principal_id" text NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"mode" text NOT NULL,
+	"param_matchers" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"applies_in" text DEFAULT 'any' NOT NULL,
+	"origin" text NOT NULL,
+	"managed_by" text,
+	"expires_at" bigint,
+	"revoked_at" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	CONSTRAINT "action_policies_one_of_target" CHECK ((("service" IS NOT NULL)::int + ("action_id" IS NOT NULL)::int + ("risk_level" IS NOT NULL)::int) = 1)
+);
+--> statement-breakpoint
+CREATE INDEX "action_policies_org_revoked" ON "action_policies" ("org_id","revoked_at");
+--> statement-breakpoint
+CREATE TABLE "runtime_grants" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"session_id" text,
+	"workflow_execution_id" text,
+	"policy_key" text NOT NULL,
+	"mode" text DEFAULT 'allow' NOT NULL,
+	"granted_by" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"revoked_at" bigint,
+	CONSTRAINT "runtime_grants_one_of_scope" CHECK ((("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int) = 1)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "runtime_grants_session_policy_key" ON "runtime_grants" ("org_id","session_id","policy_key") WHERE "session_id" IS NOT NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("org_id","workflow_execution_id","policy_key") WHERE "workflow_execution_id" IS NOT NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE TABLE "action_policy_overrides" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"mode" text NOT NULL,
+	"param_matchers" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	CONSTRAINT "action_policy_overrides_one_of_target" CHECK ((("service" IS NOT NULL)::int + ("action_id" IS NOT NULL)::int + ("risk_level" IS NOT NULL)::int) = 1)
+);
+--> statement-breakpoint
+CREATE INDEX "action_policy_overrides_org_user" ON "action_policy_overrides" ("org_id","user_id");
+--> statement-breakpoint
 CREATE TABLE "action_invocations" (
 	"invocation_id" text PRIMARY KEY NOT NULL,
-	"result" jsonb NOT NULL,
-	"created_at" bigint NOT NULL
+	"result" jsonb,
+	"result_truncated" boolean,
+	"created_at" bigint NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"resolved_mode" text,
+	"base_mode" text,
+	"matched_policy_id" text,
+	"matched_grant_id" text,
+	"matched_override_id" text,
+	"status" text,
+	"session_id" text,
+	"workflow_execution_id" text,
+	"user_id" text,
+	"org_id" text,
+	"params" jsonb,
+	"params_truncated" boolean,
+	"duration_ms" bigint,
+	"error" text,
+	"started_at" bigint,
+	"resolved_by" text
 );
+--> statement-breakpoint
+CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "action_invocations_org_created" ON "action_invocations" ("org_id","created_at");
 --> statement-breakpoint
 CREATE TABLE "llm_providers" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -593,6 +727,7 @@ CREATE TABLE "image_sources" (
 	"external_ref" text,
 	"pull_secret_name" text,
 	"setup_commands" jsonb,
+	"profile" text CHECK (profile IS NULL OR profile IN ('headless','full')),
 	"repo_host" text,
 	"repo_full_name" text,
 	"clone_url" text,
@@ -605,7 +740,7 @@ CREATE TABLE "image_sources" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "image_sources_org_repo" ON "image_sources" ("org_id","repo_host","repo_full_name") WHERE kind = 'repo';
 --> statement-breakpoint
-CREATE UNIQUE INDEX "image_sources_org_base" ON "image_sources" ("org_id") WHERE kind = 'base';
+CREATE UNIQUE INDEX "image_sources_org_base_profile" ON "image_sources" ("org_id","profile") WHERE kind = 'base';
 --> statement-breakpoint
 CREATE TABLE "bakes" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -687,6 +822,16 @@ CREATE INDEX "workflow_schedules_due" ON "workflow_schedules" ("enabled","next_f
 --> statement-breakpoint
 CREATE INDEX "workflow_schedules_workflow" ON "workflow_schedules" ("workflow_id");
 --> statement-breakpoint
+CREATE TABLE "workflow_webhooks" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workflow_id" text NOT NULL,
+	"org_id" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "workflow_webhooks_workflow" ON "workflow_webhooks" ("workflow_id");
+--> statement-breakpoint
 CREATE TABLE "event_deliveries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"event_id" text NOT NULL,
@@ -715,3 +860,69 @@ CREATE TABLE "linear_installations" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "linear_installations_org_workspace" ON "linear_installations" ("org_id","workspace_id");
+--> statement-breakpoint
+-- ── cost_entries ──────────────────────────────────────────────────────────
+--
+-- One row per billable assistant turn, with the owner resolved. This is the
+-- ONLY definition of cost attribution: Grafana queries this view directly
+-- and `/api/usage/summary` aggregates the same columns, so the dashboard and
+-- the in-app card cannot disagree.
+--
+-- It reads `engine_entries` (engine schema), so `applyAppMigrations` applies
+-- the engine schema first — see `packages/api/src/lib/drizzle.ts`.
+--
+-- Owner resolution covers the two session kinds that produce turns:
+--
+--   1. Interactive, orchestrator, and child sessions have an `agent_sessions`
+--      row that carries `org_id` + `user_id` directly.
+--   2. Workflow sessions have NO `agent_sessions` row (they belong to
+--      `workflow_runs`, not the sessions UI). Their id is
+--      `wf:{runId}:{nodeId}`, or `wf:{runId}:{nodeId}:{iteration}` inside a
+--      foreach body, so position 2 holds the run id in both shapes.
+--      `workflow_runs` has no `org_id` column, so the org comes from the
+--      parent `workflow_definitions` row.
+--
+-- An entry that resolves to no org is EXCLUDED. A row with an unknown org
+-- could not be scoped to a tenant, and `wf:invoke:{invocationId}` (the
+-- action-invocation context id) matches no run.
+--
+-- `user_id` is the individual to bill. A team-owned or org-owned workflow run
+-- has no acting user, so `user_id` is NULL there and `owner_type`/`owner_id`
+-- carry the principal instead. Such rows count toward org totals and are
+-- absent from per-user totals.
+--
+-- `cost_total` NULL means UNPRICED, never free: the engine omits cost for
+-- custom/OpenRouter providers and dev fakes rather than writing 0. Read
+-- `priced` before you read `cost_total` as a complete number.
+CREATE VIEW "cost_entries" AS
+SELECT
+	e."id"                                                     AS "entry_id",
+	e."session_id"                                             AS "session_id",
+	e."created_at"                                             AS "created_at",
+	e."model"                                                  AS "model",
+	COALESCE(s."org_id", d."org_id")                           AS "org_id",
+	CASE
+		WHEN s."id" IS NOT NULL THEN s."user_id"
+		WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '')
+	END                                                        AS "user_id",
+	COALESCE(s."owner_type", r."owner_type")                   AS "owner_type",
+	NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
+	r."workflow_id"                                            AS "workflow_id",
+	r."id"                                                     AS "workflow_run_id",
+	COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
+	COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
+	COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
+	COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
+	COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
+	(e."cost"::jsonb->>'total')::float8                        AS "cost_total",
+	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced"
+FROM "engine_entries" e
+LEFT JOIN "agent_sessions" s
+	ON s."id" = e."session_id"
+LEFT JOIN "workflow_runs" r
+	ON e."session_id" LIKE 'wf:%'
+	AND r."id" = split_part(e."session_id", ':', 2)
+LEFT JOIN "workflow_definitions" d
+	ON d."id" = r."workflow_id"
+WHERE e."usage" IS NOT NULL
+	AND COALESCE(s."org_id", d."org_id") IS NOT NULL;

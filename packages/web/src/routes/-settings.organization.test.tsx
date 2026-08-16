@@ -11,7 +11,7 @@
  * Task 11 extends the Members describe block with the invite dialog + the
  * pending-invites list, mocking `~/api/invites` the same way.
  */
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -88,26 +88,35 @@ let invitesData: {
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
+  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
+    <a {...rest}>{children}</a>
+  ),
 }));
 
-vi.mock("~/api/settings", () => ({
-  useOrg: () => ({ data: orgData, isLoading: false, error: null }),
-  usePatchOrg: () => ({
-    mutate: patchOrgMutate,
-    mutateAsync: patchOrgMutateAsync,
-    isPending: false,
-    error: null,
-  }),
-  useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
-  useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
-  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-  useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
-  useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
-  useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
-  useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
-  useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
-  useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useOrg: () => ({ data: orgData, isLoading: false, error: null }),
+    usePatchOrg: () => ({
+      mutate: patchOrgMutate,
+      mutateAsync: patchOrgMutateAsync,
+      isPending: false,
+      error: null,
+    }),
+    useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
+    useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
+    useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
+    useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
+    useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
+    useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
+    useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
+    useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
+  };
+});
 
 vi.mock("~/api/invites", () => ({
   useInvites: () => ({ data: invitesData, isLoading: false, error: null }),
@@ -115,9 +124,58 @@ vi.mock("~/api/invites", () => ({
   useRevokeInvite: () => ({ mutate: revokeInviteMutate, isPending: false, error: null }),
 }));
 
+const addSourceMutate = vi.fn();
+let orgSourcesData: {
+  sources: Array<{
+    id: string;
+    repo: string;
+    ref: string;
+    subpath: string;
+    ownerType: "user" | "team" | "org";
+    ownerId: string;
+    enabled: boolean;
+    status: "pending" | "ok" | "warning" | "error";
+    skillCount: number;
+    lastSyncedAt: number | null;
+    lastSha: string | null;
+    lastMessage: string | null;
+  }>;
+} = { sources: [] };
+
+vi.mock("~/api/skill-sources", () => ({
+  useSkillSources: () => ({ data: orgSourcesData, isLoading: false, error: null }),
+  useAddSkillSource: () => ({ mutate: addSourceMutate, isPending: false, error: null }),
+  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+// The Library page's org skills panel reads the shared skills catalog.
+vi.mock("~/api/skills", () => ({
+  useSkills: () => ({ data: { skills: [] }, isLoading: false, error: null }),
+}));
+
 import { OrganizationGeneralPage } from "./settings.organization.index";
 import { OrganizationMembersPage } from "./settings.organization.members";
 import { OrganizationTeamsPage } from "./settings.organization.teams";
+import { OrganizationLibraryPage } from "./settings.organization.library";
+
+function orgSource(over: Record<string, unknown> = {}) {
+  return {
+    id: "s_org",
+    repo: "tkhq/org-skills",
+    ref: "",
+    subpath: "",
+    ownerType: "org" as const,
+    ownerId: "org_1",
+    enabled: true,
+    status: "ok" as const,
+    skillCount: 2,
+    lastSyncedAt: null,
+    lastSha: null,
+    lastMessage: null,
+    ...over,
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -139,6 +197,7 @@ beforeEach(() => {
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
   invitesData = { invites: [] };
+  orgSourcesData = { sources: [] };
 });
 
 describe("OrganizationGeneralPage", () => {
@@ -343,5 +402,42 @@ describe("OrganizationTeamsPage", () => {
     expect(deleteTeamMutate).toHaveBeenCalledWith("team_1", expect.objectContaining({
       onSuccess: expect.any(Function),
     }));
+  });
+});
+
+describe("OrganizationLibraryPage", () => {
+  it("shows only org sources with a scope badge", () => {
+    orgSourcesData = {
+      sources: [
+        orgSource(),
+        {
+          ...orgSource({ id: "s_personal", repo: "me/mine", ownerType: "user", ownerId: "u1" }),
+        },
+      ],
+    };
+    render(<OrganizationLibraryPage />);
+    expect(screen.getByText("tkhq/org-skills")).toBeTruthy();
+    expect(screen.queryByText("me/mine")).toBeNull();
+    expect(screen.getByText("Org")).toBeTruthy();
+  });
+
+  it("an admin adds an org-scoped source", () => {
+    render(<OrganizationLibraryPage />);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/org-skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+    expect(addSourceMutate).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org" });
+  });
+
+  it("a member sees status but no Sync, Remove, or import controls", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    orgSourcesData = { sources: [orgSource()] };
+    render(<OrganizationLibraryPage />);
+    expect(screen.getByText("tkhq/org-skills")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^sync$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /import/i })).toBeNull();
   });
 });

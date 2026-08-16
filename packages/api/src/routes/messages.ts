@@ -13,26 +13,33 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray } from "drizzle-orm";
+import { dispatchCommand } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
+import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  ListCommandsResponse,
+  WireCommandInfo,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
   Message,
   MessagePart,
   MessageRole,
+  PatchThreadRequest,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
   ThreadSummary,
   WithdrawDecisionRequest,
 } from "../wire/types.js";
-import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
+import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { isOrgAdmin } from "../services/org.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -48,7 +55,10 @@ async function loadOwnedSession(c: Context<AppEnv>) {
   return rows[0] ?? null;
 }
 
-function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
+export function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
+  if (e.type === "command_result") {
+    return commandResultEntryToMessage(e, sessionId, threadId);
+  }
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -66,6 +76,7 @@ function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): M
     createdAt: Number.isFinite(created) ? created : Date.now(),
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
+    model: e.model,
   };
 }
 
@@ -78,8 +89,9 @@ function threadToSummary(
   title?: string,
   model?: string,
   key?: string,
+  archivedAt?: number,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key };
+  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt };
 }
 
 async function loadEngineSession(
@@ -107,29 +119,82 @@ messagesRouter.get("/:id/threads", async (c) => {
   await engineSession.ensureDefaultThread();
   const threads = engineSession.listThreads();
 
-  // Titles live in the app-side `session_threads` mirror (populated by
-  // auto-title). One lookup by id set — small, since a session has O(few)
-  // threads. Missing rows → undefined title, same as before.
+  // Titles + archive state live in the app-side `session_threads` mirror
+  // (titles populated by auto-title). One lookup by id set — small, since a
+  // session has O(few) threads. Missing rows → undefined title, not archived.
   const ids = threads.map((t) => t.id);
-  const titleRows = ids.length
+  const metaRows = ids.length
     ? await db
-        .select({ id: sessionThreads.id, title: sessionThreads.title })
+        .select({
+          id: sessionThreads.id,
+          title: sessionThreads.title,
+          archivedAt: sessionThreads.archivedAt,
+        })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
     : [];
-  const titleById = new Map(titleRows.map((r) => [r.id, r.title ?? undefined] as const));
-
-  const summaries = threads.map((t) =>
-    threadToSummary(
-      t.id,
-      t.toThreadData().createdAt,
-      session.id,
-      titleById.get(t.id),
-      t.modelId(),
-      t.key,
-    ),
+  const metaById = new Map(
+    metaRows.map((r) => [r.id, { title: r.title ?? undefined, archivedAt: r.archivedAt ?? undefined }] as const),
   );
+
+  // Default list excludes archived threads; `?archived=1` lists only them.
+  const wantArchived = c.req.query("archived") === "1";
+  const summaries = threads
+    .filter((t) => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .map((t) =>
+      threadToSummary(
+        t.id,
+        t.toThreadData().createdAt,
+        session.id,
+        metaById.get(t.id)?.title,
+        t.modelId(),
+        t.key,
+        metaById.get(t.id)?.archivedAt,
+      ),
+    );
   const body: ListThreadsResponse = { threads: summaries };
+  return c.json(body);
+});
+
+// ── Commands ────────────────────────────────────────────────────────────────
+//
+// GET /:id/commands — the merged slash-command registry for the session
+// (built-ins + skills + user/repo templates + plugin commands) plus registry
+// diagnostics. Building the session (via `loadEngineSession`) is what wires the
+// host `workspaceSkillsProvider`/`commandContext`; the registry is built lazily and
+// cached on the Session, refreshed after workspace prep.
+messagesRouter.get("/:id/commands", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { engineSession } = result;
+
+  // Refresh before reading so user templates (DB-backed, always available) and
+  // repo templates (readable once the sandbox is ready) land in the registry.
+  // Cheap when nothing changed: one DB read plus, only when the sandbox is
+  // ready, one exec.
+  await engineSession.refreshCommandRegistry();
+  const registry = engineSession.commandRegistry();
+
+  // Attach argument completions for commands whose first argument is
+  // enumerable. Today that is `/model` (the org's active model catalog).
+  // Failure to enumerate degrades to no completions, never a route error.
+  const { db, engineCredentials } = c.var.providers;
+  const commands: WireCommandInfo[] = registry.list();
+  const model = commands.find((cmd) => cmd.source === "builtin" && cmd.name === "model");
+  if (model) {
+    try {
+      const ctx = makeCommandContext(db, engineCredentials, result.session.orgId, result.session.id);
+      const models = await ctx.listModels();
+      model.argOptions = models.map((m) => ({ value: m.id, label: m.name }));
+    } catch (err) {
+      console.error(`GET /commands: model enumeration failed for ${result.session.id}:`, err);
+    }
+  }
+
+  const body: ListCommandsResponse = {
+    commands,
+    diagnostics: registry.diagnostics(),
+  };
   return c.json(body);
 });
 
@@ -137,27 +202,59 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
+  const { db } = c.var.providers;
 
   const threadId = c.req.param("threadId");
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  let body: { model?: string | null };
+  let body: PatchThreadRequest;
   try {
-    body = (await c.req.json()) as { model?: string | null };
+    body = (await c.req.json()) as PatchThreadRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.model === undefined) {
-    return c.json({ error: "model is required (use null to clear)" }, 400);
+  if (body.model === undefined && body.archived === undefined) {
+    return c.json(
+      { error: "nothing to patch: send model (null to clear) and/or archived" },
+      400,
+    );
   }
 
-  try {
-    await thread.setModel(
-      typeof body.model === "string" ? body.model : null,
-    );
-  } catch (err) {
-    return c.json({ error: (err as Error).message }, 400);
+  if (body.model !== undefined) {
+    try {
+      await thread.setModel(
+        typeof body.model === "string" ? body.model : null,
+      );
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  }
+
+  let archivedAt: number | undefined;
+  if (body.archived !== undefined) {
+    // Upsert — the mirror row may not exist yet (auto-title hasn't run).
+    const next = body.archived ? Date.now() : null;
+    await db
+      .insert(sessionThreads)
+      .values({
+        id: thread.id,
+        sessionId: session.id,
+        createdAt: thread.toThreadData().createdAt,
+        archivedAt: next,
+      })
+      .onConflictDoUpdate({
+        target: sessionThreads.id,
+        set: { archivedAt: next },
+      });
+    archivedAt = next ?? undefined;
+  } else {
+    const rows = await db
+      .select({ archivedAt: sessionThreads.archivedAt })
+      .from(sessionThreads)
+      .where(eq(sessionThreads.id, thread.id))
+      .limit(1);
+    archivedAt = rows[0]?.archivedAt ?? undefined;
   }
 
   const summary = threadToSummary(
@@ -167,6 +264,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     undefined,
     thread.modelId(),
     thread.key,
+    archivedAt,
   );
   return c.json(summary);
 });
@@ -264,7 +362,21 @@ messagesRouter.post("/:id/messages", async (c) => {
   const thread = resolveThread(engineSession, body.threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  const receipt = await thread.submitPrompt(body.text, {});
+  // Resolve "/"-text against the registry BEFORE choosing a path. Every
+  // path targets the REQUESTED thread — never silently rerouted:
+  // - execute-kind (builtin/plugin) → `session.prompt()` with the resolved
+  //   thread id, so the command_result lands where the client is watching.
+  // - expand-kind (skill/template) → expand here, then submit the expanded
+  //   text to the requested thread like any prompt.
+  // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
+  //   requested thread, text unchanged.
+  const outcome = body.text.startsWith("/")
+    ? dispatchCommand(body.text, engineSession.commandRegistry())
+    : null;
+  const receipt =
+    outcome && outcome.kind === "execute"
+      ? await engineSession.prompt(body.text, { threadId: thread.id })
+      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : body.text, {});
 
   // Touch the session row so list ordering reflects recency.
   await db
@@ -273,8 +385,9 @@ messagesRouter.post("/:id/messages", async (c) => {
     .where(eq(agentSessions.id, session.id));
 
   const resp: SendPromptResponse = {
-    messageId: receipt.queueItemId,
-    threadId: thread.id,
+    // Commands take no queue item; "" would read as a real (broken) id.
+    messageId: receipt.queueItemId || null,
+    threadId: receipt.threadId,
   };
   return c.json(resp, 202);
 });
@@ -334,6 +447,20 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   }
   if (body.actionId === undefined && body.value === undefined) {
     return c.json({ error: "actionId or value is required" }, 400);
+  }
+
+  // Route-level 403 for `always_allow` (action-policies plan, Task 4):
+  // defense-in-depth's front half — `onResolution` (T3) already fails this
+  // closed for a non-admin resolver, but only after the engine has already
+  // opened/consumed the gate. Rejecting here means a non-admin never sees
+  // the button "work" only to fail late; the button itself should be hidden
+  // client-side, this is the server-side backstop.
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
+    const { db } = c.var.providers;
+    const user = c.var.user;
+    if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+      return c.json({ error: "org admin required for always_allow" }, 403);
+    }
   }
 
   // Confirm the gate is actually pending in this session before resolving.

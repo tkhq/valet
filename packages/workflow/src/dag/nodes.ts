@@ -115,6 +115,22 @@ export interface OrchestratorNode {
   };
 }
 
+/**
+ * Which identity a `tool` node acts as:
+ *
+ *   - `app`  — the integration's own installed-application identity (the
+ *     GitHub App installation, a Slack bot token). The host MUST fail the
+ *     node when it cannot resolve that identity. It must never fall back to
+ *     a person's credential.
+ *   - `user` — the credential of the user who owns the workflow.
+ *   - `auto` — the host's default precedence. Same as omitting the field.
+ *
+ * The vocabulary is portable, but the resolution is not: each host decides
+ * what `app` means for a given service. `@valet/workflow` only carries the
+ * selection.
+ */
+export type ToolCredentialMode = 'auto' | 'app' | 'user';
+
 // Tool node — trimmed per decision 1: drops onPolicyDeny/retries (Phase 6
 // re-adds these with policy).
 export interface ToolNode {
@@ -124,15 +140,53 @@ export interface ToolNode {
   action: string;
   params: Record<string, unknown>;
   summary?: string;
+  /**
+   * Identity the action acts as. Omit it to keep the host's default
+   * precedence — every definition written before this field existed reads
+   * as `auto`.
+   *
+   * `params` are template-rendered before the host resolves this, so a
+   * definition can derive the target of an `app` credential from the trigger
+   * payload. A host MUST therefore resolve the application identity only
+   * within the run owner's own tenant. Prefer a literal target over a
+   * template when the workflow runs unattended.
+   */
+  credential?: ToolCredentialMode;
+  /** What a denied (or timed-out) policy gate does. 'fail' (default) fails
+   * the node; 'skip' completes it with { approved: false, policyDenied:
+   * true, resolvedBy } so fromOutput:'false' edges activate. */
+  onDeny?: 'fail' | 'skip';
+  /** Duration (e.g. "24h"). A gate unresolved past it is a denial with
+   * resolvedBy 'timeout'. Omit = wait forever. */
+  approvalTimeout?: string;
+}
+
+/**
+ * Sub-workflow call (batch-fanout design decision 1). Starts a child run
+ * of the referenced definition and parks until it settles. The child run
+ * records `parentRunId`/`parentNodeId`/`parentIteration` in its params, so
+ * each batch item is a real run with its own per-node status. Nesting
+ * depth is 1: a definition that runs AS a child may not contain `workflow`
+ * nodes (rejected at dispatch, and at validation when the reference
+ * resolves).
+ */
+export interface WorkflowCallNode {
+  id: string;
+  type: 'workflow';
+  /** The called workflow's id. Must belong to the same owner as the calling run. */
+  workflowId: string;
+  /** Template-rendered, becomes the child trigger payload's `data`. */
+  input?: unknown;
 }
 
 /**
  * Body of a foreach is restricted — no nested foreach, no if/approval
  * (control flow lives at the DAG level), no stop (stopping a run from
  * inside a loop iteration interacts badly with the wave model). The
- * runtime executes one body per item.
+ * runtime executes one body per item. A `workflow` body starts one child
+ * run per item (the per-item sub-DAG shape).
  */
-export type ForeachBodyNode = LlmNode | ToolNode | SetNode | OrchestratorNode | SessionNode;
+export type ForeachBodyNode = LlmNode | ToolNode | SetNode | OrchestratorNode | SessionNode | WorkflowCallNode;
 
 export interface ForeachNode {
   id: string;
@@ -159,6 +213,7 @@ export type WorkflowNode =
   | ForeachNode
   | LlmNode
   | OrchestratorNode
-  | ToolNode;
+  | ToolNode
+  | WorkflowCallNode;
 
 export type DagNodeType = WorkflowNode['type'];

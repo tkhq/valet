@@ -28,6 +28,22 @@ let fixture: GithubFixture | undefined;
 const prevGithubApiUrl = process.env.GITHUB_API_URL;
 const prevValetPublicUrl = process.env.VALET_PUBLIC_URL;
 
+/** `GITHUB_APP_*` fallback fixture — `setEnvApp()` applies it to
+ * `process.env`; the shared `afterEach` restores the previous values. */
+const ENV_APP = {
+  GITHUB_APP_ID: "777",
+  GITHUB_APP_SLUG: "valet-env",
+  GITHUB_APP_CLIENT_ID: "Iv1.envclient",
+  GITHUB_APP_CLIENT_SECRET: "env-oauth-secret",
+  GITHUB_APP_WEBHOOK_SECRET: "env-hook-secret",
+  GITHUB_APP_PRIVATE_KEY: TEST_PEM,
+};
+const prevEnvApp = Object.fromEntries(Object.keys(ENV_APP).map((k) => [k, process.env[k]]));
+
+function setEnvApp(): void {
+  Object.assign(process.env, ENV_APP);
+}
+
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
@@ -37,6 +53,10 @@ afterEach(async () => {
   else process.env.GITHUB_API_URL = prevGithubApiUrl;
   if (prevValetPublicUrl === undefined) delete process.env.VALET_PUBLIC_URL;
   else process.env.VALET_PUBLIC_URL = prevValetPublicUrl;
+  for (const [name, prev] of Object.entries(prevEnvApp)) {
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
+  }
 });
 
 function useFixture(overrides: Parameters<typeof startGithubFixture>[0] = {}): GithubFixture {
@@ -205,14 +225,22 @@ describe("POST /api/org/github-app/manifest", () => {
       body: JSON.stringify({}),
     });
     const body = (await res.json()) as PostGithubAppManifestResponse;
-    // installation sync events + every ingestable trigger family (no ping —
-    // GitHub sends it unconditionally on webhook creation).
-    expect(body.manifest.default_events.slice(0, 2)).toEqual(["installation", "installation_repositories"]);
+    // Every ingestable trigger family, and NOTHING GitHub delivers on its
+    // own. `ping` and the App-lifecycle events are the exclusions.
     const triggerFamilies = githubPlugin.triggers!.map((t) => t.id.slice("github.".length));
-    expect(body.manifest.default_events.slice(2).sort()).toEqual(
+    expect(body.manifest.default_events.sort()).toEqual(
       triggerFamilies.filter((e) => e !== "ping").sort(),
     );
     expect(body.manifest.default_events).not.toContain("ping");
+    // GitHub REJECTS the whole manifest when these appear — it delivers
+    // them to every App regardless, so subscribing is both unnecessary and
+    // fatal ("Default events unsupported: installation and
+    // installation_repositories"). They also map to no permission, which
+    // trips a second rejection. Asserting their ABSENCE is the regression
+    // guard: an earlier version of this test asserted their presence and so
+    // locked in a manifest GitHub always refused.
+    expect(body.manifest.default_events).not.toContain("installation");
+    expect(body.manifest.default_events).not.toContain("installation_repositories");
     expect(body.manifest.hook_attributes).toEqual({ url: "https://valet.example.com/webhooks/github-app" });
   });
 
@@ -365,6 +393,62 @@ describe("DELETE /api/org/github-app", () => {
     const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     const body = (await getRes.json()) as GetGithubAppResponse;
     expect(body).toEqual({ configured: false, installations: [], webhook: { mode: "manual" } });
+  });
+});
+
+describe("GITHUB_APP_* env fallback (admin routes)", () => {
+  it("GET reports the env app as configured with source environment", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.configured).toBe(true);
+    expect(body.source).toBe("environment");
+    expect(body.app).toEqual({
+      appId: "777",
+      appSlug: "valet-env",
+      htmlUrl: "https://github.com/apps/valet-env",
+      installUrl: "https://github.com/apps/valet-env/installations/new",
+    });
+    expect(JSON.stringify(body)).not.toContain("env-oauth-secret");
+    expect(JSON.stringify(body)).not.toContain("env-hook-secret");
+  });
+
+  it("an app saved through the manifest flow shadows the env fallback (source org)", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    await setupConfiguredOrg(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.source).toBe("org");
+    expect(body.app?.appId).toBe("42");
+  });
+
+  it("refresh discovers installations with the env app", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    useFixture({
+      listInstallations: () => ({
+        body: [{ id: 888, account: { login: "envco", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+      }),
+    });
+    const res = await fetch(`${api.baseUrl}/api/org/github-app/refresh`, { method: "POST", headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.installations).toHaveLength(1);
+    expect(body.installations[0].accountLogin).toBe("envco");
+  });
+
+  it("DELETE removes installation rows but cannot remove the env config (still configured)", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    const delRes = await fetch(`${api.baseUrl}/api/org/github-app`, { method: "DELETE", headers: HEADERS });
+    expect(delRes.status).toBe(204);
+    const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.configured).toBe(true);
+    expect(body.source).toBe("environment");
   });
 });
 
@@ -609,6 +693,49 @@ describe("POST /webhooks/github-app", () => {
       .from(eventDeliveries)
       .where(eq(eventDeliveries.eventId, eventRows[0].id));
     expect(deliveryRows).toHaveLength(1);
+  });
+
+  it("routes by installation row and verifies with the env secret when only the env fallback is configured", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    await api.providers.db.insert(githubInstallations).values({
+      id: "ghi_env",
+      orgId: "local-org",
+      installationId: 999,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const payload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const badSig = signWebhookBody(JSON.stringify(payload), "wrong-secret");
+    expect((await postWebhook(api.baseUrl, "installation", payload, badSig)).status).toBe(403);
+
+    const sig = signWebhookBody(JSON.stringify(payload), ENV_APP.GITHUB_APP_WEBHOOK_SECRET);
+    expect((await postWebhook(api.baseUrl, "installation", payload, sig)).status).toBe(204);
+
+    const [row] = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_env"));
+    expect(row.suspended).toBe(true);
+  });
+
+  it("routes to the deployment's org when the env fallback has no matching installation row yet", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    useFixture({
+      listInstallations: () => ({
+        body: [{ id: 555, account: { login: "newco", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+      }),
+    });
+
+    const payload = { action: "created", installation: { id: 555, account: { login: "newco", type: "Organization" } } };
+    const sig = signWebhookBody(JSON.stringify(payload), ENV_APP.GITHUB_APP_WEBHOOK_SECRET);
+    expect((await postWebhook(api.baseUrl, "installation", payload, sig)).status).toBe(204);
+
+    const rows = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, "local-org"));
+    expect(rows.some((r) => r.accountLogin === "newco")).toBe(true);
   });
 
   it("413s a body over the 1 MiB cap", async () => {

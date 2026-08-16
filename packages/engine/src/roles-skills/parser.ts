@@ -1,14 +1,25 @@
 /**
- * Minimal markdown + YAML-frontmatter parser for role and skill artifacts.
+ * Markdown + YAML-frontmatter parser for role and skill artifacts.
  *
- * The frontmatter we care about is shallow `key: value` pairs. We do NOT
- * support nested objects, multi-line strings, or YAML anchors — if a
- * future role/skill needs them, swap in `gray-matter` and tighten this
- * module's API.
+ * The frontmatter goes through the `yaml` package. Skill files come from
+ * other people's repositories, so they use the whole of YAML — block
+ * scalars for a long description, quoting, anchors — and a subset parser
+ * turns anything it does not know into a wrong value rather than an error.
+ *
+ * Frontmatter is flattened to scalars and one-level maps of scalars, which
+ * is the shape the Agent Skills spec defines
+ * (https://agentskills.io/specification) and the shape the validator and
+ * the loaders read. A value of any other shape (a list, a deeper map) is
+ * dropped, so a caller never sees a type it cannot handle.
  */
 
+import { parse as parseYaml } from "yaml";
+
+/** A frontmatter value: a scalar, or a one-level map of scalars. */
+export type FrontmatterValue = string | boolean | number | Record<string, string | boolean | number>;
+
 export interface ParsedArtifact {
-  frontmatter: Record<string, string | boolean | number>;
+  frontmatter: Record<string, FrontmatterValue>;
   body: string;
 }
 
@@ -30,34 +41,49 @@ export function parseMarkdownArtifact(content: string): ParsedArtifact {
   return { frontmatter: parseFrontmatter(fmText), body };
 }
 
-function parseFrontmatter(text: string): Record<string, string | boolean | number> {
-  const out: Record<string, string | boolean | number> = {};
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const colon = line.indexOf(":");
-    if (colon < 0) continue;
-    const key = line.slice(0, colon).trim();
-    const valueRaw = line.slice(colon + 1).trim();
-    out[key] = parseValue(valueRaw);
+/**
+ * Reads the frontmatter block. Malformed YAML gives empty frontmatter
+ * rather than an exception: the callers already report a missing `name` or
+ * `description` with an actionable message, and that message is more use
+ * than a parser stack trace.
+ */
+function parseFrontmatter(text: string): Record<string, FrontmatterValue> {
+  let doc: unknown;
+  try {
+    // A file written on Windows keeps its carriage returns, and the parser
+    // leaves them on the end of every scalar. Normalize the line breaks
+    // first so a Windows author does not get "MIT\r" for a license. The
+    // last line of the block ends at the closing `---`, so its carriage
+    // return has no newline after it — match a lone one too.
+    doc = parseYaml(text.replace(/\r\n?/g, "\n"));
+  } catch {
+    return {};
+  }
+  if (!isRecord(doc)) return {};
+
+  const out: Record<string, FrontmatterValue> = {};
+  for (const [key, value] of Object.entries(doc)) {
+    if (isScalar(value)) {
+      out[key] = value;
+      continue;
+    }
+    if (isRecord(value)) {
+      const map: Record<string, string | boolean | number> = {};
+      for (const [k, v] of Object.entries(value)) {
+        if (isScalar(v)) map[k] = v;
+      }
+      out[key] = map;
+    }
   }
   return out;
 }
 
-function parseValue(raw: string): string | boolean | number {
-  if (raw === "") return "";
-  // Strip matching surrounding quotes.
-  const stripped =
-    (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))
-      ? raw.slice(1, -1)
-      : raw;
-  if (stripped === raw) {
-    if (raw === "true") return true;
-    if (raw === "false") return false;
-    if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
-    if (/^-?\d+\.\d+$/.test(raw)) return parseFloat(raw);
-  }
-  return stripped;
+function isScalar(value: unknown): value is string | boolean | number {
+  return typeof value === "string" || typeof value === "boolean" || typeof value === "number";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

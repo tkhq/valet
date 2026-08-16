@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
-import type { ToolCategory, ToolStatus } from "./types";
+import { isActiveStatus, type ToolCategory, type ToolStatus } from "./types";
 
 /**
  * Friendly display names for tool identifiers. Unknown (plugin) tools fall
@@ -12,6 +12,7 @@ import type { ToolCategory, ToolStatus } from "./types";
 const TOOL_LABELS: Record<string, string> = {
   bash: "shell",
   mem_write: "memory write",
+  mem_patch: "memory patch",
   mem_read: "memory read",
   thread_read: "thread read",
 };
@@ -62,10 +63,23 @@ const CATEGORY_TEXT: Record<ToolCategory, string> = {
 };
 
 const STATUS_DOT: Record<ToolStatus, string> = {
+  streaming: "bg-current",
   running: "bg-current",
   completed: "bg-success-600 dark:bg-success-500",
   error: "bg-danger-600 dark:bg-danger-500",
 };
+
+const STATUS_LABEL: Record<ToolStatus, string> = {
+  streaming: "writing",
+  running: "running",
+  completed: "done",
+  error: "error",
+};
+
+/** Header pip label per status. Exported for tests. */
+export function statusLabel(status: ToolStatus): string {
+  return STATUS_LABEL[status];
+}
 
 export function ToolShell({
   toolName,
@@ -149,7 +163,7 @@ export function ToolShell({
           {/* Scanner overlay — only active while running. The gradient sweeps
               left→right behind the header content, low-alpha, in the
               category color via currentColor. */}
-          {status === "running" && (
+          {isActiveStatus(status) && (
             <span
               aria-hidden
               className={cn(
@@ -206,7 +220,7 @@ function StatusPip({ status }: { status: ToolStatus }) {
     <span
       className={cn(
         "shrink-0 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-medium",
-        status === "running" && "text-muted",
+        isActiveStatus(status) && "text-muted",
         status === "completed" && "text-success-600 dark:text-success-500",
         status === "error" && "text-danger-600 dark:text-danger-500",
       )}
@@ -216,10 +230,10 @@ function StatusPip({ status }: { status: ToolStatus }) {
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           STATUS_DOT[status],
-          status === "running" && "animate-pulse motion-reduce:animate-none",
+          isActiveStatus(status) && "animate-pulse motion-reduce:animate-none",
         )}
       />
-      {status === "running" ? "running" : status === "completed" ? "done" : "error"}
+      {statusLabel(status)}
     </span>
   );
 }

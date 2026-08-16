@@ -27,6 +27,7 @@ import {
 } from "./submission.js";
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
+import { buildRepoInstructionsFragment } from "./repo-instructions.js";
 import { capturePatch } from "./patch-capture.js";
 import { recordSettlement, recordTurn } from "./metrics.js";
 import {
@@ -73,6 +74,7 @@ import type {
   PromptReceipt,
   QueueItem,
   QueueMode,
+  QueueState,
   ResolvedModel,
   SessionEntry,
   SignalContent,
@@ -1184,6 +1186,16 @@ export class Thread {
     return this.runningItem?.id;
   }
 
+  /**
+   * Read-only snapshot of this thread's derived queue state from durable
+   * rows. Same derivation as the `queue_state` event, without emitting.
+   * Used by the `/status` and `/clear` built-ins.
+   */
+  async currentQueueState(): Promise<QueueState> {
+    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    return deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
+  }
+
   /** True when this thread is mid-turn (a submission is claimed and running). */
   get hasActiveRun(): boolean {
     return this.runningItem != null;
@@ -1281,6 +1293,18 @@ export class Thread {
       // exec jobs. Errors degrade to running stale — never fail the turn.
       if (!this.session.hasOtherActiveRuns(this.id) && this.session.pendingJobCount() === 0) {
         try { await this.session.attachment.reconcile(); } catch (err) { console.error("[thread] reconcile failed, continuing:", err); }
+      }
+
+      // First load of repo AGENTS.md instructions (agents-md spec, decision 1):
+      // the ready transition's host-hook refresh is async and unawaited, so
+      // without this the first turn would race it and run without the
+      // fragment. No-op unless a provider exists, the attachment is ready,
+      // and no refresh has completed yet. Errors degrade to running without
+      // instructions — never fail the turn.
+      try {
+        await this.session.ensureRepoInstructions();
+      } catch (err) {
+        console.error("[thread] repo-instructions load failed, continuing:", err);
       }
 
       let turnFailed = false;
@@ -2177,6 +2201,11 @@ export class Thread {
       this.agent.state.model = turnModel;
     }
 
+    // Repo AGENTS.md instructions overlay (agents-md spec, decision 4):
+    // applied FIRST so the composition is base → systemContext → repo
+    // instructions → role → cold hint, and restored LAST so the existing
+    // overlays nest unchanged inside it.
+    const repoInstructionsPrompt = this.applyRepoInstructionsForTurn();
     // Apply role overlay (system-prompt overlay + optional model override) for
     // this one turn. Restored unconditionally in finally.
     const roleOverlay = this.applyRoleForTurn(item);
@@ -2214,6 +2243,7 @@ export class Thread {
     } finally {
       this.restoreColdHintAfterTurn(coldHintPrompt);
       this.restoreRoleAfterTurn(roleOverlay);
+      this.restoreRepoInstructionsAfterTurn(repoInstructionsPrompt);
       // Restore the agent's baseline model so the next turn picks up any
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
@@ -2249,6 +2279,31 @@ export class Thread {
 
   private restoreColdHintAfterTurn(preHintPrompt: string): void {
     this.agent.state.systemPrompt = preHintPrompt;
+  }
+
+  /**
+   * Repo AGENTS.md instructions overlay (agents-md spec, decision 4).
+   * Snapshots `session.repoInstructions()` exactly ONCE, here at turn start,
+   * and appends a turn-local fragment — a `refreshRepoInstructions()` that
+   * lands mid-turn replaces the session's reference but cannot change the
+   * prompt this turn already carries; the new value takes effect on the next
+   * turn's overlay. Returns the pre-overlay prompt for the unconditional
+   * restore in the turn's finally.
+   */
+  private applyRepoInstructionsForTurn(): string {
+    const preOverlayPrompt = this.agent.state.systemPrompt;
+    const instructions = this.session.repoInstructions();
+    if (!instructions) return preOverlayPrompt;
+    const fragment = buildRepoInstructionsFragment(instructions);
+    if (!fragment) return preOverlayPrompt;
+    this.agent.state.systemPrompt = preOverlayPrompt
+      ? `${preOverlayPrompt}\n\n${fragment}`
+      : fragment;
+    return preOverlayPrompt;
+  }
+
+  private restoreRepoInstructionsAfterTurn(preOverlayPrompt: string): void {
+    this.agent.state.systemPrompt = preOverlayPrompt;
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {
@@ -2619,6 +2674,8 @@ export class Thread {
       sandbox: session.sandbox,
       config: session.options.toolConfig,
       owner: session.owner,
+      policyResolver: session.options.policyResolver,
+      queueItemId: this.runningItem?.id,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
@@ -2641,8 +2698,13 @@ export class Thread {
           suspendedDecision: this.suspendedDecisionForReplay,
         });
         if (sc.match) {
+          const replayOrdinal = this.suspendedDecisionForReplay?.ordinal;
           this.suspendedDecisionForReplay = undefined; // one-shot
-          return sc.resolution;
+          // The persisted resolution already carries gateOrdinal from the
+          // original (non-replay) requestDecision call below, but stamp it
+          // defensively so a replay is self-describing even if the stored
+          // record predates this field.
+          return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
         }
         // Ordinal resolution: reuse a still-pending gate for this
         // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
@@ -2748,7 +2810,7 @@ export class Thread {
         );
 
         try {
-          const resolution = await this.gates.register(gate, async (gateId) => {
+          const rawResolution = await this.gates.register(gate, async (gateId) => {
             await session.providers.store.updateDecisionGateEntry(
               session.id,
               this.id,
@@ -2760,6 +2822,12 @@ export class Thread {
               { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
             );
           });
+          // Stamp the gate's ordinal onto the resolution before it is
+          // persisted or handed back to the calling tool — the caller (e.g.
+          // call_tool's policy audit) needs this to distinguish a
+          // restart-replay double-fire (same ordinal) from a fresh
+          // legitimate repeat (new ordinal) for the same resumeKey.
+          const resolution: DecisionResolution = { ...rawResolution, gateOrdinal: gate.ordinal };
           // Mark gate resolved in store and update DAG entry
           const resolved: DecisionGate = { ...gate, status: "resolved", updatedAt: Date.now() };
           await session.providers.store.saveDecisionGate(session.id, this.id, resolved);
@@ -2894,6 +2962,12 @@ export class Thread {
         break;
       }
       case "message_update": {
+        // A superseded (zombie) attempt can keep receiving buffered stream
+        // events after its fence died. Fenced durable emits already throw
+        // StaleAttemptError; ephemeral emits (text_delta, tool_call_update)
+        // bypass the fence, so gate them on the detected-stale flag to stop
+        // painting a dead attempt's output into live clients.
+        if (this.staleFenceDetected) break;
         const ev = event.assistantMessageEvent;
         if (ev.type === "text_delta") {
           await this.session.emit({
@@ -2901,6 +2975,19 @@ export class Thread {
             threadId: this.id,
             text: ev.delta,
           });
+        } else if (ev.type === "toolcall_start" || ev.type === "toolcall_delta") {
+          // Live-only args streaming: forward the raw JSON chunk keyed by
+          // callId so clients can render the tool call before it executes.
+          const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "toolCall") {
+            await this.session.emit({
+              type: "tool_call_update",
+              threadId: this.id,
+              callId: block.id,
+              toolName: block.name,
+              argsDelta: ev.type === "toolcall_delta" ? ev.delta : "",
+            });
+          }
         } else if (ev.type === "toolcall_end") {
           const part: MessagePart = {
             type: "tool_call",
@@ -2998,6 +3085,7 @@ export class Thread {
             type: "tool_start",
             threadId: this.id,
             tool: event.toolName,
+            callId: event.toolCallId,
             args: event.args ?? {},
           },
           { queueItemId: this.runningItem?.id },
@@ -3043,6 +3131,7 @@ export class Thread {
             type: "tool_end",
             threadId: this.id,
             tool: event.toolName,
+            callId: event.toolCallId,
             result: resultText,
             isError: event.isError,
           },

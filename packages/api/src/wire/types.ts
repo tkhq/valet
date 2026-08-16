@@ -12,6 +12,8 @@
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 import type { RepoListItem } from "@valet/sdk/repos";
+import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
+export type { CommandInfo, RegistryDiagnostic };
 
 // ── Common ────────────────────────────────────────────────────────────────
 
@@ -176,6 +178,8 @@ export interface ThreadSummary {
   createdAt: number;
   /** Thread-level model override. Falls back to the session default when undefined. */
   model?: string;
+  /** Set when the thread is archived (display state; history is intact). */
+  archivedAt?: number;
   /**
    * The engine thread key — encodes the thread's ORIGIN by convention:
    * `web:{nonce}` (created from the UI), `events` (event-subscription
@@ -199,11 +203,13 @@ export interface CreateThreadRequest {
 export type CreateThreadResponse = ThreadSummary;
 
 /**
- * Patch a thread's settings. Currently only `model` is mutable; pass
- * `null` to clear the override and fall back to the session default.
+ * Patch a thread's settings. Pass `model: null` to clear the override and
+ * fall back to the session default. `archived` toggles app-side display
+ * state — an archived thread leaves the default GET /threads list.
  */
 export interface PatchThreadRequest {
   model?: string | null;
+  archived?: boolean;
 }
 
 export type PatchThreadResponse = ThreadSummary;
@@ -234,7 +240,13 @@ export type MessagePart =
       kind: "tool_call";
       callId: string;
       toolName: string;
-      status: "running" | "completed" | "error";
+      /**
+       * `streaming` is a live-plane-only state: the client synthesizes it
+       * from `tool_call_update` frames while args are still being generated.
+       * The engine never persists it, so REST (`GET /messages`) and
+       * `message_update` frames only ever carry the other three.
+       */
+      status: "streaming" | "running" | "completed" | "error";
       args?: unknown;
       result?: unknown;
       error?: string;
@@ -249,6 +261,17 @@ export interface MessageSignal {
   signalType: string;
   attributes?: Record<string, string>;
   senderSessionId?: string;
+}
+
+/**
+ * Slash-command metadata on a `command_result` entry. Present only when
+ * `role === "system"` and the entry originated from a slash command.
+ * `name` is the command name without the leading slash.
+ */
+export interface MessageCommand {
+  name: string;
+  source: string;
+  ok: boolean;
 }
 
 export interface Message {
@@ -274,6 +297,18 @@ export interface Message {
    * as a card, never a user bubble (plan decision 3).
    */
   signal?: MessageSignal;
+  /**
+   * Present when this message is a `command_result` entry (slash-commands
+   * plan, Task 11). `name` is the command name without the leading slash.
+   * The renderer uses `ok` to show success/failure styling.
+   */
+  command?: MessageCommand;
+  /**
+   * Model that produced this entry (assistant messages). Gives the reply
+   * visible attribution so a model switch is verifiable in the transcript,
+   * not only in the header picker.
+   */
+  model?: string;
 }
 
 export interface ListMessagesResponse {
@@ -289,8 +324,11 @@ export interface SendPromptRequest {
 }
 
 export interface SendPromptResponse {
-  /** ID for client-side optimistic placeholder; the actual user-message row created server-side. */
-  messageId: string;
+  /**
+   * Queue item id for client-side optimistic linkage. `null` when the text
+   * executed as a slash command — commands never take a queue item.
+   */
+  messageId: string | null;
   threadId: string;
 }
 
@@ -306,6 +344,23 @@ export interface DecisionAction {
   style?: "primary" | "danger";
 }
 
+/**
+ * Why a policy-driven approval gate opened — the typed subset of the engine
+ * gate's `context.provenance` (the raw `context` stays engine-only). Same
+ * vocabulary as `ActionLogEntryWire`; `source` names the winning precedence
+ * rung — the engine's `PolicyProvenanceSource` values: `org_policy` /
+ * `runtime_grant` / `override` / `plugin_default` / `risk_default` /
+ * `resolver_error`. Absent for gates that did not come from the policy
+ * resolver.
+ */
+export interface DecisionGateProvenance {
+  baseMode: ApprovalModeWire;
+  source: string;
+  matchedPolicyId?: string;
+  matchedGrantId?: string;
+  matchedOverrideId?: string;
+}
+
 export interface DecisionGate {
   id: string;
   sessionId: string;
@@ -318,6 +373,7 @@ export interface DecisionGate {
   status: DecisionGateStatus;
   createdAt: number;
   updatedAt: number;
+  provenance?: DecisionGateProvenance;
 }
 
 export interface DecisionResolution {
@@ -366,6 +422,21 @@ export type WireEvent =
   | { seq: number; ts: number; offset?: string; type: "init"; session: SessionDetail }
   | { seq: number; ts: number; offset?: string; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
   | { seq: number; ts: number; offset?: string; type: "text_delta"; threadId: string; messageId: string; delta: string }
+  | {
+      /**
+       * Live-only tool-call argument streaming (ephemeral, no offset).
+       * `argsDelta` is a raw chunk of the args JSON; concatenate per callId
+       * and parse leniently. `tool_start` later carries the complete args
+       * and self-heals any dropped delta.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "tool_call_update";
+      threadId: string;
+      callId: string;
+      toolName: string;
+      argsDelta: string;
+    }
   | {
       seq: number;
       ts: number; offset?: string;
@@ -481,6 +552,16 @@ export type WireEvent =
       state: string;
       epoch: number;
       estimateMs?: number;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "command_result";
+      /** Target thread id, if the command ran in a thread context. */
+      threadId?: string;
+      /** The completed command as a wire `Message` (role "system", content = output). */
+      message: Message;
     }
   | { seq: number; ts: number; offset?: string; type: "ping" };
 
@@ -675,11 +756,17 @@ export interface WorkflowDefinitionSummary {
   definition: unknown;
   createdAt: number;
   updatedAt: number;
+  ownerType: "user" | "team";
+  ownerId: string;
 }
 
 export interface CreateWorkflowRequest {
   name: string;
   definition: unknown;
+  /** Create as a team-owned workflow instead of personal. Caller must be a
+   * current member of the team; a non-member or unknown id 404s, same as
+   * any other cross-owner access (decision 18's own-rows convention). */
+  teamId?: string;
 }
 
 export interface ValidationErrorResponse {
@@ -718,6 +805,14 @@ export interface WorkflowRunSummary {
   outcome?: WorkflowRunOutcome;
   createdAt: number;
   updatedAt: number;
+  /** True when the run is parked waiting for at least one human approval. */
+  needsApproval?: boolean;
+  /**
+   * Set only while the run is parked: what it is blocked on, so a run list
+   * shows the gate (node + signal/timer) without a per-run detail fetch.
+   * Same conditions `GetWorkflowRunResponse.run.waitingOn` carries.
+   */
+  waitingOn?: Array<{ kind: string; nodeId: string; signalType?: string; wakeAt?: number }>;
 }
 
 export interface ListWorkflowRunsResponse {
@@ -750,6 +845,26 @@ export interface WorkflowRunCheckpoint {
   createdAt: number;
 }
 
+/** One pending approval gate on a parked workflow run. */
+export interface WorkflowPendingGate {
+  nodeId: string;
+  kind: "approval" | "policy_gate";
+  iteration?: number;
+  /** Approval nodes: the human-readable prompt from the definition. */
+  prompt?: string;
+  /** Policy gates: the service that owns the action. */
+  service?: string;
+  /** Policy gates: the action identifier. */
+  action?: string;
+  riskLevel?: string;
+  provenance?: string;
+  gateParams?: unknown;
+  gateParamsTruncated?: boolean;
+  gateItem?: unknown;
+  timeoutAt?: number;
+  onDeny?: "fail" | "skip";
+}
+
 export interface WorkflowRunSignal {
   signalId: string;
   signalType: string;
@@ -765,6 +880,7 @@ export interface WorkflowRunDetail {
   };
   checkpoints: WorkflowRunCheckpoint[];
   signals: WorkflowRunSignal[];
+  pendingGates: WorkflowPendingGate[];
 }
 
 export type GetWorkflowRunResponse = WorkflowRunDetail;
@@ -772,6 +888,13 @@ export type GetWorkflowRunResponse = WorkflowRunDetail;
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
   note?: string;
+  /** Approve scope (policy gates): 'once' (default) authorizes only this
+   * invocation; 'run' writes a run-scoped grant for the gated action;
+   * 'always' (org admin only) writes a durable org allow policy. Ignored on
+   * approval-node gates and on denials. */
+  scope?: "once" | "run" | "always";
+  /** Foreach-iteration disambiguation; omit or 0 for top-level nodes. */
+  iteration?: number;
 }
 
 export interface ResolveWorkflowApprovalResponse {
@@ -780,6 +903,26 @@ export interface ResolveWorkflowApprovalResponse {
 
 export interface CancelWorkflowRunResponse {
   ok: true;
+}
+
+export interface RetryWorkflowRunResponse {
+  runId: string;
+}
+
+// Arbitrary-URL webhook triggers (overhaul design decision 5). `hookId` is
+// the bearer secret in `POST /api/hooks/workflows/:workflowId/:hookId` —
+// minting/rotating returns it once; `GetWorkflowWebhookResponse` also
+// returns it since the management surface is owner-scoped and re-showing
+// the URL (not just "a hook exists") is the point of a status check.
+export interface WorkflowWebhookResponse {
+  workflowId: string;
+  hookId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DeleteWorkflowWebhookResponse {
+  deleted: boolean;
 }
 
 export interface GlobalWorkflowRunSummary extends WorkflowRunSummary {
@@ -906,6 +1049,16 @@ export interface GetMemoryTreeResponse {
 
 export type CredentialKind = "oauth2" | "api_key" | "bot_token" | "service_account";
 
+/** One statically-declared action, for the org-policy admin UI's target
+ *  picker (action-policies plan, Task 4) — `id` is the fully-qualified
+ *  action id (`"github.create_issue"`), matching what `action_policies.
+ *  action_id` / `action_policy_overrides.action_id` store. */
+export interface PluginActionSummary {
+  id: string;
+  name: string;
+  riskLevel: RiskLevelWire;
+}
+
 export interface PluginServiceSummary {
   /** Credential store key — defaults to the plugin name when the
    * declaration omits its own `service` (see `CredentialDeclaration`). */
@@ -927,6 +1080,9 @@ export interface PluginServiceSummary {
    * declarations report "manual" when their client env vars are unset so
    * the UI never renders a Connect button that would 503. */
   connect: "oauth" | "manual";
+  /** Statically-declared actions for this service (empty when the plugin
+   * only declares `resolveActions` dynamic discovery, or none at all). */
+  actions: PluginActionSummary[];
 }
 
 export interface PluginSummary {
@@ -949,6 +1105,200 @@ export interface PluginSummary {
 
 export interface ListPluginsResponse {
   plugins: PluginSummary[];
+}
+
+// ── REST: skills ─────────────────────────────────────────────────────────
+
+/**
+ * A skill — a markdown playbook the agent can pull into a turn through the
+ * `skill` tool. Skills come from two places, and `origin` says which:
+ *
+ *   - `plugin` — shipped inside a plugin package. Everyone sees the same set.
+ *   - `local`  — written in the product, stored in the `skills` table.
+ *   - `repo`   — synced from a repository into the same table.
+ *
+ * The two stored origins carry a row id and owner; a plugin skill carries
+ * its plugin's name. Narrow on `origin` to read either group.
+ */
+interface SkillSummaryBase {
+  /** The identifier the agent passes to the `skill` tool. */
+  name: string;
+  description?: string;
+  /** True when the skill declares an `argsSchema`, so the caller must supply
+   * values for the `{{placeholder}}` names in its body. Plugin skills only —
+   * a stored skill takes no arguments. */
+  takesArgs: boolean;
+}
+
+export interface PluginSkillSummary extends SkillSummaryBase {
+  origin: "plugin";
+  /** Name of the plugin that ships this skill. */
+  plugin: string;
+}
+
+export interface StoredSkillSummary extends SkillSummaryBase {
+  origin: "local" | "repo";
+  /** Row id. The `/api/skills/stored/:id` routes take this. */
+  id: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  /**
+   * True when another skill already holds this name, so this one never
+   * reaches a session. A plugin skill always wins, and between two stored
+   * skills the personal one wins over the team one. Rename this skill to
+   * make it reachable.
+   */
+  shadowed: boolean;
+  updatedAt: number;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Absent when the skill uses the `"context"` default.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Present only on prompt-invocation skills that declare one.
+   */
+  argHint?: string;
+}
+
+export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
+
+export interface ListSkillsResponse {
+  skills: SkillSummary[];
+}
+
+/** A skill plus its markdown body, with the frontmatter already removed.
+ * Placeholders stay unfilled — this route reads the skill, it does not
+ * invoke it. */
+export type GetSkillResponse = SkillSummary & { content: string };
+
+/** One stored skill, body included — what the create/read/update routes
+ * return.
+ *
+ * `editable` says whether THIS caller may write the row. A user or team row
+ * follows the caller's ownership; an org-library row is editable only for an
+ * org admin. A member reads an org row but gets `editable: false`, so the
+ * detail page shows the body read-only. */
+export type SkillResponse = StoredSkillSummary & { content: string; editable: boolean };
+
+export interface CreateSkillRequest {
+  name: string;
+  description: string;
+  /** The markdown body. Write it without frontmatter: `name` and
+   * `description` above are the frontmatter. */
+  content: string;
+  /** Create the skill for a team the caller belongs to instead of for the
+   * caller. A non-member or unknown id 404s, same as any other cross-owner
+   * access. */
+  teamId?: string;
+  /** Create the skill for the org instead of for the caller.
+   * Requires the caller to be an org admin; a non-admin gets 403. */
+  ownerType?: "user" | "team" | "org";
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Must be `"context"` or `"prompt"` when present.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
+}
+
+/** Every field is optional; an absent field keeps its stored value. */
+export interface UpdateSkillRequest {
+  name?: string;
+  description?: string;
+  content?: string;
+  /**
+   * How the engine expands this skill as a slash command.
+   * `"context"` (default) wraps the body in `<skill>` tags;
+   * `"prompt"` substitutes args and sends the body bare.
+   * Must be `"context"` or `"prompt"` when present.
+   */
+  invocation?: "context" | "prompt";
+  /**
+   * Hint shown in the command palette for the first argument.
+   * Meaningful only for `invocation: "prompt"` skills.
+   */
+  argHint?: string;
+}
+
+export interface DeleteSkillResponse {
+  ok: true;
+}
+
+// ── REST: skill sources ──────────────────────────────────────────────────
+
+/**
+ * A tracked skill repository. Valet mirrors its `SKILL.md` files into the
+ * skill catalog as `repo`-origin skills, and keeps mirroring as the
+ * repository moves.
+ *
+ * Public repositories only. Nothing here carries a GitHub credential.
+ */
+export interface SkillSourceSummary {
+  id: string;
+  /** `owner/repo`. */
+  repo: string;
+  /** Branch, tag, or commit. Empty means the default branch. */
+  ref: string;
+  /** Directory that holds the skill directories. Empty means the root. */
+  subpath: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  enabled: boolean;
+  /** `pending` — never synced. `ok` — synced. `warning` — synced, but at
+   * least one skill was skipped. `error` — the last sync failed. */
+  status: "pending" | "ok" | "warning" | "error";
+  /** Skills this source currently mirrors. */
+  skillCount: number;
+  lastSyncedAt: number | null;
+  /** Commit the last sync read. */
+  lastSha: string | null;
+  /** What the last sync has to report: the failure for `error`, the skills
+   * it skipped for `warning`, null otherwise. */
+  lastMessage: string | null;
+}
+
+export interface ListSkillSourcesResponse {
+  sources: SkillSourceSummary[];
+}
+
+export interface CreateSkillSourceRequest {
+  /** `owner/repo`, or a GitHub URL. A `/tree/` URL also sets `ref` and
+   * `subpath`, unless the fields below give them explicitly. */
+  repo: string;
+  ref?: string;
+  subpath?: string;
+  /** Track the repository for a team the caller belongs to instead of for
+   * the caller. A non-member or unknown id 404s. Mutually exclusive with
+   * `ownerType: "org"`. */
+  teamId?: string;
+  /** Track the repository for the org instead of for the caller.
+   * Requires the caller to be an org admin; a non-admin gets 403. */
+  ownerType?: "user" | "team" | "org";
+}
+
+/** What a sync did. Returned by the create route too, because adding a
+ * source imports it right away. */
+export interface SkillSourceSyncResponse {
+  source: SkillSourceSummary;
+  imported: number;
+  updated: number;
+  deleted: number;
+  /** One line per skill the sync skipped, each naming the fix. */
+  warnings: string[];
+}
+
+export interface DeleteSkillSourceResponse {
+  ok: true;
 }
 
 export interface CredentialSummary {
@@ -1024,6 +1374,16 @@ export interface PatchMeRequest {
 
 export type PatchMeResponse = MeResponse;
 
+/** Org-level settings response for `PATCH /api/org/settings`. */
+export interface OrgSettingsResponse {
+  bareSkillCommands: boolean;
+}
+
+/** Org-level settings request for `PATCH /api/org/settings`. */
+export interface PatchOrgSettingsRequest {
+  bareSkillCommands?: boolean;
+}
+
 /** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
  * back-compat) — see `services/model-catalog.ts`. `active: false` marks a
  * configured-but-currently-unusable model (disabled provider, or no
@@ -1049,11 +1409,20 @@ export interface ListModelsResponse {
 export interface UsageWindow {
   inputTokens: number;
   outputTokens: number;
-  /** Estimated USD from the engine's per-turn cost records; 0 when the
-   * model was unpriced. */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Every token the window billed: input + output + cache read + cache
+   * write. On a cache-heavy model, input + output is a small part of this. */
+  totalTokens: number;
+  /** Estimated USD, summed over PRICED turns only. Turns on an unpriced
+   * model (custom/OpenRouter providers, dev fakes) contribute nothing — read
+   * `unpricedTurns` before you present this as the full spend. */
   costUsd: number;
   /** Assistant turns that reported usage in the window. */
   turns: number;
+  /** Turns of `turns` whose model reported no price. `costUsd` excludes
+   * them; it is a floor, not a total, whenever this is above 0. */
+  unpricedTurns: number;
 }
 
 export interface UsageMemberSummary extends UsageWindow {
@@ -1319,6 +1688,11 @@ export interface GithubAppInfo {
 
 export interface GetGithubAppResponse {
   configured: boolean;
+  /** Where the config came from: `"org"` for the org's own credential row
+   * (manifest flow), `"environment"` for the deployment-wide `GITHUB_APP_*`
+   * fallback. Absent when unconfigured. An environment-sourced config
+   * cannot be removed through the API — unset the variables instead. */
+  source?: "org" | "environment";
   app?: GithubAppInfo;
   installations: GithubAppInstallationSummary[];
   webhook: { mode: "public" | "manual" };
@@ -1681,6 +2055,38 @@ export interface EventSubscriptionWire {
   updatedAt: number;
 }
 
+// ─── Action policies (action-policies plan, Task 4) ─────────────────────────
+//
+// `/api/org/policies` (admin CRUD + action log), `/api/me/policy-overrides`,
+// `/api/me/grants`. See `packages/api/src/policies/resolution.ts` for the
+// precedence semantics these rows feed and `packages/api/src/policies/
+// admin.ts` for the CRUD/pagination service layer backing these routes.
+
+export type RiskLevelWire = "low" | "medium" | "high" | "critical";
+export type ApprovalModeWire = "allow" | "require_approval" | "deny";
+export type PolicyAppliesInWire = "any" | "workflow" | "session";
+
+export interface ParamMatcherWire {
+  path: string;
+  op: "eq" | "neq" | "regex" | "in" | "not_in" | "gt" | "gte" | "lt" | "lte" | "exists" | "not_exists";
+  value?: unknown;
+}
+
+export interface ActionPolicyWire {
+  id: string;
+  service: string | null;
+  actionId: string | null;
+  riskLevel: RiskLevelWire | null;
+  mode: ApprovalModeWire;
+  paramMatchers: ParamMatcherWire[];
+  appliesIn: PolicyAppliesInWire;
+  origin: "settings" | "approval_prompt" | "workflow_editor" | "admin";
+  managedBy: string | null;
+  expiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface CreateEventSubscriptionRequest {
   name: string;
   eventKeys: string[];
@@ -1749,4 +2155,206 @@ export interface HealthResponse {
   /** Resolved sandbox backend (`docker` | `local` | `kubernetes`) the server
    * is running. Append-only; existing consumers ignore it. */
   sandboxBackend?: string;
+}
+
+// ── REST: slash commands (slash-commands plan, Task 10) ──────────────────
+//
+// `GET /api/sessions/:id/commands` — the merged command registry for a
+// session: built-ins, skills, user + repo templates, and plugin commands, plus
+// any registry diagnostics (name collisions, shadowed entries). `CommandInfo`
+// and `RegistryDiagnostic` are the engine's own registry shapes, forwarded
+// as-is.
+
+/** One enumerable completion for a command's first argument. */
+export interface CommandArgOption {
+  /** The literal text to insert (e.g. a model id). */
+  value: string;
+  /** Human-readable label shown beside the value (e.g. a model's display name). */
+  label?: string;
+}
+
+/**
+ * Engine `CommandInfo` plus wire-only argument completions. The registry
+ * itself is sync and cannot enumerate async sources (model ids need a DB +
+ * credential read), so the route attaches `argOptions` for the commands it
+ * knows how to enumerate.
+ */
+export type WireCommandInfo = CommandInfo & { argOptions?: CommandArgOption[] };
+
+export interface ListCommandsResponse {
+  commands: WireCommandInfo[];
+  diagnostics: RegistryDiagnostic[];
+}
+
+export interface ListOrgPoliciesResponse {
+  policies: ActionPolicyWire[];
+}
+
+/** Exactly one of `service`/`actionId`/`riskLevel` — matches the DB CHECK
+ *  constraint; the route 400s otherwise. */
+export interface CreateOrgPolicyRequest {
+  service?: string;
+  actionId?: string;
+  riskLevel?: RiskLevelWire;
+  mode: ApprovalModeWire;
+  paramMatchers?: ParamMatcherWire[];
+  appliesIn?: PolicyAppliesInWire;
+  expiresAt?: number | null;
+}
+
+export type CreateOrgPolicyResponse = ActionPolicyWire;
+
+/** Rule fields only — `service`/`actionId`/`riskLevel` (the row's target
+ *  identity) are immutable after creation; re-target by deleting and
+ *  recreating. */
+export interface PatchOrgPolicyRequest {
+  mode?: ApprovalModeWire;
+  paramMatchers?: ParamMatcherWire[];
+  appliesIn?: PolicyAppliesInWire;
+  expiresAt?: number | null;
+}
+
+export type PatchOrgPolicyResponse = ActionPolicyWire;
+
+/** DELETE soft-revokes (stamps `revokedAt`) rather than row-deleting; the
+ *  response echoes the now-revoked row. */
+export type DeleteOrgPolicyResponse = ActionPolicyWire;
+
+/** POST /api/org/policies/preview — dry-run the resolver against a
+ *  synthetic invocation, without writing anything. Admin-only, same gate as
+ *  the rest of `/api/org/policies`. */
+export interface PreviewOrgPolicyRequest {
+  service: string;
+  actionId: string;
+  riskLevel: RiskLevelWire;
+  params?: Record<string, unknown>;
+  appliesIn: "session" | "workflow";
+  sessionId?: string;
+  workflowExecutionId?: string;
+  /** Whose per-user overrides to fold into the preview. An admin may preview
+   *  another member's effective resolution by passing that member's id here;
+   *  the `orgId` is ALWAYS forced to the calling admin's own org (never taken
+   *  from the request), so this can only ever reveal resolution within the
+   *  caller's org, never cross-org. Omit to preview with no override layer. */
+  userId?: string;
+}
+
+export interface PreviewOrgPolicyResponse {
+  mode: ApprovalModeWire;
+  provenance: {
+    baseMode: ApprovalModeWire;
+    matchedPolicyId?: string;
+    matchedGrantId?: string;
+    matchedOverrideId?: string;
+    source: string;
+  };
+}
+
+export type ActionInvocationStatusWire = "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed" | "cancelled" | "timeout";
+
+export interface ActionLogEntryWire {
+  invocationId: string;
+  createdAt: number;
+  service: string | null;
+  actionId: string | null;
+  riskLevel: RiskLevelWire | null;
+  /** The policy DECISION for this invocation — key audit/action-log
+   *  consumers on this, not `status` (execution outcome). */
+  resolvedMode: ApprovalModeWire | null;
+  baseMode: ApprovalModeWire | null;
+  matchedPolicyId: string | null;
+  matchedGrantId: string | null;
+  matchedOverrideId: string | null;
+  status: ActionInvocationStatusWire | null;
+  sessionId: string | null;
+  workflowExecutionId: string | null;
+  userId: string | null;
+  params: unknown;
+  paramsTruncated: boolean | null;
+  result: unknown;
+  resultTruncated: boolean | null;
+  error: string | null;
+  durationMs: number | null;
+  startedAt: number | null;
+}
+
+/** Keyset-paginated — `cursor` is opaque (base64url of `{s, id}`, see
+ *  `policies/admin.ts`'s `ActionLogCursor`). `nextCursor` is `null` at the
+ *  end of the result set. */
+export interface ListActionLogResponse {
+  entries: ActionLogEntryWire[];
+  nextCursor: string | null;
+}
+
+export interface ActionPolicyOverrideWire {
+  id: string;
+  service: string | null;
+  actionId: string | null;
+  riskLevel: RiskLevelWire | null;
+  mode: ApprovalModeWire;
+  paramMatchers: ParamMatcherWire[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListPolicyOverridesResponse {
+  overrides: ActionPolicyOverrideWire[];
+}
+
+/** PUT /api/me/policy-overrides — upsert-BY-TARGET, not by row id: the
+ *  caller has at most one override per (service|actionId|riskLevel) target,
+ *  so the target triple IS the addressing key. A second PUT for the same
+ *  target updates the existing row in place. A `mode: "allow"` write is
+ *  bounds-checked against org policy (`validateOverrideBounds`,
+ *  `policies/admin.ts`) before it's accepted — an `actionId` not found in
+ *  the plugin catalog fails CLOSED (400), which also covers an action only
+ *  reachable via a plugin's dynamic `resolveActions` seam (intentional, safe
+ *  direction — not a gap). */
+export interface PutPolicyOverrideRequest {
+  service?: string;
+  actionId?: string;
+  riskLevel?: RiskLevelWire;
+  mode: ApprovalModeWire;
+  paramMatchers?: ParamMatcherWire[];
+}
+
+export type PutPolicyOverrideResponse = ActionPolicyOverrideWire;
+
+/** DELETE /api/me/policy-overrides — same target-addressing as PUT; the
+ *  target triple goes in the request body (DELETE-with-body, since there's
+ *  no per-row id in the URL to delete by). */
+export interface DeletePolicyOverrideRequest {
+  service?: string;
+  actionId?: string;
+  riskLevel?: RiskLevelWire;
+}
+
+export interface DeletePolicyOverrideResponse {
+  ok: true;
+}
+
+export interface RuntimeGrantWire {
+  id: string;
+  sessionId: string | null;
+  workflowExecutionId: string | null;
+  policyKey: string;
+  grantedBy: string;
+  createdAt: number;
+}
+
+export interface ListGrantsResponse {
+  grants: RuntimeGrantWire[];
+}
+
+/** DELETE /api/me/grants — revokes (stamps `revokedAt`, never row-deletes)
+ *  the caller's own live grant matching this exact scope + policy key. */
+export interface DeleteGrantRequest {
+  sessionId?: string;
+  workflowExecutionId?: string;
+  service: string;
+  actionId: string;
+}
+
+export interface DeleteGrantResponse {
+  ok: true;
 }

@@ -28,6 +28,9 @@
  *      newly-runnable work; otherwise loop again
  */
 
+import { markSpanError, withSpan } from '@valet/engine';
+import type { Span } from '@opentelemetry/api';
+
 import {
   evaluateExpression,
   parseExpression,
@@ -40,10 +43,13 @@ import type { WorkflowDefinition, WorkflowEdge } from './dag/shape.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import {
   createDefaultNodeExecutors,
+  llmUsageSpanAttributes,
   type NodeExecuteResult,
   type NodeExecutorArgs,
   type NodeExecutorRegistry,
+  type OnApprovalGrant,
   type OnApprovalPending,
+  type OnGateResolved,
 } from './nodes/index.js';
 import type { NodeCheckpoint, RunParkState, RunWaitCondition, WorkflowRun, WorkflowStore } from './store.js';
 
@@ -53,6 +59,8 @@ export interface InterpreterDeps {
   clock: () => number;
   executors?: NodeExecutorRegistry;
   onApprovalPending?: OnApprovalPending;
+  onApprovalGrant?: OnApprovalGrant;
+  onGateResolved?: OnGateResolved;
   /**
    * Host-only extension point (Phase 5 plan decision 20): invoked
    * synchronously right after `store.beginTerminalize` succeeds, before
@@ -80,13 +88,54 @@ export interface InterpreterDeps {
  */
 const ITERATION = 0;
 
+/**
+ * Tracing seam (same contract as the engine's): spans go through
+ * `@valet/engine`'s `withSpan`, which is a no-op until a host registers an
+ * OTel SDK. One `workflow.drive` span covers a full drive segment (claim →
+ * park/settle); each executed node nests a `workflow.node.{type}` child.
+ * Because the node span is the active context when a submission node calls
+ * `engine.prompt`, the engine's admission-traceparent stamp links the
+ * spawned session's turn back to this workflow node automatically.
+ */
 export async function driveUntilPark(runId: string, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, clock, onApprovalPending, onBeginTerminalize } = deps;
+  return await withSpan(
+    'workflow.drive',
+    { 'valet.workflow.run.id': runId, 'valet.workflow.run.attempt': attempt },
+    async (span) => {
+      const park = await driveLoop(runId, attempt, deps, span);
+      span.setAttribute('valet.workflow.run.status', park.status);
+      if (park.outcome !== undefined) span.setAttribute('valet.workflow.run.outcome', park.outcome);
+      const waitingKinds = [...new Set(park.waitingOn.map((w) => w.kind))];
+      if (waitingKinds.length > 0) span.setAttribute('valet.workflow.run.waiting', waitingKinds);
+      return park;
+    },
+  );
+}
+
+async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, span: Span): Promise<RunParkState> {
+  const { store, engine, clock, onApprovalPending, onApprovalGrant, onGateResolved, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
+
+  // `valet.workflow.id` is fixed for a run's whole lifetime (written once by
+  // `createRun`), so it only needs setting once — as soon as the first
+  // successful `store.getRun` makes it knowable — not on every pass of the
+  // loop below (the loop itself must still re-fetch `run` every pass; see
+  // its own comment). This flag guards that single `setAttribute` call.
+  // If `store.getRun` throws or returns `null` on every pass (the run
+  // genuinely doesn't exist, or a store-level fault), the span never gets
+  // `valet.workflow.id` — there is no way to know it without a successful
+  // fetch. This is an accepted gap: `valet.workflow.run.id`/`.attempt`,
+  // set at span creation before any store call, remain available to
+  // correlate the error.
+  let workflowIdKnown = false;
 
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
+    if (!workflowIdKnown) {
+      span.setAttribute('valet.workflow.id', run.params.workflowId);
+      workflowIdKnown = true;
+    }
 
     // A reclaimed `terminalizing` run (crash between `beginTerminalize` and
     // `settleRun`) MUST resume settlement directly, never re-enter the wave
@@ -139,20 +188,30 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
     // own outcome.
     let sawFailure = [...cpAll.values()].some((cp) => cp.status === 'failed');
 
-    for (const node of runnable) {
-      const existingCheckpoint = cpAll.get(node.id);
-      const argsBase: Omit<NodeExecutorArgs, 'node'> = {
-        run,
-        attempt,
-        iteration: ITERATION,
-        templateContext,
-        existingCheckpoint,
-        store,
-        clock,
-        engine,
-        onApprovalPending,
-      };
-      const outcome = await invokeExecutor(node, executors, argsBase);
+    // Execute the wave's runnable nodes concurrently, bounded (batch-fanout
+    // design decision 2). Same-wave nodes never feed each other — the
+    // template context and runnable set were computed before the wave, and
+    // each executor writes only its own checkpoint row — so concurrency
+    // changes wall-clock, not semantics. Outcomes are aggregated in
+    // definition order below, preserving the sequential loop's
+    // deterministic terminate selection.
+    const outcomes = await executeWave(runnable, executors, (node) => ({
+      run,
+      attempt,
+      iteration: ITERATION,
+      templateContext,
+      existingCheckpoint: cpAll.get(node.id),
+      store,
+      clock,
+      engine,
+      onApprovalPending,
+      onApprovalGrant,
+      onGateResolved,
+    }));
+
+    for (let i = 0; i < runnable.length; i++) {
+      const node = runnable[i];
+      const outcome = outcomes[i];
 
       if (outcome.status === 'failed') sawFailure = true;
 
@@ -175,7 +234,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome, onBeginTerminalize);
+      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome, onBeginTerminalize, clock);
     }
     if (waitingOn.length > 0) {
       const wakeAt = earliestTimerWake(waitingOn);
@@ -207,13 +266,27 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
 async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, onBeginTerminalize } = deps;
+  const { store, engine, clock, onBeginTerminalize } = deps;
   for (const wait of run.waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
     }
+    if (wait.kind === 'run') {
+      await cancelChildRun(store, wait.runId, clock);
+    }
   }
   return await twoPhaseSettle(store, run.runId, attempt, 'cancelled', onBeginTerminalize);
+}
+
+/** Cancel propagation to a sub-workflow run: same durable signal + wake the host's own `terminate()` writes. */
+async function cancelChildRun(store: WorkflowStore, childRunId: string, clock: () => number): Promise<void> {
+  await store.insertSignal({
+    runId: childRunId,
+    signalId: 'cancel',
+    signalType: 'cancel',
+    createdAt: clock(),
+  });
+  await store.requestWake(childRunId);
 }
 
 /**
@@ -229,6 +302,7 @@ async function resumeTerminalize(store: WorkflowStore, run: WorkflowRun): Promis
   }
   // Terminal cleanup hook: no-op this task. See `twoPhaseSettle`.
   await store.settleRun(run.runId, run.outcome);
+  await wakeParentRun(store, run.runId);
   return await mustGetParkState(store, run.runId);
 }
 
@@ -247,10 +321,14 @@ async function terminateSettle(
   waitingOn: RunWaitCondition[],
   outcome: 'completed' | 'failed',
   onBeginTerminalize: (() => void | Promise<void>) | undefined,
+  clock: () => number,
 ): Promise<RunParkState> {
   for (const wait of waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
+    }
+    if (wait.kind === 'run') {
+      await cancelChildRun(store, wait.runId, clock);
     }
   }
   return await twoPhaseSettle(store, runId, attempt, outcome, onBeginTerminalize);
@@ -274,7 +352,21 @@ async function twoPhaseSettle(
   // teardown, trace finalization) run here, between reserving the
   // outcome and finalizing it.
   await store.settleRun(runId, outcome);
+  await wakeParentRun(store, runId);
   return await mustGetParkState(store, runId);
+}
+
+/**
+ * A sub-workflow run's settlement is its parent's wake signal (batch-
+ * fanout design decision 1): request a wake on `params.parentRunId` so the
+ * parked `workflow` node re-drives promptly. Best-effort — the host's
+ * lost-wake sweep independently wakes parents whose `run` wait names a
+ * settled child, so a crash right here loses nothing.
+ */
+async function wakeParentRun(store: WorkflowStore, runId: string): Promise<void> {
+  const run = await store.getRun(runId);
+  const parentRunId = run?.params.parentRunId;
+  if (parentRunId !== undefined) await store.requestWake(parentRunId);
 }
 
 async function parkAndReturn(
@@ -311,7 +403,86 @@ function earliestTimerWake(waitingOn: RunWaitCondition[]): number | undefined {
   return min;
 }
 
+// ─── Wave execution ──────────────────────────────────────────────────────────
+
+/** Concurrent executors per wave. Bounds fan-in load, not correctness. */
+const WAVE_CONCURRENCY = 5;
+
+/**
+ * Runs every node's executor with bounded concurrency and returns their
+ * outcomes indexed like `runnable`. An executor throw (fence error,
+ * contract violation) propagates — after every in-flight executor has
+ * settled, so no write from this wave is left mid-air when the drive
+ * aborts.
+ */
+async function executeWave(
+  runnable: WorkflowNode[],
+  executors: NodeExecutorRegistry,
+  argsFor: (node: WorkflowNode) => Omit<NodeExecutorArgs, 'node'>,
+): Promise<NodeExecuteResult[]> {
+  const outcomes: NodeExecuteResult[] = new Array<NodeExecuteResult>(runnable.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(WAVE_CONCURRENCY, runnable.length) }, async () => {
+    while (true) {
+      const idx = next++;
+      if (idx >= runnable.length) return;
+      const node = runnable[idx];
+      outcomes[idx] = await invokeExecutorTraced(node, executors, argsFor(node));
+    }
+  });
+  const settled = await Promise.allSettled(workers);
+  const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  return outcomes;
+}
+
 // ─── Executor dispatch ───────────────────────────────────────────────────────
+
+/**
+ * Wraps one executor invocation in a `workflow.node.{type}` span. The span
+ * records the node's terminal disposition for this wave (`completed` /
+ * `failed` / `parked`); a `failed` outcome marks the span ERROR with the
+ * executor's error message. Executor throws (fence errors, contract
+ * violations) propagate — `withSpan` records them as ERROR and rethrows.
+ *
+ * A completed `llm` node also gets its usage/cost attached as span
+ * attributes, so per-node cost is visible in traces without a DB join.
+ * Usage on a *failed* llm node (a repair round that billed a real call
+ * before validation failed it) isn't mirrored here — it's persisted in
+ * the node's checkpoint `effects` for cost reconciliation, but the
+ * `NodeExecuteResult` the trace wrapper sees on failure carries no usage
+ * (see `llm.ts`'s `fail()`), and giving the shared, node-type-agnostic
+ * result type an llm-specific field isn't worth it for that one path.
+ */
+async function invokeExecutorTraced(
+  node: WorkflowNode,
+  executors: NodeExecutorRegistry,
+  argsBase: Omit<NodeExecutorArgs, 'node'>,
+): Promise<NodeExecuteResult> {
+  return await withSpan(
+    `workflow.node.${node.type}`,
+    {
+      'valet.workflow.id': argsBase.run.params.workflowId,
+      'valet.workflow.run.id': argsBase.run.runId,
+      'valet.workflow.run.attempt': argsBase.attempt,
+      'valet.workflow.node.id': node.id,
+      'valet.workflow.node.type': node.type,
+      'valet.workflow.node.iteration': argsBase.iteration,
+    },
+    async (span) => {
+      const outcome = await invokeExecutor(node, executors, argsBase);
+      span.setAttribute('valet.workflow.node.status', outcome.status);
+      if (outcome.status === 'failed') markSpanError(span, outcome.error);
+      if (node.type === 'llm' && outcome.status === 'completed') {
+        const usageAttrs = llmUsageSpanAttributes(outcome.result);
+        if (usageAttrs) {
+          for (const [key, value] of Object.entries(usageAttrs)) span.setAttribute(key, value);
+        }
+      }
+      return outcome;
+    },
+  );
+}
 
 /**
  * Switches on `node.type` so each branch narrows `node` via the
@@ -347,6 +518,8 @@ async function invokeExecutor(
       return requireExecutor(executors.orchestrator, node).execute({ ...argsBase, node });
     case 'tool':
       return requireExecutor(executors.tool, node).execute({ ...argsBase, node });
+    case 'workflow':
+      return requireExecutor(executors.workflow, node).execute({ ...argsBase, node });
   }
 }
 
@@ -394,15 +567,20 @@ function isSettled(cpAll: Map<string, NodeCheckpoint>, nodeId: string): boolean 
 
 interface CompiledGraph {
   incomingByNode: Map<string, WorkflowEdge[]>;
+  nodeById: Map<string, WorkflowNode>;
 }
 
 function compile(definition: WorkflowDefinition): CompiledGraph {
   const incomingByNode = new Map<string, WorkflowEdge[]>();
-  for (const node of definition.nodes) incomingByNode.set(node.id, []);
+  const nodeById = new Map<string, WorkflowNode>();
+  for (const node of definition.nodes) {
+    incomingByNode.set(node.id, []);
+    nodeById.set(node.id, node);
+  }
   for (const edge of definition.edges) {
     incomingByNode.get(edge.to)?.push(edge);
   }
-  return { incomingByNode };
+  return { incomingByNode, nodeById };
 }
 
 /** An edge is resolved when its source has a terminal checkpoint (completed/failed/skipped). */
@@ -415,12 +593,13 @@ function edgeResolved(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>): b
  * matches the source's boolean output) AND (no `when` or it evaluates
  * truthy). A `failed`/`skipped` source never activates an outgoing edge.
  */
-function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, templateContext: TemplateContext): boolean {
+function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, templateContext: TemplateContext, graph: CompiledGraph): boolean {
   const source = cpAll.get(edge.from);
   if (!source || source.status !== 'completed') return false;
 
   if (edge.fromOutput !== undefined) {
-    const actual = booleanOutputOf(source.result);
+    const sourceType = graph.nodeById.get(edge.from)?.type;
+    const actual = booleanOutputOf(source.result, sourceType);
     if (actual === undefined) return false;
     return actual === (edge.fromOutput === 'true');
   }
@@ -438,13 +617,17 @@ function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, temp
   return true;
 }
 
-/** `if` nodes carry `{ result: boolean }`; `approval` nodes (Task 5) carry `{ approved: boolean }`. */
-function booleanOutputOf(result: unknown): boolean | undefined {
+/** `if` → { result: boolean }; `approval` → { approved: boolean };
+ * `tool` (policy gates) → boolean-true on any completed result EXCEPT the
+ * deny-skip marker { policyDenied: true }. */
+function booleanOutputOf(result: unknown, sourceType?: WorkflowNode['type']): boolean | undefined {
   if (result && typeof result === 'object') {
     const r = result as Record<string, unknown>;
     if (typeof r.result === 'boolean') return r.result;
     if (typeof r.approved === 'boolean') return r.approved;
+    if (sourceType === 'tool') return r.policyDenied !== true;
   }
+  if (sourceType === 'tool') return true; // completed with a non-object result
   return undefined;
 }
 
@@ -477,7 +660,7 @@ async function propagateSkips(
     const incoming = graph.incomingByNode.get(node.id) ?? [];
     if (incoming.length === 0) continue; // runnable, not skippable
     if (!incoming.every((e) => edgeResolved(e, cpAll))) continue;
-    if (incoming.some((e) => edgeActive(e, cpAll, templateContext))) continue;
+    if (incoming.some((e) => edgeActive(e, cpAll, templateContext, graph))) continue;
 
     await store.putIntent({
       runId: run.runId,
@@ -517,18 +700,21 @@ function computeRunnable(
       continue;
     }
     if (!incoming.every((e) => edgeResolved(e, cpAll))) continue;
-    if (incoming.some((e) => edgeActive(e, cpAll, templateContext))) runnable.push(node);
+    if (incoming.some((e) => edgeActive(e, cpAll, templateContext, graph))) runnable.push(node);
   }
   return runnable;
 }
 
-// ─── Template context (decision 4: `{ trigger, nodes }`, `nodes.<id>.output`) ─
+// ─── Template context (decision 4: `{ trigger, nodes }`, `nodes.<id>.result`) ─
 
 function buildTemplateContext(definition: WorkflowDefinition, cpAll: Map<string, NodeCheckpoint>): TemplateContext {
-  const nodes: Record<string, { output: unknown }> = {};
+  // `result` is the documented form — it names the same checkpoint field
+  // agents see in `get_node_result`. `output` is the original key, kept so
+  // existing definitions keep resolving. Both read the same value.
+  const nodes: Record<string, { result: unknown; output: unknown }> = {};
   for (const [nodeId, cp] of cpAll) {
     if (cp.status !== 'completed') continue; // skipped/failed/intent nodes contribute no output
-    nodes[nodeId] = { output: cp.result };
+    nodes[nodeId] = { result: cp.result, output: cp.result };
   }
   const triggerNode = definition.nodes.find((n) => n.type === 'trigger');
   const trigger = triggerNode ? nodes[triggerNode.id]?.output : undefined;

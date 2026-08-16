@@ -42,6 +42,7 @@ import {
   type ToolNode,
   type TriggerNode,
   type WaitNode,
+  type WorkflowCallNode,
   type WorkflowDefinition,
   type WorkflowEditorState,
   type WorkflowEdge,
@@ -190,6 +191,11 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
     description: 'Call an integration action',
     defaultNode: (id): ToolNode => ({ id, type: 'tool', service: '', action: '', params: {} }),
   },
+  workflow: {
+    label: 'Workflow',
+    description: 'Run another workflow and wait for its result',
+    defaultNode: (id): WorkflowCallNode => ({ id, type: 'workflow', workflowId: '' }),
+  },
 };
 
 export const ADDABLE_NODE_TYPES: AddableDagNodeType[] = [
@@ -202,6 +208,7 @@ export const ADDABLE_NODE_TYPES: AddableDagNodeType[] = [
   'set',
   'orchestrator',
   'session',
+  'workflow',
   'stop',
 ];
 
@@ -637,6 +644,8 @@ function summarizeNode(node: WorkflowNode): string {
       return trimSummary(node.prompt || 'No prompt configured');
     case 'stop':
       return trimSummary(node.message || node.outcome || 'success');
+    case 'workflow':
+      return node.workflowId ? `Runs ${node.workflowId}` : 'No workflow selected';
     case 'foreach':
       return trimSummary(node.items || 'No item expression configured');
     case 'llm':

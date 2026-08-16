@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Clock, Trash2, Zap } from "lucide-react";
 import type { WorkflowDefinitionSummary, WorkflowTriggerItem } from "@valet/api/wire";
+import { triggerDataSchema } from "@valet/workflow";
 import {
   useAllWorkflowRuns,
   useDeleteWorkflow,
@@ -11,6 +12,7 @@ import {
   useWorkflows,
 } from "~/api/workflows";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
+import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { Button, Spinner } from "~/components/primitives";
@@ -153,6 +155,16 @@ function DefinitionRow({
   const runCount = runsQ.data?.runs.length;
   const latestRun = runs[0];
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [runOpen, setRunOpen] = useState(false);
+
+  // A trigger with declared inputs routes through the run dialog; without
+  // one, Run starts immediately as before (no empty-dialog flash).
+  const schema = triggerDataSchema(workflow.definition);
+  const hasSchema = schema !== undefined && Object.keys(schema).length > 0;
+
+  function goToRun(runId: string) {
+    void navigate({ to: "/workflows/runs/$runId", params: { runId } });
+  }
 
   const schedules = triggers.filter(
     (t): t is Extract<WorkflowTriggerItem, { kind: "schedule" }> => t.kind === "schedule",
@@ -169,8 +181,12 @@ function DefinitionRow({
   const nextFireAt = isFinite(nextFire) ? nextFire : undefined;
 
   async function handleRun() {
+    if (hasSchema) {
+      setRunOpen(true);
+      return;
+    }
     const result = await startRun.mutateAsync();
-    void navigate({ to: "/workflows/runs/$runId", params: { runId: result.runId } });
+    goToRun(result.runId);
   }
 
   async function handleDelete() {
@@ -198,6 +214,16 @@ function DefinitionRow({
           </span>
         )}
       </Link>
+      {hasSchema && schema && (
+        <RunWorkflowDialog
+          workflowId={workflow.id}
+          workflowName={workflow.name}
+          schema={schema}
+          open={runOpen}
+          onOpenChange={setRunOpen}
+          onStarted={goToRun}
+        />
+      )}
       <div className="flex items-center gap-2 shrink-0 flex-wrap">
         {scheduleCount > 0 && (
           <span
@@ -217,7 +243,7 @@ function DefinitionRow({
           </span>
         )}
         {latestRun && (
-          <RunStatusChip status={latestRun.status} outcome={latestRun.outcome} />
+          <RunStatusChip status={latestRun.status} outcome={latestRun.outcome} needsApproval={false} />
         )}
         {deleteError && <span className="text-xs text-danger-500">{deleteError}</span>}
         <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
@@ -274,7 +300,7 @@ function RunsTab() {
             </div>
             <div className="flex shrink-0 items-center gap-3">
               <span className="text-xs text-muted">{new Date(r.createdAt).toLocaleString()}</span>
-              <RunStatusChip status={r.status} outcome={r.outcome} />
+              <RunStatusChip status={r.status} outcome={r.outcome} needsApproval={false} />
             </div>
           </Link>
         </li>

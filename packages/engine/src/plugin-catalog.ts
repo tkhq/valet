@@ -3,6 +3,12 @@ import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
 import type {
   CredentialProvider,
+  DecisionAction,
+  DecisionResolution,
+  PolicyDecision,
+  PolicyInvocationRecord,
+  PolicyResolveInput,
+  PolicyResolver,
   RiskLevel,
   ToolAttachment,
   ToolContext,
@@ -155,6 +161,27 @@ export function prepareActionArgs(
 // ── Public API ────────────────────────────────────────────────────
 
 /**
+ * Opaque catalog handle shared by the call_tool tool path and the
+ * slash-command path. Build it once with {@link buildPluginCatalog}, then
+ * pass it to {@link pluginCatalogTools} (LLM tool path) and/or hold it for
+ * {@link invokeAction} (slash-command path). Its internals — the id index and
+ * the dynamic-resolution TTL cache — stay private to this module.
+ */
+export type PluginCatalog = Catalog;
+
+/**
+ * Assemble an in-memory catalog from every ActionPlugin in `plugins`.
+ * Both the LLM `call_tool` path and the slash-command path route through
+ * the SAME catalog so approval policy and arg validation stay identical.
+ */
+export function buildPluginCatalog(
+  plugins: ActionPlugin[],
+  clock?: () => number,
+): PluginCatalog {
+  return buildCatalog(plugins, clock ?? Date.now);
+}
+
+/**
  * Build the [list_tools, call_tool] pair backed by an in-memory catalog
  * assembled from every ActionPlugin in `opts.plugins`.
  */
@@ -162,6 +189,243 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
   const catalog = buildCatalog(opts.plugins, now);
   return [makeListTool(catalog), makeCallTool(catalog)];
+}
+
+/**
+ * Outcome of {@link invokeAction}. The tool path and the slash-command path
+ * both consume this and render it into their own transport shape
+ * (`ToolResult` text vs. a `command_result` markdown output).
+ */
+export type InvokeActionResult =
+  | { kind: "ok"; result: PluginActionResult }
+  | { kind: "unknown"; toolId: string }
+  | { kind: "invalid-args"; error: string }
+  | { kind: "denied-policy" }
+  | { kind: "denied-approval"; reason?: "approval-processing-failed" }
+  | { kind: "pending-approval" }
+  | { kind: "missing-credential"; service: string }
+  | { kind: "error"; message: string }
+  | { kind: "resolve-failed"; service: string; message: string };
+
+/**
+ * The executable core shared by `call_tool` and the slash-command path:
+ * look up the action, apply approval policy (deny / require_approval via
+ * `ctx.requestDecision`), validate + default the args, then run the
+ * action's `execute`. Never duplicated — the call_tool tool wraps this and
+ * renders `InvokeActionResult` into a `ToolResult`, and the command path
+ * renders it into a `command_result` entry.
+ *
+ * `args` are the caller-supplied parameters (already mapped from CLI args on
+ * the command path, or the LLM-supplied `params` on the tool path).
+ * `summary` is the approval-gate body line.
+ */
+export async function invokeAction(
+  catalog: PluginCatalog,
+  actionId: string,
+  args: Record<string, unknown> | undefined,
+  ctx: ToolContext,
+  summary: string,
+): Promise<InvokeActionResult> {
+  let entry = catalog.byId.get(actionId);
+  if (!entry) {
+    const dotIdx = actionId.indexOf(".");
+    if (dotIdx > 0) {
+      const prefix = actionId.slice(0, dotIdx);
+      const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
+      if (plugin) {
+        try {
+          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          entry = resolvedDyn.byId.get(actionId);
+        } catch (err) {
+          return {
+            kind: "resolve-failed",
+            service: prefix,
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    }
+  }
+  if (!entry) return { kind: "unknown", toolId: actionId };
+
+  const resolver = ctx.policyResolver;
+  // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
+  // to ctx.requestDecision when a gate opens for this call. Recorded on every
+  // audit record (even allow/deny, which never open a gate) so a host sink
+  // can correlate all records for one (tool, args) pair.
+  const resumeKey = `${qualifiedId(entry)}:${stableJson(args ?? {})}`;
+
+  // ── Decision phase ────────────────────────────────────────────
+  // Absent resolver: byte-identical to pre-policy behavior — derive the
+  // approval mode from riskLevel and open the engine's default gate. No
+  // policy machinery runs and no audit records are emitted.
+  if (!resolver) {
+    const approvalMode = approvalModeFor(entry);
+    if (approvalMode === "deny") return { kind: "denied-policy" };
+    if (approvalMode === "require_approval") {
+      const resolution = await ctx.requestDecision({
+        type: "approval",
+        title: `Approve ${entry.action.name}?`,
+        body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+        resumeKey,
+        context: {
+          riskLevel: entry.action.riskLevel,
+          service: entry.service,
+          tool_id: actionId,
+          args,
+        },
+      });
+      // No resolution / an explicit "pending" action means the gate has not
+      // yet been decided — distinct from an outright deny.
+      if (resolution.actionId === "pending") return { kind: "pending-approval" };
+      if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+    }
+    return executeAction(entry, actionId, args, summary, ctx);
+  }
+
+  // Present resolver: consult the host policy port. The policy-facing
+  // actionId is ALWAYS the fully-qualified `service.action` id (the same
+  // fqid convention list_tools reports and the workflow path resolves) —
+  // never the plugin's raw `PluginAction.id`, which may be bare. One
+  // canonical form means one actionId an admin can target that matches both
+  // the session and workflow paths.
+  const policyActionId = qualifiedId(entry);
+  const input: PolicyResolveInput = {
+    service: entry.service,
+    actionId: policyActionId,
+    riskLevel: entry.action.riskLevel,
+    params: args,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    sessionId: ctx.sessionId,
+    threadId: ctx.threadId,
+    appliesIn: "session",
+  };
+  const baseRecord: BaseInvocationRecord = {
+    service: entry.service,
+    actionId: policyActionId,
+    toolId: actionId,
+    riskLevel: entry.action.riskLevel,
+    sessionId: ctx.sessionId,
+    threadId: ctx.threadId,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    appliesIn: "session",
+    summary,
+    resumeKey,
+    queueItemId: ctx.queueItemId,
+    params: args,
+  };
+
+  let decision: PolicyDecision;
+  try {
+    decision = await resolver.resolve(input);
+  } catch {
+    // Fail closed but keep a human in the loop — degrade to an approval
+    // gate rather than hard-deny on a transient resolver/store error.
+    decision = {
+      mode: "require_approval",
+      provenance: { baseMode: "require_approval", source: "resolver_error" },
+    };
+  }
+
+  if (decision.mode === "deny") {
+    emitInvocation(resolver, {
+      ...baseRecord,
+      status: "denied",
+      resolvedMode: "deny",
+      provenance: decision.provenance,
+    });
+    return { kind: "denied-policy" };
+  }
+
+  // Populated only when a gate actually opens below (require_approval), so
+  // the terminal audit record can carry it — absent for allow/deny.
+  let gateOrdinal: number | undefined;
+
+  if (decision.mode === "require_approval") {
+    // Reject reserved ids up front: "approve"/"deny" are the engine's own
+    // default gate actions (added below), so a host extra reusing one would
+    // silently collide with — or shadow — the built-in approve/deny
+    // semantics. A host-config bug must NOT crash the tool/command path —
+    // return a controlled error outcome (fails closed: the action never
+    // runs, no gate opens) instead of throwing through execute().
+    for (const extra of decision.extraGateActions ?? []) {
+      if (extra.id === "approve" || extra.id === "deny") {
+        return {
+          kind: "error",
+          message:
+            `policy misconfiguration: PolicyDecision.extraGateActions id "${extra.id}" is reserved ` +
+            `for the engine's built-in approve/deny actions and cannot be reused by a host action`,
+        };
+      }
+    }
+    // Strip `approves` before the gate — the gate only understands
+    // DecisionActions; the approval semantics stay engine-side.
+    const extras: DecisionAction[] = (decision.extraGateActions ?? []).map(
+      ({ approves: _approves, ...rest }) => rest,
+    );
+    const resolution = await ctx.requestDecision({
+      type: "approval",
+      title: `Approve ${entry.action.name}?`,
+      body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+      resumeKey,
+      actions: [
+        { id: "approve", label: "Approve", style: "primary" },
+        { id: "deny", label: "Deny", style: "danger" },
+        ...extras,
+      ],
+      context: {
+        riskLevel: entry.action.riskLevel,
+        service: entry.service,
+        tool_id: actionId,
+        args,
+        provenance: decision.provenance,
+      },
+    });
+    // An undecided gate (command path): no resolution happened, so no
+    // onResolution side effects run and no audit record is emitted here —
+    // the re-driven invocation after the gate resolves emits the terminal
+    // record.
+    if (resolution.actionId === "pending") return { kind: "pending-approval" };
+    gateOrdinal = resolution.gateOrdinal;
+    // onResolution is awaited BEFORE the outcome is interpreted; a throw
+    // fails the approval closed (treated as not-approved).
+    let onResolutionThrew = false;
+    if (resolver.onResolution) {
+      try {
+        await resolver.onResolution(input, decision, resolution);
+      } catch {
+        onResolutionThrew = true;
+      }
+    }
+    const approved =
+      !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
+    if (!approved) {
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: "rejected",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+        gateOrdinal,
+      });
+      return onResolutionThrew
+        ? { kind: "denied-approval", reason: "approval-processing-failed" }
+        : { kind: "denied-approval" };
+    }
+  }
+
+  // allow, or an approved require_approval → execute with audit.
+  return executeAction(entry, actionId, args, summary, ctx, {
+    resolver,
+    record: {
+      ...baseRecord,
+      resolvedMode: decision.mode,
+      provenance: decision.provenance,
+      gateOrdinal,
+    },
+  });
+
 }
 
 // ── Catalog ───────────────────────────────────────────────────────
@@ -415,90 +679,155 @@ function makeCallTool(catalog: Catalog): ToolDef {
         params?: Record<string, unknown>;
         summary: string;
       };
-      let entry = catalog.byId.get(a.tool_id);
-      if (!entry) {
-        const dotIdx = a.tool_id.indexOf(".");
-        if (dotIdx > 0) {
-          const prefix = a.tool_id.slice(0, dotIdx);
-          const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
-          if (plugin) {
-            try {
-              const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-              entry = resolvedDyn.byId.get(a.tool_id);
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              return { text: `error resolving ${prefix} tools: ${message}` };
-            }
-          }
-        }
-      }
-      if (!entry) {
-        return {
-          text: `unknown tool_id: "${a.tool_id}". Use list_tools to find available actions.`,
-        };
-      }
-
-      const approvalMode = approvalModeFor(entry);
-      if (approvalMode === "deny") {
-        return { text: `denied: ${a.tool_id} is blocked by org policy` };
-      }
-      if (approvalMode === "require_approval") {
-        const resolution = await ctx.requestDecision({
-          type: "approval",
-          title: `Approve ${entry.action.name}?`,
-          body: `${a.summary}\n\ntool_id=${a.tool_id}\nargs=${stableJson(a.params ?? {})}`,
-          resumeKey: `${qualifiedId(entry)}:${stableJson(a.params ?? {})}`,
-          context: {
-            riskLevel: entry.action.riskLevel,
-            service: entry.service,
-            tool_id: a.tool_id,
-            args: a.params,
-          },
-        });
-        if (resolution.actionId !== "approve") {
+      const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
+      switch (outcome.kind) {
+        case "ok":
+          return actionResultToToolResult(outcome.result, a.tool_id);
+        case "unknown":
+          return {
+            text: `unknown tool_id: "${a.tool_id}". Use list_tools to find available actions.`,
+          };
+        case "resolve-failed":
+          return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
+        case "denied-policy":
+          return { text: `denied: ${a.tool_id} is blocked by org policy` };
+        // The LLM tool path has no distinct "pending" state — requestDecision
+        // blocks until the gate resolves — so both approval outcomes collapse
+        // to the same "did not approve" text.
+        case "denied-approval":
+          return {
+            text:
+              outcome.reason === "approval-processing-failed"
+                ? `denied: approval processing failed, so ${a.tool_id} did not approve`
+                : `denied: user did not approve ${a.tool_id}`,
+          };
+        case "pending-approval":
           return { text: `denied: user did not approve ${a.tool_id}` };
-        }
+        case "invalid-args":
+          return { text: `invalid params for ${a.tool_id}: ${outcome.error}` };
+        case "missing-credential":
+          return {
+            text: `${a.tool_id} failed: credential ${outcome.service} not connected`,
+          };
+        case "error":
+          return { text: `error: ${outcome.message}` };
       }
-
-      // Validate (and apply schema defaults to) LLM-supplied params before
-      // they reach the plugin action's execute body — closes the gap where
-      // unvalidated params flowed straight into plugin code.
-      const prepared = prepareActionArgs(entry.action.parameters, a.params);
-      if (!prepared.ok) {
-        return { text: `invalid params for ${a.tool_id}: ${prepared.error}` };
-      }
-
-      // Build the plugin action context. credentialService routing is
-      // per-plugin; the action sees the same ToolContext shape plus
-      // actionId/service/summary, with credentials defaulting to the
-      // plugin's credentialService.
-      const credentialService = entry.plugin.credentialService ?? entry.service;
-      const actionCtx: PluginActionContext = {
-        ...ctx,
-        actionId: entry.action.id,
-        service: entry.service,
-        summary: a.summary,
-        credentials: scopedCredentialProvider(ctx, credentialService),
-      };
-
-      let result: PluginActionResult;
-      try {
-        result = await entry.action.execute(
-          prepared.args as Static<typeof entry.action.parameters>,
-          actionCtx,
-        );
-      } catch (err) {
-        return {
-          text: `error: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-
-      return actionResultToToolResult(result, a.tool_id);
     },
   };
 }
 
 // ── helpers ──────────────────────────────────────────────────────
+
+/** The invocation-record fields known before an audit status is decided. */
+type BaseInvocationRecord = Omit<
+  PolicyInvocationRecord,
+  "status" | "resolvedMode" | "provenance" | "durationMs" | "error"
+>;
+
+/**
+ * Validate params, build the action context, run the plugin action, and map
+ * the result. When `audit` is supplied (present-resolver path), emit exactly
+ * one fire-and-forget `onInvocation` record for the terminal disposition
+ * (`error` for a param-validation failure or a thrown execute, `completed`
+ * otherwise). Absent-resolver callers pass no `audit` and emit nothing.
+ */
+async function executeAction(
+  entry: CatalogEntry,
+  actionId: string,
+  args: Record<string, unknown> | undefined,
+  summary: string,
+  ctx: ToolContext,
+  audit?: { resolver: PolicyResolver; record: BaseAuditedRecord },
+): Promise<InvokeActionResult> {
+  // Validate (and apply schema defaults to) LLM-supplied params before they
+  // reach the plugin action's execute body — closes the gap where unvalidated
+  // params flowed straight into plugin code.
+  const prepared = prepareActionArgs(entry.action.parameters, args);
+  if (!prepared.ok) {
+    if (audit) {
+      emitInvocation(audit.resolver, {
+        ...audit.record,
+        status: "error",
+        error: `invalid params: ${prepared.error}`,
+      });
+    }
+    return { kind: "invalid-args", error: prepared.error };
+  }
+
+  // Build the plugin action context. credentialService routing is per-plugin;
+  // the action sees the same ToolContext shape plus actionId/service/summary,
+  // with credentials defaulting to the plugin's credentialService.
+  const credentialService = entry.plugin.credentialService ?? entry.service;
+  const actionCtx: PluginActionContext = {
+    ...ctx,
+    actionId: entry.action.id,
+    service: entry.service,
+    summary,
+    credentials: scopedCredentialProvider(ctx, credentialService),
+  };
+
+  const startedAt = Date.now();
+  try {
+    const result = await entry.action.execute(
+      prepared.args as Static<typeof entry.action.parameters>,
+      actionCtx,
+    );
+    if (audit) {
+      emitInvocation(audit.resolver, {
+        ...audit.record,
+        status: "completed",
+        durationMs: Date.now() - startedAt,
+        result,
+      });
+    }
+    return { kind: "ok", result };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (audit) {
+      emitInvocation(audit.resolver, {
+        ...audit.record,
+        status: "error",
+        durationMs: Date.now() - startedAt,
+        error: message,
+      });
+    }
+    // A plugin action that needs a credential calls `credentials.request`,
+    // which throws "credential <service> not connected: <reason>" (store
+    // present, no cred) or "credential <service> not available (no store)"
+    // (no store at all). Both mean the same thing to the user — surface a
+    // missing-credential outcome so callers can name the corrective action.
+    if (/credential .* not (connected|available)/.test(message)) {
+      return { kind: "missing-credential", service: credentialService };
+    }
+    return { kind: "error", message };
+  }
+}
+
+/** Base record plus the resolved mode + provenance carried into execution. */
+type BaseAuditedRecord = BaseInvocationRecord &
+  Pick<PolicyInvocationRecord, "resolvedMode" | "provenance">;
+
+/** Approved iff the human chose `approve` or a host `approves: true` action. */
+function isApprovedResolution(
+  resolution: DecisionResolution,
+  extraGateActions: PolicyDecision["extraGateActions"],
+): boolean {
+  if (resolution.actionId === "approve") return true;
+  return !!extraGateActions?.some((x) => x.approves && x.id === resolution.actionId);
+}
+
+/**
+ * Emit an audit record fire-and-forget. `onInvocation` must never throw into
+ * the tool path — a rejected promise is swallowed here.
+ */
+function emitInvocation(resolver: PolicyResolver, record: PolicyInvocationRecord): void {
+  if (!resolver.onInvocation) return;
+  try {
+    void Promise.resolve(resolver.onInvocation(record)).catch(() => {});
+  } catch {
+    // A sink that throws synchronously must not break the tool path either.
+  }
+}
 
 function approvalModeFor(entry: CatalogEntry): ApprovalMode {
   if (entry.plugin.defaultApprovalMode) return entry.plugin.defaultApprovalMode;

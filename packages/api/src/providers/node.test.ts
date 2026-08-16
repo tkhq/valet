@@ -11,7 +11,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildNodeProviders } from "./node.js";
+import { buildNodeProviders, configDeclaresPlugins } from "./node.js";
 import { users } from "../schema/index.js";
 
 let tmpDir: string | undefined;
@@ -46,5 +46,29 @@ describe("buildNodeProviders seedLocalIdentity", () => {
     });
     const rows = await providers.db.select({ id: users.id }).from(users);
     expect(rows.length).toBe(0);
+  });
+});
+
+describe("configDeclaresPlugins", () => {
+  it("returns false for undefined config plugins", () => {
+    expect(configDeclaresPlugins(undefined)).toBe(false);
+  });
+
+  it("returns false for an empty plugins block (both keys undefined)", () => {
+    // `plugins: {}` must NOT count as declaring plugins — it neither trips the
+    // VALET_PLUGINS both-set guard nor suppresses env parsing.
+    expect(configDeclaresPlugins({})).toBe(false);
+  });
+
+  it("returns true when allow is set", () => {
+    expect(configDeclaresPlugins({ allow: ["pkg-a"] })).toBe(true);
+  });
+
+  it("returns true when deny is set", () => {
+    expect(configDeclaresPlugins({ deny: ["pkg-b"] })).toBe(true);
+  });
+
+  it("returns true when allow is an empty array (explicit deny-all)", () => {
+    expect(configDeclaresPlugins({ allow: [] })).toBe(true);
   });
 });

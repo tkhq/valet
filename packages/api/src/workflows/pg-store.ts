@@ -386,6 +386,16 @@ export class PgWorkflowStore implements WorkflowStore {
       now,
       runId,
     ]);
+    // Grant expiry (action-policies plan, Task 3): a settled run's
+    // exec-scoped runtime grants must not survive to quiet a future action.
+    // Soft-revoke (matches `revokeExecutionGrants`) and idempotent — the
+    // `status === 'settled'` short-circuit above already makes a re-settle a
+    // no-op, and the `revoked_at IS NULL` guard makes the UPDATE itself
+    // idempotent regardless.
+    await this.db.query(
+      `UPDATE runtime_grants SET revoked_at = $1 WHERE workflow_execution_id = $2 AND revoked_at IS NULL`,
+      [now, runId],
+    );
   }
 
   async listRunnable(now: number, limit: number): Promise<WorkflowRun[]> {

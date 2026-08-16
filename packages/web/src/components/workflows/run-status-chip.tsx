@@ -1,32 +1,55 @@
 import type { WorkflowRunOutcome, WorkflowRunStatus } from "@valet/api/wire";
+import { Badge } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 
-// Token substitutions: `info-500` → `accent-500`, `warning-500` → `amber-500`.
-// The project tailwind config has no `info` or `warning` scales; `accent` and
-// `amber` are defined and used elsewhere for the same semantic roles.
-const STYLES: Record<string, string> = {
-  pending: "bg-muted/20 text-muted",
-  running: "bg-accent-500/15 text-accent-500",
-  parked: "bg-amber-500/15 text-amber-600 dark:text-amber-300",
-  terminalizing: "bg-amber-500/15 text-amber-600 dark:text-amber-300",
-  completed: "bg-moss/15 text-moss",
-  failed: "bg-danger-500/15 text-danger-500",
-  cancelled: "bg-muted/20 text-muted",
-};
+/**
+ * Maps a settled run's outcome to the Badge variant.
+ * Exported so the run detail route can reference it directly.
+ */
+export const OUTCOME_VARIANT: Record<WorkflowRunOutcome, "success" | "danger" | "neutral"> = {
+  completed: "success",
+  failed: "danger",
+  cancelled: "neutral",
+} as const;
 
-/** One chip for run state: outcome once settled, status until then. */
-export function RunStatusChip({
-  status,
-  outcome,
-}: {
+export interface RunStatusChipProps {
   status: WorkflowRunStatus;
   outcome?: WorkflowRunOutcome;
-}) {
-  const label = status === "settled" ? (outcome ?? "settled") : status;
+  needsApproval: boolean;
+}
+
+/**
+ * Inline chip that reflects the current run state:
+ * - needsApproval (parked + gates): amber "Needs approval" with a static dot
+ * - parked, no gates: neutral "Waiting"
+ * - running/pending: moss "Running"
+ * - settled: outcome Badge via OUTCOME_VARIANT
+ */
+export function RunStatusChip({ status, outcome, needsApproval }: RunStatusChipProps) {
+  if (needsApproval) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300">
+        <span className={cn("h-2 w-2 rounded-full bg-amber-500 shrink-0")} aria-hidden="true" />
+        Needs approval
+      </span>
+    );
+  }
+
+  if (status === "settled") {
+    if (outcome) {
+      return <Badge variant={OUTCOME_VARIANT[outcome]}>{outcome}</Badge>;
+    }
+    return <Badge variant="neutral">settled</Badge>;
+  }
+
+  if (status === "parked") {
+    return <Badge variant="neutral">Waiting</Badge>;
+  }
+
+  // running | pending | terminalizing
   return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STYLES[label] ?? "bg-muted/20 text-muted"}`}
-    >
-      {label}
+    <span className="inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium bg-success-500/15 text-success-600 dark:text-success-500">
+      Running
     </span>
   );
 }

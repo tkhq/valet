@@ -43,7 +43,23 @@ import {
   listWorkflowSchedules,
   updateWorkflowSchedule,
 } from "./schedule-service.js";
+import {
+  deleteWorkflowWebhook,
+  getWorkflowWebhook,
+  mintOrRotateWorkflowWebhook,
+} from "./webhook-service.js";
+import { publicUrlFromEnv } from "../channels/host.js";
 import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
+
+/** `POST /api/hooks/workflows/:workflowId/:hookId`'s path, absolute when a
+ * public origin is configured (same `VALET_PUBLIC_URL`/`BETTER_AUTH_URL`
+ * resolution `ChannelHost` uses), else path-only so the agent can still
+ * report to the user with an "attach your deployment's origin" caveat. */
+function webhookUrl(workflowId: string, hookId: string): string {
+  const path = `/api/hooks/workflows/${workflowId}/${hookId}`;
+  const origin = publicUrlFromEnv(process.env);
+  return origin ? `${origin}${path}` : path;
+}
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
  * emit dozens of errors on a badly-shaped definition; the first ~20 are
@@ -210,6 +226,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const started = await startWorkflowRun(getDeps(), owner, workflow_id, input);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
+      if ("invalidInput" in started) {
+        return {
+          success: false,
+          error:
+            `run input is invalid: ${started.invalidInput.map((e) => e.message).join(" ")} ` +
+            "Fix the listed inputs and start the run again.",
+        };
+      }
       return {
         success: true,
         data: { runId: started.runId, workflowId: workflow_id, status: "pending" },
@@ -277,6 +301,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "List workflow runs",
     description:
       "List a workflow's runs (runId, status, outcome, timestamps), newest first. " +
+      "Parked runs also carry waitingOn — the node and signal/timer each is blocked on " +
+      "(signalType approval:<nodeId> = an approval node OR a policy gate on a tool node). " +
       "Use to find parked/pending runs before cancelling or checking approvals.",
     riskLevel: "low",
     execute: async ({ workflow_id }, ctx) => {
@@ -299,6 +325,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ run_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
+      // Self-invocation guard: a workflow session must not cancel runs.
+      const sessionId = (ctx as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
+        return { success: false, error: "A workflow cannot cancel runs. Request cancellation through the web UI or API." };
+      }
       const result = await cancelWorkflowRun(getDeps(), owner, run_id);
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       return { success: true, data: { runId: run_id, cancelled: true } };
@@ -311,26 +342,41 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       node_id: Type.String(),
       approved: Type.Boolean(),
       note: Type.Optional(Type.String()),
+      iteration: Type.Optional(Type.Number()),
     }),
   )({
     id: "workflows.resolve_approval",
     name: "Resolve workflow approval",
     description:
-      "Approve or deny a run's pending approval gate. Approval gates exist for HUMANS — " +
+      "Approve or deny a run's pending approval-node gate. Approval gates exist for HUMANS — " +
       "only call this when the user has explicitly told you their decision in this " +
       "conversation; never resolve a gate on your own judgment. (This action itself " +
-      "requires the user's confirmation.)",
+      "requires the user's confirmation.) Policy gates on tool nodes must be resolved " +
+      "from the run page, not via this action.",
     riskLevel: "high",
-    execute: async ({ run_id, node_id, approved, note }, ctx) => {
+    execute: async ({ run_id, node_id, approved, note, iteration }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
+      // Self-invocation guard: a workflow session must not resolve approval gates.
+      const sessionId = (ctx as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
+        return { success: false, error: "A workflow cannot resolve approval gates. A human must resolve this gate from the run page." };
+      }
       const result = await resolveWorkflowApproval(getDeps(), owner, {
         runId: run_id,
         nodeId: node_id,
         approved,
         note,
+        iteration,
+        via: "agent",
       });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
+      if (result === "not_parked") return { success: false, error: `run ${run_id} is not parked on approval gate ${node_id}` };
+      if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
+      if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
+      if (result === "human_only") return { success: false, error: "A human must resolve this policy gate from the run page." };
+      if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
+      if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
       return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
     },
   });
@@ -429,7 +475,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Get node result",
     description:
       "Fetch a run node's FULL checkpoint output (result + error) — use when debugging a " +
-      "failed or surprising node; get_run intentionally omits result bodies. Foreach body " +
+      "failed or surprising node; get_run intentionally omits result bodies. `result` is " +
+      "the checkpoint value verbatim (the same value templates read via nodes.<id>.result); " +
+      "an oversized result comes back as { truncated: true, jsonPrefix }. Foreach body " +
       "nodes have one checkpoint per iteration; pass `iteration` to narrow.",
     riskLevel: "low",
     execute: async ({ run_id, node_id, iteration }, ctx) => {
@@ -456,7 +504,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             iteration: cp.iteration,
             status: cp.status,
             error: cp.error,
-            result: truncateJson(cp.result, 20_000),
+            result: presentResult(cp.result, 20_000),
           })),
         },
       };
@@ -728,6 +776,64 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const createWebhook = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.create_webhook",
+    name: "Create or rotate workflow webhook",
+    description:
+      "Mint an arbitrary-URL trigger for a workflow: POST any JSON to the returned URL and a run " +
+      "starts, no Valet auth required — the URL itself is the credential. Calling this again on the " +
+      "same workflow ROTATES the secret: the old URL stops working immediately. Returns { workflowId, " +
+      "hookId, url }.",
+    // high, not medium: this mints a bearer secret that is the ENTIRE auth
+    // for triggering a run — equivalent in blast radius to granting a new
+    // credential, which the plugin catalog's default policy (medium ==
+    // auto-allow) would otherwise let the agent do with no human in the
+    // loop, the same reasoning that keeps resolve_approval at "high".
+    riskLevel: "high",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await mintOrRotateWorkflowWebhook(getDeps().db, owner, workflow_id);
+      if (!result.ok) return { success: false, error: result.error };
+      return {
+        success: true,
+        data: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) },
+      };
+    },
+  });
+
+  const getWebhook = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.get_webhook",
+    name: "Get workflow webhook",
+    description: "Look up the current webhook URL for a workflow, or null if none has been minted.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await getWorkflowWebhook(getDeps().db, owner, workflow_id);
+      if (!result.ok) return { success: false, error: result.error };
+      if (!result.webhook) return { success: true, data: { webhook: null } };
+      return {
+        success: true,
+        data: { webhook: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) } },
+      };
+    },
+  });
+
+  const deleteWebhook = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.delete_webhook",
+    name: "Delete workflow webhook",
+    description: "Remove a workflow's webhook trigger, if any. The URL 404s afterward.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await deleteWorkflowWebhook(getDeps().db, owner, workflow_id);
+      if (result === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: workflow_id, deleted: result === "deleted" } };
+    },
+  });
+
   return {
     service: "workflows",
     description:
@@ -753,19 +859,29 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       listSchedules,
       deleteSchedule,
       updateSchedule,
+      createWebhook,
+      getWebhook,
+      deleteWebhook,
     ],
   };
 }
 
-/** JSON-stringify with a hard cap so a giant node result can't blow up the
- * LLM context; the flag tells the model the payload was cut. */
-function truncateJson(value: unknown, maxChars: number): { json: string; truncated: boolean } {
+/**
+ * Return a checkpoint result verbatim when its JSON fits `maxChars`, so the
+ * agent sees the same structured value templates read via
+ * `nodes.<id>.result`. An oversized result becomes a `{ truncated: true,
+ * jsonPrefix }` stub so a giant payload can't blow up the LLM context.
+ * (An earlier always-stringified wrapper here read as the checkpoint's own
+ * shape and convinced agents the data was unreachable.)
+ */
+function presentResult(value: unknown, maxChars: number): unknown {
   let json: string;
   try {
     json = JSON.stringify(value) ?? "null";
   } catch (err) {
     json = `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
+    return { truncated: true, jsonPrefix: json };
   }
-  if (json.length <= maxChars) return { json, truncated: false };
-  return { json: json.slice(0, maxChars), truncated: true };
+  if (json.length <= maxChars) return value;
+  return { truncated: true, jsonPrefix: json.slice(0, maxChars) };
 }

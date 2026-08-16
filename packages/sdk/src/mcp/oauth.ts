@@ -26,17 +26,119 @@ export interface TokenResponse {
   token_type?: string;
 }
 
-// ─── RFC 8414: Authorization Server Metadata Discovery ──────────────────────
+// ─── RFC 9728 + RFC 8414: Authorization Server Metadata Discovery ───────────
 
-/** Discover authorization server metadata from an MCP server URL. */
+interface ProtectedResourceMetadata {
+  resource?: string;
+  authorization_servers?: string[];
+}
+
+/** Well-known URL candidates for an issuer, most-specific first. RFC 8414
+ * inserts the well-known segment between the origin and the issuer's path
+ * (`https://host/.well-known/<kind>/path`); OIDC's original form appends
+ * it after the path instead, so `openid-configuration` probes both. */
+function wellKnownUrls(issuer: string, kind: string): string[] {
+  const u = new URL(issuer);
+  const path = u.pathname.replace(/\/+$/, '');
+  const urls: string[] = [];
+  if (path && path !== '/') {
+    urls.push(`${u.origin}/.well-known/${kind}${path}`);
+    urls.push(`${u.origin}/.well-known/${kind}`);
+    if (kind === 'openid-configuration') {
+      urls.push(`${u.origin}${path}/.well-known/${kind}`);
+    }
+  } else {
+    urls.push(`${u.origin}/.well-known/${kind}`);
+  }
+  return urls;
+}
+
+/**
+ * Fetch a well-known document; null on any non-2xx or non-JSON response.
+ * A rejected fetch (socket-level failure, not an HTTP status) retries once
+ * after a short delay: a transient ECONNRESET must not read as "this server
+ * publishes no metadata" — that false negative fails the whole discovery.
+ */
+async function fetchWellKnown(url: string): Promise<Record<string, unknown> | null> {
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    try {
+      res = await fetch(url);
+    } catch {
+      return null;
+    }
+  }
+  if (!res.ok) return null;
+  try {
+    const body: unknown = await res.json();
+    return typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Discover authorization server metadata from an MCP server URL.
+ *
+ * Follows the MCP authorization spec: first read the server's protected
+ * resource metadata (RFC 9728) to find its authorization server, then
+ * read that issuer's metadata (RFC 8414, with OpenID Connect discovery
+ * as a fallback). Servers that predate the spec and publish metadata
+ * only at `<serverUrl>/.well-known/oauth-authorization-server` are
+ * still probed, last.
+ */
 export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServerMetadata> {
   const base = mcpServerUrl.replace(/\/+$/, '');
-  const url = `${base}/.well-known/oauth-authorization-server`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`MCP OAuth discovery failed: ${res.status} from ${url}`);
+
+  // Step 1: protected resource metadata names the issuer. Absent PRM,
+  // the MCP server URL itself is the issuer.
+  let issuer = base;
+  for (const url of wellKnownUrls(base, 'oauth-protected-resource')) {
+    const prm = (await fetchWellKnown(url)) as ProtectedResourceMetadata | null;
+    const advertised = prm?.authorization_servers?.[0];
+    if (typeof advertised === 'string' && advertised.length > 0) {
+      issuer = advertised;
+      break;
+    }
   }
-  return (await res.json()) as AuthServerMetadata;
+
+  // Step 2: issuer metadata. Most-specific compliant forms first, the
+  // legacy path-suffix form last.
+  const candidates = new Set<string>([
+    ...wellKnownUrls(issuer, 'oauth-authorization-server'),
+    ...wellKnownUrls(issuer, 'openid-configuration'),
+    `${base}/.well-known/oauth-authorization-server`,
+  ]);
+  const optStr = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  const optStrArr = (v: unknown): string[] | undefined =>
+    Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : undefined;
+  for (const url of candidates) {
+    const meta = await fetchWellKnown(url);
+    if (
+      meta &&
+      typeof meta.authorization_endpoint === 'string' &&
+      typeof meta.token_endpoint === 'string'
+    ) {
+      return {
+        authorization_endpoint: meta.authorization_endpoint,
+        token_endpoint: meta.token_endpoint,
+        registration_endpoint: optStr(meta.registration_endpoint),
+        scopes_supported: optStrArr(meta.scopes_supported),
+        code_challenge_methods_supported: optStrArr(meta.code_challenge_methods_supported),
+        grant_types_supported: optStrArr(meta.grant_types_supported),
+        token_endpoint_auth_methods_supported: optStrArr(
+          meta.token_endpoint_auth_methods_supported,
+        ),
+      };
+    }
+  }
+
+  throw new Error(
+    `MCP OAuth discovery failed for ${mcpServerUrl}: no authorization server metadata at ${[...candidates].join(', ')}`,
+  );
 }
 
 // ─── RFC 7591: Dynamic Client Registration ──────────────────────────────────

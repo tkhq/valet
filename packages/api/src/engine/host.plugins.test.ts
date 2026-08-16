@@ -80,7 +80,9 @@ describe("EngineHost + plugin extras", () => {
     });
 
     const toolNames = (child.options.tools ?? []).map((t) => t.name);
-    expect(toolNames.sort()).toEqual(["call_tool", "list_tools"]);
+    // `skill` joins the catalog tools whenever the plugin set ships a skill
+    // (see `plugins/skill-tool.ts`).
+    expect(toolNames.sort()).toEqual(["call_tool", "list_tools", "skill"]);
     expect(child.options.skills?.map((s) => s.name)).toEqual(["demo-skill"]);
     expect(child.options.roles?.map((r) => r.name)).toEqual(["demo-role"]);
   });

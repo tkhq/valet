@@ -1,5 +1,5 @@
 import type {
-  BusEvent,
+  CommandResultEntry,
   DeliveredBusEvent,
   DecisionGate as EngineDecisionGate,
   DecisionResolution as EngineDecisionResolution,
@@ -8,7 +8,9 @@ import type {
 } from "@valet/engine";
 import type {
   DecisionGate as WireDecisionGate,
+  DecisionGateProvenance,
   DecisionResolution as WireDecisionResolution,
+  Message,
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
   WireEvent,
@@ -16,10 +18,14 @@ import type {
 
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
- * (origin/refs/context) — the UI doesn't render those today, and surfacing
- * them now would commit us to a contract before we know what we want.
+ * (origin/refs, and `context` as a whole — surfacing the raw bag would
+ * commit us to a contract before we know what we want). The ONE typed
+ * extraction is `context.provenance` (policy gates, action-policies spec
+ * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
+ * surfaces can render WHY the gate opened.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
+  const provenance = gateProvenance(g.context);
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -32,6 +38,30 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     status: g.status,
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
+    ...(provenance ? { provenance } : {}),
+  };
+}
+
+const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
+
+/** Narrow the engine gate's untyped `context.provenance` into the wire's
+ * `DecisionGateProvenance`. Fail-soft: any shape surprise → undefined (the
+ * gate still renders, just without the "why" line). */
+function gateProvenance(context: Record<string, unknown> | undefined): DecisionGateProvenance | undefined {
+  const p = context?.provenance;
+  if (p === null || p === undefined || typeof p !== "object") return undefined;
+  const prov = p as Record<string, unknown>;
+  const { baseMode, source } = prov;
+  if (typeof baseMode !== "string" || !WIRE_APPROVAL_MODES.has(baseMode) || typeof source !== "string") {
+    return undefined;
+  }
+  return {
+    // Narrowed by the WIRE_APPROVAL_MODES membership check above.
+    baseMode: baseMode as DecisionGateProvenance["baseMode"],
+    source,
+    ...(typeof prov.matchedPolicyId === "string" ? { matchedPolicyId: prov.matchedPolicyId } : {}),
+    ...(typeof prov.matchedGrantId === "string" ? { matchedGrantId: prov.matchedGrantId } : {}),
+    ...(typeof prov.matchedOverrideId === "string" ? { matchedOverrideId: prov.matchedOverrideId } : {}),
   };
 }
 
@@ -94,6 +124,38 @@ export function engineSignalToWire(
     signalType: signal.signalType,
     attributes: signal.attributes,
     senderSessionId: signal.senderSessionId,
+  };
+}
+
+/**
+ * Project a `CommandResultEntry` to its wire `Message` shape.
+ *
+ * Called from BOTH `busEventToWire` (live WS path) and `entryToMessage`
+ * (REST reload path) so the two shapes are always identical. Shape drift here
+ * is the documented three-time regression (CLAUDE.md "Tool-call persistence
+ * round trip").
+ */
+export function commandResultEntryToMessage(
+  e: CommandResultEntry,
+  sessionId: string,
+  threadId: string,
+): Message {
+  const created = e.createdAt;
+  return {
+    id: e.id,
+    sessionId,
+    threadId,
+    role: "system",
+    content: e.output,
+    parts: [],
+    createdAt: Number.isFinite(created) ? created : Date.now(),
+    queueItemId: e.queueItemId,
+    command: {
+      // Strip the leading slash from the stored command string.
+      name: e.command.startsWith("/") ? e.command.slice(1) : e.command,
+      source: e.source,
+      ok: e.ok,
+    },
   };
 }
 
@@ -165,12 +227,24 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "tool_call_update":
+      return [
+        {
+          type: "tool_call_update",
+          threadId: e.threadId,
+          callId: e.callId,
+          toolName: e.toolName,
+          argsDelta: e.argsDelta,
+        },
+      ];
+
     case "tool_start":
       return [
         {
           type: "tool_start",
           threadId: e.threadId,
           toolName: e.tool,
+          callId: e.callId,
           args: e.args,
         },
       ];
@@ -181,6 +255,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "tool_end",
           threadId: e.threadId,
           toolName: e.tool,
+          callId: e.callId,
           result: e.result,
           isError: e.isError,
         },
@@ -296,6 +371,19 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           queueItemId: e.queueItemId,
           outcome: e.outcome.outcome,
           error: e.outcome.error,
+        },
+      ];
+
+    case "command_result":
+      return [
+        {
+          type: "command_result",
+          threadId: e.threadId || undefined,
+          message: commandResultEntryToMessage(
+            e.entry,
+            ev.sessionId,
+            e.threadId ?? "",
+          ),
         },
       ];
 

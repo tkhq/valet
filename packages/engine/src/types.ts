@@ -1,5 +1,8 @@
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@mariozechner/pi-ai";
+// Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
+// exists only for the type checker (both directions are `import type`).
+import type { ApprovalMode } from "./plugin-catalog.js";
 
 // ── Identity / authoring ──────────────────────────────────────────
 
@@ -255,6 +258,11 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /**
+   * Target thread id. When set, the prompt (or command result) goes to this
+   * thread instead of the session default. Throws if no thread has this id.
+   */
+  threadId?: string;
   author?: PromptAuthor;
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
@@ -282,6 +290,10 @@ export interface PromptReceipt {
   threadId: string;
   queueItemId: string;
   status: "queued" | "running" | "blocked_on_decision_gate";
+  /** Set when the submission was handled as a command and no prompt was queued. */
+  command?: { name: string; source: import("./commands/types.js").CommandSource };
+  /** Set when an unknown /word passed through as prompt text; closest registered name. */
+  nearMiss?: string;
 }
 
 // ── Messages and DAG entries ──────────────────────────────────────
@@ -391,7 +403,20 @@ export interface DecisionGateEntry extends BaseEntry {
   withdrawnReason?: DecisionWithdrawReason;
 }
 
-export type SessionEntry = MessageEntry | CompactionEntry | BranchSummaryEntry | DecisionGateEntry;
+export interface CommandResultEntry extends BaseEntry {
+  type: "command_result";
+  command: string; // as typed, with leading slash
+  source: import("./commands/types.js").CommandSource;
+  ok: boolean;
+  output: string; // markdown
+}
+
+export type SessionEntry =
+  | MessageEntry
+  | CompactionEntry
+  | BranchSummaryEntry
+  | DecisionGateEntry
+  | CommandResultEntry;
 
 export interface MessageQuery {
   limit?: number;
@@ -458,6 +483,20 @@ export interface ToolContext {
    */
   owner?: Principal;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
+  /**
+   * Optional host policy resolver consulted by `call_tool` before invoking a
+   * plugin action. Absent === the engine's built-in riskLevel→approvalMode
+   * fallback (`approvalModeFor`), byte-identical to pre-policy behavior.
+   * Threaded from `CreateSessionOptions.policyResolver` via `buildToolContext`.
+   */
+  policyResolver?: PolicyResolver;
+  /**
+   * The queue item (turn) this tool call runs under. On a restart replay the
+   * engine reconstructs the running item with the ORIGINAL queueItemId (see
+   * `SuspendedTurnState.queueItemId`), so the value is stable across replay.
+   * Consumed by `call_tool`'s policy audit (`PolicyInvocationRecord.queueItemId`).
+   */
+  queueItemId?: string;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
@@ -603,6 +642,19 @@ export interface DecisionResolution {
   resolvedBy: string;
   resolvedAt: number;
   source?: { channelType?: string; channelId?: string; messageId?: string };
+  /**
+   * The resolved gate's ordinal (see `DecisionGate.ordinal`), stamped on by
+   * `Thread.requestDecision` — both on the live-registration path (from the
+   * gate it just opened/joined) and the restart-replay short-circuit path
+   * (from the persisted gate entry) — before the resolution is handed back
+   * to the calling tool. Callers (e.g. `call_tool`'s policy audit) use this
+   * to distinguish a replayed resolution from a fresh one for the same
+   * resumeKey: a true restart replay carries the SAME ordinal as the
+   * original decision, while a new legitimate call for identical args mints
+   * a new (incremented) ordinal. Absent only for resolutions constructed
+   * outside the engine's gate machinery (e.g. hand-built in tests).
+   */
+  gateOrdinal?: number;
 }
 
 export interface SuspendedTurnState {
@@ -620,6 +672,160 @@ export interface SuspendedTurnState {
   ordinal: number;
   attempt: number;
   createdAt: number;
+}
+
+// ── Policy resolution (org policy engine seam) ─────────────────────
+
+/**
+ * Input handed to a host `PolicyResolver` when `call_tool` is about to
+ * invoke a plugin action. `appliesIn` is `"session"` from the interactive
+ * `call_tool` path; a future workflow-mode invoker (T3) passes `"workflow"`.
+ */
+export interface PolicyResolveInput {
+  service: string;
+  actionId: string;
+  riskLevel: RiskLevel;
+  params: Record<string, unknown> | undefined;
+  userId?: string;
+  orgId?: string;
+  sessionId: string;
+  threadId: string;
+  appliesIn: "session" | "workflow";
+}
+
+/**
+ * Which precedence rung produced a `PolicyDecision`. Tightened from a bare
+ * `string` to this literal union (action-policies plan, T3 review carry-
+ * forward) so the host resolver + audit sink share one closed vocabulary:
+ * `resolver_error` is the synthetic fail-closed source the engine stamps when
+ * a host `resolve()` throws (see `call_tool`); every other member is produced
+ * by the host's pure precedence core (`policies/resolution.ts`). This is a
+ * type-narrowing only — the runtime string values are unchanged.
+ */
+export type PolicyProvenanceSource =
+  | "org_policy"
+  | "runtime_grant"
+  | "override"
+  | "plugin_default"
+  | "risk_default"
+  | "resolver_error";
+
+/**
+ * The host's decision for one action invocation. `mode` drives `call_tool`:
+ * `allow` → straight through; `require_approval` → open an approval gate;
+ * `deny` → refuse. `provenance` is opaque to the engine and rides into the
+ * gate `context` and every audit record so the host can explain the call.
+ */
+export interface PolicyDecision {
+  mode: ApprovalMode;
+  provenance: {
+    baseMode: ApprovalMode;
+    matchedPolicyId?: string;
+    matchedGrantId?: string;
+    matchedOverrideId?: string;
+    source: PolicyProvenanceSource;
+  };
+  /**
+   * Extra gate actions the host wants offered on a require_approval gate.
+   * Actions flagged `approves: true` are treated as approval by `call_tool`
+   * AFTER `onResolution` runs. The engine strips the `approves` flag to plain
+   * `DecisionAction`s before opening the gate.
+   */
+  extraGateActions?: (DecisionAction & { approves: boolean })[];
+}
+
+/**
+ * Audit record emitted (fire-and-forget) by `call_tool` for every
+ * plugin-action invocation attempt made through a host `PolicyResolver`.
+ * `status` is the terminal disposition of the attempt:
+ *  - `denied`    — resolver returned `deny`; the action never ran.
+ *  - `rejected`  — a require_approval gate was not approved (human deny or an
+ *                  `onResolution` throw); the action never ran.
+ *  - `completed` — `action.execute` returned (success or handled failure).
+ *  - `error`     — `action.execute` threw, or validated params were rejected.
+ * `allowed` / `approved` are reserved for non-executing callers (workflow
+ * mode / T3); `call_tool` collapses those into `completed`/`error` and relies
+ * on `resolvedMode` + `provenance` to show whether the call was allowed
+ * outright or approved through a gate. `durationMs` is set for executed paths.
+ */
+export interface PolicyInvocationRecord {
+  service: string;
+  actionId: string;
+  toolId: string;
+  riskLevel: RiskLevel;
+  sessionId: string;
+  threadId: string;
+  userId?: string;
+  orgId?: string;
+  appliesIn: "session" | "workflow";
+  summary?: string;
+  status: "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
+  resolvedMode: ApprovalMode;
+  provenance: PolicyDecision["provenance"];
+  durationMs?: number;
+  error?: string;
+  /**
+   * The deterministic resumeKey `call_tool` derives for this invocation
+   * (`${tool_id}:${stableJson(params)}`) — same value passed as
+   * `DecisionGateRequest.resumeKey` when a gate opens. Always present, even
+   * for `allow`/`deny` dispositions that never open a gate, so an audit sink
+   * can correlate every record for a given (tool, args) pair.
+   */
+  resumeKey: string;
+  /**
+   * The resolved decision gate's ordinal (`DecisionResolution.gateOrdinal`),
+   * present only when a gate was actually opened for this invocation
+   * (`require_approval`, both `rejected` and post-approval outcomes). A host
+   * audit sink can use (resumeKey, gateOrdinal) as the true dedup key: a
+   * restart-replay double-fire reuses the SAME gateOrdinal as the original
+   * record, while a second legitimate identical call mints a new one.
+   */
+  gateOrdinal?: number;
+  /**
+   * The queue item (turn) this invocation ran under. `gateOrdinal` is scoped
+   * to `(queueItemId, resumeKey)` and resets per turn, so an audit sink MUST
+   * include `queueItemId` in any dedup key built from `(resumeKey,
+   * gateOrdinal)` — without it, two different turns gating on the identical
+   * (tool, args) pair collide. A restart replay reuses the ORIGINAL turn's
+   * queueItemId (the suspended-turn state mirrors it), so replay dedup still
+   * holds. Absent only when a host builds a ToolContext outside the engine's
+   * thread machinery (e.g. hand-assembled in tests).
+   */
+  queueItemId?: string;
+  /**
+   * The invocation's params and the executed action's result, verbatim.
+   * Populated so an audit sink can persist them (size-capping is the sink's
+   * job — the engine does not truncate). `result` is present only for
+   * `completed` dispositions.
+   */
+  params?: Record<string, unknown>;
+  result?: unknown;
+}
+
+/**
+ * Optional host-provided policy port. Absent === the engine's built-in
+ * riskLevel→approvalMode fallback (`approvalModeFor`), byte-identical to
+ * pre-policy behavior. Present === `call_tool` consults it per invocation.
+ */
+export interface PolicyResolver {
+  resolve(input: PolicyResolveInput): Promise<PolicyDecision>;
+  /**
+   * Host side effects on gate resolution (grant/policy writes). Awaited by
+   * `call_tool` BEFORE it interprets the resolution; a throw fails the
+   * approval closed (the resolution is treated as not-approved). Best-effort
+   * otherwise.
+   */
+  onResolution?(
+    input: PolicyResolveInput,
+    decision: PolicyDecision,
+    resolution: DecisionResolution,
+  ): Promise<void>;
+  /**
+   * Audit sink for every invocation attempt. Fire-and-forget — `call_tool`
+   * never awaits it and swallows rejections, so it must never be relied on to
+   * gate execution.
+   */
+  onInvocation?(record: PolicyInvocationRecord): Promise<void>;
 }
 
 // ── Sandbox ────────────────────────────────────────────────────────
@@ -841,6 +1047,21 @@ export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
   | {
+      /**
+       * Live-only tool-call argument streaming (same ephemeral plane as
+       * text_delta — never durable, never persisted). Emitted once when the
+       * model opens a tool call (empty argsDelta) and once per raw args JSON
+       * chunk. Consumers concatenate argsDelta per callId and parse the
+       * accumulated string leniently; `tool_start` later carries the
+       * complete args and self-heals any dropped delta.
+       */
+      type: "tool_call_update";
+      threadId: string;
+      callId: string;
+      toolName: string;
+      argsDelta: string;
+    }
+  | {
       type: "message_update";
       threadId: string;
       messageId: string;
@@ -853,8 +1074,8 @@ export type EngineEvent =
       messageId: string;
       reason: "end_turn" | "error" | "abort";
     }
-  | { type: "tool_start"; threadId: string; tool: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; result: string; isError: boolean }
+  | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
+  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
   | {
       type: "turn_end";
       threadId: string;
@@ -887,6 +1108,17 @@ export type EngineEvent =
       reason: DecisionWithdrawReason;
     }
   | { type: "model_switched"; threadId?: string; fromModel: string; toModel: string; reason: string }
+  | {
+      /**
+       * A slash command ran and produced a transcript record (slash-commands
+       * design). Session-scoped when the command is thread-agnostic; carries
+       * the executing thread id otherwise. Emitted after the
+       * `command_result` entry is persisted.
+       */
+      type: "command_result";
+      threadId?: string;
+      entry: CommandResultEntry;
+    }
   | {
       type: "submission_settled";
       sessionId: string;
@@ -1272,6 +1504,27 @@ export type SpecProvider = () => Promise<DesiredSandboxSpec>;
 
 // ── Engine API ─────────────────────────────────────────────────────
 
+/**
+ * Repository agent instructions read from the workspace — the AGENTS.md
+ * format (https://agents.md/). Produced by a host
+ * `repoInstructionsProvider`; injected into the system prompt as a per-turn
+ * overlay. See docs/specs/2026-08-15-agents-md-instructions-design.md.
+ */
+export interface RepoInstructions {
+  /**
+   * Root AGENTS.md (or CLAUDE.md fallback) content of the primary repo
+   * binding, already size-capped by the host. Empty string === no root file;
+   * the fragment then carries only the nested-file list.
+   */
+  content: string;
+  /**
+   * Absolute in-sandbox paths of other AGENTS.md files (nested files and
+   * secondary bindings' roots). Listed — not inlined — with the format's
+   * closest-file-wins precedence instruction.
+   */
+  nestedPaths: string[];
+}
+
 export interface RoleSpec {
   name: string;
   description?: string;
@@ -1280,12 +1533,39 @@ export interface RoleSpec {
   source?: "session" | "thread" | "prompt" | "plugin" | "sandbox";
 }
 
+/**
+ * One skill, in the Agent Skills format
+ * (https://agentskills.io/specification). `name`, `description`, and the
+ * markdown body come from a `SKILL.md`; `license`, `compatibility`,
+ * `metadata`, and `allowedTools` are the spec's optional fields.
+ *
+ * `argsSchema` and the `{{placeholder}}` rendering it validates are a
+ * Valet extension, NOT part of the spec. An imported skill will not use
+ * them. See `docs/specs/2026-08-05-agent-skills-design.md`.
+ */
 export interface SkillSource {
   name: string;
   description?: string;
   content: string;
   argsSchema?: TSchema;
   source?: "plugin" | "sandbox" | "repo" | "user";
+  /** Spec field. License name, or the name of a bundled license file. */
+  license?: string;
+  /** Spec field. Environment requirements, at most 500 characters. */
+  compatibility?: string;
+  /** Spec field. A map of text keys to text values, for properties the
+   * spec itself does not define. */
+  metadata?: Record<string, string>;
+  /** Spec field `allowed-tools`, in camelCase: a space-separated list of
+   * pre-approved tools. Experimental in the spec, and Valet does not act
+   * on it yet. */
+  allowedTools?: string;
+  /** How a slash invocation expands. "context" (default): wrap in <skill>
+   * tags, append args. "prompt": substitute $1/$@ into the body, send bare.
+   * Prompt skills are never surfaced as capability documentation. */
+  invocation?: "context" | "prompt";
+  /** Autocomplete hint for the first argument, e.g. "<topic> [audience]". */
+  argHint?: string;
 }
 
 export interface SkillInvokeOptions {
@@ -1397,6 +1677,22 @@ export interface CreateSessionOptions {
    * behind a resolver it was given.
    */
   credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
+  /**
+   * Optional host-provided org-policy resolver. Absent === the engine's
+   * built-in fallback: `call_tool` derives approval from each action's
+   * riskLevel (`approvalModeFor`) exactly as before — no resolver machinery
+   * runs, gate default actions are unchanged, and no audit records are
+   * emitted. When present, `call_tool` consults it per invocation:
+   *  - `resolve()` returns a `PolicyDecision` (`allow` → straight through,
+   *    `require_approval` → open a gate, `deny` → refuse);
+   *  - `onResolution?` runs on gate resolution before the outcome is
+   *    interpreted (a throw fails the approval closed);
+   *  - `onInvocation?` receives a fire-and-forget audit record per attempt.
+   * A throwing `resolve()` fails closed to `require_approval` with provenance
+   * source `resolver_error` (keeps a human in the loop rather than bricking on
+   * a transient store error). Threaded onto `ToolContext.policyResolver`.
+   */
+  policyResolver?: PolicyResolver;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
@@ -1465,6 +1761,65 @@ export interface CreateSessionOptions {
    * prompt hint.
    */
   warmSandboxOnClaim?: boolean;
+  /**
+   * Host capabilities for slash commands the engine cannot answer alone
+   * (`/model`, `/sessions`). Absent === those built-ins return `ok: false`
+   * with an explicit "not exposed" message, and the engine stays runnable in
+   * bare tests.
+   */
+  commandContext?: import("./commands/types.js").CommandContext;
+  /**
+   * Host-injected workspace-skill source for slash commands. Absent === no
+   * workspace skills. Read lazily and cached; the host calls
+   * `Session.refreshCommandRegistry()` after workspace prep and on any event
+   * that also refreshes skills.
+   */
+  workspaceSkillsProvider?: () => Promise<SkillSource[]>;
+  /**
+   * Host-injected reader for the workspace's AGENTS.md instructions
+   * (docs/specs/2026-08-15-agents-md-instructions-design.md). Absent === no
+   * repo instructions — every existing path is unchanged. When present, the
+   * engine loads it lazily at run start once the attachment is `ready`
+   * (`Session.ensureRepoInstructions`) and the host re-invokes
+   * `Session.refreshRepoInstructions()` on each `ready` transition. A `null`
+   * return means the workspace carries no instructions.
+   */
+  repoInstructionsProvider?: () => Promise<RepoInstructions | null>;
+  /**
+   * When true, a skill named `review` also registers a bare `/review` command
+   * in addition to the always-present `/skill:review`. Default false.
+   */
+  bareSkillNames?: boolean;
+  /**
+   * Action-backed plugin commands, registered under `${pluginName}:${def.name}`.
+   * The host derives these from every loaded `ValetPlugin.commands`. Absent ===
+   * no plugin commands. Paired with `pluginCatalog`: the registry entry resolves
+   * the command, and `pluginCatalog` invokes its backing action.
+   */
+  pluginCommands?: Array<{
+    pluginName: string;
+    def: import("./commands/types.js").CommandDef;
+  }>;
+  /**
+   * Plugin action catalog for the slash-command path — built by the host with
+   * `buildPluginCatalog(actionPlugins)` from the SAME plugins that back the
+   * LLM `call_tool` tool. A plugin command's `def.action` is invoked against
+   * this catalog through the shared `invokeAction` core, so approval policy and
+   * arg validation stay identical to the tool path. Absent === plugin commands
+   * report that no catalog is available.
+   */
+  pluginCatalog?: import("./plugin-catalog.js").PluginCatalog;
+  /**
+   * Host approval hook for the slash-command path only. A plugin command whose
+   * action needs approval (`require_approval`) calls this instead of the
+   * turn-scoped decision gate — a command is not a claimed turn, so it cannot
+   * suspend one. Return a resolution with `actionId: "approve"` to proceed,
+   * `"pending"` when the decision is deferred, anything else to deny. Absent ===
+   * approval-requiring plugin commands are denied.
+   */
+  commandRequestDecision?: (
+    req: DecisionGateRequest,
+  ) => Promise<DecisionResolution>;
 }
 
 /**
@@ -1537,6 +1892,44 @@ export type ChildSpawner = (
   req: SpawnChildRequest,
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
 ) => Promise<SpawnChildResult>;
+
+/**
+ * Reads the messages of a child session on behalf of its parent.
+ *
+ * A `child.settled` signal carries a bounded copy of the child's result, so
+ * a parent that needs the whole thing has to come back for it. This is the
+ * only way it can: `thread_read` reaches threads inside one session, and a
+ * child is a separate session.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`.
+ * A caller cannot tell "not yours" from "does not exist", which keeps the
+ * ids of other people's sessions unguessable.
+ */
+export type ChildReader = (
+  req: { childSessionId: string; limit?: number },
+  ctx: { parentSessionId: string },
+) => Promise<SessionEntry[] | null>;
+
+/**
+ * Sends a message into a child session on behalf of its parent — the
+ * steering half of the child toolset (`task` spawns, `child_read` reads,
+ * `child_send` redirects). `interrupt: true` supersedes the child's
+ * in-flight work (queue-mode steer); the default queues behind it.
+ *
+ * The host re-points its settlement watch at the new submission, so the
+ * parent's next `child.settled` signal reports the steered work, not the
+ * superseded original. The signal lands on the thread that spawned the
+ * child (the durable edge), not necessarily the thread the send came from.
+ * A send that re-opens a settled child pays the host's active-children
+ * limits and may reject.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`,
+ * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.
+ */
+export type ChildSender = (
+  req: { childSessionId: string; message: string; interrupt?: boolean },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+) => Promise<{ queueItemId: string } | null>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,

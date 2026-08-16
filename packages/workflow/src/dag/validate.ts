@@ -77,6 +77,7 @@ const SUPPORTED_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
   'llm',
   'orchestrator',
   'tool',
+  'workflow',
 ]);
 
 /** Node types allowed as a foreach body (decision 1: no nested foreach/if/approval/stop). */
@@ -86,6 +87,7 @@ const FOREACH_BODY_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
   'set',
   'orchestrator',
   'session',
+  'workflow',
 ]);
 
 /** Allowed keys per node type — the unknown-key lint's ground truth. */
@@ -99,9 +101,15 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary'],
+  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
+  workflow: ['id', 'type', 'workflowId', 'input'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
+
+/** Typed as `ReadonlySet<string>` on purpose: the runtime input is
+ * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
+ * cannot hold. */
+const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
 
 const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
@@ -314,6 +322,12 @@ function validateNodeFields(
         errors.push(`${label}: trigger.dataSchema must be an object`);
       }
       break;
+    case 'workflow':
+      if (!isNonEmptyString(node.workflowId)) {
+        errors.push(`${label}: workflow.workflowId must be a non-empty string naming the called workflow`);
+      }
+      checkJsonTemplates(label, 'input', node.input, refCtx, errors);
+      break;
     case 'set':
       if (!isPlainObject(node.values)) {
         errors.push(`${label}: set.values must be an object mapping names to values`);
@@ -430,6 +444,12 @@ function validateNodeFields(
       if (node.summary !== undefined && typeof node.summary === 'string') {
         checkTemplate(label, 'summary', node.summary, refCtx, errors);
       }
+      if (node.credential !== undefined && !TOOL_CREDENTIAL_MODES.has(node.credential)) {
+        errors.push(
+          `${label}: tool.credential must be "auto", "app" or "user", got ${JSON.stringify(node.credential)} — ` +
+            `"app" makes the action run as the installed application, "user" as the workflow owner`,
+        );
+      }
       break;
     case 'foreach':
       // Field checks live in validateForeachNode (needs nodesById).
@@ -522,7 +542,7 @@ function validateForeachNode(
   }
 
   if (!isPlainObject(node.body) || typeof node.body.type !== 'string') {
-    errors.push(`${label}: foreach.body must be a single inline node object (llm/tool/set/orchestrator/session)`);
+    errors.push(`${label}: foreach.body must be a single inline node object (llm/tool/set/orchestrator/session/workflow)`);
     return;
   }
   if (!FOREACH_BODY_TYPES.has(node.body.type)) {
@@ -536,7 +556,23 @@ function validateForeachNode(
     validateNodeFields(node.body, bodyLabel, refCtx, env, errors);
   }
 
-  if (typeof node.body.id === 'string' && nodesById.has(node.body.id)) {
+  // A body node is not in `definition.nodes`, so the per-node loop in
+  // `validateWorkflowDefinition` never applies `NODE_ID_PATTERN` to its id.
+  // Apply it here. At runtime the body id becomes one part of the session id
+  // `wf:{runId}:{nodeId}[:{iteration}]` and one segment of that session's
+  // workspace path, so an id with a colon makes an unparseable session id,
+  // and an id with a slash or a dot segment escapes the workspace root.
+  if (typeof node.body.id !== 'string' || node.body.id.length === 0) {
+    errors.push(
+      `${label}: foreach.body is missing its "id" — give the body an id, ` +
+        `because its checkpoints and session ids are keyed by it`,
+    );
+  } else if (!NODE_ID_PATTERN.test(node.body.id)) {
+    errors.push(
+      `${label}: foreach.body id ${JSON.stringify(node.body.id)} must match ${NODE_ID_PATTERN} — ` +
+        `start it with a letter or a digit, then use only letters, digits, "-", and "_"`,
+    );
+  } else if (nodesById.has(node.body.id)) {
     errors.push(`${label}: foreach.body id ${JSON.stringify(node.body.id)} collides with a definition node id`);
   }
 
@@ -639,6 +675,21 @@ function checkPathRefs(label: string, field: string, paths: string[][], refCtx: 
         errors.push(
           `${label}: ${field} references unknown node ${JSON.stringify(target)}${didYouMean(target, [...refCtx.referenceableIds])}`,
         );
+      } else {
+        // The runtime context only defines `result` (and its legacy alias
+        // `output`) under a node id. Any other segment resolves to null at
+        // run time and surfaces as a confusing downstream error — catch it
+        // at save time with the corrected path.
+        const segment = segments[2];
+        if (segment !== undefined && segment !== 'result' && segment !== 'output') {
+          const rest = segments.slice(3);
+          // `values` is the common set-node mistake — a set node's rendered
+          // values ARE its result, so the segment is dropped, not moved.
+          const corrected = ['nodes', target, 'result', ...(segment === 'values' ? [] : [segment]), ...rest].join('.');
+          errors.push(
+            `${label}: ${field} references ${JSON.stringify(segment)} under nodes.${target} — a node's checkpoint is read via nodes.${target}.result... (did you mean "${corrected}"?)`,
+          );
+        }
       }
       continue;
     }

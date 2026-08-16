@@ -29,9 +29,45 @@ import type { NodeCheckpoint, RunWaitCondition, WorkflowRun, WorkflowStore } fro
 export type OnApprovalPending = (info: {
   runId: string;
   nodeId: string;
-  prompt: string;
+  /** 'approval' = explicit approval node (prompt REQUIRED there by
+   * convention); 'policy_gate' = tool node gated by policy. Absent reads
+   * as 'approval' for backward compatibility. */
+  kind?: 'approval' | 'policy_gate';
+  prompt?: string;           // was required; now optional (policy gates have none)
   summary?: string;
   details?: unknown;
+  service?: string;          // policy gates only
+  action?: string;
+  params?: unknown;
+  iteration?: number;        // set only when > 0
+}) => Promise<void> | void;
+
+/** Host audit seam: the tool executor reports gate settlements the HTTP
+ * route cannot see (timeout; denial consumed by the executor). Best-effort
+ * — a throw must not abort the node. */
+export type OnGateResolved = (info: {
+  runId: string;
+  nodeId: string;
+  iteration: number;
+  invocationId: string;
+  outcome: 'denied' | 'timeout';
+  resolvedBy: string;
+}) => Promise<void> | void;
+
+/**
+ * Host seam (action-policies plan, Task 3): when an approval is resolved with
+ * a "grant the rest of this run" choice, the executor calls this with the
+ * exact `(service, actionId)` pairs the approver authorized. The host
+ * (`packages/api`) writes one exec-scoped runtime grant per entry so
+ * subsequent `tool` nodes hitting those actions run grant-clean instead of
+ * re-failing `require_approval`. Portable — the workflow package never
+ * touches the policy db itself. Best-effort: a throw must not abort the
+ * approved node (the host implementation swallows/logs its own errors).
+ */
+export type OnApprovalGrant = (info: {
+  runId: string;
+  resolvedBy: string;
+  grants: Array<{ service: string; actionId: string }>;
 }) => Promise<void> | void;
 
 export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
@@ -67,6 +103,8 @@ export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
   clock: () => number;
   engine: WorkflowEngineDeps;
   onApprovalPending?: OnApprovalPending;
+  onApprovalGrant?: OnApprovalGrant;
+  onGateResolved?: OnGateResolved;
 }
 
 /**
@@ -108,10 +146,11 @@ export { executeStop } from './stop.js';
 export { executeWait } from './wait.js';
 export { executeApproval } from './approval.js';
 export { executeSession } from './session.js';
-export { executeLlm } from './llm.js';
+export { executeLlm, llmUsageSpanAttributes } from './llm.js';
 export { executeTool } from './tool.js';
 export { executeOrchestrator } from './orchestrator.js';
 export { executeForeach } from './foreach.js';
+export { executeWorkflowCall, deriveChildRunId } from './workflow-call.js';
 
 import { executeTrigger } from './trigger.js';
 import { executeSet } from './set.js';
@@ -124,6 +163,7 @@ import { executeLlm } from './llm.js';
 import { executeTool } from './tool.js';
 import { executeOrchestrator } from './orchestrator.js';
 import { executeForeach } from './foreach.js';
+import { executeWorkflowCall } from './workflow-call.js';
 
 /** The pure executors plus `wait`/`approval`/`session`/`llm`/`tool`/`orchestrator`/`foreach` (Tasks 5, 7, 3, 4, 5, 6). */
 export function createDefaultNodeExecutors(): NodeExecutorRegistry {
@@ -139,5 +179,6 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     tool: { execute: executeTool },
     orchestrator: { execute: executeOrchestrator },
     foreach: { execute: executeForeach },
+    workflow: { execute: executeWorkflowCall },
   };
 }

@@ -3,18 +3,30 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
-import { tracedSessionStore } from "../observability/traced-store.js";
-import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
+import { eq } from "drizzle-orm";
+import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
+import {
+  createDefaultNodeExecutors,
+  LocalRunHost,
+  type OnApprovalGrant,
+  type OnApprovalPending,
+  type OnGateResolved,
+} from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
+import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader, buildChildSender,
+  buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
+import { skillsActionPlugin } from "../services/skills-actions.js";
+import { SkillSyncService } from "../services/skill-sync.js";
+import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -24,6 +36,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
+import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
@@ -31,10 +44,12 @@ import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
-import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
+import { buildSandboxProvider, resolveChildRetentionMs, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
+import type { InstanceConfig } from "../config/instance-config.js";
+import { InstanceConfigError } from "../config/instance-config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -59,6 +74,18 @@ export function parseValetPluginsEnv(
   if (mode === "allow") return { allowlist: names };
   if (mode === "deny") return { denylist: names };
   return {};
+}
+
+/**
+ * True only when the config's `plugins` block actually declares an allow or
+ * deny list. An empty `plugins: {}` block (both keys undefined) does NOT count
+ * as "config declares plugins": it neither trips the VALET_PLUGINS both-set
+ * guard nor suppresses env parsing. `null`/absent config → false.
+ */
+export function configDeclaresPlugins(
+  plugins: InstanceConfig["plugins"] | undefined,
+): boolean {
+  return plugins !== undefined && (plugins.allow !== undefined || plugins.deny !== undefined);
 }
 
 export interface NodeProviderOpts {
@@ -117,29 +144,32 @@ export interface NodeProviderOpts {
   /**
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
-   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set) AND
-   * the stub rung is off: `evaluateAdmission`'s "zero users → first signup
-   * becomes admin" rule (`auth/provisioning.ts`) never fires if a local user
-   * is pre-seeded, so a fresh real deployment could never mint its first
-   * admin and every real signup would land in the seeded "Local Dev" org.
-   * But when `VALET_LOCAL_AUTH=1` is ALSO set, the middleware's stub rung
-   * resolves session-less requests to `local-user` — an unseeded stub
-   * identity 404s every `users`-joining route, so seeding is mandatory then.
-   * `shouldSeedLocalIdentity` encodes this decision; `main.ts` calls it.
+   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
+   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
+   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * fresh real deployment could never mint its first admin and every real
+   * signup would land in the seeded "Local Dev" org. The stub identity is an
+   * admin, so seeding it next to real auth also leaves an admin row nobody
+   * signed up for. `shouldSeedLocalIdentity` encodes this decision;
+   * `main.ts` calls it.
    */
   seedLocalIdentity?: boolean;
+  /**
+   * Parsed instance config (`valet.yaml`). When present:
+   * - `plugins` allow/deny feeds `loadNodeModulesPlugins` instead of
+   *   `parseValetPluginsEnv`. Both set simultaneously is an error.
+   * - `toolPolicies` reconcile into `action_policies` rows (org policies)
+   *   by `reconcileInstanceConfig`; the policy engine reads them at runtime.
+   */
+  instanceConfig?: InstanceConfig;
 }
 
 /**
- * Whether boot should seed `local-user`/`local-org`. True unless real auth
- * is configured WITHOUT the stub rung — the only mode where an unseeded db
- * is coherent (see `NodeProviderOpts.seedLocalIdentity`).
+ * Whether boot should seed `local-user`/`local-org`. Real auth configured →
+ * never (see `NodeProviderOpts.seedLocalIdentity`).
  */
-export function shouldSeedLocalIdentity(
-  authConfigured: boolean,
-  env: { VALET_LOCAL_AUTH?: string } = process.env,
-): boolean {
-  return !authConfigured || env.VALET_LOCAL_AUTH === "1";
+export function shouldSeedLocalIdentity(authConfigured: boolean): boolean {
+  return !authConfigured;
 }
 
 export const LOCAL_USER = {
@@ -243,7 +273,29 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       }),
     ],
   };
-  const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
+  // Skills are the other host-defined action surface. They need only the
+  // app Drizzle handle, which already exists here, so they take no deferred
+  // getter. This is the in-product authoring path for a skill; the web tab
+  // reads only (docs/specs/2026-08-05-agent-skills-design.md).
+  const skillsActions: ValetPlugin = {
+    name: "skills-actions",
+    version: "0.1.0",
+    description: "Agent-facing skill authoring actions.",
+    actions: [skillsActionPlugin(db)],
+  };
+  // Plugin filter: config file `plugins` block takes precedence over
+  // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
+  // the operator must remove one to avoid ambiguity.
+  const configPlugins = opts.instanceConfig?.plugins;
+  const configHasPlugins = configDeclaresPlugins(configPlugins);
+  if (configHasPlugins && process.env.VALET_PLUGINS) {
+    throw new InstanceConfigError(
+      "VALET_PLUGINS is set and the config file declares plugins. Remove one.",
+    );
+  }
+  const { allowlist, denylist } = configHasPlugins
+    ? { allowlist: configPlugins!.allow, denylist: configPlugins!.deny }
+    : parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
     : assemblePlugins([
@@ -255,7 +307,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
             denylist,
           })
         ).plugins,
-        [workflowsActions],
+        [workflowsActions, skillsActions],
       ]);
 
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
@@ -276,6 +328,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `engineHost` exists, before any orchestrator session can actually wake
   // and try to call `task`.
   let spawnerRef: ChildSpawner | undefined;
+  let readerRef: ChildReader | undefined;
+  let senderRef: ChildSender | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -284,6 +338,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
+    defaultImages: {
+      headless: process.env.VALET_HEADLESS_BASE_IMAGE ?? resolveDefaultImage(process.env),
+      full: process.env.VALET_FULL_BASE_IMAGE ?? resolveDefaultImage(process.env),
+    },
     idleMinutes: resolveIdleMinutes(process.env),
     ...(resolvePrebuildPreflight(process.env) ? { prebuildPreflight: resolvePrebuildPreflight(process.env) } : {}),
     ...buildHibernationHooks(db),
@@ -292,6 +350,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxJwtMaster: opts.sandboxJwtMaster,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
+    actionPluginByService,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -300,10 +359,51 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
     },
+    childReader: (req, ctx) => {
+      if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
+      return readerRef(req, ctx);
+    },
+    childSender: (req, ctx) => {
+      if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
+      return senderRef(req, ctx);
+    },
   });
 
-  const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
-  spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
+  // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
+  // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
+  // in this file builds (`{ db, credentials: engineCredentials, key }`).
+  // Constructed before the child spawner, whose zero-config repo binding
+  // needs it. `start()`/`stop()` are called from `main.ts`.
+  const prebuildService = new SourceService({
+    db,
+    builder: imageBuilder,
+    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+  });
+
+  const childrenDeps = {
+    db,
+    engineHost,
+    engineStore,
+    prebuildService,
+    retentionMs: resolveChildRetentionMs(process.env),
+  };
+  const childWatcher = new ChildWatcher(childrenDeps);
+  spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
+  readerRef = buildChildReader(childrenDeps);
+  senderRef = buildChildSender(childrenDeps, childWatcher);
+
+  // Backfill default bases for existing orgs (idempotent). Fires once at
+  // boot in the background; never blocks startup.
+  (async () => {
+    const rows = await db.select({ id: orgs.id }).from(orgs);
+    for (const { id } of rows) {
+      try {
+        await prebuildService.seedDefaultBasesIfMissing(id);
+      } catch (err) {
+        console.error(`seedDefaultBasesIfMissing(${id}) failed:`, err);
+      }
+    }
+  })();
 
   const channelHost = new ChannelHost({
     db,
@@ -320,7 +420,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
   // by the same connection source as everything else.
-  const workflowStore = new PgWorkflowStore(pgdb);
+  // Traced under the same condition as the engine store: `workflow-store.*`
+  // spans nest inside the interpreter's `workflow.drive`/`workflow.node.*`.
+  const rawWorkflowStore = new PgWorkflowStore(pgdb);
+  const workflowStore = telemetryEnabled ? tracedWorkflowStore(rawWorkflowStore) : rawWorkflowStore;
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
@@ -348,19 +451,78 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       const run = await workflowStore.getRun(info.runId);
       if (!run?.owner) return; // no recorded owner: nothing to notify
       const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
+      const isPolicyGate = info.kind === "policy_gate";
       await routeAttention(
         { db },
         {
           kind: "approval",
           owner,
-          title: info.summary ?? info.prompt,
-          body: info.summary ? info.prompt : undefined,
+          title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
+          body: isPolicyGate
+            ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`
+            : info.summary
+              ? info.prompt
+              : undefined,
           href: `/workflows/runs/${info.runId}`,
-          dedupeKey: `${info.runId}:${info.nodeId}`,
+          dedupeKey: `${info.runId}:${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`,
         },
       );
     } catch (err) {
       console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
+    }
+  };
+
+  // "Grant the rest of this run" (action-policies plan, Task 3): an approval
+  // resolved with `grantActions` writes one exec-scoped runtime grant per
+  // authorized `(service, actionId)` so downstream `tool` nodes stop failing
+  // `require_approval`. Best-effort — a failure here must not abort the
+  // approved node; `writeExecutionGrant` is idempotent under replay.
+  const onApprovalGrant: OnApprovalGrant = async (info) => {
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.params.workflowId) return;
+      const defRows = await db
+        .select({ orgId: workflowDefinitions.orgId })
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.params.workflowId))
+        .limit(1);
+      const orgId = defRows[0]?.orgId;
+      if (!orgId) return;
+      const now = Date.now();
+      for (const g of info.grants) {
+        await writeExecutionGrant(db, info.runId, {
+          orgId,
+          service: g.service,
+          actionId: g.actionId,
+          grantedBy: info.resolvedBy,
+          now,
+        });
+      }
+    } catch (err) {
+      console.error(`workflow approval grant write failed for run ${info.runId}:`, err);
+    }
+  };
+
+  const onGateResolved: OnGateResolved = async (info) => {
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.params.workflowId) return;
+      const defRows = await db
+        .select({ orgId: workflowDefinitions.orgId })
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.params.workflowId))
+        .limit(1);
+      const orgId = defRows[0]?.orgId;
+      if (!orgId) return;
+      const suffix = info.iteration > 0 ? `:${info.iteration}` : "";
+      await updateInvocationOutcome(
+        db,
+        `pol:wf:workflow:${info.runId}:${info.nodeId}${suffix}`,
+        orgId,
+        { status: info.outcome, resolvedBy: info.resolvedBy },
+      );
+    } catch (err) {
+      console.error(`workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
     }
   };
 
@@ -369,6 +531,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
+    onApprovalGrant,
+    onGateResolved,
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };
@@ -378,6 +542,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // main.ts alongside the dispatcher.
   const deliverToOrchestrator = buildOrchestratorTarget({ db, engineHost });
   const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
+
+  // Coarse per-workflow cap for the public webhook-trigger route — bounds
+  // what an unauthenticated caller holding a leaked/guessed URL can force
+  // us to start, without needing a shared rate-limit store.
+  const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
@@ -389,15 +558,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     deliverToOrchestrator,
   });
 
-  // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
-  // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
-  // in this file builds (`{ db, credentials: engineCredentials, key }`).
-  // `start()`/`stop()` are called from `main.ts`.
-  const prebuildService = new SourceService({
-    db,
-    builder: imageBuilder,
-    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
-  });
+  // Skill-repository sync (agent-skills design). Reads PUBLIC repositories
+  // only, so the reader takes no credential deps — see
+  // `services/skill-repo-reader.ts` for why an authenticated importer is
+  // deliberately not wired in yet. `start()`/`stop()` are called from
+  // `main.ts` alongside the other loops.
+  const skillSync = new SkillSyncService({ db, reader: new PublicSkillRepoReader() });
 
   return {
     db,
@@ -414,7 +580,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    webhookRateLimiter,
     eventDispatcher,
+    skillSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

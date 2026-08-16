@@ -40,7 +40,10 @@ Skills already reach the session catalog through plugins. This feature exposes t
 
 **Bare-name setting.** A per-user setting (default off) also registers each skill under its bare name (`/<name>`). A template with the same name shadows a bare skill name: user-authored beats plugin-provided. Shadowing emits a diagnostic. `/skill:<name>` always works, with or without the setting.
 
-### 3. Prompt templates (`source: "template"`)
+### 3. Prompt templates (`source: "template"`) — SUPERSEDED
+
+> Superseded by `2026-08-13-skills-as-commands-design.md`: templates fold
+> into skills as `invocation: prompt`. This section stays for history only.
 
 Bare `/name [args]`. The template body replaces the command text before the prompt path runs. Substitution supports `$1`, `$2`, `$@`, `$ARGUMENTS`, and `${@:N:L}`, with quote-aware argument parsing. Port Pi's `parseCommandArgs` and `substituteArgs` (small, pure functions in `packages/coding-agent/src/core/prompt-templates.ts`).
 
@@ -147,3 +150,23 @@ Every failure is a `command_result` entry with `ok: false` and a corrective acti
 - Code-hook plugin commands (medium-term; the `CommandContext` seam anticipates them).
 - Client-side commands (theme, layout). These are UI preferences, not slash commands.
 - Extending the legacy v1 `SLASH_COMMANDS` registry or channels on the frozen stack.
+
+## Deviations
+
+These items differ from or add detail to the spec as written. All are intentional implementation decisions recorded here for accuracy.
+
+**Command results land on the requested thread.** `PromptOptions.threadId` selects the target thread for `session.prompt()`. When set, every dispatch outcome — execute, expand, and pass — runs against that thread, and a command's `command_result` entry persists there. When unset, dispatch falls back to the session's default thread. An unknown `threadId` throws; the messages route resolves the thread first and returns 404 before it reaches the engine. (Before 2026-08-13, execute-kind commands ignored the requested thread and always wrote results to the default thread — a client watching another thread never saw them.)
+
+**An executed command persists a user-message echo before its result.** A command takes no queue item, so no other path persists the user's typed text. `executeCommand` writes a `role: "user"` message entry with the raw command text, then the `command_result`. Without the echo, a client refetch reorders the result above the user's bubble and a reload loses the command entirely. The echo is written before the plugin grace window so it always precedes its result.
+
+**Plugin-command approvals open session-level decision gates.** A slash command is not a claimed turn, so its gate never suspends a turn. When no `commandRequestDecision` hook is set, the engine opens a durable gate on the default thread: it persists a `decision_gate` entry, emits the same gate events turn gates emit (so the web approvals UI and channel approve/deny buttons render it), and waits in a session-level `GateManager` that `resolveDecision` checks first. The command completes in the background — the `command_result` entry lands when the gate resolves, and the HTTP send returns after a 500 ms grace window. Two caveats: a pending command gate does not survive an api restart (the durable row stays pending; send the command again), and gate expiry records an `ok: false` result that tells the user to retry.
+
+**Shared orchestrators carry no personal command configuration.** User prompt templates and the bare-skill-names setting apply only when the session belongs to a user principal. Team and org orchestrators get repo templates only and bare skill names off — a shared session must not surface whichever actor's personal settings happened to wake it.
+
+**Command-path action attachments are dropped.** `PluginActionResult.attachments` are not forwarded on the command path. A `command_result` entry has no sink for blobs or vision content. The `call_tool` (LLM turn) path still carries attachments unchanged.
+
+**Interactive sessions only receive command providers.** `buildCommandOptions` runs only in `EngineHost.buildSession` (the interactive `sessionFor` path). Orchestrator sessions, child sessions, and workflow sessions do not receive `templateProvider`, `commandContext`, `pluginCommands`, or `pluginCatalog`. The helper is reusable; wiring it to those paths is future work.
+
+**`PluginActionResult.data` renders as fenced JSON.** When a plugin action returns a `data` object, the command formatter writes it as a fenced `json` block. When `data` is already a string, the formatter writes it verbatim. There is no HTML or rich-content rendering path for command output.
+
+**Bare-skill-name setting is exposed via `PATCH /api/me { bareSkillCommands }`.** The per-user toggle that registers each skill under its bare name is stored in the `users.bareSkillCommands` column and read through the standard user-settings PATCH route. The spec named the setting but did not specify its wire field name; `bareSkillCommands` is the field used in both the DB schema and the API.

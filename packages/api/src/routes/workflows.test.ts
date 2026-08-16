@@ -7,14 +7,26 @@
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { addMember, createTeam } from "../services/teams.js";
+import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
+import { persistInvocationAudit } from "../policies/service.js";
+import { actionInvocations, actionPolicies, orgs, runtimeGrants, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import {
+  getWorkflowRunDetail,
+  listWorkflowRuns,
+} from "../workflows/service.js";
 import type {
   CreateWorkflowResponse,
+  DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
+  RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
+  WorkflowWebhookResponse,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -35,17 +47,17 @@ const VALID_DEFINITION = {
 
 /** A `RunHost` stub that records every call instead of driving anything. */
 class StubRunHost implements RunHost {
-  started: Array<{ runId: string; owner?: { ownerType: string; ownerId: string } }> = [];
+  started: Array<{ runId: string; params: unknown; owner?: { ownerType: string; ownerId: string } }> = [];
   woken: string[] = [];
   terminated: string[] = [];
 
   async start(
     runId: string,
-    _params: unknown,
+    params: unknown,
     _definition: unknown,
     owner?: { ownerType: string; ownerId: string },
   ): Promise<void> {
-    this.started.push({ runId, owner });
+    this.started.push({ runId, params, owner });
   }
   async wake(runId: string): Promise<void> {
     this.woken.push(runId);
@@ -127,6 +139,130 @@ describe("GET /api/workflows + /:id", () => {
   });
 });
 
+describe("team-owned workflows", () => {
+  it("creates a team-owned workflow when the caller is a member", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateWorkflowResponse;
+    expect(body.ownerType).toBe("team");
+    expect(body.ownerId).toBe(team.id);
+  });
+
+  it("404s creating a workflow under a team the caller isn't a member of", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "test-member" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("404s creating a workflow under an unknown teamId", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: "team_nonexistent" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("lists a team-owned workflow to every team member, not just its creator", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["team-wf"]);
+  });
+
+  it("404s listing/fetching a team-owned workflow for a non-member in the SAME org", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    }).then((r) => r.json() as Promise<CreateWorkflowResponse>);
+
+    const listRes = await fetch(`${api.baseUrl}/api/workflows`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const { workflows } = (await listRes.json()) as ListWorkflowsResponse;
+    expect(workflows).toEqual([]);
+
+    const getRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(getRes.status).toBe(404);
+  });
+
+  it("404s for a member who has since left the team — membership is re-checked live, not cached", async () => {
+    const { removeMember } = await import("../services/teams.js");
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    }).then((r) => r.json() as Promise<CreateWorkflowResponse>);
+
+    await removeMember(api.providers.db, { teamId: team.id, userId: "test-member" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("creating a workflow with teamId: null falls through to a personal workflow instead of 404ing", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "personal-wf", definition: VALID_DEFINITION, teamId: null }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateWorkflowResponse;
+    expect(body.ownerType).toBe("user");
+    expect(body.ownerId).toBe("local-user");
+  });
+
+  it("409s deleting a team that still owns a workflow", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/teams/${team.id}`, { method: "DELETE" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code?: string };
+    expect(body.code).toBe("team_owns_workflows");
+  });
+});
+
 describe("PUT /api/workflows/:id", () => {
   it("updates name and definition", async () => {
     api = await bootTestApi();
@@ -189,6 +325,82 @@ describe("POST /api/workflows/:id/runs", () => {
     expect(res.status).toBe(404);
     expect(stub.started).toHaveLength(0);
   });
+
+  const SCHEMA_DEFINITION = {
+    version: "dag/v1",
+    nodes: [
+      {
+        id: "trigger",
+        type: "trigger",
+        dataSchema: {
+          name: { type: "string", required: true },
+          retries: { type: "number", default: 3 },
+        },
+      },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [{ from: "trigger", to: "stop" }],
+  };
+
+  async function createSchemaWorkflow(baseUrl: string): Promise<CreateWorkflowResponse> {
+    const res = await fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "schema-workflow", definition: SCHEMA_DEFINITION }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateWorkflowResponse;
+  }
+
+  it("merges trigger dataSchema defaults into the run's trigger data", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { name: "deploy" } }),
+    });
+    expect(res.status).toBe(201);
+
+    expect(stub.started).toHaveLength(1);
+    const params = stub.started[0].params as { input: { data: Record<string, unknown> } };
+    expect(params.input.data).toEqual({ name: "deploy", retries: 3 });
+  });
+
+  it("400s a run missing a required trigger input, naming the field", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: {} }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: Array<{ field: string; message: string }> };
+    expect(body.fields.map((f) => f.field)).toEqual(["name"]);
+    expect(body.error).toContain("name");
+    expect(stub.started).toHaveLength(0);
+  });
+
+  it("400s a type mismatch against the trigger dataSchema", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createSchemaWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { name: "deploy", retries: "three" } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { fields: Array<{ field: string }> };
+    expect(body.fields.map((f) => f.field)).toEqual(["retries"]);
+    expect(stub.started).toHaveLength(0);
+  });
 });
 
 describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
@@ -227,6 +439,14 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(detail.checkpoints).toEqual([]);
     expect(detail.signals).toEqual([]);
 
+    // Park the run on the approval signal before resolving — the new route
+    // validates the run is actually waiting on this gate.
+    await api.providers.workflowStore.parkRun(
+      runId,
+      1,
+      [{ kind: "signal", signalType: "approval:some-node", nodeId: "some-node" }],
+    );
+
     const approveRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/approvals/some-node`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -241,7 +461,7 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(signals[0]).toMatchObject({
       signalId: "approval:some-node:resolution",
       signalType: "approval:some-node",
-      payload: { approved: true, resolvedBy: "local-user", note: "looks good" },
+      payload: { approved: true, resolvedBy: "local-user", note: "looks good", resolvedVia: "web" },
     });
 
     const cancelRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/cancel`, { method: "POST" });
@@ -266,6 +486,1057 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
     expect(res.status).toBe(404);
   });
+
+  it("retries a settled failed run with the original input; 409s while non-settled and after completion", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+
+    const runId = "wfrun_retry_me";
+    await api.providers.workflowStore.createRun(
+      runId,
+      {
+        workflowId: created.id,
+        definitionVersionId: "v1",
+        input: {
+          type: "manual",
+          timestamp: "2026-08-14T00:00:00.000Z",
+          data: { foo: "bar" },
+          metadata: {},
+        },
+      },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+
+    // Not settled yet → 409.
+    const early = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(early.status).toBe(409);
+
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(res.status).toBe(201);
+    const { runId: newRunId } = (await res.json()) as RetryWorkflowRunResponse;
+    expect(newRunId).not.toBe(runId);
+
+    const startedRetry = stub.started.find((s) => s.runId === newRunId);
+    expect(startedRetry).toBeDefined();
+    // The retry's trigger payload must carry the original run's input data.
+    const params = startedRetry?.params as { input?: { data?: unknown } };
+    expect(params.input?.data).toEqual({ foo: "bar" });
+
+    // A completed run is not retryable.
+    const completedId = "wfrun_completed";
+    await api.providers.workflowStore.createRun(
+      completedId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await api.providers.workflowStore.settleRun(completedId, "completed");
+    const completedRes = await fetch(`${api.baseUrl}/api/workflows/runs/${completedId}/retry`, { method: "POST" });
+    expect(completedRes.status).toBe(409);
+  });
+
+  it("400s a retry when the current trigger schema no longer accepts the original input", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+
+    const runId = "wfrun_schema_drift";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    // The definition gains a required input AFTER the original run — the
+    // retry validates against the CURRENT definition, so it must 400.
+    const updateRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        definition: {
+          ...VALID_DEFINITION,
+          nodes: [
+            { id: "trigger", type: "trigger", dataSchema: { name: { type: "string", required: true } } },
+            { id: "stop", type: "stop" },
+          ],
+        },
+      }),
+    });
+    expect(updateRes.status).toBe(200);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: Array<{ field: string }> };
+    expect(body.fields[0]?.field).toBe("name");
+    expect(stub.started.find((s) => s.runId !== runId)).toBeUndefined();
+  });
+
+  it("404s retrying another owner's settled run", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_cross_owner_retry";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "test-member" },
+    );
+    await api.providers.workflowStore.settleRun(runId, "failed");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, { method: "POST" });
+    expect(res.status).toBe(404);
+  });
+
+  it("a team member manages a run started against a team-owned workflow (get/approve/cancel), matching a schedule/trigger fire's owner shape", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    }).then((r) => r.json() as Promise<CreateWorkflowResponse>);
+
+    const runId = "wfrun_team_owned";
+    // Mirrors what scheduler.ts / events/dispatcher.ts pass to
+    // workflowRunHost.start: the fired run's owner is the WORKFLOW's own
+    // owner, copied verbatim — not the schedule/trigger creator.
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      VALID_DEFINITION,
+      "v1",
+      { ownerType: "team", ownerId: team.id },
+    );
+
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+    const getRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`, { headers: memberHeaders });
+    expect(getRes.status).toBe(200);
+
+    // Park the run on the approval signal first (required by the new route).
+    await api.providers.workflowStore.parkRun(
+      runId,
+      1,
+      [{ kind: "signal", signalType: "approval:some-node", nodeId: "some-node" }],
+    );
+
+    const approveRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/approvals/some-node`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...memberHeaders },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(approveRes.status).toBe(200);
+    expect(stub.woken).toContain(runId);
+
+    const cancelRes = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: memberHeaders,
+    });
+    expect(cancelRes.status).toBe(200);
+    expect(stub.terminated).toContain(runId);
+  });
+
+  it("404s a team-owned run for a non-member in the SAME org", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const runId = "wfrun_team_outsider";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: "wf_whatever", definitionVersionId: "v1" },
+      VALID_DEFINITION,
+      "v1",
+      { ownerType: "team", ownerId: team.id },
+    );
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("resolveWorkflowApproval — outcome coverage", () => {
+  /** Bootstrap a test run. When `nodeType` is `"tool"` we insert the workflow
+   * definition directly into the DB to bypass the save-time validator (which
+   * rejects unknown services in environments without a plugin catalog). */
+  async function setupRun(
+    opts: { nodeType?: string; service?: string; action?: string } = {},
+  ) {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        ...(opts.nodeType
+          ? [{ id: "gate", type: opts.nodeType, service: opts.service, action: opts.action, params: {} }]
+          : []),
+        { id: "stop", type: "stop" },
+      ],
+      edges: [
+        { from: "trigger", to: opts.nodeType ? "gate" : "stop" },
+        ...(opts.nodeType ? [{ from: "gate", to: "stop" }] : []),
+      ],
+    };
+
+    let wfId: string;
+    if (opts.nodeType === "tool") {
+      // Insert directly — the route's save-time validator rejects unknown
+      // services (no plugin catalog in the test env). The run host / service
+      // functions only read the definition from the run row, so this is safe.
+      const now = Date.now();
+      wfId = `wf_test_${now}`;
+      await localApi.providers.db.insert(workflowDefinitions).values({
+        id: wfId,
+        orgId: "local-org",
+        name: "test-wf",
+        definition,
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await localApi.providers.db.insert(workflowVersions).values({
+        id: `wfv_test_${now}`,
+        workflowId: wfId,
+        version: 1,
+        name: "test-wf",
+        definition,
+        createdAt: now,
+      });
+    } else {
+      const wfRes = await fetch(`${localApi.baseUrl}/api/workflows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "test-wf", definition }),
+      });
+      expect(wfRes.status).toBe(201);
+      wfId = ((await wfRes.json()) as CreateWorkflowResponse).id;
+    }
+
+    const wf = { id: wfId } as CreateWorkflowResponse;
+
+    // Start the run via the route (so the route records it), then seed the
+    // run in the store directly so approval/cancel reads can find it.
+    const startRes = await fetch(`${localApi.baseUrl}/api/workflows/${wfId}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(startRes.status).toBe(201);
+    const { runId } = (await startRes.json()) as StartWorkflowRunResponse;
+    await localApi.providers.workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    return { localApi, stub, wf, runId };
+  }
+
+  it("not parked → 409", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("not parked") });
+    // No DB writes on failure
+    const signals = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signals).toHaveLength(0);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
+  });
+
+  it("unknown run → 404", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/no-such-run/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(res.status).toBe(404);
+    // No DB writes on failure
+    const grants = await api.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await api.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
+  });
+
+  it("already resolved → 409", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    // Seed an already-unconsumed signal
+    await localApi.providers.workflowStore.insertSignal({
+      runId,
+      signalId: "approval:gate:resolution",
+      signalType: "approval:gate",
+      payload: { approved: true },
+      createdAt: Date.now(),
+    });
+    const signalsBefore = await localApi.providers.workflowStore.listSignals(runId);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("already been resolved") });
+    // No additional DB writes on failure — signal count unchanged
+    const signalsAfter = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signalsAfter).toHaveLength(signalsBefore.length);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
+  });
+
+  it("timed out → 409", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate", timeoutAt: Date.now() - 1000 },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("timed out") });
+    // No DB writes on failure
+    const signals = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signals).toHaveLength(0);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
+  });
+
+  it("policy gate + scope=run → writes execution grant + 200", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true, scope: "run" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    // Assert runtime_grants row was written
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ workflowExecutionId: runId, policyKey: "widgets.nuke" });
+  });
+
+  it("policy gate + scope=always + admin → writes org policy + 200", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true, scope: "always" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    // Assert action_policies row written with the deterministic id
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies.some((p) => p.id === "pol:approval:local-org:widgets.nuke")).toBe(true);
+    // Assert runtime_grants row also written (scope=always implies scope=run grant too)
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants.some((g) => g.workflowExecutionId === runId && g.policyKey === "widgets.nuke")).toBe(true);
+  });
+
+  it("policy gate + scope=always + non-admin → 403", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    // Insert a workflow definition owned by test-member directly (bypass validator).
+    const now = Date.now();
+    const memberWfId = `wf_nonAdmin_${now}`;
+    const memberDef = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "gate", type: "tool", service: "widgets", action: "nuke", params: {} }, { id: "stop", type: "stop" }],
+      edges: [{ from: "trigger", to: "gate" }, { from: "gate", to: "stop" }],
+    };
+    await localApi.providers.db.insert(workflowDefinitions).values({
+      id: memberWfId, orgId: "local-org", name: "member-wf", definition: memberDef,
+      ownerType: "user", ownerId: "test-member", createdAt: now, updatedAt: now,
+    });
+    await localApi.providers.db.insert(workflowVersions).values({
+      id: `wfv_nonAdmin_${now}`, workflowId: memberWfId, version: 1, name: "member-wf",
+      definition: memberDef, createdAt: now,
+    });
+    const memberRunId = `wfrun_nonAdmin_${now}`;
+    await localApi.providers.workflowStore.createRun(
+      memberRunId,
+      { workflowId: memberWfId, definitionVersionId: "v1" },
+      memberDef, "v1",
+      { ownerType: "user", ownerId: "test-member" },
+    );
+    await localApi.providers.workflowStore.parkRun(memberRunId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${memberRunId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ approved: true, scope: "always" }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Ask an org admin") });
+    // No policy row, no grant, no signal written on failure
+    const signals = await localApi.providers.workflowStore.listSignals(memberRunId);
+    expect(signals).toHaveLength(0);
+    const grants = await localApi.providers.db.select().from(runtimeGrants);
+    expect(grants).toHaveLength(0);
+    const policies = await localApi.providers.db.select().from(actionPolicies);
+    expect(policies).toHaveLength(0);
+  });
+
+  it("approval node (non-tool) + scope=run → 200 no grant written", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    // Park on a plain approval signal (no tool node in definition)
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:manual", nodeId: "manual" },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/manual`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true, scope: "run" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("denial on policy gate → 200", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("grantActions rejected → 400", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true, grantActions: [{ service: "x", actionId: "x.y" }] }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("grantActions") });
+  });
+
+  it("agent via → human_only for policy gate", async () => {
+    const { localApi, runId, wf } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const result = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: true, via: "agent" },
+    );
+    expect(result).toBe("human_only");
+  });
+
+  it("foreach body gate: park on approval:body1:3, resolve with iteration: 3 → signal approval:body1:3:resolution", async () => {
+    // Use an approval node (non-tool) to bypass the save-time validator for the
+    // foreach body; the service looks up the node in run.definition, not the
+    // workflow definition table, so we can seed any definition directly.
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const now = Date.now();
+    const wfId = `wf_foreach_${now}`;
+    // A foreach definition whose body is a tool node with id "body1".
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        {
+          id: "loop",
+          type: "foreach",
+          items: "{{ trigger.data.items }}",
+          body: { id: "body1", type: "approval", prompt: "approve this item?" },
+        },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [
+        { from: "trigger", to: "loop" },
+        { from: "loop", to: "stop" },
+      ],
+    };
+    await localApi.providers.db.insert(workflowDefinitions).values({
+      id: wfId,
+      orgId: "local-org",
+      name: "foreach-wf",
+      definition: def,
+      ownerType: "user",
+      ownerId: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await localApi.providers.db.insert(workflowVersions).values({
+      id: `wfv_foreach_${now}`,
+      workflowId: wfId,
+      version: 1,
+      name: "foreach-wf",
+      definition: def,
+      createdAt: now,
+    });
+    const runId = `wfrun_foreach_${now}`;
+    await localApi.providers.workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    // Park on iteration 3 of the foreach body node.
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:body1:3", nodeId: "body1" },
+    ]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/body1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true, iteration: 3 }),
+    });
+    expect(res.status).toBe(200);
+    const signals = await localApi.providers.workflowStore.listSignals(runId);
+    expect(signals.some((s) => s.signalId === "approval:body1:3:resolution")).toBe(true);
+  });
+
+  it("org_mismatch: run's defining org has no membership for the caller → org_mismatch", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_mismatch_${now}`;
+    // Insert a workflow that belongs to a different org ("other-org") that exists in DB
+    // but "local-user" is not a member of.
+    await db.insert(orgs).values({ id: "other-org", name: "Other Org", createdAt: now });
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "gate", type: "tool", service: "widgets", action: "nuke", params: {} },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "gate" }, { from: "gate", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId,
+      orgId: "other-org", // different org
+      name: "other-wf",
+      definition: def,
+      ownerType: "user",
+      ownerId: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_mismatch_${now}`,
+      workflowId: wfId,
+      version: 1,
+      name: "other-wf",
+      definition: def,
+      createdAt: now,
+    });
+    const runId = `wfrun_mismatch_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    // "local-user" is in "local-org" but not in "other-org" → org_mismatch
+    const result = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: true, via: "web" },
+    );
+    expect(result).toBe("org_mismatch");
+  });
+
+  it("audit stamp: approve of tool-node gate stamps invocation row approved + resolvedBy", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    // Seed a pending audit row the way the workflow enforcer does.
+    const invId = `pol:wf:workflow:${runId}:gate`;
+    await persistInvocationAudit(db, {
+      invocationId: invId,
+      orgId: "local-org",
+      workflowExecutionId: runId,
+      service: "widgets",
+      actionId: "widgets.nuke",
+      resolvedMode: "require_approval",
+      status: "pending",
+    });
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const result = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: true, via: "web" },
+    );
+    expect(result).toBe("ok");
+    const rows = await db
+      .select({ status: actionInvocations.status, resolvedBy: actionInvocations.resolvedBy })
+      .from(actionInvocations)
+      .where(eq(actionInvocations.invocationId, invId));
+    expect(rows[0]).toMatchObject({ status: "approved", resolvedBy: "local-user" });
+  });
+
+  it("resolution race: second sequential call with a different decision gets already_resolved and writes no grant or audit row", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const invId = `pol:wf:workflow:${runId}:gate`;
+    await persistInvocationAudit(db, {
+      invocationId: invId,
+      orgId: "local-org",
+      workflowExecutionId: runId,
+      service: "widgets",
+      actionId: "widgets.nuke",
+      resolvedMode: "require_approval",
+      status: "pending",
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+
+    // First resolution: approve with scope=run (writes a grant)
+    const first = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: true, scope: "run", via: "web" },
+    );
+    expect(first).toBe("ok");
+
+    // Audit row must carry the first (approve) decision.
+    const auditAfterFirst = await db
+      .select({ status: actionInvocations.status, resolvedBy: actionInvocations.resolvedBy })
+      .from(actionInvocations)
+      .where(eq(actionInvocations.invocationId, invId));
+    expect(auditAfterFirst[0]).toMatchObject({ status: "approved", resolvedBy: "local-user" });
+
+    // Grant row must exist after first.
+    const grantsAfterFirst = await db.select().from(runtimeGrants).where(eq(runtimeGrants.workflowExecutionId, runId));
+    expect(grantsAfterFirst.length).toBeGreaterThan(0);
+
+    // Second resolution: deny (simulates the racing loser arriving after the signal is stored)
+    const second = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: false, scope: "once", via: "web" },
+    );
+    expect(second).toBe("already_resolved");
+
+    // Audit row must still carry the FIRST decision, not the loser's.
+    const auditAfterSecond = await db
+      .select({ status: actionInvocations.status })
+      .from(actionInvocations)
+      .where(eq(actionInvocations.invocationId, invId));
+    expect(auditAfterSecond[0]?.status).toBe("approved");
+
+    // Grant count must not have increased (loser wrote nothing).
+    const grantsAfterSecond = await db.select().from(runtimeGrants).where(eq(runtimeGrants.workflowExecutionId, runId));
+    expect(grantsAfterSecond.length).toBe(grantsAfterFirst.length);
+  });
+
+  it("cancelWorkflowRun stamps pending tool-gate audit rows as cancelled", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    // Seed a pending gate audit row.
+    const invId = `pol:wf:workflow:${runId}:gate`;
+    await persistInvocationAudit(db, {
+      invocationId: invId,
+      orgId: "local-org",
+      workflowExecutionId: runId,
+      service: "widgets",
+      actionId: "widgets.nuke",
+      resolvedMode: "require_approval",
+      status: "pending",
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    const result = await cancelWorkflowRun({ db, workflowStore, workflowRunHost }, { userId: "local-user", orgId: "local-org" }, runId);
+    expect(result).toBe("ok");
+    const rows = await db
+      .select({ status: actionInvocations.status })
+      .from(actionInvocations)
+      .where(eq(actionInvocations.invocationId, invId));
+    expect(rows[0]?.status).toBe("cancelled");
+  });
+});
+
+describe("pendingGates + needsApproval wire", () => {
+  it("(a) tool node park with gate effects → policy_gate entry with all fields populated verbatim", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_a_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        {
+          id: "t1",
+          type: "tool",
+          service: "github",
+          action: "create_pr",
+          params: {},
+          onDeny: "skip",
+        },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [
+        { from: "trigger", to: "t1" },
+        { from: "t1", to: "stop" },
+      ],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-wf-a", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_a_${now}`, workflowId: wfId, version: 1, name: "pg-wf-a",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_a_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    // Seed the intent checkpoint with gate effects.
+    const gateParams = { repo: "valet", branch: "main" };
+    await workflowStore.putIntent({
+      runId,
+      nodeId: "t1",
+      iteration: 0,
+      attempt: 1,
+      status: "intent",
+      createdAt: now,
+      effects: {
+        invocationId: `pol:wf:${runId}:t1`,
+        gate: true,
+        gateParams,
+        gateItem: { item: 42 },
+        riskLevel: "high",
+        provenance: "inferred",
+        timeoutAt: 123,
+      },
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:t1", nodeId: "t1", timeoutAt: 123 },
+    ]);
+
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail).not.toBeNull();
+    expect(detail!.pendingGates).toHaveLength(1);
+    const gate = detail!.pendingGates[0];
+    expect(gate.kind).toBe("policy_gate");
+    expect(gate.nodeId).toBe("t1");
+    expect(gate.service).toBe("github");
+    expect(gate.action).toBe("create_pr");
+    expect(gate.onDeny).toBe("skip");
+    expect(gate.riskLevel).toBe("high");
+    expect(gate.provenance).toBe("inferred");
+    expect(gate.timeoutAt).toBe(123);
+    expect(gate.gateParams).toEqual(gateParams); // verbatim round-trip
+    expect(gate.gateItem).toEqual({ item: 42 });
+    expect(gate.iteration).toBeUndefined(); // top-level node, no iteration
+    expect(gate.prompt).toBeUndefined();
+  });
+
+  it("(a) gateParamsTruncated is present when set in effects", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_trunc_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "t2", type: "tool", service: "svc", action: "act", params: {} },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "t2" }, { from: "t2", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-trunc", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_trunc_${now}`, workflowId: wfId, version: 1, name: "pg-trunc",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_trunc_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.putIntent({
+      runId,
+      nodeId: "t2",
+      iteration: 0,
+      attempt: 1,
+      status: "intent",
+      createdAt: now,
+      effects: {
+        gate: true,
+        gateParams: { truncated: true },
+        gateParamsTruncated: true,
+      },
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:t2", nodeId: "t2" },
+    ]);
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail!.pendingGates[0].gateParamsTruncated).toBe(true);
+  });
+
+  it("(b) approval node park → kind=approval, prompt from definition, no gate fields", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_b_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "approval1", type: "approval", prompt: "Please review this action." },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "approval1" }, { from: "approval1", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-wf-b", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_b_${now}`, workflowId: wfId, version: 1, name: "pg-wf-b",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_b_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:approval1", nodeId: "approval1" },
+    ]);
+
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail).not.toBeNull();
+    expect(detail!.pendingGates).toHaveLength(1);
+    const gate = detail!.pendingGates[0];
+    expect(gate.kind).toBe("approval");
+    expect(gate.nodeId).toBe("approval1");
+    expect(gate.prompt).toBe("Please review this action.");
+    expect(gate.service).toBeUndefined();
+    expect(gate.action).toBeUndefined();
+    expect(gate.gateParams).toBeUndefined();
+    expect(gate.riskLevel).toBeUndefined();
+    expect(gate.onDeny).toBeUndefined();
+  });
+
+  it("(c) listWorkflowRuns: approval-parked run → needsApproval=true; timer-parked → needsApproval absent", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { workflowStore, workflowRunHost, db } = localApi.providers;
+
+    // Create a workflow via the HTTP route (uses the default VALID_DEFINITION).
+    const wfRes = await fetch(`${localApi.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "pg-c-wf", definition: VALID_DEFINITION }),
+    });
+    expect(wfRes.status).toBe(201);
+    const wf = (await wfRes.json()) as CreateWorkflowResponse;
+
+    // Start run 1 — will become the approval-parked run.
+    const approvalStartRes = await fetch(`${localApi.baseUrl}/api/workflows/${wf.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(approvalStartRes.status).toBe(201);
+    const { runId: approvalRunId } = (await approvalStartRes.json()) as StartWorkflowRunResponse;
+    await workflowStore.createRun(
+      approvalRunId,
+      { workflowId: wf.id, definitionVersionId: "v1" },
+      VALID_DEFINITION, "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(approvalRunId, 1, [
+      { kind: "signal", signalType: "approval:stop", nodeId: "stop" },
+    ]);
+
+    // Start run 2 — will become the timer-parked run.
+    const timerStartRes = await fetch(`${localApi.baseUrl}/api/workflows/${wf.id}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(timerStartRes.status).toBe(201);
+    const { runId: timerRunId } = (await timerStartRes.json()) as StartWorkflowRunResponse;
+    await workflowStore.createRun(
+      timerRunId,
+      { workflowId: wf.id, definitionVersionId: "v1" },
+      VALID_DEFINITION, "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.parkRun(timerRunId, 1, [
+      { kind: "timer", nodeId: "stop", wakeAt: Date.now() + 60000 },
+    ]);
+
+    const runs = await listWorkflowRuns(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      wf.id,
+    );
+    expect(runs).not.toBeNull();
+    const approvalRun = runs!.find((r) => r.runId === approvalRunId);
+    const timerRun = runs!.find((r) => r.runId === timerRunId);
+    expect(approvalRun?.needsApproval).toBe(true);
+    // Timer-parked run must NOT carry needsApproval (absent, not false).
+    expect(timerRun?.needsApproval).toBeUndefined();
+  });
+
+  it("(d) checkpoint wire does NOT expose effects (selective exposure only)", async () => {
+    const stub = new StubRunHost();
+    const localApi = await bootTestApi({ workflowRunHost: stub });
+    api = localApi;
+    const { db, workflowStore, workflowRunHost } = localApi.providers;
+    const now = Date.now();
+    const wfId = `wf_pg_d_${now}`;
+    const def = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "t3", type: "tool", service: "svc", action: "act", params: {} },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "t3" }, { from: "t3", to: "stop" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: wfId, orgId: "local-org", name: "pg-wf-d", definition: def,
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.insert(workflowVersions).values({
+      id: `wfv_pg_d_${now}`, workflowId: wfId, version: 1, name: "pg-wf-d",
+      definition: def, createdAt: now,
+    });
+    const runId = `wfrun_pg_d_${now}`;
+    await workflowStore.createRun(
+      runId,
+      { workflowId: wfId, definitionVersionId: "v1" },
+      def, "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await workflowStore.putIntent({
+      runId,
+      nodeId: "t3",
+      iteration: 0,
+      attempt: 1,
+      status: "intent",
+      createdAt: now,
+      effects: { gate: true, gateParams: { secret: "internal" } },
+    });
+    await workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:t3", nodeId: "t3" },
+    ]);
+
+    const detail = await getWorkflowRunDetail(
+      { db, workflowStore, workflowRunHost },
+      { userId: "local-user", orgId: "local-org" },
+      runId,
+    );
+    expect(detail).not.toBeNull();
+    // The checkpoints array must NOT expose effects.
+    for (const cp of detail!.checkpoints) {
+      expect(cp).not.toHaveProperty("effects");
+    }
+  });
 });
 
 describe("GET /api/workflows/:id/runs", () => {
@@ -286,5 +1557,81 @@ describe("GET /api/workflows/:id/runs", () => {
     expect(res.status).toBe(200);
     const { runs } = (await res.json()) as ListWorkflowRunsResponse;
     expect(runs.map((r) => r.runId)).toEqual([runId]);
+  });
+});
+
+describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
+  it("mints a hookId, then reads it back via GET", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const minted = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    expect(minted.status).toBe(200);
+    const mintedBody = (await minted.json()) as WorkflowWebhookResponse;
+    expect(mintedBody.workflowId).toBe(created.id);
+    expect(mintedBody.hookId).toMatch(/^[0-9a-f]{64}$/);
+
+    const fetched = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(fetched.status).toBe(200);
+    const fetchedBody = (await fetched.json()) as WorkflowWebhookResponse;
+    expect(fetchedBody.hookId).toBe(mintedBody.hookId);
+  });
+
+  it("GET 404s when the workflow has no webhook yet", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(res.status).toBe(404);
+  });
+
+  it("POST/GET/DELETE all 404 against another owner's workflow", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const headers = { "x-valet-test-user-id": "test-member" };
+
+    const post = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST", headers });
+    expect(post.status).toBe(404);
+
+    const get = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { headers });
+    expect(get.status).toBe(404);
+
+    const del = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE", headers });
+    expect(del.status).toBe(404);
+  });
+
+  it("rotating changes the hookId", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const first = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    const firstBody = (await first.json()) as WorkflowWebhookResponse;
+    const second = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    const secondBody = (await second.json()) as WorkflowWebhookResponse;
+    expect(secondBody.hookId).not.toBe(firstBody.hookId);
+  });
+
+  it("DELETE removes an existing hook and returns deleted:true", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeleteWorkflowWebhookResponse;
+    expect(body.deleted).toBe(true);
+
+    const afterDelete = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(afterDelete.status).toBe(404);
+  });
+
+  it("DELETE on an owned workflow with no hook returns deleted:false (not a 404 — the workflow itself is fine)", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeleteWorkflowWebhookResponse;
+    expect(body.deleted).toBe(false);
   });
 });

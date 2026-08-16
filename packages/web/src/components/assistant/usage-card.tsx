@@ -78,14 +78,42 @@ export function UsageCard() {
   );
 }
 
+export interface WindowCostDisplay {
+  /** The headline number. */
+  text: string;
+  /** Qualifier under the number. Empty when the cost covers every turn. */
+  note: string;
+}
+
+/**
+ * Cost presentation for one window, extracted so it's testable without
+ * rendering React (CLAUDE.md: prefer pure functions over private member
+ * access for tests).
+ *
+ * The engine records no cost for an unpriced model (custom/OpenRouter
+ * providers, dev fakes) rather than recording 0, and the API keeps that
+ * distinction in `unpricedTurns`. So a window can be partly measured, and a
+ * window can be entirely unmeasured. Neither may render as a confident "$0":
+ * an unmeasured window shows a dash, and a partly measured one shows the
+ * priced spend as a floor.
+ */
+export function windowCostDisplay(w: UsageWindow): WindowCostDisplay {
+  if (w.turns === 0) return { text: formatUsd(0), note: "" };
+  if (w.unpricedTurns === 0) return { text: formatUsd(w.costUsd), note: "" };
+  if (w.unpricedTurns >= w.turns) return { text: "—", note: "unpriced" };
+  return { text: `${formatUsd(w.costUsd)}+`, note: `${w.unpricedTurns} unpriced` };
+}
+
 function WindowStat({ label, window: w }: { label: string; window: UsageWindow }) {
+  const cost = windowCostDisplay(w);
   return (
     <div className="rounded-md bg-moss-wash px-2.5 py-2">
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
-      <div className="mt-0.5 font-display text-lg text-ink leading-tight">{formatUsd(w.costUsd)}</div>
+      <div className="mt-0.5 font-display text-lg text-ink leading-tight">{cost.text}</div>
       <div className="text-[10px] text-muted tabular-nums">
-        {formatTokens(w.inputTokens + w.outputTokens)} tok · {w.turns} turns
+        {formatTokens(w.totalTokens)} tok · {w.turns} turns
       </div>
+      {cost.note && <div className="text-[10px] text-muted">{cost.note}</div>}
     </div>
   );
 }
@@ -100,6 +128,7 @@ function MemberBar({
   isMe: boolean;
 }) {
   const fraction = max > 0 ? member.costUsd / max : 0;
+  const cost = windowCostDisplay(member);
   return (
     <div className="flex items-center gap-2 text-xs">
       <span className={cn("w-24 truncate", isMe ? "text-ink font-medium" : "text-muted")}>
@@ -111,7 +140,16 @@ function MemberBar({
           style={{ width: `${Math.max(2, Math.round(fraction * 100))}%` }}
         />
       </div>
-      <span className="w-14 text-right tabular-nums text-muted">{formatUsd(member.costUsd)}</span>
+      <span
+        className="w-16 text-right tabular-nums text-muted"
+        title={
+          cost.note
+            ? `${member.unpricedTurns} of ${member.turns} turns had no price`
+            : undefined
+        }
+      >
+        {cost.text}
+      </span>
     </div>
   );
 }

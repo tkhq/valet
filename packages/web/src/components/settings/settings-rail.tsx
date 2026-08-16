@@ -24,6 +24,8 @@ const YOU_ITEMS = [
   { to: "/settings/notifications", label: "Notifications" },
   { to: "/settings/connected-accounts", label: "Connected accounts" },
   { to: "/settings/api-keys", label: "API keys" },
+  { to: "/settings/library-sources", label: "Library sources" },
+  { to: "/settings/policies", label: "Policies" },
 ] as const;
 
 /** Single-user-mode stand-in for Organization · Models — shown under "You"
@@ -36,8 +38,11 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/members", label: "Members" },
   { to: "/settings/organization/teams", label: "Teams" },
   { to: "/settings/organization/models", label: "Models" },
+  { to: "/settings/organization/library", label: "Library" },
   { to: "/settings/organization/github", label: "GitHub" },
   { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
+  { to: "/settings/organization/policies", label: "Policies" },
+  { to: "/settings/organization/action-log", label: "Action log" },
 ] as const;
 
 export function SettingsRail() {

@@ -10,6 +10,8 @@ import {
   parseOrchestratorSessionId,
   NoCredentialsError,
   type BlobStore,
+  type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type CredentialStore,
   type EventStream,
@@ -22,11 +24,30 @@ import {
   type SessionStore,
   type StoredCredential,
   type ResolvedModel,
+  type PolicyResolver,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import {
+  buildPluginCatalog,
+  type ActionPlugin,
+  type CommandContext,
+  type CommandDef,
+  type PluginCatalog,
+  type RepoInstructions,
+  type Sandbox,
+  type SkillSource,
+} from "@valet/engine";
+import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import type { RepoBinding } from "../wire/types.js";
-import { GitHubAuthError } from "../services/github-tokens.js";
-import { resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
+import { makeRepoInstructionsProvider } from "./repo-instructions.js";
+import {
+  GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
+  GitHubAuthError,
+  resolveInstallationApiToken,
+} from "../services/github-tokens.js";
+import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -36,7 +57,7 @@ import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orchestratorIdentities, users } from "../schema/index.js";
+import { agentSessions, orchestratorIdentities, orgs, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
@@ -50,7 +71,8 @@ import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
-import { pluginSessionExtras } from "../plugins/assemble.js";
+import { listSkillSourcesFor } from "../services/skills.js";
+import { pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 
 /** Personality is capped at injection time (assistant-centered web UI
  * decision 5), independent of any cap the memory service itself applies. */
@@ -68,6 +90,15 @@ export interface EngineHostOpts {
   defaultModelId?: string;
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
+  /**
+   * Optional per-profile override for the fall-through stock image.
+   * When present, `stockImage` in `resolveSnapshot` uses
+   * `defaultImages[profile] ?? defaultImage` for the session's profile.
+   * Used to keep full-profile sessions from silently falling through to
+   * the headless base image during the boot window (before the org's
+   * default-full base bake lands).
+   */
+  defaultImages?: Partial<Record<"headless" | "full", string>>;
   /**
    * The app db handle — required by `orchestratorSessionFor` (memory
    * snapshot assembly, journal bootstrap, the compaction hook, and the
@@ -108,11 +139,34 @@ export interface EngineHostOpts {
    */
   childSpawner?: ChildSpawner;
   /**
+   * Injected into every orchestrator session's `toolConfig.childReader`,
+   * which is what the engine's `child_read` built-in calls. Paired with
+   * `childSpawner`: a session that can spawn children is exactly the
+   * session that may read them back.
+   */
+  childReader?: ChildReader;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childSender`,
+   * which is what the engine's `child_send` built-in calls. Completes the
+   * child toolset (`task` spawns, `child_read` reads, `child_send`
+   * steers); scoped exactly like the other two — children never get it.
+   */
+  childSender?: ChildSender;
+  /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
-   * output). Every session builder calls `pluginSessionExtras(plugins)`
-   * FRESH — see the call sites below — never cached on the host instance.
+   * output). Every session builder goes through `sessionExtras`, which
+   * builds the extras FRESH per build and never caches them on the host
+   * instance.
    */
   plugins?: ValetPlugin[];
+  /**
+   * Assembled service→ActionPlugin index (plugin-system-v2 Task 4's
+   * `assemblePlugins` output). Used only to look up a plugin's
+   * `defaultApprovalMode` inside the policy resolver (action-policies plan,
+   * Task 3) — org policies/grants apply regardless, so an absent map just
+   * means the plugin-default rung falls through to the risk default.
+   */
+  actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   /**
    * Deps for resolving a session's `github` credential through the canonical
    * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
@@ -302,6 +356,17 @@ export class EngineHost {
    */
   private tokenMintedAt = new Map<string, number>();
 
+  /**
+   * Lazily-built, host-wide policy resolver (action-policies plan, Task 3).
+   * ONE instance shared by every session build — all per-invocation context
+   * (org/user/session/service/params) rides in on the engine's
+   * `PolicyResolveInput`, so the resolver holds no session state. Present
+   * whenever an app `db` is wired (org policies/grants/audit all need it);
+   * absent in db-less tests, which then get the engine's byte-identical
+   * pre-policy approval path.
+   */
+  private policyResolverInstance: PolicyResolver | null = null;
+
   constructor(private readonly opts: EngineHostOpts) {
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
@@ -422,6 +487,23 @@ export class EngineHost {
             console.error(`EngineHost: onSessionReady failed for session ${sessionId}:`, err),
           );
         }
+        // Prep-completion seam for slash commands (Task 10): repo templates
+        // under `/workspace/.valet/prompts` are only readable once workspace
+        // prep has run, which happens by the time the attachment reaches
+        // `ready`. Refresh the command registry so those templates land. A
+        // no-op when the session has no `workspaceSkillsProvider`. Best-effort — a
+        // refresh failure never breaks the ready transition.
+        Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
+          console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
+        );
+        // Repo AGENTS.md instructions (agents-md spec, decision 1): re-read on
+        // every ready transition — cold boot, wake, and warm rebuild — so
+        // mid-session edits land at natural boundaries. A no-op when the
+        // session has no `repoInstructionsProvider`. Best-effort, same as the
+        // registry refresh above; a failure leaves the previous value serving.
+        Promise.resolve(session.refreshRepoInstructions()).catch((err) =>
+          console.error(`EngineHost: refreshRepoInstructions failed for session ${sessionId}:`, err),
+        );
       }
     });
   }
@@ -460,12 +542,12 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
-    // Built FRESH per session build, never cached on the host: the plugin
-    // catalog's dynamic-action-resolution cache lives on the `Catalog`
-    // instance `pluginCatalogTools` returns, so it must stay scoped to this
-    // one session's credential context — a shared/cached catalog would leak
-    // one user's resolved tool list into every other session.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `SessionMeta` carries no principal, and this builder passes no `owner`
+    // to the engine either — `Session`'s constructor then defaults the
+    // principal to `{ type: "user", id: options.userId }`. So the acting
+    // user IS this session's owner, and the same `{ user, meta.userId }`
+    // scope the session's credentials already use is the honest one here.
+    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId);
 
     const engine = new Engine({
       providers: {
@@ -508,10 +590,31 @@ export class EngineHost {
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
-    // Initial sandbox image: the stock default. The specProvider closure may
-    // resolve a prebuild image override at provision time — the engine applies
-    // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImage;
+    // Slash-command options (Task 10). The workspace-skills provider's sandbox
+    // accessor closes over `builtSession` — resolved lazily, so it is safe that
+    // the session doesn't exist yet at this point. `hasPrep` is true only when
+    // a specProvider exists: without prep there is no `/workspace/.valet/prompts`
+    // to scan (skills-as-commands plan, Task 4).
+    const commandOptions = await this.buildCommandOptions(
+      meta.orgId,
+      sessionId,
+      () => builtSession,
+      specProvider !== undefined,
+    );
+    // Repo AGENTS.md instructions (agents-md spec, decision 5): same lazy
+    // `builtSession` accessor as the command options above.
+    const repoInstructionsProvider = this.buildRepoInstructionsProvider(
+      () => builtSession,
+      meta.repos,
+      specProvider !== undefined,
+    );
+    // Initial sandbox image: the per-profile stock default. Full-profile
+    // sessions use `defaultImages["full"]` so the boot-window fall-through
+    // (before the org's default-full base bake lands) picks the full image
+    // rather than silently booting the headless base. The specProvider closure
+    // may resolve a prebuild image override at provision time — the engine
+    // applies DesiredSandboxSpec.image when the specProvider returns one.
+    const image = this.opts.defaultImages?.[profile] ?? this.opts.defaultImage;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -519,6 +622,7 @@ export class EngineHost {
       profile,
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
+    const policyResolver = this.getPolicyResolver();
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -536,6 +640,9 @@ export class EngineHost {
             roles: extras.roles.length ? extras.roles : undefined,
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
+            ...(commandOptions ?? {}),
+            ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
+            ...(policyResolver ? { policyResolver } : {}),
           },
         })
       : await engine.createSession({
@@ -553,6 +660,9 @@ export class EngineHost {
           roles: extras.roles.length ? extras.roles : undefined,
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
+          ...(commandOptions ?? {}),
+          ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
+          ...(policyResolver ? { policyResolver } : {}),
         });
 
     builtSession = session;
@@ -568,6 +678,34 @@ export class EngineHost {
     // window. Fire-and-forget — never block or fail the restore.
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;
+  }
+
+  /**
+   * The tools/skills/roles a session build gets: the plugin set, plus the
+   * stored skills the session's `owner` can reach (`skills` table).
+   *
+   * Built FRESH per session build, never cached on the host: the plugin
+   * catalog's dynamic-action-resolution cache lives on the `Catalog`
+   * instance `pluginCatalogTools` returns, so it must stay scoped to this
+   * one session's credential context — a shared/cached catalog would leak
+   * one user's resolved tool list into every other session. The skill read
+   * is per-build for the same reason a session's memory snapshot is: an
+   * edit reaches a session at its next build, not mid-run.
+   *
+   * `opts.db` is optional (tests that wire no db), so an absent db means
+   * "plugin skills only" — the same graceful degradation `mintSandboxEnv`
+   * applies. A stored skill whose name a plugin skill already holds is
+   * shadowed inside `pluginSessionExtras`, never thrown: none of the four
+   * callers has a try/catch, and a throw here would stop this owner from
+   * starting any session.
+   */
+  private async sessionExtras(owner: Principal, orgId: string): Promise<PluginSessionExtras> {
+    const plugins = this.opts.plugins ?? [];
+    if (!this.opts.db) return pluginSessionExtras(plugins, []);
+    return pluginSessionExtras(
+      plugins,
+      await listSkillSourcesFor(this.opts.db, owner, orgId),
+    );
   }
 
   /**
@@ -658,7 +796,11 @@ export class EngineHost {
 
     const host = this;
     const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
-    const stockImage = this.opts.defaultImage ?? "";
+    const profile: "headless" | "full" = meta.profile ?? "headless";
+    const stockImage =
+      this.opts.defaultImages?.[profile] ??
+      this.opts.defaultImage ??
+      "";
 
     return async () => {
       const snap = await resolveSnapshot({
@@ -719,6 +861,9 @@ export class EngineHost {
    *    unchanged — the engine surfaces it as the tool's error result, hint
    *    text intact. Synthesizes a `StoredCredential` the engine's
    *    `credentialProvider` maps to `{ accessToken }`.
+   *  - `github:installation` → `resolveInstallationApiToken`, the explicit
+   *    installation-tier request (the binding's owner, else the org's sole
+   *    installation). `null` when no installation resolves.
    *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
    *    read, byte-identical to the engine's default (store-backed) path.
    *
@@ -740,6 +885,23 @@ export class EngineHost {
    * answer the "is github connected" question discovery actually asks; that's
    * a follow-up seam, not new surface built in this wave.
    */
+  /**
+   * The host-wide `PolicyResolver` (action-policies plan, Task 3), or
+   * `undefined` when no app `db` is wired (db-less tests keep the engine's
+   * built-in risk→approval fallback, byte-identical to pre-policy behavior).
+   * Built once and memoized — the resolver is session-agnostic.
+   */
+  private getPolicyResolver(): PolicyResolver | undefined {
+    if (!this.opts.db) return undefined;
+    if (!this.policyResolverInstance) {
+      this.policyResolverInstance = buildPolicyResolver({
+        db: this.opts.db,
+        actionPluginByService: this.opts.actionPluginByService ?? new Map(),
+      });
+    }
+    return this.policyResolverInstance;
+  }
+
   private buildCredentialResolver(
     sessionId: string,
     userId: string,
@@ -750,6 +912,29 @@ export class EngineHost {
     const credentials = this.opts.engineCredentials;
     if (!tokenDeps || !db) return undefined;
     return async (owner, service) => {
+      if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
+        // Explicit installation-tier request (github.list_repos with
+        // `scope: "installation"`): mint the App installation token directly
+        // instead of reusing whatever tier default `github` resolution
+        // picked — a user token 403s on `GET /installation/repositories`.
+        // `null` (no installation) stays `null`; the action names the
+        // corrective step in its own error.
+        const binding = await primaryRepoBinding(db, sessionId);
+        const token = await resolveInstallationApiToken(
+          {
+            db,
+            credentials,
+            key: tokenDeps.key,
+            apiUrl: tokenDeps.apiUrl,
+            githubUrl: tokenDeps.githubUrl,
+            fetchImpl: tokenDeps.fetchImpl,
+            now: tokenDeps.now,
+          },
+          orgId,
+          binding?.repo.owner,
+        );
+        return token === null ? null : { type: "app_install", accessToken: token };
+      }
       if (service !== "github") {
         // Byte-identical to the engine's default store-backed read.
         return credentials.get(owner, service);
@@ -776,6 +961,135 @@ export class EngineHost {
       }
       return { type: "oauth2", accessToken: resolved.token };
     };
+  }
+
+  /**
+   * Assembles the slash-command options for a session build (slash-commands
+   * plan, Task 10; skills-as-commands plan, Task 4): `workspaceSkillsProvider`,
+   * `commandContext`, `bareSkillNames`, and the plugin-command pair
+   * (`pluginCommands` + `pluginCatalog`).
+   *
+   * `getSession` returns the built `Session` once it exists (parked in a local
+   * by the caller, same pattern as `onStartRef`). The workspace-skills
+   * provider's sandbox accessor uses it to reach `session.sandbox` — but ONLY
+   * when the attachment is already `ready`, so listing commands never
+   * provisions a sandbox. Repo prompt skills become readable once workspace
+   * prep finishes; the host calls `session.refreshCommandRegistry()` on each
+   * `ready` transition (see `trackHibernationWake`) so the registry picks them
+   * up then.
+   *
+   * `hasPrep` (skills-as-commands plan, Task 4): the workspace-skills provider
+   * is wired ONLY when the session has a prepared workspace (a `specProvider`
+   * exists). Without prep, `/workspace/.valet/prompts` is meaningless — a
+   * non-isolated, repo-less session (and every sandbox-less orchestrator) execs
+   * against a workspace that no prep ever created — so the provider, and its
+   * `===VALET-TMPL` scan on the `ready` refresh, must not fire. When `hasPrep`
+   * is false, `workspaceSkillsProvider` is omitted and `refreshCommandRegistry`
+   * runs an empty scan. DB-stored prompt skills still reach the session through
+   * `sessionExtras` regardless of prep.
+   *
+   * `bareSkillNames` reads `orgs.bareSkillCommands` (Task 3): when the org sets
+   * it, stored/repo skills also register under their bare name in addition to
+   * the always-present `skill:<name>` entry.
+   *
+   * `pluginCommands` and `pluginCatalog` are wired TOGETHER from the SAME
+   * `ActionPlugin[]` that backs the LLM `call_tool` tool (via
+   * `pluginSessionExtras`) — a command entry resolves through the registry, and
+   * its backing action runs against this catalog, so approval policy and arg
+   * validation stay identical to the tool path. Wiring one without the other
+   * makes every plugin command fail with "no plugin catalog is configured".
+   *
+   * No `commandRequestDecision` is supplied: a slash command is not a claimed
+   * turn, so it cannot suspend one on a decision gate, and the host has no
+   * synchronous approve path (approvals resolve asynchronously over REST).
+   * An approval-requiring plugin command therefore denies by default (Task 7
+   * behavior), which is the safe outcome until a command-scoped async approval
+   * flow exists.
+   *
+   * Returns `undefined` when the host has no `db` (tests that don't wire one) —
+   * the session then builds with no command providers, same as before.
+   */
+  /**
+   * `hasPrep` gates the workspace-skills provider — see the doc block above.
+   * Pass `true` only when the caller wired a `specProvider` for this build.
+   */
+  private async buildCommandOptions(
+    orgId: string,
+    sessionId: string,
+    getSession: () => Session | undefined,
+    hasPrep: boolean,
+  ): Promise<
+    | {
+        workspaceSkillsProvider?: () => Promise<SkillSource[]>;
+        commandContext: CommandContext;
+        bareSkillNames: boolean;
+        pluginCommands: Array<{ pluginName: string; def: CommandDef }>;
+        pluginCatalog: PluginCatalog;
+      }
+    | undefined
+  > {
+    const db = this.opts.db;
+    if (!db) return undefined;
+
+    // Task 3: moved bareSkillCommands to org level; read from orgs table.
+    // (Was per-user users.bareSkillCommands — column removed in that task.)
+    const bareRows = await db
+      .select({ bareSkillCommands: orgs.bareSkillCommands })
+      .from(orgs)
+      .where(eq(orgs.id, orgId))
+      .limit(1);
+    const bareSkillNames = bareRows[0]?.bareSkillCommands ?? false;
+
+    // Only a prepared workspace has a `/workspace/.valet/prompts` to scan; a
+    // non-isolated repo-less session and every sandbox-less orchestrator have
+    // none, so omit the provider (and its `===VALET-TMPL` exec) for them.
+    const workspaceSkillsProvider = hasPrep
+      ? makeWorkspaceSkillsProvider(() => {
+          const session = getSession();
+          // Only reach for the sandbox once it is provisioned — listing
+          // commands must never trigger a cold start just to read repo prompts.
+          if (!session || session.attachment.state !== "ready") return undefined;
+          return session.sandbox as Sandbox;
+        })
+      : undefined;
+    const commandContext = makeCommandContext(db, this.opts.engineCredentials, orgId, sessionId);
+
+    const plugins = this.opts.plugins ?? [];
+    const pluginCommands = plugins.flatMap((p) =>
+      (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
+    );
+    const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
+    const pluginCatalog = buildPluginCatalog(actionPlugins);
+
+    return {
+      ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
+      commandContext,
+      bareSkillNames,
+      pluginCommands,
+      pluginCatalog,
+    };
+  }
+
+  /**
+   * Builds the `repoInstructionsProvider` for a session build (agents-md
+   * spec, decision 5). Wired only when the session has BOTH a prepared
+   * workspace (`hasPrep`, same gate as `workspaceSkillsProvider`) and at
+   * least one repo binding — a credential-only prep clones nothing, so
+   * there is no AGENTS.md to scan. The sandbox accessor mirrors
+   * `buildCommandOptions`: it reaches for the sandbox only once the
+   * attachment is `ready`, so a refresh never provisions one.
+   */
+  private buildRepoInstructionsProvider(
+    getSession: () => Session | undefined,
+    repos: SessionMeta["repos"],
+    hasPrep: boolean,
+  ): (() => Promise<RepoInstructions | null>) | undefined {
+    if (!hasPrep || !repos || repos.length === 0) return undefined;
+    return makeRepoInstructionsProvider(() => {
+      const session = getSession();
+      if (!session || session.attachment.state !== "ready") return undefined;
+      return session.sandbox as Sandbox;
+    }, repos[0].targetDir);
   }
 
   /**
@@ -857,18 +1171,37 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
-    // Built FRESH per session build, never cached on the host — see the
-    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `principal`, not `meta.actorUserId`: an orchestrator session belongs to
+    // the principal and is shared by everyone who can reach it, exactly like
+    // the memory snapshot this method assembles from `scope.owner`. Scoping
+    // to the actor instead would put whoever woke a team orchestrator's
+    // personal skills in front of every other member of that team.
+    const extras = await this.sessionExtras(principal, meta.orgId);
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    // Slash-command options: same wiring as the interactive path, so the
+    // orchestrator answers /model and /sessions instead of the no-context
+    // fallback. The getter closes over `builtSession`, assigned below.
+    // Orchestrators are sandbox-less (no specProvider), so `hasPrep` is false —
+    // no `/workspace/.valet/prompts` scan. `bareSkillNames` comes from the org
+    // row; DB-stored skills reach the orchestrator through `sessionExtras`,
+    // scoped by the principal (skills-as-commands plan, Task 4).
+    let builtSession: Session | undefined;
+    const commandOptions = await this.buildCommandOptions(
+      meta.orgId,
+      sessionId,
+      () => builtSession,
+      false,
+    );
+    const policyResolver = this.getPolicyResolver();
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
       workspace,
       purpose: "orchestrator" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(policyResolver ? { policyResolver } : {}),
       owner: principal,
       queueMode,
       sandbox: {
@@ -889,6 +1222,8 @@ export class EngineHost {
         apiBaseUrl,
         internalToken: internalToken(),
         ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
+        ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
+        ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
@@ -903,6 +1238,7 @@ export class EngineHost {
       // PolicySandbox attachment's first-touch contract — never a
       // proactive warm-on-claim kick just because a turn was claimed.
       warmSandboxOnClaim: false,
+      ...(commandOptions ?? {}),
     };
 
     const engine = new Engine({
@@ -918,6 +1254,7 @@ export class EngineHost {
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
+    builtSession = session;
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
@@ -1032,7 +1369,19 @@ export class EngineHost {
       await entry.session.destroy();
     } finally {
       this.cache.delete(sessionId);
-      if (this.opts.db) await revokeSandboxTokens(this.opts.db, sessionId);
+      if (this.opts.db) {
+        await revokeSandboxTokens(this.opts.db, sessionId);
+        // Grant expiry (action-policies plan, Task 3): a stopped session's
+        // runtime grants must not survive to quiet a future action on a
+        // rebuilt session reusing the same id. Idempotent (guarded on
+        // `revoked_at IS NULL`); best-effort — a failure here must not mask
+        // the destroy, so it's logged, not thrown.
+        try {
+          await revokeSessionGrants(this.opts.db, sessionId);
+        } catch (err) {
+          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+        }
+      }
     }
   }
 
@@ -1182,6 +1531,27 @@ export class EngineHost {
    */
   liveSession(sessionId: string): Session | null {
     return this.cache.get(sessionId)?.session ?? null;
+  }
+
+  /**
+   * Whether the sandbox backend can suspend/resume (hibernation). The
+   * child retention path consults this at settle time: capable backends
+   * park a settled child's sandbox for later revival; the rest destroy it
+   * eagerly, exactly as before retention existed.
+   */
+  sandboxHibernationCapable(): boolean {
+    return this.opts.sandboxProvider.capabilities().hibernation;
+  }
+
+  /**
+   * Destroy one sandbox by its provider id, without touching any session
+   * state. The child retention sweep uses this for a parked child whose
+   * session is no longer cached (an api restart evicted it) — the
+   * `child_watches.parkedSandboxId` recorded at park time is the only
+   * remaining handle.
+   */
+  async destroySandbox(sandboxId: string): Promise<void> {
+    await this.opts.sandboxProvider.destroy(sandboxId);
   }
 
   /**
@@ -1377,21 +1747,51 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    // Built FRESH per session build, never cached on the host — see the
-    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `opts.owner` is the child's own principal: the `task` tool reads the
+    // parent session's principal and hands it to the spawner, which passes
+    // it here and on to `createSession` below. A child of a team-owned
+    // session gets that team's skills, not the spawning user's.
+    const extras = await this.sessionExtras(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
+    const policyResolver = this.getPolicyResolver();
+    // A child spawned with a repo binding (the spawner inserts the
+    // `session_repos` row before calling in here) gets the same declarative
+    // clone prep a REST-created session gets. Only this first build decides —
+    // later cache hits ignore meta (see `loadSessionMeta`'s module doc). No
+    // start-ref sink: a child session records no start-ref today. An absent
+    // `opts.db` (tests that wire no db) degrades to empty bindings, same as
+    // `sessionExtras`/`mintSandboxEnv`.
+    const meta = this.opts.db
+      ? await loadSessionMeta(this.opts.db, {
+          id: childSessionId,
+          userId: opts.actorUserId,
+          orgId: opts.orgId,
+          workspace: opts.workspace,
+        })
+      : { userId: opts.actorUserId, orgId: opts.orgId, workspace: opts.workspace };
+    const specProvider = await this.buildSpecProvider(childSessionId, meta);
+    // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
+    // spawned with a repo binding reads its AGENTS.md exactly like a
+    // REST-created session. `builtSession` is assigned below, after the
+    // engine builds the session — the provider resolves it lazily.
+    let builtSession: Session | undefined;
+    const repoInstructionsProvider = this.buildRepoInstructionsProvider(
+      () => builtSession,
+      "repos" in meta ? meta.repos : undefined,
+      specProvider !== undefined,
+    );
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(policyResolver ? { policyResolver } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -1409,6 +1809,8 @@ export class EngineHost {
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
+      ...(specProvider ? { specProvider } : {}),
+      ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
     };
 
     const engine = new Engine({
@@ -1425,6 +1827,7 @@ export class EngineHost {
       ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
+    builtSession = session;
     this.cache.set(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
@@ -1475,21 +1878,25 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    // Built FRESH per session build, never cached on the host — see the
-    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
+    // the scheduler and the event dispatcher copy from the definition row).
+    // A run started from a team-owned workflow therefore reads the team's
+    // skills, not those of whoever last edited the workflow.
+    const extras = await this.sessionExtras(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
+    const policyResolver = this.getPolicyResolver();
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(policyResolver ? { policyResolver } : {}),
       owner: opts.owner,
       sandbox: {
         workspace: opts.workspace,

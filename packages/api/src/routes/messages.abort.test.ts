@@ -177,6 +177,8 @@ describeIfKey("POST /threads/:threadId/abort (real turn)", () => {
       });
       expect(promptRes.status).toBe(202);
       const { messageId } = (await promptRes.json()) as SendPromptResponse;
+      // A plain prompt always queues; null is the slash-command shape.
+      if (messageId === null) throw new Error("prompt unexpectedly ran as a command");
 
       const abortRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
         method: "POST",

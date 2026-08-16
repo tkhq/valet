@@ -2,7 +2,7 @@ import { mkdtemp, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { buildDockerRunArgs, writeCredsFiles } from "../src/sandbox.js";
+import { buildDockerRunArgs, credsCheckScript, writeCredsFiles } from "../src/sandbox.js";
 
 const baseOpts = {
   containerName: "valet-sandbox-test",
@@ -162,5 +162,46 @@ describe("writeCredsFiles (pure — no Docker required)", () => {
     // Both files exist; no error thrown on access.
     await expect(access(join(tmp, "token"))).resolves.toBeUndefined();
     await expect(access(join(tmp, "other"))).resolves.toBeUndefined();
+  });
+});
+
+describe("credsCheckScript (pure — no Docker required)", () => {
+  it("checks each file's content base64-encoded and each removed name's absence", () => {
+    const script = credsCheckScript({ token: "abc" }, ["stale"]);
+    const b64 = Buffer.from("abc", "utf8").toString("base64");
+    expect(script).toContain(`base64 < '/etc/valet/creds/token'`);
+    expect(script).toContain(`= '${b64}' ] || exit 1`);
+    expect(script).toContain(`[ ! -e '/etc/valet/creds/stale' ] || exit 1`);
+    expect(script.endsWith("exit 0")).toBe(true);
+  });
+
+  it("never embeds the secret content in shell syntax", () => {
+    const secret = "s3cr3t'; rm -rf / #";
+    const script = credsCheckScript({ token: secret }, []);
+    expect(script).not.toContain(secret);
+    expect(script).toContain(Buffer.from(secret, "utf8").toString("base64"));
+  });
+
+  it("quotes removed filenames for a single-quoted shell context", () => {
+    const script = credsCheckScript({}, ["odd'name"]);
+    expect(script).toContain(`'/etc/valet/creds/odd'\\''name'`);
+  });
+
+  it("reduces to a bare success for empty inputs", () => {
+    expect(credsCheckScript({}, [])).toBe("exit 0");
+  });
+});
+
+describe("credsCheckScript path-traversal guard", () => {
+  it("rejects traversal in file keys", () => {
+    expect(() => credsCheckScript({ "../../../etc/passwd": "x" }, [])).toThrow(
+      /unsafe key.*etc\/passwd/,
+    );
+    expect(() => credsCheckScript({ "a/b": "x" }, [])).toThrow(/unsafe key/);
+  });
+
+  it("rejects traversal in removed names", () => {
+    expect(() => credsCheckScript({}, ["../outside"])).toThrow(/unsafe key/);
+    expect(() => credsCheckScript({}, ["."])).toThrow(/unsafe key/);
   });
 });

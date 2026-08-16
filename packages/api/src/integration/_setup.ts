@@ -13,21 +13,26 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
+import { eq } from "drizzle-orm";
 import {
   VirtualSandboxProvider,
+  type ChildReader,
+  type ChildSender,
   type ChildSpawner,
   type SandboxProvider,
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
+import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalGrant, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
+import { SkillSyncService } from "../services/skill-sync.js";
+import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -35,9 +40,11 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { ImageBuilder } from "../prebuilds/builder.js";
@@ -62,6 +69,9 @@ export interface BootTestApiOpts {
    * `sandboxProvider` that records the `SandboxCreateOpts.image` it
    * receives. Unset by default, matching `EngineHost`'s own default. */
   defaultImage?: string;
+  /** Forwarded to `EngineHostOpts.defaultImages` — tests that pin
+   * per-profile stock-image fallback behavior. */
+  defaultImages?: Partial<Record<"headless" | "full", string>>;
   /**
    * Override the default real `LocalRunHost` — route-level tests that only
    * need to observe `start`/`wake`/`terminate` calls (never actually drive a
@@ -69,17 +79,22 @@ export interface BootTestApiOpts {
    * the poll/sweep loops.
    */
   workflowRunHost?: RunHost;
+  /** Overrides the default 30-per-60s `webhookRateLimiter` — rate-limit
+   * tests set a tiny limit so they don't have to race a wall-clock window. */
+  webhookRateLimit?: WorkflowWebhookRateLimiterOptions;
   /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
    * — tests never scan node_modules; default `[]`. */
   plugins?: ValetPlugin[];
   /**
    * Boots with a real better-auth instance instead of stub-only mode: sets
-   * `BETTER_AUTH_SECRET=test-secret` (restored on `cleanup()`) so
-   * `loadAuthConfig` resolves, then wires `buildAuthHooks` + `buildAuth`
-   * into `createApp` exactly as `main.ts` does. Every other caller stays
-   * untouched — `BETTER_AUTH_SECRET` is unset by default, so `createApp`
-   * gets no `auth`/`authConfig` and runs stub-only, same as before this
-   * option existed.
+   * `BETTER_AUTH_SECRET=test-secret` and unsets `VALET_LOCAL_AUTH` (both
+   * restored on `cleanup()`) so `loadAuthConfig` resolves and the stub rung
+   * stays off, then wires `buildAuthHooks` + `buildAuth` into `createApp`
+   * exactly as `main.ts` does. A credential-less request therefore 401s here
+   * the way it does in production. Every other caller stays untouched —
+   * `BETTER_AUTH_SECRET` is unset by default and `VALET_LOCAL_AUTH=1` stays
+   * on, so `createApp` gets no `auth`/`authConfig` and runs stub-only, same
+   * as before this option existed.
    */
   auth?: boolean;
   /** Passed through to `createApp`'s `CreateAppOpts.webDistDir` — route
@@ -116,21 +131,25 @@ export interface BootTestApiOpts {
   /** Forwarded to `EngineHostOpts.idleSweepTestHooks` — test-only race
    * injection for the idle sweep's re-check. */
   idleSweepTestHooks?: EngineHostOpts["idleSweepTestHooks"];
-  /** Forwarded to `EngineHostOpts.githubTokenDeps` — wires the session
-   * `credentialResolver` seam (GH-T10 fix) so a real `sessionFor(...)` build
-   * resolves `github` credentials through the token service instead of a raw
-   * store read. Unset by default, matching every other route test (no
-   * resolver at all) — only tests exercising the action-invoke-level
-   * session-credential seam (GitHub/repo integration plan, Task 12's e2e)
-   * need this wired through a full API boot. */
+  /** Overrides the GitHub token deps given to BOTH `EngineHost` (the
+   * session `credentialResolver` seam, GH-T10 fix) and the workflow action
+   * invoker — the same pair `providers/node.ts` derives from one key at real
+   * boot. Point `apiUrl`/`githubUrl` at `startGithubFixture()`'s `url` to
+   * keep resolution off the network.
+   *
+   * When unset, `EngineHost` gets no resolver (sessions read credentials
+   * straight from the store, matching every other route test) but the
+   * workflow invoker still gets the default test key, because production
+   * always wires it and a `github` tool node is otherwise untestable. */
   githubTokenDeps?: EngineHostOpts["githubTokenDeps"];
   /** Wires `Providers.prebuildService`'s `builder` — unset/`null` (the
    * default) means "prebuilds unavailable", same as a `local` sandbox
    * backend boot. Prebuild route tests supply a fake `ImageBuilder`. */
   imageBuilder?: ImageBuilder | null;
-  /** Overrides the `apiUrl`/`githubUrl` the constructed `PrebuildService`
-   * resolves GitHub credentials/contents through — point this at
-   * `startGithubFixture()`'s `url`. Ignored when `imageBuilder` is unset. */
+  /** Overrides the GitHub API base URL two constructed services read
+   * through: the `PrebuildService`'s credential/contents resolution (ignored
+   * when `imageBuilder` is unset), and the skill-sync reader. Point it at
+   * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
 }
 
@@ -173,15 +192,23 @@ async function getFreePort(): Promise<number> {
 
 export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
-  process.env.VALET_LOCAL_AUTH = "1";
   // Test-only: enables the `x-valet-test-user-id` impersonation header in
   // authMiddleware. Never set this outside the test bootstrap (see
   // packages/api/src/middleware/auth.ts).
   process.env.VALET_TEST_AUTH_HEADER = "1";
 
   const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
+  const prevLocalAuth = process.env.VALET_LOCAL_AUTH;
   if (opts.auth) {
     process.env.BETTER_AUTH_SECRET = "test-secret";
+    // Stub auth and real auth are mutually exclusive — the boot check in
+    // `main.ts` refuses the pair. A real-auth test must see production's
+    // answer to a credential-less request (401), so the stub var comes OFF
+    // here and is restored on `cleanup()`. Stub-mode callers keep the
+    // stub + `x-valet-test-user-id` contract unchanged.
+    delete process.env.VALET_LOCAL_AUTH;
+  } else {
+    process.env.VALET_LOCAL_AUTH = "1";
   }
 
   const { pgdb, appDb: db } = await freshTestPgDb();
@@ -240,10 +267,13 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
 
   // Same circular-construction indirection as providers/node.ts — see its
-  // comment. Test callers that want to unit-test the spawner/watcher
+  // comment. Test callers that want to unit-test the spawner/watcher/reader
   // directly still can (they're plain exported functions/classes); this
-  // wiring only matters for exercising `task` through a real orchestrator.
+  // wiring only matters for exercising `task` and `child_read` through a
+  // real orchestrator.
   let spawnerRef: ChildSpawner | undefined;
+  let readerRef: ChildReader | undefined;
+  let senderRef: ChildSender | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -257,6 +287,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
+    ...(opts.defaultImages ? { defaultImages: opts.defaultImages } : {}),
     idleMinutes: opts.idleMinutes,
     onHibernate: opts.onHibernate ?? defaultHibernationHooks.onHibernate,
     onWake: opts.onWake ?? defaultHibernationHooks.onWake,
@@ -266,16 +297,44 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     apiBaseUrl,
     plugins,
+    actionPluginByService,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
     },
+    childReader: (req, ctx) => {
+      if (!readerRef) throw new Error("childReader invoked before provider wiring completed");
+      return readerRef(req, ctx);
+    },
+    childSender: (req, ctx) => {
+      if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
+      return senderRef(req, ctx);
+    },
   });
+  // Prebuilds are out of scope for the integration harness (no real
+  // docker/kubernetes builder wired here unless a test injects one); routes
+  // must treat this as "unavailable", same as a `local` sandbox-backend
+  // boot. Constructed before the child spawner, whose zero-config repo
+  // binding needs it.
+  const prebuildService = new SourceService({
+    db,
+    builder: opts.imageBuilder ?? null,
+    githubTokenDeps: {
+      db,
+      credentials: engineCredentials,
+      key: deriveSecretKey("test-key"),
+      apiUrl: opts.githubApiUrl,
+      githubUrl: opts.githubApiUrl,
+    },
+  });
+
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
-  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(blobsRoot, "children") };
+  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
+  readerRef = buildChildReader(childrenDeps);
+  senderRef = buildChildSender(childrenDeps, childWatcher);
 
   const channelHost = new ChannelHost({
     db,
@@ -299,11 +358,43 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineStore,
     actionPluginByService,
     credentials: engineCredentials,
+    // Same key BOTH consumers get at real boot (`providers/node.ts` derives
+    // one key for `EngineHost` and the workflow action invoker). Without
+    // this, a `github` tool node inside a workflow threw a wiring error and
+    // the whole path was untestable.
+    githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
   });
+  // "Grant the rest of this run" (action-policies plan, Task 3/6): mirrors
+  // `providers/node.ts`'s real-boot `onApprovalGrant` wiring so integration
+  // tests can exercise an approval node's `grantActions` end to end — the
+  // real boot path wires this via `providers/node.ts`, which this harness
+  // otherwise duplicates rather than reuses (same rationale as every other
+  // hand-assembled dep below).
+  const onApprovalGrant: OnApprovalGrant = async (info) => {
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.params.workflowId) return;
+      const defRows = await db
+        .select({ orgId: workflowDefinitions.orgId })
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.params.workflowId))
+        .limit(1);
+      const orgId = defRows[0]?.orgId;
+      if (!orgId) return;
+      const now = Date.now();
+      for (const g of info.grants) {
+        await writeExecutionGrant(db, info.runId, { orgId, service: g.service, actionId: g.actionId, grantedBy: info.resolvedBy, now });
+      }
+    } catch (err) {
+      console.error(`test harness: workflow approval grant write failed for run ${info.runId}:`, err);
+    }
+  };
+
   const realWorkflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
+    onApprovalGrant,
   });
   const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
   // Only start the host loop when it's the real one under test control — a
@@ -331,19 +422,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
   });
 
-  // Prebuilds are out of scope for the integration harness (no real
-  // docker/kubernetes builder wired here); routes must treat this as
-  // "unavailable", same as a `local` sandbox-backend boot.
-  const prebuildService = new SourceService({
+  const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
+
+  // Skill-repository sync. Constructed with the same real deps
+  // `buildNodeProviders` uses, but NEVER started on its timer — tests drive
+  // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
+  const skillSync = new SkillSyncService({
     db,
-    builder: opts.imageBuilder ?? null,
-    githubTokenDeps: {
-      db,
-      credentials: engineCredentials,
-      key: deriveSecretKey("test-key"),
-      apiUrl: opts.githubApiUrl,
-      githubUrl: opts.githubApiUrl,
-    },
+    reader: new PublicSkillRepoReader({ apiUrl: opts.githubApiUrl }),
   });
 
   const providers: Providers = {
@@ -361,7 +447,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    webhookRateLimiter,
     eventDispatcher,
+    skillSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
@@ -398,6 +486,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (opts.auth) {
         if (prevAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
         else process.env.BETTER_AUTH_SECRET = prevAuthSecret;
+        if (prevLocalAuth === undefined) delete process.env.VALET_LOCAL_AUTH;
+        else process.env.VALET_LOCAL_AUTH = prevLocalAuth;
       }
     },
   };

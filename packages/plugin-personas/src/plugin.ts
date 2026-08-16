@@ -8,12 +8,12 @@ import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 // personas/*.md directory to load via loadRoleFromMarkdown; the only content
 // file present is skill-shaped, so it's loaded as a SkillSource like the
 // other content plugins.
-const personasMd = readFileSync(fileURLToPath(new URL("../skills/personas.md", import.meta.url)), "utf8");
+const personasMd = readFileSync(fileURLToPath(new URL("../skills/personas/SKILL.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {
   name: "personas",
   version: "0.1.0",
-  skills: [loadSkillFromMarkdown(personasMd, "plugin")],
+  skills: [loadSkillFromMarkdown(personasMd, "plugin", "personas")],
 };
 
 export default plugin;

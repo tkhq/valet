@@ -12,8 +12,9 @@ name: Remote Postgres
 on:
   push:
     branches: [main, dev-v2]
+  # Unfiltered for the same reason as ci.yml: the branches filter matches a
+  # PR's base, so stacked PRs targeting a feature branch got no run at all.
   pull_request:
-    branches: [main, dev-v2]
 
 jobs:
   remote-postgres:

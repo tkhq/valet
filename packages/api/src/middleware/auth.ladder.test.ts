@@ -95,6 +95,15 @@ describe("auth middleware ladder — stub-mode boots", () => {
     expect(body.email).toBe("local@dev");
   });
 
+  it("the test impersonation header still selects a seeded user in stub mode", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { email: string; role: string };
+    expect(body.email).toBe("member@dev");
+    expect(body.role).toBe("member");
+  });
+
   it("stub off (no VALET_LOCAL_AUTH), no credential at all → 401 unauthorized", async () => {
     api = await bootTestApi();
     const prev = process.env.VALET_LOCAL_AUTH;
@@ -201,17 +210,68 @@ describe("auth middleware ladder — real-auth boots", () => {
     // Garbage + oversized cookie value: whether better-auth throws or
     // returns null, the middleware must treat it as "no session". With no
     // other credential and no stub, that lands on the 401 rung — never 500.
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      headers: { cookie: `better-auth.session_token=${"garbage.signature".repeat(500)}` },
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("unauthorized");
+  });
+
+  it("a credential-less request 401s — the harness never forces stub auth onto a real-auth boot", async () => {
+    api = await bootTestApi({ auth: true });
+    const res = await fetch(`${api.baseUrl}/api/me`);
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("unauthorized");
+  });
+
+  // The privilege-escalation regression: rung 5 fired on the env var alone,
+  // so a deployment with both variables answered every credential-less
+  // request with the seeded ADMIN stub identity. `main.ts` now refuses that
+  // pair at boot; the rung itself gates on the auth instance so no other
+  // caller of `buildAuthMiddleware` can reach the stub under real auth.
+  //
+  // This reproduces the complete misconfiguration, not a partial one: the
+  // `local-user` admin row is seeded exactly as boot seeded it in the mixed
+  // mode, so a rung 5 that fired here would answer with a live admin (200),
+  // not merely a 404 on a missing row.
+  it("VALET_LOCAL_AUTH=1 next to a real auth instance grants nothing", async () => {
+    api = await bootTestApi({ auth: true });
+    const { db } = api.providers;
+
+    const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "First Admin", email: "first-admin@nowhere.test", password: "correct-horse-battery" }),
+    });
+    expect(signUpRes.status).toBe(200);
+    const adminRows = await db.select().from(users).where(eq(users.email, "first-admin@nowhere.test")).limit(1);
+    const admin = adminRows[0];
+    expect(admin).toBeDefined();
+
+    await db
+      .insert(users)
+      .values({ id: "local-user", email: "local@dev", name: "Local Dev", role: "admin" })
+      .onConflictDoNothing();
+
     const prev = process.env.VALET_LOCAL_AUTH;
-    delete process.env.VALET_LOCAL_AUTH;
+    process.env.VALET_LOCAL_AUTH = "1";
     try {
-      const res = await fetch(`${api.baseUrl}/api/me`, {
-        headers: { cookie: `better-auth.session_token=${"garbage.signature".repeat(500)}` },
+      const bareRes = await fetch(`${api.baseUrl}/api/me`);
+      expect(bareRes.status).toBe(401);
+      expect(await bareRes.json()).toEqual({ error: "unauthorized" });
+
+      // The impersonation header rides on the same rung — it must not reach
+      // a real user either.
+      const impersonatedRes = await fetch(`${api.baseUrl}/api/me`, {
+        headers: { "x-valet-test-user-id": admin!.id },
       });
-      expect(res.status).toBe(401);
-      const body = (await res.json()) as { error: string };
-      expect(body.error).toBe("unauthorized");
+      expect(impersonatedRes.status).toBe(401);
+      expect(await impersonatedRes.json()).toEqual({ error: "unauthorized" });
     } finally {
-      if (prev !== undefined) process.env.VALET_LOCAL_AUTH = prev;
+      if (prev === undefined) delete process.env.VALET_LOCAL_AUTH;
+      else process.env.VALET_LOCAL_AUTH = prev;
     }
   });
 

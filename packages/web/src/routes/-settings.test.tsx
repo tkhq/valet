@@ -22,9 +22,15 @@ vi.mock("@tanstack/react-router", () => ({
   redirect: (opts: { to: string }) => ({ isRedirect: true as const, ...opts }),
 }));
 
-vi.mock("~/api/settings", () => ({
-  useOrg: () => useOrgMock(),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useOrg: () => useOrgMock(),
+  };
+});
 
 import { SettingsRail } from "~/components/settings/settings-rail";
 import { OrgRouteGuard } from "./settings.organization";

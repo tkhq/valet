@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
@@ -21,7 +22,8 @@ import type {
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { sessionRepos, githubInstallations } from "../schema/index.js";
+import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations } from "../schema/index.js";
+import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
@@ -365,8 +367,33 @@ describe("buildActionInvoker: github service resolution", () => {
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
+  /** Same credential consumption as `githubWhoamiAction`, but with the
+   * `owner`/`repo` parameters every real repo-scoped plugin-github action
+   * declares — the pair an `app`-credential node's installation lookup is
+   * derived from. */
+  function githubRepoAction(): PluginAction {
+    return {
+      id: "github.create_comment",
+      name: "create_comment",
+      description: "create a comment",
+      riskLevel: "low",
+      parameters: Type.Object({ owner: Type.String(), repo: Type.String() }),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        const token = cred?.accessToken;
+        if (!token) {
+          throw new Error("Missing GitHub access token. Connect the GitHub integration in Settings.");
+        }
+        return { success: true, data: { token } };
+      },
+    };
+  }
+
   function githubActionPluginByService(): Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }> {
-    return actionPluginByServiceOf("github", { service: "github", actions: [githubWhoamiAction()] });
+    return actionPluginByServiceOf("github", {
+      service: "github",
+      actions: [githubWhoamiAction(), githubRepoAction()],
+    });
   }
 
   it("user-connected: resolves the user's healthy github credential", async () => {
@@ -501,6 +528,190 @@ describe("buildActionInvoker: github service resolution", () => {
     });
   });
 
+  // ── credential: "app" — the bot identity, or a loud failure ───────────
+  //
+  // A user-owned review workflow must comment as the GitHub App, not as the
+  // person who saved it. `auto` + `api` tries the user's own credential
+  // first, so an `app` node MUST bypass that precedence, and MUST fail
+  // instead of falling back to a human identity.
+
+  /** App config + one installation on `acme`, plus a healthy user
+   * credential that an `app`-credential node must ignore. */
+  async function seedAppAndUser(appDb: AppDb, credentials: PgCredentialStore): Promise<void> {
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_222",
+      orgId,
+      installationId: 222,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+  }
+
+  it('credential "app": resolves the installation for the params owner, ignoring a healthy user credential', async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n1",
+        credential: "app",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-222" } });
+  });
+
+  it('credential "app": fails loudly when the App is not installed on the params owner', async () => {
+    const { appDb, credentials } = await harness();
+    // Installed on `acme` only; the action targets `other-org`.
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "other-org", repo: "widgets" },
+        invocationId: "workflow:r1:n2",
+        credential: "app",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    // No silent fallback to `user-tok` — the whole point of the strict tier.
+    expect(result).toEqual({
+      ok: false,
+      error: "the GitHub App is not installed on other-org",
+    });
+  });
+
+  it('credential "app": names the missing owner/repo parameters when the repo cannot be derived', async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n3", credential: "app" },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({
+      error: expect.stringContaining('Add "owner" and "repo"'),
+    });
+  });
+
+  it('credential "auto" keeps the default precedence: the user credential still wins', async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n4",
+        credential: "auto",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "user-tok" } });
+  });
+
+  it('credential "user": fails loudly when the user has no connected GitHub account', async () => {
+    const { appDb, credentials } = await harness();
+    // App + installation exist, but no user credential — `user` must not
+    // fall back to the installation.
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_333",
+      orgId,
+      installationId: 333,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n5",
+        credential: "user",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "no GitHub account is connected for this user",
+    });
+  });
+
   it("non-github service is untouched: no githubTokenDeps required, resolveGitHubToken never consulted", async () => {
     const store = new FakeCredentialStore();
     store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "secret-token" });
@@ -515,5 +726,254 @@ describe("buildActionInvoker: github service resolution", () => {
     );
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+  });
+
+  it("a non-github service refuses an app selection instead of ignoring it", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "secret-token" });
+    const fixture2 = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture2.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1", credential: "app" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ error: expect.stringContaining("Remove the credential field") });
+    // Refused before the action ran — an ignored selection would have let it
+    // execute under the workflow owner's own credential.
+    expect(fixture2.calls()).toBe(0);
+  });
+});
+
+describe("buildActionInvoker: workflow policy enforcement (action-policies T3)", () => {
+  const ORG = "org1";
+  const RUN = "run_wf1";
+  // A high-risk action: with no policy it defaults to require_approval.
+  function highRiskAction() {
+    let deployCount = 0;
+    const inner = countingAction({
+      id: "demo.deploy",
+      execute: async () => {
+        deployCount += 1;
+        return { success: true as const, data: { deployed: true } };
+      },
+    });
+    return {
+      action: inner.action,
+      calls: () => deployCount,
+      lastArgs: inner.lastArgs,
+    };
+  }
+  const highRiskPlugin = (a: PluginAction) => actionPluginByServiceOf("demo", {
+    service: "demo",
+    actions: [{ ...a, riskLevel: "critical" }],
+  });
+  const wfCtx: ActionInvocationContext = {
+    userId: "u1", orgId: ORG, owner: { type: "user", id: "u1" }, workflowExecutionId: RUN,
+  };
+
+  it("require_approval (high-risk, no grant) returns requiresApproval and parks a pending audit row; action never runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n1" }, wfCtx);
+    expect(res).toEqual({ ok: false, requiresApproval: true, riskLevel: "critical", provenance: "risk_default" });
+    expect(fixture.calls()).toBe(0);
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.workflowExecutionId, RUN));
+    expect(audit).toHaveLength(1);
+    expect(audit[0].status).toBe("pending");
+    expect(audit[0].resolvedMode).toBe("require_approval");
+  });
+
+  it("an org deny fails the node as blocked; action never runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    await db.insert(actionPolicies).values({
+      id: "pd", orgId: ORG, principalType: "org", principalId: ORG,
+      // Action-scope policies target the fully-qualified fqid — the ONE
+      // canonical id both invocation paths resolve to (spec T6 #3, fixed).
+      service: null, actionId: "demo.deploy", riskLevel: null, mode: "deny",
+      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke({ service: "demo", action: "deploy", params: {}, invocationId: "workflow:run_wf1:n2" }, wfCtx);
+    expect(res.ok).toBe(false);
+    expect((res as { error: string }).error).toContain("blocked by org policy");
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("an exec-scoped grant covers the action → it runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    await db.insert(runtimeGrants).values({
+      id: "gr", orgId: ORG, sessionId: null, workflowExecutionId: RUN,
+      policyKey: grantPolicyKey("demo", "deploy"), mode: "allow", grantedBy: "u1", createdAt: 1, revokedAt: null,
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n3" }, wfCtx);
+    // The returned data proves the action executed (the grant quieted the gate).
+    expect(res).toEqual({ ok: true, result: { deployed: true } });
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n3"));
+    // The decision row is stamped with the execution outcome + full
+    // PluginActionResult after execute (spec T6 #6, fixed).
+    expect(audit[0].status).toBe("completed");
+    expect(audit[0].result).toEqual({ success: true, data: { deployed: true } });
+    expect(audit[0].matchedGrantId).toBe("gr");
+  });
+
+  it("dedup: a replayed invocationId writes exactly one audit row and never re-runs enforcement", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const req = { service: "demo", action: "deploy", params: {}, invocationId: "workflow:run_wf1:n4" };
+    const first = await invoke(req, wfCtx);
+    const second = await invoke(req, wfCtx);
+    expect(second).toEqual(first); // stored result row is authoritative
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n4"));
+    expect(audit).toHaveLength(1);
+  });
+
+  // ── requiresApproval gate (Task 4) ──────────────────────────────────────
+
+  it("require_approval with no approval field returns requiresApproval outcome and is NOT stored in the dedup table", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const req = { service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n5" };
+    const res = await invoke(req, wfCtx);
+    expect(res).toEqual({ ok: false, requiresApproval: true, riskLevel: "critical", provenance: "risk_default" });
+    // Gate outcomes must NOT land in the dedup table — an approved retry must
+    // reach enforcement fresh (re-querying the current policy state).
+    const rows = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, req.invocationId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("require_approval WITH the approval field executes and stamps audit row status approved", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const req = {
+      service: "demo",
+      action: "deploy",
+      params: { msg: "x" },
+      invocationId: "workflow:run_wf1:n6",
+      approval: { resolvedBy: "u1", note: "lgtm" },
+    };
+    const res = await invoke(req, wfCtx);
+    expect(res).toEqual({ ok: true, result: { deployed: true } });
+    expect(fixture.calls()).toBe(1);
+    // The audit row is stamped "approved" on the policy side.
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n6"));
+    expect(audit).toHaveLength(1);
+    // persistInvocationAudit writes "approved" but updateInvocationOutcome
+    // then stamps the final execution outcome ("completed"). Task 5 will assert
+    // resolvedBy once that column lands.
+    expect(audit[0].status).toBe("completed");
+    // The dedup table holds the computed result so a re-drive returns it without re-running.
+    const dedup = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, req.invocationId));
+    expect(dedup).toHaveLength(1);
+  });
+
+  it("resolver throw returns requiresApproval with provenance resolver_error; action never runs", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    // Wrap db with a Proxy that throws on the second select call.
+    // selectStoredResult (the dedup check) is the first select; policy
+    // resolution (resolveActionPolicy) does the subsequent selects. Because
+    // requiresApproval is returned without reaching the dedup insert, only two
+    // select calls happen (initial dedup check + first policy table select).
+    let selectCallCount = 0;
+    const origSelect = db.select.bind(db);
+    const failingDb: AppDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "select") return Reflect.get(target, prop, receiver);
+        return function (...args: unknown[]) {
+          selectCallCount += 1;
+          if (selectCallCount === 1) {
+            // First select is selectStoredResult — let it through.
+            return (origSelect as (...a: unknown[]) => unknown)(...args);
+          }
+          throw new Error("simulated db error during policy resolution");
+        };
+      },
+    }) as AppDb;
+
+    const invoke2 = buildActionInvoker({ db: failingDb, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke2(
+      { service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "workflow:run_wf1:n7" },
+      wfCtx,
+    );
+    expect(res).toEqual({ ok: false, requiresApproval: true, provenance: "resolver_error" });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("resolver_error + approval field executes on the signal's authority", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    // Same failing db strategy: second select throws. With approval set,
+    // enforceWorkflowPolicy catches the throw and returns null (proceed).
+    // The action executes, then the dedup insert and re-select both use the
+    // real db. Call order: 1=dedup-pre, 2=policy (throw), 3=dedup-post.
+    // We allow calls 1 and 3, throw on 2.
+    let selectCallCount = 0;
+    const origSelect = db.select.bind(db);
+    const failingDb: AppDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "select") return Reflect.get(target, prop, receiver);
+        return function (...args: unknown[]) {
+          selectCallCount += 1;
+          if (selectCallCount === 2) {
+            throw new Error("simulated db error during policy resolution");
+          }
+          return (origSelect as (...a: unknown[]) => unknown)(...args);
+        };
+      },
+    }) as AppDb;
+
+    const invoke = buildActionInvoker({ db: failingDb, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const res = await invoke(
+      {
+        service: "demo",
+        action: "deploy",
+        params: { msg: "x" },
+        invocationId: "workflow:run_wf1:n8",
+        approval: { resolvedBy: "u1" },
+      },
+      wfCtx,
+    );
+    // Resolver error + approval set → human resolution authorizes execution
+    expect(res).toEqual({ ok: true, result: { deployed: true } });
+    expect(fixture.calls()).toBe(1);
+    // The resolver_error path writes a best-effort audit row before returning
+    // null. Use the real db (not failingDb) to query — the proxy only
+    // intercepts selects, but this verifies the insert/update went through
+    // on the real backing store.
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run_wf1:n8"));
+    expect(audit).toHaveLength(1);
+    // updateInvocationOutcome stamps the final execution outcome after the
+    // action runs, so the row ends as "completed" even though the audit
+    // insert wrote "approved".
+    expect(audit[0].status).toBe("completed");
+    expect(audit[0].resolvedMode).toBe("require_approval");
+  });
+
+  it("parseStoredResult rejects a stored requiresApproval row (defensive: such rows must never exist)", async () => {
+    const db = await makeDb();
+    // Seed a row with { ok: false, requiresApproval: true } directly
+    await db.insert(actionInvocations).values({
+      invocationId: "corrupt:n9",
+      result: { ok: false, requiresApproval: true },
+      createdAt: Date.now(),
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(highRiskAction().action) });
+    // A stored requiresApproval result is corrupt — such rows must never be persisted,
+    // but if one exists the invoker must throw rather than silently returning it.
+    await expect(
+      invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "corrupt:n9" }, wfCtx),
+    ).rejects.toThrow("stored requiresApproval outcome should never exist for");
   });
 });

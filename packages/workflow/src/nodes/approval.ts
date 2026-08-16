@@ -41,6 +41,14 @@ interface ApprovalPayload {
   approved: boolean;
   resolvedBy: string;
   note?: string;
+  /**
+   * "Grant the rest of this run" (action-policies plan, Task 3): exact
+   * `(service, actionId)` pairs the approver authorized for the remainder of
+   * the run. When present on an APPROVED resolution, the executor calls
+   * `onApprovalGrant` so the host writes exec-scoped runtime grants. Ignored
+   * on a denial.
+   */
+  grantActions?: Array<{ service: string; actionId: string }>;
 }
 
 export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Promise<NodeExecuteResult> {
@@ -120,11 +128,20 @@ async function resolveViaSignal(
   signal: RunSignal,
   timeoutAt: number | undefined,
 ): Promise<NodeExecuteResult> {
-  const { run, node, attempt, iteration, store, clock } = args;
+  const { run, node, attempt, iteration, store, clock, onApprovalGrant } = args;
   const payload = parseApprovalPayload(signal.payload);
   const consumedBy = { nodeId: node.id, iteration, attempt };
 
   if (payload.approved) {
+    // "Grant the rest of this run": authorize the named actions before the
+    // approval node completes, so downstream `tool` nodes run grant-clean.
+    // Fired before the terminal checkpoint write; on a crash+replay the
+    // consumed signal / terminal checkpoint short-circuits re-entry, and the
+    // host's grant write is itself idempotent — so at-least-once here is
+    // safe.
+    if (payload.grantActions && payload.grantActions.length > 0 && onApprovalGrant) {
+      await onApprovalGrant({ runId: run.runId, resolvedBy: payload.resolvedBy, grants: payload.grantActions });
+    }
     const result: ApprovalResult = { approved: true, resolvedBy: payload.resolvedBy };
     const checkpoint: NodeCheckpoint = {
       runId: run.runId,
@@ -207,7 +224,25 @@ function parseApprovalPayload(payload: unknown): ApprovalPayload {
     approved: p.approved,
     resolvedBy: p.resolvedBy,
     note: typeof p.note === 'string' ? p.note : undefined,
+    grantActions: parseGrantActions(p.grantActions),
   };
+}
+
+/** Defensive parse of the optional `grantActions` payload field — only well-
+ *  formed `{ service, actionId }` string pairs survive; anything else is
+ *  dropped (undefined), never thrown. */
+function parseGrantActions(value: unknown): Array<{ service: string; actionId: string }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: Array<{ service: string; actionId: string }> = [];
+  for (const entry of value) {
+    if (entry && typeof entry === 'object') {
+      const e = entry as Record<string, unknown>;
+      if (typeof e.service === 'string' && typeof e.actionId === 'string') {
+        out.push({ service: e.service, actionId: e.actionId });
+      }
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function renderText(source: string, ctx: TemplateContext): string {

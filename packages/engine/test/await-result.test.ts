@@ -409,7 +409,10 @@ describe("Thread.awaitResult", () => {
     faux.unregister();
   });
 
-  it("resumability: settle under engine A, awaitResult under a fresh engine B over the same store", async () => {
+  // Two PGlite cold boots (WASM init) make this the suite's heaviest test —
+  // under full-suite worker contention it can exceed vitest's 5s default
+  // while passing in well under 1s alone. Budget it explicitly.
+  it("resumability: settle under engine A, awaitResult under a fresh engine B over the same store", { timeout: 20_000 }, async () => {
     const faux = registerFauxProvider({ provider: "await-resume", tokensPerSecond: 200 });
     faux.setResponses([fauxAssistantMessage("resumed-done")]);
 

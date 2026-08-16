@@ -17,9 +17,19 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 const mutateAsync = vi.fn().mockResolvedValue({ id: "sess-new" });
-vi.mock("~/api/queries", () => ({
-  useCreateSession: () => ({ mutateAsync, isPending: false, error: null }),
-}));
+// `importOriginal` rather than a bare replacement: `isolate: false`
+// (vitest.config.ts) shares the module registry across test files in a
+// worker, so an incomplete mock here can shadow `~/api/queries` for
+// whichever OTHER test file's component happens to call a hook this file
+// doesn't override — spreading the real module keeps every export present
+// regardless of which file's factory the shared worker ends up using.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useCreateSession: () => ({ mutateAsync, isPending: false, error: null }),
+  };
+});
 
 let reposData: GetReposResponse = { repos: [], connected: false, installed: false };
 const prebuildByRepo = new Map<string, GetPrebuildForRepoResponse>();

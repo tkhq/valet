@@ -58,6 +58,40 @@ existence for API groups it does not own.
   `BETTER_AUTH_SECRET` when unset.
 - **`helm test`**: a Pod hook that curls the api Service's `/api/health`.
 
+## Pre-existing GitHub App (env fallback)
+
+By default, an org admin creates the deployment's GitHub App in the web UI
+(Organization → GitHub, the manifest flow). That flow always creates a NEW
+App. To use an App that already exists, set the `GITHUB_APP_*` env
+fallback instead:
+
+```sh
+helm upgrade --install valet deploy/chart/valet \
+  --set api.githubApp.appId="123456" \
+  --set api.githubApp.slug="my-valet-app" \
+  --set api.githubApp.clientId="Iv1.abc123" \
+  --set api.secrets.githubAppClientSecret="..." \
+  --set api.secrets.githubAppWebhookSecret="..." \
+  --set-file api.secrets.githubAppPrivateKey=my-valet-app.private-key.pem
+```
+
+- `githubAppPrivateKey` accepts the PEM raw or base64-encoded. Use
+  `--set-file` for the raw PEM, or base64-encode it for delivery through a
+  secrets manager (one line, no newline escaping).
+- Set all values, or none. The api fails loudly on a partial set and names
+  the missing variables.
+- `githubAppWebhookSecret` is optional. Leave it blank for an App without
+  a webhook.
+- Nothing is written to the database — the env is the config. To rotate a
+  value, change it and roll the api pod. An App created later through the
+  manifest flow shadows the fallback for that org.
+- Point the App's webhook URL at `{public URL}/webhooks/github-app` and
+  its callback URL at `{public URL}/api/me/github/callback`. If the
+  private key is lost, generate a new one from the App's GitHub settings
+  page — keys are download-once.
+- For External Secrets Operator (or similar), leave these values blank and
+  deliver the same `GITHUB_APP_*` env vars through `api.extraEnvFrom`.
+
 ## Notes
 
 - **PVCs survive `helm uninstall`** by Kubernetes design — StatefulSet
@@ -66,8 +100,73 @@ existence for API groups it does not own.
   ```sh
   kubectl --context rancher-desktop -n valet delete pvc -l app.kubernetes.io/instance=valet
   ```
+- **A rotated key rolls the api pod.** The api reads its config and
+  secrets through `envFrom`/`secretKeyRef`, and Kubernetes injects those
+  once, at pod start. The api pod template therefore carries
+  `checksum/secret` and `checksum/config` annotations, so `helm upgrade`
+  replaces the pod when the material behind them changes. `checksum/secret`
+  digests the supplied values — `api.secrets.*`, `externalDatabase.url`,
+  and `postgres.*` — rather than the rendered Secret. The retained values
+  are generated fresh on any render that cannot `lookup` them, so a digest
+  over the rendered Secret would change when nothing changed. Secrets and
+  ConfigMaps referenced through `api.extraEnvFrom` are outside the chart
+  and outside both digests; rotate one of those with
+  `kubectl rollout restart deployment/<release>-api`.
 - No secrets are committed to `values.yaml` — only empty placeholders.
   Supply real values via `--set`, a gitignored local `values-local.yaml`,
   or `--set-file`. Or leave them blank to let the chart generate and
   retain `BETTER_AUTH_SECRET`, `VALET_ENCRYPTION_KEY`, and the bundled
   Postgres password.
+
+## Sessions and profiles
+
+Every Valet session runs under one of two profiles:
+
+- **`headless`** (default) — agent-only sandbox. Starts on a lean `node:22-bookworm-slim` base augmented with git, ripgrep, gh, curl, and openssh-client. Used for all AI-agent sessions and repo-bound workspaces.
+- **`full`** (opt-in) — interactive developer sandbox. FROMs the CI-published `ghcr.io/tkhq/valet-sandbox` image, which ships the compiled `@valet/sandbox-gateway` bundle, ttyd, and code-server in addition to all headless tooling. Required for browser-tab Terminal and VS Code sessions.
+
+### Auto-seeded base sources
+
+On first boot (and idempotently on subsequent boots), Valet seeds three `image_sources` rows per org:
+
+| kind | name | profile | FROM |
+|---|---|---|---|
+| `external` | `stock-full` | — | `VALET_FULL_BASE_IMAGE` (default `ghcr.io/tkhq/valet-sandbox:latest`) |
+| `base` | `default-headless` | `headless` | `VALET_HEADLESS_BASE_IMAGE` (default `node:22-bookworm-slim`) |
+| `base` | `default-full` | `full` | parent = `stock-full` external row |
+
+The headless base's setup commands install the agent tooling layer. The full base has empty setup commands — the full image ships everything.
+
+### Customising base images
+
+To pin a specific CI-published full image for reproducible deploys:
+
+```yaml
+sandbox:
+  fullBaseImage: ghcr.io/tkhq/valet-sandbox:sha-abc1234
+  headlessBaseImage: node:22-bookworm-slim  # or your own image
+```
+
+To layer additional tooling onto the auto-seeded headless base (e.g. python3), patch its `setupCommands` in place — do **not** POST a new `kind='base'` row with the same profile, as the unique index on `(org_id, profile) WHERE kind='base'` would 409:
+
+```sh
+# 1. Find the auto-seeded headless base's id
+GET /api/org/sources
+# → look for the row with name="default-headless" and profile="headless"
+
+# 2. Append your setup commands (supply the full desired list — this replaces, not appends)
+PATCH /api/org/sources/<headless-base-id>
+{
+  "setupCommands": [
+    "apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates coreutils curl procps bash openssh-client && rm -rf /var/lib/apt/lists/*",
+    "apt-get install -y python3"
+  ]
+}
+```
+
+To re-parent a repo source at a different base, use:
+
+```sh
+PATCH /api/org/sources/<repo-source-id>
+{ "parentId": "<base-id>" }
+```

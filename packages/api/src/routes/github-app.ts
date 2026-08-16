@@ -36,6 +36,12 @@
  * (e.g. keyed by GitHub App id in the URL or a signed org hint); this does
  * NOT attempt that and will misroute if more than one org ever configures
  * a `github_app` credential in the same process.
+ *
+ * When no `github_app` credential row exists anywhere, the webhook falls
+ * back to the deployment-wide `GITHUB_APP_*` env config
+ * (`resolveGithubAppEnvConfig`): the signature verifies against the env
+ * webhook secret, then `resolveEnvFallbackOrgId` routes the delivery by
+ * `installation.id` (or to the oldest org). Same single-org caveat.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -49,6 +55,8 @@ import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js
 import {
   discoverInstallations,
   loadAppConfig,
+  loadAppConfigWithSource,
+  resolveGithubAppEnvConfig,
   saveAppConfig,
   type GithubAppConfig,
   type GithubAppDeps,
@@ -89,17 +97,18 @@ function toInstallationSummary(row: typeof githubInstallations.$inferSelect): Gi
 }
 
 async function buildGetResponse(deps: GithubAppDeps, orgId: string): Promise<GetGithubAppResponse> {
-  const config = await loadAppConfig(deps, orgId);
+  const loaded = await loadAppConfigWithSource(deps, orgId);
   const rows = await deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
   const githubUrl = resolveGithubUrl(process.env);
   return {
-    configured: config !== null,
-    app: config
+    configured: loaded !== null,
+    source: loaded?.source,
+    app: loaded
       ? {
-          appId: config.appId,
-          appSlug: config.appSlug,
-          htmlUrl: config.htmlUrl,
-          installUrl: `${githubUrl}/apps/${config.appSlug}/installations/new`,
+          appId: loaded.config.appId,
+          appSlug: loaded.config.appSlug,
+          htmlUrl: loaded.config.htmlUrl,
+          installUrl: `${githubUrl}/apps/${loaded.config.appSlug}/installations/new`,
         }
       : undefined,
     installations: rows.map(toInstallationSummary),
@@ -263,9 +272,13 @@ githubAppRouter.post("/manifest", async (c) => {
     callback_urls: [`${apiBase}/api/me/github/callback`],
     ...(webhookOn ? { hook_attributes: { url: `${apiBase}/webhooks/github-app` } } : {}),
     public: false,
-    default_events: webhookOn
-      ? ["installation", "installation_repositories", ...(eventsOverride ?? triggerEvents)]
-      : [],
+    // Subscribe ONLY to events an App may subscribe to. GitHub delivers
+    // the App-lifecycle events (`installation`,
+    // `installation_repositories`) to every App on its own, and rejects a
+    // manifest that lists them: "Default events unsupported", plus a second
+    // rejection because they map to no permission. Listing them here cost
+    // us every App creation until it was found by hand.
+    default_events: webhookOn ? (eventsOverride ?? triggerEvents) : [],
     // GitHub's manifest schema key is `default_permissions` — a bare
     // `permissions` key makes the app-creation form reject the manifest.
     default_permissions: permissionOverride ?? {
@@ -371,6 +384,10 @@ githubAppRouter.delete("/", async (c) => {
   // (`resolveGitHubToken` throws a `GitHubAuthError` naming the gap, same
   // as "never configured") rather than needing this route to first prove
   // nothing depends on it.
+  // This only removes the org's credential row + installation rows. The
+  // `GITHUB_APP_*` env fallback (if set) is deployment config — GET keeps
+  // reporting `configured: true, source: "environment"` until the operator
+  // unsets the variables.
   await engineCredentials.delete({ type: "org", id: orgId }, "github_app");
   await db.delete(githubInstallations).where(eq(githubInstallations.orgId, orgId));
   return c.body(null, 204);
@@ -405,6 +422,25 @@ async function findGithubAppOrgId(db: AppQueryable): Promise<string | null> {
     .where(and(eq(credentials.ownerType, "org"), eq(credentials.service, "github_app")))
     .limit(1);
   return rows[0]?.ownerId ?? null;
+}
+
+/** Org routing for a delivery verified against the `GITHUB_APP_*` env
+ * fallback (no `github_app` credential row anywhere). The delivery's
+ * `installation.id` routes to the org that already synced that
+ * installation; otherwise the deployment's oldest org takes it — same
+ * single-org assumption (and the same multi-org caveat) as
+ * `findGithubAppOrgId`. `null` when the deployment has no orgs at all. */
+async function resolveEnvFallbackOrgId(db: AppQueryable, payload: unknown): Promise<string | null> {
+  if (isRecord(payload) && isRecord(payload.installation) && typeof payload.installation.id === "number") {
+    const rows = await db
+      .select({ orgId: githubInstallations.orgId })
+      .from(githubInstallations)
+      .where(eq(githubInstallations.installationId, payload.installation.id))
+      .limit(1);
+    if (rows[0]) return rows[0].orgId;
+  }
+  const [oldest] = await db.select({ id: orgs.id }).from(orgs).orderBy(orgs.createdAt).limit(1);
+  return oldest?.id ?? null;
 }
 
 function verifyWebhookSignature(rawBody: Uint8Array, header: string | undefined, secret: string): boolean {
@@ -486,11 +522,17 @@ githubAppWebhookRouter.post("/", async (c) => {
   }
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
-  const orgId = await findGithubAppOrgId(db);
-  if (!orgId) return c.body(null, 204); // no app configured anywhere in this deployment
-
-  const config = await loadAppConfig({ credentials: engineCredentials }, orgId);
-  if (!config) return c.body(null, 204); // credential row vanished between the scan and here
+  // Prefer a credential-row app; with none anywhere, fall back to the
+  // `GITHUB_APP_*` env config. The webhook secret is App-level either way,
+  // so signature verification never needs the org first. In the orgId
+  // branch, `loadAppConfig` reads `process.env` if the row vanished
+  // between the scan and here — the same deployment-wide fallback the
+  // null branch uses, so the race changes nothing.
+  let orgId = await findGithubAppOrgId(db);
+  const config = orgId
+    ? await loadAppConfig({ credentials: engineCredentials }, orgId)
+    : resolveGithubAppEnvConfig(process.env);
+  if (!config) return c.body(null, 204); // no app configured anywhere in this deployment
 
   const sigHeader = c.req.header("x-hub-signature-256");
   if (!verifyWebhookSignature(rawBody, sigHeader, config.webhookSecret)) {
@@ -503,6 +545,11 @@ githubAppWebhookRouter.post("/", async (c) => {
     payload = JSON.parse(Buffer.from(rawBody).toString("utf8"));
   } catch {
     return c.json({ error: "invalid JSON" }, 400);
+  }
+
+  if (!orgId) {
+    orgId = await resolveEnvFallbackOrgId(db, payload);
+    if (!orgId) return c.body(null, 204); // env app configured but no orgs exist yet
   }
 
   const event = c.req.header("x-github-event");

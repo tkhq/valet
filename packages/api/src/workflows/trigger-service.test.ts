@@ -1,129 +1,111 @@
 /**
- * DB-backed tests for `updateWorkflowTrigger`. Uses the same PGlite harness
- * as Task 1 (`schedule-service.db.test.ts`), with the real github plugin for
- * `validateSubscription`.
+ * `trigger-service.ts` unit tests. Scoped to authorization: this file
+ * previously had zero coverage. `createWorkflowTrigger`'s
+ * `validateSubscription` call needs a real event-key catalog to get past,
+ * so tests supply a minimal fixture `ValetPlugin` — its `verify`/`toEvent`
+ * are never invoked here, only `catalog`.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
-import githubPlugin from "@valet/plugin-github/plugin";
-import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventSubscriptions, workflowDefinitions } from "../schema/index.js";
-import {
-  createWorkflowTrigger,
-  updateWorkflowTrigger,
-} from "./trigger-service.js";
-import type { AppDb } from "../lib/drizzle.js";
+import { PGlite } from "@electric-sql/pglite";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { ValetPlugin } from "@valet/engine";
+import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
+import { workflowDefinitions } from "../schema/index.js";
+import { createWorkflowTrigger, deleteWorkflowTrigger, listWorkflowTriggers } from "./trigger-service.js";
+
+const FIXTURE_PLUGINS: ValetPlugin[] = [
+  {
+    name: "fixture",
+    version: "0.0.0",
+    triggers: [
+      {
+        id: "fixture.thing_happened",
+        service: "fixture",
+        description: "test fixture event",
+        verify: () => null,
+        toEvent: () => {
+          throw new Error("not exercised by these tests");
+        },
+        catalog: [{ key: "fixture.thing_happened", description: "a thing happened", filters: [] }],
+      },
+    ],
+  },
+];
 
 let db: AppDb;
-let cleanup: () => Promise<void>;
-
-const USER = { id: "user_1", orgId: "org_1" };
+let pglite: PGlite;
 
 beforeAll(async () => {
-  const boot = await freshTestPgDb();
-  db = boot.appDb;
-  cleanup = boot.cleanup;
-
-  const now = Date.now();
-  await db.insert(workflowDefinitions).values({
-    id: "wf_1",
-    orgId: USER.orgId,
-    ownerType: "user",
-    ownerId: USER.id,
-    name: "test workflow",
-    definition: { version: "dag/v1", nodes: [], edges: [] },
-    createdAt: now,
-    updatedAt: now,
-  });
+  pglite = new PGlite();
+  await applyAppMigrations(buildAppQueryable(pglite));
+  db = buildAppDb(pglite);
 });
 
 afterAll(async () => {
-  await cleanup();
+  await pglite.close();
 });
 
-describe("updateWorkflowTrigger", () => {
-  it("updates name/eventKeys/enabled and returns the summary", async () => {
-    const created = await createWorkflowTrigger(db, [githubPlugin], USER, {
-      workflowId: "wf_1",
-      name: "original",
-      eventKeys: ["github.pull_request.opened"],
-    });
-    if (!created.ok) throw new Error(created.error);
-    const triggerId = created.trigger.triggerId;
+beforeEach(async () => {
+  await buildAppQueryable(pglite).query(`TRUNCATE workflow_definitions, event_subscriptions RESTART IDENTITY CASCADE`);
+});
 
-    const updated = await updateWorkflowTrigger(db, [githubPlugin], "org_1", triggerId, {
-      name: "renamed",
-      enabled: false,
+async function seedWorkflow(id: string, ownerId: string, orgId = "org-1"): Promise<void> {
+  await db.insert(workflowDefinitions).values({
+    id,
+    orgId,
+    ownerType: "user",
+    ownerId,
+    name: "target",
+    definition: { version: "dag/v1", nodes: [], edges: [] },
+    createdAt: 1_000,
+    updatedAt: 1_000,
+  });
+}
+
+describe("createWorkflowTrigger authorization", () => {
+  it("rejects wiring a trigger onto a workflow owned by a different user in the SAME org", async () => {
+    await seedWorkflow("wf_1", "owner-user", "org-1");
+
+    const result = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "other-org-member", orgId: "org-1" }, {
+      workflowId: "wf_1",
+      name: "trig",
+      eventKeys: ["fixture.thing_happened"],
     });
-    expect(updated.ok).toBe(true);
-    if (updated.ok) {
-      expect(updated.trigger.name).toBe("renamed");
-      expect(updated.trigger.enabled).toBe(false);
-    }
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("wf_1");
   });
 
-  it("re-validates merged eventKeys/filters and 400s with the validator message", async () => {
-    const created = await createWorkflowTrigger(db, [githubPlugin], USER, {
-      workflowId: "wf_1",
-      name: "to-invalidate",
-      eventKeys: ["github.pull_request.opened"],
-    });
-    if (!created.ok) throw new Error(created.error);
-    const triggerId = created.trigger.triggerId;
+  it("allows the actual owner to wire a trigger onto their own workflow", async () => {
+    await seedWorkflow("wf_1", "owner-user", "org-1");
 
-    const updated = await updateWorkflowTrigger(db, [githubPlugin], "org_1", triggerId, {
-      eventKeys: ["github.no_such_event"],
+    const result = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "owner-user", orgId: "org-1" }, {
+      workflowId: "wf_1",
+      name: "trig",
+      eventKeys: ["fixture.thing_happened"],
     });
-    expect(updated.ok).toBe(false);
-    if (!updated.ok) expect(updated.status).toBe(400);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.trigger.workflowId).toBe("wf_1");
   });
+});
 
-  it("404s for unknown ids, cross-org rows, and non-workflow subscriptions", async () => {
-    // Unknown id
-    const missing = await updateWorkflowTrigger(db, [githubPlugin], "org_1", "nope", {
-      name: "x",
-    });
-    expect(missing.ok).toBe(false);
-    if (!missing.ok) expect(missing.status).toBe(404);
-
-    // Cross-org: trigger exists under a different org
-    const created = await createWorkflowTrigger(db, [githubPlugin], USER, {
+describe("listWorkflowTriggers / deleteWorkflowTrigger scope (documented, deliberately unchanged by this fix)", () => {
+  it("any org member can list and delete a trigger they didn't create — org-shared visibility, matching event_subscriptions' own documented model everywhere else in this route family, NOT the creation-time ownership bug fixed above", async () => {
+    await seedWorkflow("wf_1", "owner-user", "org-1");
+    const created = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "owner-user", orgId: "org-1" }, {
       workflowId: "wf_1",
-      name: "cross-org trigger",
-      eventKeys: ["github.pull_request.opened"],
+      name: "trig",
+      eventKeys: ["fixture.thing_happened"],
     });
-    if (!created.ok) throw new Error(created.error);
-    const crossOrg = await updateWorkflowTrigger(
-      db,
-      [githubPlugin],
-      "org_other",
-      created.trigger.triggerId,
-      { name: "x" },
-    );
-    expect(crossOrg.ok).toBe(false);
-    if (!crossOrg.ok) expect(crossOrg.status).toBe(404);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
 
-    // Non-workflow subscription (orchestrator target) — must 404 through this seam
-    const now = Date.now();
-    const orchId = randomUUID();
-    await db.insert(eventSubscriptions).values({
-      id: orchId,
-      orgId: USER.orgId,
-      ownerType: "user",
-      ownerId: USER.id,
-      name: "orch sub",
-      eventKeys: ["github.pull_request.opened"],
-      filters: [],
-      target: { kind: "orchestrator" },
-      enabled: true,
-      createdBy: USER.id,
-      createdAt: now,
-      updatedAt: now,
-    });
-    const orchUpdate = await updateWorkflowTrigger(db, [githubPlugin], "org_1", orchId, {
-      name: "should-fail",
-    });
-    expect(orchUpdate.ok).toBe(false);
-    if (!orchUpdate.ok) expect(orchUpdate.status).toBe(404);
+    const listedByOther = await listWorkflowTriggers(db, "org-1");
+    expect(listedByOther.map((t) => t.triggerId)).toContain(created.trigger.triggerId);
+
+    const deletedByOther = await deleteWorkflowTrigger(db, "org-1", created.trigger.triggerId);
+    expect(deletedByOther).toBe("ok");
   });
 });

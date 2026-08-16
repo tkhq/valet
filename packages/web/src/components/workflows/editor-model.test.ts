@@ -38,7 +38,7 @@ function baseDefinition(): WorkflowDefinition {
         type: 'if',
         // `left` is a bare expression, not a `{{…}}` template — the
         // runtime if-executor calls parseExpression on it directly.
-        conditions: [{ left: 'nodes.start.data.ok', dataType: 'boolean', operation: 'equals', right: true }],
+        conditions: [{ left: 'nodes.start.result.ok', dataType: 'boolean', operation: 'equals', right: true }],
       },
       { id: 'done', type: 'stop', outcome: 'success', message: 'Finished' },
     ],
@@ -71,7 +71,7 @@ describe('NODE_META default nodes', () => {
   it('produces a defaultNode for every addable type plus trigger', () => {
     const types = Object.keys(NODE_META).sort();
     expect(types).toEqual(
-      ['approval', 'foreach', 'if', 'llm', 'orchestrator', 'session', 'set', 'stop', 'tool', 'trigger', 'wait'].sort(),
+      ['approval', 'foreach', 'if', 'llm', 'orchestrator', 'session', 'set', 'stop', 'tool', 'trigger', 'wait', 'workflow'].sort(),
     );
   });
 
@@ -309,7 +309,7 @@ describe('addNode / removeNode / duplicateNode / updateNode', () => {
 
   it('does not offer trigger as an addable type', () => {
     expect(ADDABLE_NODE_TYPES).not.toContain('trigger');
-    expect(ADDABLE_NODE_TYPES).toHaveLength(10);
+    expect(ADDABLE_NODE_TYPES).toHaveLength(11);
   });
 
   it('removes a node and cascades its edges, leaving the trigger untouched', () => {

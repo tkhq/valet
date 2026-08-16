@@ -47,7 +47,12 @@ Requests to `/api/*` resolve through a strict priority ladder
 | 2 | `x-valet-sandbox` | Sandboxes | **Only** `/api/memory` and `/api/sandbox`. 403 anywhere else, 401 if invalid |
 | 3 | Session cookie | Browsers via better-auth | The signed-in user |
 | 4 | `x-api-key` | CLI / automation (`vlt_` prefix, hashed at rest) | The key's user |
-| 5 | Local stub | `VALET_LOCAL_AUTH=1` dev only | Fixed local identity |
+| 5 | Local stub | `VALET_LOCAL_AUTH=1` dev only, and only when real auth is absent | Fixed local identity (admin) |
+
+The stub and real auth are mutually exclusive. The stub identity is an admin,
+so the two together would resolve every credential-less request to an admin.
+The api refuses to boot when `BETTER_AUTH_SECRET` and `VALET_LOCAL_AUTH=1` are
+both set, and rung 5 stays inert whenever a real auth instance exists.
 
 Real auth is [better-auth](https://better-auth.com): email/password, optional
 Google/GitHub social login, and generic OIDC SSO (PKCE). The first signup

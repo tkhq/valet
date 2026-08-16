@@ -4,7 +4,11 @@ name: Docker Images
 # dev-v2 (and on version tags):
 #
 #   ghcr.io/<owner>/valet-api      — docker/Dockerfile.api (api + baked web SPA)
-#   ghcr.io/<owner>/valet-sandbox  — docker/Dockerfile.sandbox-k8s (session pods)
+#   ghcr.io/<owner>/valet-sandbox  — docker/Dockerfile.sandbox-k8s
+#                                    CI-published full-profile base image.
+#                                    Auto-seeded as the `kind='base',
+#                                    profile='full'` image_sources row per org.
+#                                    Ships gateway + ttyd + code-server.
 #
 # Multi-arch (linux/amd64 + linux/arm64) on NATIVE runners — public repos get
 # free ubuntu-24.04-arm runners, so no QEMU emulation (the sandbox image is a

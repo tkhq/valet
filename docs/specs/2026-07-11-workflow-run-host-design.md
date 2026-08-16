@@ -206,13 +206,27 @@ Workflow nodes consume the engine exclusively through the Workflow Caller Contra
 
 | Node need | Engine primitive |
 |---|---|
-| Spawn a session | `engine.createSession({ id: presetSessionId, purpose: 'workflow' })` — idempotent by id |
+| Spawn a session | `engine.createSession({ id: presetSessionId, purpose: 'workflow' })` — idempotent by id. The preset id is `wf:{runId}:{nodeId}[:{iteration}]`, which follows the same suffix rule as the dispatchId below: a `session` node used as a `foreach` body gets one session per item. Everything that resolves run context from a session id must accept both the 3-part and the 4-part form. |
 | Prompt a session/orchestrator | `thread.prompt(content, { dispatchId: 'workflow:{runId}:{nodeId}[:{iteration}]' })` — idempotent by dispatchId |
 | Await the result | `thread.awaitResult(queueItemId, { resultSchema })` — resumable; replaces poll-until-idle |
 | Observe progress | engine EventStream (settled/`turn_end`/`queue_state` events) |
 | Read transcripts | `SessionStore.getEntries(...)` — one path for all session kinds |
 | Approvals raised inside a spawned session | engine decision gates, resolved via `resolveDecision` — no workflow involvement beyond observing settlement |
 | Approvals raised by the workflow itself | `workflow_signals` row + `wake(runId)` — the workflow-instance resume target of the dual-target approval model |
+
+## Tracing
+
+The interpreter emits OTel spans through `@valet/engine`'s tracing seam (`withSpan`). With no SDK registered, every span is a no-op; the api registers the SDK when an OTLP endpoint is configured.
+
+- `workflow.drive` — one span per drive segment (claim → park/settle). Attributes: `valet.workflow.id`, `valet.workflow.run.id`, `valet.workflow.run.attempt`, and at end `valet.workflow.run.status`, `valet.workflow.run.outcome` (settled runs), `valet.workflow.run.waiting` (parked runs, wait kinds).
+- `workflow.node.{type}` — one child span per executed node. Attributes: the run identity plus `valet.workflow.node.id`, `valet.workflow.node.type`, `valet.workflow.node.iteration`, and `valet.workflow.node.status` (`completed` / `failed` / `parked`). A `failed` outcome sets span status ERROR with the executor's error message.
+- `workflow-store.{method}` — the api wraps `PgWorkflowStore` in a tracing proxy (`tracedWorkflowStore`) when telemetry is enabled, so store round trips are visible inside the drive tree. First-string-argument methods carry `valet.workflow.run.id`; `consumeSignalAndCheckpoint` carries `valet.workflow.signal.id` instead (its first argument is a signal id).
+
+Cross-trace linkage: the node span is the active context when a submission node calls `engine.prompt`, so the engine stamps that traceparent into the queue item's metadata and the spawned session's turn links back to the workflow node span.
+
+Context detachment: the host detaches every drive, submission-waiter continuation, and timer tick from the ambient trace context (`detachedFromTrace`). A nudge often fires inside a request handler's span, a drive is minutes-long, and one poll pass can claim unrelated runs — so `workflow.drive` is always a trace root. Linking a run back to the request that triggered it needs per-run traceparent storage and is future work.
+
+Not yet covered: spans for `foreach` body iterations (the body executes inside the `workflow.node.foreach` span without per-item children), `workflow_run_status` bus events, and run/node metrics beyond store-call durations.
 
 ## Migration Path
 

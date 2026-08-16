@@ -75,6 +75,20 @@ Secrets:
   (see `deploy/chart/valet/README.md`). You do not need to supply them.
   Because they survive `helm upgrade`, a redeploy does not invalidate
   sessions, cookies, or the sandbox JWT master.
+- To rotate a key, change it and run `make k8s-up` again. Kubernetes
+  injects env vars at pod start only, so a new Secret value does not reach
+  a running pod. The api pod template carries `checksum/secret` and
+  `checksum/config` annotations for this reason: a changed key or config
+  value rolls the api Deployment.
+- `api.extraEnvFrom` points at Secrets and ConfigMaps that this chart does
+  not render, and the checksums do not cover them. If you rotate one of
+  those, restart the api yourself:
+  ```sh
+  kubectl --context rancher-desktop -n valet rollout restart deployment/valet-api
+  ```
+- To use a pre-existing GitHub App instead of creating one in the web UI,
+  set `api.githubApp.*` + `api.secrets.githubApp*` — see "Pre-existing
+  GitHub App (env fallback)" in `deploy/chart/valet/README.md`.
 
 The api Deployment has an initContainer that blocks on the bundled
 Postgres StatefulSet's readiness, because the api runs migrations at boot.

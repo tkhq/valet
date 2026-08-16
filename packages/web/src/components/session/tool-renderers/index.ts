@@ -12,6 +12,10 @@
 import { bashRenderer } from "./bash";
 import { editRenderer } from "./edit";
 import { fallbackRenderer } from "./fallback";
+import { findReplaceRenderer } from "./find-replace";
+import { memPatchRenderer } from "./mem-patch";
+import { memReadRenderer } from "./mem-read";
+import { memWriteRenderer } from "./mem-write";
 import { readRenderer } from "./read";
 import { threadReadRenderer } from "./thread-read";
 import { workflowRenderer } from "./workflow";
@@ -23,8 +27,12 @@ const RENDERERS: ToolRenderer[] = [
   readRenderer,
   writeRenderer,
   editRenderer,
+  memPatchRenderer,
+  memReadRenderer,
+  memWriteRenderer,
   threadReadRenderer,
   workflowRenderer,
+  findReplaceRenderer,
   // … add plugin-specific renderers here as the ecosystem grows.
   fallbackRenderer,
 ];

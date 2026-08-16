@@ -23,16 +23,22 @@ import { SessionView } from "./session-view";
 
 vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined }));
 
-vi.mock("~/api/queries", () => ({
-  useSession: () => ({
-    isLoading: false,
-    error: null,
-    data: { id: "sess-1", title: "fix-auth", workspace: "/workspace" },
-  }),
-  useThreads: () => ({ data: { threads: [{ id: "t1", createdAt: 0 }] } }),
-  useMessages: () => ({ data: undefined }),
-  useDecisions: () => ({ data: undefined }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useSession: () => ({
+      isLoading: false,
+      error: null,
+      data: { id: "sess-1", title: "fix-auth", workspace: "/workspace" },
+    }),
+    useThreads: () => ({ data: { threads: [{ id: "t1", createdAt: 0 }] } }),
+    useMessages: () => ({ data: undefined }),
+    useDecisions: () => ({ data: undefined }),
+  };
+});
 
 vi.mock("~/stores/stream", () => ({
   useSessionStream: () => ({ messages: [], agentStatus: "idle", conn: "open" }),

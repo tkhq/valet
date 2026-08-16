@@ -37,7 +37,7 @@ Always surface returned `workflowId`/`runId` values — the chat UI uses them to
     { "id": "start", "type": "trigger" },
     { "id": "greet", "type": "set", "values": { "greeting": "hello" } },
     { "id": "gate", "type": "approval", "prompt": "Proceed with the demo?" },
-    { "id": "haiku", "type": "llm", "model": "claude-sonnet-4-6", "prompt": "Write a haiku about {{greet.greeting}}" },
+    { "id": "haiku", "type": "llm", "model": "claude-sonnet-4-6", "prompt": "Write a haiku about {{nodes.greet.result.greeting}}" },
     { "id": "done", "type": "stop", "outcome": "completed" }
   ],
   "edges": [
@@ -65,11 +65,36 @@ Node types:
 
 Edges may carry `"when"` (an expression) to gate a branch.
 
+## Templates: reading data between nodes
+
+Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill into objects and arrays: `{{nodes.fetch.result.runs[0].id}}`.
+
+**Node outputs.** A completed node's checkpoint result is `nodes.<id>.result` (`.output` is a legacy alias for the same value). Nothing else exists under a node id — the linter rejects any other segment. Result shapes by node type:
+
+- `set` — the rendered `values` object itself. `{ "values": { "owner": "tkhq" } }` → `{{nodes.x.result.owner}}` (NOT `.values.owner`).
+- `tool` — the action's data, verbatim. Check the shape with `get_node_result` on a real run.
+- `llm` — `{ text, output?, usage }`. The raw completion is `{{nodes.x.result.text}}`; with `outputSchema` set, the parsed object is `{{nodes.x.result.output...}}`.
+- `if` — `{ result: boolean }`; `approval` — `{ approved: boolean, ... }`; `foreach` — `{ items: [{ status, data }...], completedCount, ... }` (per-item data at `result.items[0].data`).
+- `stop` — `{ outcome, output? }` with `output` rendered.
+
+**Trigger data.** `trigger` is the run's start envelope: `{ type, timestamp, data, metadata }`. What `trigger.data` holds depends on how the run started:
+
+- `start_run` (manual): the `input` you passed → `{{trigger.data.<field>}}`.
+- Event trigger: `{ key, summary, refs, payload }` — `payload` is the provider's event body. GitHub example: `{{trigger.data.payload.pull_request.number}}` (single `payload`, then GitHub's own webhook shape).
+- Webhook: the raw JSON POST body.
+- Schedule: `{ scheduleName, cron, input }` → static input at `{{trigger.data.input...}}`.
+
+**Rendering rules.** A field that is exactly one `{{...}}` keeps the value's type (objects/arrays/numbers survive). Mixed text stringifies each expression. A path that resolves to nothing renders as `null` in a single-template field and `""` in mixed text — the save-time linter and the run-time error messages both name bad paths, but a syntactically-valid path to a missing key only surfaces at run time. When a tool param fails validation ("must be string"), suspect a template that rendered null; the node error lists the unresolved paths.
+
+**Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
+
 ## Working practices
 
-- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references, edge semantics, reachability, model ids, and tool service/actions. On error it returns a bulleted list — fix each item and retry; never save around validation.
+- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, and tool service/actions. On error it returns a bulleted list — fix each item and retry; never save around validation.
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
-- Read node outputs in templates as `{{nodes.<id>.result...}}`; trigger data as `{{trigger.data...}}`. Node ids containing `-` need bracket form: `nodes["my-id"].result`.
-- To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start).
+- Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.
+- To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start) — a parked run can be waiting on a node from an OLDER definition version; read the run's own checkpoints, not the current definition.
 - After `start_run`, use `get_run` to report progress. `status: "parked"` with an approval in `waitingOn` means a human must approve — tell the user and point them at the approval card; you cannot approve on their behalf.
+- `tool` nodes can park WITHOUT an approval node in the definition: when org policy resolves the action to require_approval, the node raises a policy gate and parks on `approval:<nodeId>` until a human resolves it (optional `approvalTimeout`, `onDeny` on the tool node). `list_runs` shows each parked run's `waitingOn`.
+- Debug a surprising node with `get_node_result` — it returns the checkpoint result verbatim, the same value templates read via `nodes.<id>.result` (oversized results come back as `{ truncated: true, jsonPrefix }`).
 - A run is finished when `status: "settled"`; report the `outcome`.

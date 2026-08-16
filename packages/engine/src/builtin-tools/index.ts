@@ -1,10 +1,13 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import type {
+  ChildReader,
+  ChildSender,
   ChildSpawner,
   ExecJobHandle,
   JobPoll,
   MessageQuery,
+  SessionEntry,
   SpawnChildRequest,
   ToolContext,
   ToolDef,
@@ -252,26 +255,148 @@ export const threadReadTool = defineTool({
     };
     const entries = await ctx.threadRead(args.key, opts);
     if (entries.length === 0) return { text: `(thread "${args.key}" has no messages)` };
-    const lines: string[] = [`# thread:${args.key}`];
-    for (const e of entries) {
-      if (e.type === "message") {
-        const author = e.author?.name ? ` (${e.author.name})` : "";
-        lines.push(`\n## ${e.role}${author} @ ${new Date(e.createdAt).toISOString()}`);
-        lines.push(e.content);
-      } else if (e.type === "compaction") {
-        lines.push(`\n## [compaction summary]`);
-        lines.push(e.summary);
-      } else if (e.type === "decision_gate") {
-        lines.push(
-          `\n## [decision gate: ${e.gate.type} — ${e.gate.status}] ${e.gate.title}`,
-        );
-        if (e.gate.body) lines.push(e.gate.body);
-      } else if (e.type === "branch_summary") {
-        lines.push(`\n## [branch summary]`);
-        lines.push(e.summary);
-      }
+    return { text: renderEntries(`thread:${args.key}`, entries) };
+  },
+});
+
+/**
+ * Renders session entries as markdown. Shared by `thread_read` and
+ * `child_read` so one reader cannot drift from the other.
+ */
+function renderEntries(heading: string, entries: SessionEntry[]): string {
+  const lines: string[] = [`# ${heading}`];
+  for (const e of entries) {
+    if (e.type === "message") {
+      const author = e.author?.name ? ` (${e.author.name})` : "";
+      lines.push(`\n## ${e.role}${author} @ ${new Date(e.createdAt).toISOString()}`);
+      lines.push(e.content);
+    } else if (e.type === "compaction") {
+      lines.push(`\n## [compaction summary]`);
+      lines.push(e.summary);
+    } else if (e.type === "decision_gate") {
+      lines.push(`\n## [decision gate: ${e.gate.type} — ${e.gate.status}] ${e.gate.title}`);
+      if (e.gate.body) lines.push(e.gate.body);
+    } else if (e.type === "branch_summary") {
+      lines.push(`\n## [branch summary]`);
+      lines.push(e.summary);
     }
-    return { text: lines.join("\n") };
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Byte ceiling on one `child_read` result. Matches the api's
+ * `CHILD_RESULT_MAX_CHARS` on the settled signal: the recovery path must
+ * not re-admit the flood the signal ceiling exists to prevent.
+ */
+export const CHILD_READ_MAX_CHARS = 16_000;
+
+export const childReadTool = defineTool({
+  name: "child_read",
+  description:
+    "Read the messages of a child session this session spawned. A " +
+    "`child.settled` signal carries only a bounded copy of the child's " +
+    "result, so call this when the signal says it was truncated, or when " +
+    "you need the child's working detail rather than its conclusion.",
+  parameters: Type.Object({
+    child_session_id: Type.String({ description: "The child session to read, as named in the child.settled signal." }),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+  }),
+  execute: async (args, ctx) => {
+    // Same `toolConfig` passthrough convention as `task`'s childSpawner:
+    // `ctx.config` is verbatim `Record<string, unknown>`, so a
+    // reader-shaped value is known only by convention.
+    const rawReader = ctx.config?.childReader;
+    if (typeof rawReader !== "function") {
+      return { text: "[child_read_unavailable] this session cannot read child sessions" };
+    }
+    const reader = rawReader as ChildReader; // narrowed by typeof check above
+
+    const entries = await reader(
+      { childSessionId: args.child_session_id, limit: args.limit },
+      { parentSessionId: ctx.sessionId },
+    );
+    if (entries === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a child.settled signal in this thread.`,
+      };
+    }
+    if (entries.length === 0) return { text: `(child ${args.child_session_id} has no messages)` };
+    const rendered = renderEntries(`child:${args.child_session_id}`, entries);
+    // The store's limit counts entries, not bytes — one oversized entry
+    // (the exact case the settled-signal ceiling truncates) would flood
+    // the parent's context through the recovery path. Keep the most
+    // recent tail; the head is older transcript.
+    if (rendered.length > CHILD_READ_MAX_CHARS) {
+      const dropped = rendered.length - CHILD_READ_MAX_CHARS;
+      return {
+        text:
+          `[Truncated: this is the most recent ${CHILD_READ_MAX_CHARS} characters; ` +
+          `${dropped} older characters were dropped. No \`limit\` value recovers ` +
+          `them — \`limit\` only picks how many recent entries are fetched.]\n\n` +
+          rendered.slice(-CHILD_READ_MAX_CHARS),
+      };
+    }
+    return { text: rendered };
+  },
+});
+
+export const childSendTool = defineTool({
+  name: "child_send",
+  description:
+    "Send a message to a child session this session spawned — steer it " +
+    "mid-run or follow up after it settled. By default the message queues " +
+    "behind the child's current work; set `interrupt: true` to supersede " +
+    "that work (use it when the child is heading the wrong direction). " +
+    "Either way the settlement watch re-arms: the child's next result " +
+    "arrives as a fresh `child.settled` signal on the thread that spawned " +
+    "the child.",
+  parameters: Type.Object({
+    child_session_id: Type.String({
+      description: "The child session to message, as returned by `task` or named in a child.settled signal.",
+    }),
+    message: Type.String({ minLength: 1, description: "The message to deliver to the child." }),
+    interrupt: Type.Optional(
+      Type.Boolean({
+        description: "Supersede the child's in-flight work instead of queueing behind it. Default false.",
+      }),
+    ),
+  }),
+  execute: async (args, ctx) => {
+    // Same `toolConfig` passthrough convention as `task`'s childSpawner:
+    // `ctx.config` is verbatim `Record<string, unknown>`, so a
+    // sender-shaped value is known only by convention.
+    const rawSender = ctx.config?.childSender;
+    if (typeof rawSender !== "function") {
+      return { text: "[child_send_unavailable] this session cannot message child sessions" };
+    }
+    const sender = rawSender as ChildSender; // narrowed by typeof check above
+
+    const result = await sender(
+      {
+        childSessionId: args.child_session_id,
+        message: args.message,
+        ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
+      },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+    );
+    if (result === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    const mode = args.interrupt
+      ? "superseding its in-flight work"
+      : "queued behind its current work";
+    return {
+      text:
+        `sent to child ${args.child_session_id} (submission ${result.queueItemId}, ${mode}). ` +
+        `Its next result will arrive as a child.settled signal on the thread that spawned it.`,
+    };
   },
 });
 
@@ -412,4 +537,6 @@ export const builtinTools: ToolDef[] = [
   switchModelTool,
   askApprovalTool,
   taskTool,
+  childReadTool,
+  childSendTool,
 ];

@@ -13,6 +13,7 @@
 
 import type { QueueMode, SessionPurpose, SubmissionResult } from '@valet/engine';
 import type { TSchema } from 'typebox';
+import type { ToolCredentialMode } from './dag/nodes.js';
 
 export interface WorkflowCreateSessionOptions {
   id: string;
@@ -44,8 +45,28 @@ export interface WorkflowLlmCompleteRequest {
   maxOutputTokens?: number;
 }
 
+/**
+ * Portable, provider-agnostic shape — deliberately not pi-ai's own `Usage`
+ * type (this package depends only on `@valet/engine` and `@sinclair/
+ * typebox`; the API-side implementation maps whatever the real provider
+ * SDK returns into this). Required, not optional, on the result it lives
+ * in: an `llmComplete` implementation that can't fill this in is a real
+ * gap, and making it required means the type system catches a silently-
+ * dropped-usage regression at compile time instead of an unnoticed cost
+ * dimension that goes missing until someone asks where the money went.
+ */
+export interface WorkflowLlmUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
 export interface WorkflowLlmCompleteResult {
   text: string;
+  usage: WorkflowLlmUsage;
 }
 
 export interface WorkflowPromptOrchestratorOptions {
@@ -73,9 +94,24 @@ export interface WorkflowInvokeActionRequest {
   params: Record<string, unknown>;
   /** Idempotency key. Deterministic per the tool executor's dispatch (decision 6: `workflow:{runId}:{nodeId}[:{iteration}]`). */
   invocationId: string;
+  /**
+   * `ToolNode.credential`, forwarded unchanged. Absent means the node
+   * selected no identity, and the implementation keeps its default
+   * precedence. An implementation that receives `'app'` MUST resolve the
+   * installed application's identity or fail the invocation — a fallback to
+   * a person's credential would make the action act as that person.
+   */
+  credential?: ToolCredentialMode;
+  /** Host-internal single-invocation authorization (spec §1). Set by the
+   * tool executor only when it holds an approved, unconsumed resolution
+   * signal for exactly this invocation. Never crosses an HTTP boundary. */
+  approval?: { resolvedBy: string; note?: string };
 }
 
-export type WorkflowInvokeActionResult = { ok: true; result: unknown } | { ok: false; error: string };
+export type WorkflowInvokeActionResult =
+  | { ok: true; result: unknown }
+  | { ok: false; error: string }
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel
@@ -140,4 +176,19 @@ export interface WorkflowEngineDeps {
    * `dispatchId` gives the session executor.
    */
   invokeAction(req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult>;
+
+  /**
+   * The `workflow` node's definition lookup (batch-fanout design decision
+   * 1). Resolves `workflowId` to its current definition snapshot ONLY when
+   * the workflow belongs to `owner` — an id belonging to someone else
+   * resolves `null`, indistinguishable from a missing one. Optional
+   * because definition storage lives host-side: a host that does not wire
+   * it gets a loud per-node failure from the executor, never a silent
+   * skip. Starting the child run needs no engine method — the executor
+   * enqueues durably through the `WorkflowStore` itself.
+   */
+  resolveWorkflow?(
+    workflowId: string,
+    owner: { ownerType: string; ownerId: string } | undefined,
+  ): Promise<{ definition: unknown; definitionVersionId: string } | null>;
 }

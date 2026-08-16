@@ -17,16 +17,22 @@ let githubAppData: GetGithubAppResponse | undefined;
 let isLoading = false;
 let isError = false;
 
-vi.mock("~/api/settings", () => ({
-  useGithubApp: () => ({ data: githubAppData, isLoading, error: isError ? new Error("boom") : null }),
-  useCreateGithubAppManifest: () => ({
-    mutateAsync: createManifestMutateAsync,
-    isPending: false,
-    error: null,
-  }),
-  useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
-  useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useGithubApp: () => ({ data: githubAppData, isLoading, error: isError ? new Error("boom") : null }),
+    useCreateGithubAppManifest: () => ({
+      mutateAsync: createManifestMutateAsync,
+      isPending: false,
+      error: null,
+    }),
+    useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
+    useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false }),
+  };
+});
 
 import { GithubAppSection } from "./github-app-section";
 

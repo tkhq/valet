@@ -10,8 +10,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
+import type { Usage } from "@mariozechner/pi-ai";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { buildWorkflowEngineDeps } from "./engine-deps.js";
+import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 
@@ -374,5 +375,47 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     await expect(
       deps.llmComplete({ model: "definitely-not-a-real-model-id", prompt: "hi" }),
     ).rejects.toThrow(/unknown model/);
+  });
+});
+
+describe("mapPiAiUsage", () => {
+  it("maps every field, not a subset — this is the fix for the completion usage that used to be silently discarded", () => {
+    const usage: Usage = {
+      input: 120,
+      output: 30,
+      cacheRead: 5,
+      cacheWrite: 2,
+      totalTokens: 157,
+      cost: { input: 0.001, output: 0.002, cacheRead: 0.00001, cacheWrite: 0.00002, total: 0.00303 },
+    };
+
+    expect(mapPiAiUsage(usage)).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 2,
+      totalTokens: 157,
+      costUsd: 0.00303,
+    });
+  });
+
+  it("passes through zeros unchanged (no accidental truthiness/default-value bugs)", () => {
+    const usage: Usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+
+    expect(mapPiAiUsage(usage)).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+    });
   });
 });

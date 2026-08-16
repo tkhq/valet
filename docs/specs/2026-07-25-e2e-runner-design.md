@@ -263,6 +263,18 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
 
 ## Deviations (as implemented)
 
+- Test-file filters are passed to vitest WITHOUT a `--` separator. vitest
+  drops every argument after a bare `--` and runs the full suite;
+  `lib.test.ts` rejects any step command that contains one.
+- Execution runs in three waves, not one sequential list. Wave 1 (serial):
+  static steps that write files other steps read — `typecheck` (tsc --build
+  re-emits shared/sdk dist) and `registry-drift` (temporarily rewrites a
+  tracked file). Wave 2 (pooled): `parallelSafe` static steps run
+  concurrently, at most `VALET_E2E_JOBS` at a time (default:
+  min(4, max(2, cores/4))). Wave 3 (serial, table order): every non-static
+  step — daemons, fixed ports, API keys, and clusters do not interleave.
+  `--verbose` forces one job (inherited stdio cannot interleave). The
+  scorecard always prints in table order, whatever the completion order.
 - `integration-core` / `integration-agent` run explicit file lists (held in
   `scripts/e2e/lib.ts`), not whole-directory globs — keeps the two rows
   disjoint from the dedicated rows (cli, telegram, github-live, openai,

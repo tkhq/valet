@@ -27,21 +27,31 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
 }));
 
-vi.mock("~/api/queries", () => ({
-  useThreads: () => ({
-    data: { threads: [{ id: "thread-1", title: null, createdAt: Date.now() }] },
-    isLoading: false,
-    error: null,
-  }),
-  useCreateThread: () => ({
-    mutateAsync: createThreadMutateAsync,
-    isPending: false,
-  }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useThreads: () => ({
+      data: { threads: [{ id: "thread-1", title: null, createdAt: Date.now() }] },
+      isLoading: false,
+      error: null,
+    }),
+    useCreateThread: () => ({
+      mutateAsync: createThreadMutateAsync,
+      isPending: false,
+    }),
+    useArchivedThreads: () => ({ data: undefined, isLoading: false, error: null }),
+    useSetThreadArchived: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useReplaceSandbox: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  };
+});
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: { sessionId: "orchestrator:user-1" } }),
   useOrchestratorChildren: () => ({ data: { children: [] }, refetch: vi.fn() }),
+  useDismissChild: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 vi.mock("~/stores/stream", () => ({
