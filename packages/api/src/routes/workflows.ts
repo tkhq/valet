@@ -10,7 +10,7 @@
 import { Hono } from "hono";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import type { ValidateEnvironment } from "@valet/workflow";
+import { WorkflowCursorError, type ValidateEnvironment } from "@valet/workflow";
 import {
   cancelWorkflowRun,
   createWorkflowDefinition,
@@ -19,6 +19,9 @@ import {
   getWorkflowRunDetail,
   getWorkflowVersion,
   isAuthorizedForOwner,
+  isRunOutcome,
+  isRunStatus,
+  listRunsForOwner,
   listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowVersions,
@@ -27,6 +30,9 @@ import {
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
+  RUN_OUTCOME_VALUES,
+  RUN_PAGE_LIMIT_MAX,
+  RUN_STATUS_VALUES,
   type WorkflowOwner,
   type WorkflowOwnerRef,
   type WorkflowOwnerType,
@@ -71,6 +77,23 @@ import type {
 } from "../wire/types.js";
 
 export const workflowsRouter = new Hono<AppEnv>();
+
+/** An empty query value means "not set": a client that always sends the
+ * field must not get a 400 for leaving it blank. */
+function blankToUndefined(value: string | undefined): string | undefined {
+  return value === undefined || value === "" ? undefined : value;
+}
+
+/** Parses `?limit=` for the run lists. Both list handlers share the range. */
+function parseRunLimit(raw: string | undefined): { limit?: number } | { error: string } {
+  const value = blankToUndefined(raw);
+  if (value === undefined) return {};
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > RUN_PAGE_LIMIT_MAX) {
+    return { error: `limit must be an integer from 1 to ${RUN_PAGE_LIMIT_MAX}` };
+  }
+  return { limit };
+}
 
 function serviceCtx(c: {
   var: { providers: WorkflowServiceDeps; user: { id: string; orgId: string } };
@@ -174,6 +197,62 @@ workflowsRouter.get("/", async (c) => {
   return c.json(resp);
 });
 
+// ── Cross-workflow run list ───────────────────────────────────────────────
+//
+// Registration order is load-bearing: `GET /:id` below also matches the
+// single segment `/runs`, and the router picks the route registered first.
+// Keep this handler above it. (`GET /runs/:runId` further down is safe at
+// any position — two segments never collide with `/:id`.)
+
+workflowsRouter.get("/runs", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+
+  const limit = parseRunLimit(c.req.query("limit"));
+  if ("error" in limit) return c.json({ error: limit.error }, 400);
+
+  // A whole number, not merely finite: `created_at` is an integer column, and
+  // a fractional or out-of-range value reaches the driver as a syntax error.
+  const rawSince = blankToUndefined(c.req.query("since"));
+  const since = rawSince === undefined ? undefined : Number(rawSince);
+  if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) {
+    return c.json({ error: "since must be a whole millisecond timestamp, 0 or greater" }, 400);
+  }
+
+  // `status`, `outcome` and `workflowId` are repeatable and match any-of.
+  const rawStatus = c.req.queries("status");
+  const status = rawStatus?.filter(isRunStatus);
+  if (rawStatus && status && status.length !== rawStatus.length) {
+    return c.json({ error: `status must be one of: ${RUN_STATUS_VALUES.join(", ")}` }, 400);
+  }
+  const rawOutcome = c.req.queries("outcome");
+  const outcome = rawOutcome?.filter(isRunOutcome);
+  if (rawOutcome && outcome && outcome.length !== rawOutcome.length) {
+    return c.json({ error: `outcome must be one of: ${RUN_OUTCOME_VALUES.join(", ")}` }, 400);
+  }
+
+  let page;
+  try {
+    page = await listRunsForOwner(deps, owner, {
+      workflowIds: c.req.queries("workflowId"),
+      status,
+      outcome,
+      parentRunId: blankToUndefined(c.req.query("parentRunId")),
+      since,
+      limit: limit.limit,
+      cursor: blankToUndefined(c.req.query("cursor")),
+    });
+  } catch (err) {
+    if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  // Same convention as every other handler here: a workflow the caller
+  // cannot read is indistinguishable from one that does not exist.
+  if (!page) return c.json({ error: "workflow not found" }, 404);
+
+  const resp: ListWorkflowRunsResponse = page;
+  return c.json(resp);
+});
+
 workflowsRouter.get("/:id", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
@@ -259,9 +338,23 @@ workflowsRouter.post("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/runs", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const runs = await listWorkflowRuns(deps, owner, c.req.param("id"));
-  if (!runs) return c.json({ error: "workflow not found" }, 404);
-  const resp: ListWorkflowRunsResponse = { runs };
+
+  const limit = parseRunLimit(c.req.query("limit"));
+  if ("error" in limit) return c.json({ error: limit.error }, 400);
+
+  let page;
+  try {
+    page = await listWorkflowRuns(deps, owner, c.req.param("id"), {
+      limit: limit.limit,
+      cursor: blankToUndefined(c.req.query("cursor")),
+    });
+  } catch (err) {
+    if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  if (!page) return c.json({ error: "workflow not found" }, 404);
+
+  const resp: ListWorkflowRunsResponse = page;
   return c.json(resp);
 });
 

@@ -424,6 +424,92 @@ describe('validateWorkflowDefinition', () => {
     });
   });
 
+  describe('onError policy', () => {
+    /** One-node fixture per type that carries `onError`, so the policy is the only variable. */
+    function withNode(node: Record<string, unknown>): WorkflowDefinition {
+      return JSON.parse(
+        JSON.stringify({
+          version: 'dag/v1',
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            node,
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'step' },
+            { from: 'step', to: 'stop' },
+          ],
+        }),
+      ) as WorkflowDefinition;
+    }
+
+    const toolNode = { id: 'step', type: 'tool', service: 'slack', action: 'send_message', params: {} };
+    const llmNode = { id: 'step', type: 'llm', model: 'anthropic/claude-sonnet', prompt: 'summarize' };
+    const workflowNode = { id: 'step', type: 'workflow', workflowId: 'wf-child' };
+
+    it('accepts "fail", "continue", and omission on tool, llm and workflow nodes', () => {
+      for (const base of [toolNode, llmNode, workflowNode]) {
+        expect(validateWorkflowDefinition(withNode(base))).toEqual({ ok: true });
+        expect(validateWorkflowDefinition(withNode({ ...base, onError: 'fail' }))).toEqual({ ok: true });
+        expect(validateWorkflowDefinition(withNode({ ...base, onError: 'continue' }))).toEqual({ ok: true });
+      }
+    });
+
+    it('rejects an unknown policy and names both accepted values', () => {
+      for (const [base, type] of [
+        [toolNode, 'tool'],
+        [llmNode, 'llm'],
+        [workflowNode, 'workflow'],
+      ] as const) {
+        const result = validateWorkflowDefinition(withNode({ ...base, onError: 'ignore' }));
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.errors.some((e) => e.includes(`${type}.onError must be "fail" or "continue"`))).toBe(true);
+        }
+      }
+    });
+
+    it('rejects onError on a node type that has no error policy', () => {
+      const result = validateWorkflowDefinition(
+        withNode({ id: 'step', type: 'set', values: {}, onError: 'continue' }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('unknown field "onError"'))).toBe(true);
+      }
+    });
+
+    it('rejects onError on a foreach body and points at foreach.onItemError', () => {
+      const result = validateWorkflowDefinition(
+        JSON.parse(
+          JSON.stringify({
+            version: 'dag/v1',
+            nodes: [
+              { id: 'trigger', type: 'trigger' },
+              {
+                id: 'loop',
+                type: 'foreach',
+                items: '{{trigger.data.items}}',
+                body: { id: 'loop-body', type: 'tool', service: 'slack', action: 'send_message', params: {}, onError: 'continue' },
+              },
+              { id: 'stop', type: 'stop' },
+            ],
+            edges: [
+              { from: 'trigger', to: 'loop' },
+              { from: 'loop', to: 'stop' },
+            ],
+          }),
+        ) as WorkflowDefinition,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.body must not set onError') && e.includes('onItemError'))).toBe(
+          true,
+        );
+      }
+    });
+  });
+
   describe('foreach node', () => {
     // Several of these cases construct deliberately invalid foreach shapes
     // (disallowed body types, malformed maxItems/concurrency) that don't fit

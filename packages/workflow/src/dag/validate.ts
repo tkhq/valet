@@ -99,10 +99,10 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   approval: ['id', 'type', 'prompt', 'summary', 'details', 'timeout', 'onDeny'],
   session: ['id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
-  llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
+  llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'onError'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
-  workflow: ['id', 'type', 'workflowId', 'input'],
+  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential', 'onError'],
+  workflow: ['id', 'type', 'workflowId', 'input', 'onError'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
 
@@ -110,6 +110,12 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
  * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
  * cannot hold. */
 const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
+
+/** Node types that carry `onError` (batch-fanout design decision 3). */
+const ERROR_POLICY_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>(['llm', 'tool', 'workflow']);
+
+/** Same reason as `TOOL_CREDENTIAL_MODES`: reject what `NodeErrorPolicy` cannot hold. */
+const NODE_ERROR_POLICIES: ReadonlySet<string> = new Set(['fail', 'continue']);
 
 const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
@@ -327,6 +333,7 @@ function validateNodeFields(
         errors.push(`${label}: workflow.workflowId must be a non-empty string naming the called workflow`);
       }
       checkJsonTemplates(label, 'input', node.input, refCtx, errors);
+      checkErrorPolicy(label, 'workflow', node.onError, errors);
       break;
     case 'set':
       if (!isPlainObject(node.values)) {
@@ -411,6 +418,7 @@ function validateNodeFields(
       if (node.maxOutputTokens !== undefined && !isPositiveInteger(node.maxOutputTokens)) {
         errors.push(`${label}: llm.maxOutputTokens must be a positive integer`);
       }
+      checkErrorPolicy(label, 'llm', node.onError, errors);
       break;
     case 'orchestrator':
       if (!isNonEmptyString(node.prompt)) {
@@ -450,11 +458,21 @@ function validateNodeFields(
             `"app" makes the action run as the installed application, "user" as the workflow owner`,
         );
       }
+      checkErrorPolicy(label, 'tool', node.onError, errors);
       break;
     case 'foreach':
       // Field checks live in validateForeachNode (needs nodesById).
       break;
   }
+}
+
+function checkErrorPolicy(label: string, type: DagNodeType, policy: unknown, errors: string[]): void {
+  if (policy === undefined) return;
+  if (typeof policy === 'string' && NODE_ERROR_POLICIES.has(policy)) return;
+  errors.push(
+    `${label}: ${type}.onError must be "fail" or "continue", got ${JSON.stringify(policy)} — ` +
+      `"continue" records the failure and still runs the nodes downstream of it`,
+  );
 }
 
 function validateIfNode(node: IfNode, label: string, refCtx: RefContext, errors: string[]): void {
@@ -554,6 +572,16 @@ function validateForeachNode(
     const bodyLabel = `node ${JSON.stringify(`${node.id}.body (${node.body.id})`)}`;
     lintNodeKeys(node.body, bodyLabel, errors);
     validateNodeFields(node.body, bodyLabel, refCtx, env, errors);
+    // A body has no outgoing edges, so `onError` would pass the shared
+    // field checks and then change nothing. `foreach.onItemError` is the
+    // per-item policy. The key is only accepted here for body types that
+    // declare it — on the others `lintNodeKeys` already rejected it.
+    if (ERROR_POLICY_NODE_TYPES.has(node.body.type) && hasKey(node.body, 'onError')) {
+      errors.push(
+        `${label}: foreach.body must not set onError — use foreach.onItemError ` +
+          `("fail", "skip" or "collect") to choose what a failed item does`,
+      );
+    }
   }
 
   // A body node is not in `definition.nodes`, so the per-node loop in

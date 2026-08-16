@@ -1,7 +1,12 @@
 import type { LlmNode } from "@valet/workflow";
 import { JsonTextarea, LabeledInput, LabeledTextarea, NumberField } from "../fields";
+import { ErrorPolicyField, type ErrorPolicyProps } from "./error-policy-field";
 
-export function LlmForm({ node, onChange }: { node: LlmNode; onChange: (patch: Record<string, unknown>) => void }) {
+export function LlmForm({
+  node,
+  onChange,
+  allowOnError = true,
+}: { node: LlmNode; onChange: (patch: Record<string, unknown>) => void } & ErrorPolicyProps) {
   return (
     <div className="flex flex-col gap-3">
       <LabeledInput label="Model" value={node.model} onChange={(value) => onChange({ model: value })} />
@@ -26,6 +31,7 @@ export function LlmForm({ node, onChange }: { node: LlmNode; onChange: (patch: R
         onChange={(value) => onChange({ maxOutputTokens: value })}
         min={1}
       />
+      {allowOnError && <ErrorPolicyField value={node.onError} onChange={onChange} />}
     </div>
   );
 }

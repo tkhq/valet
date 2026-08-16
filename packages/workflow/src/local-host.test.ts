@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { describeRunHostContract, makeRunHostFixtureEngine, type RunHostFixture, type RunHostFixtureOptions } from './conformance/run-host.js';
+import type { RunSettledInfo } from './interpreter.js';
 import { LocalRunHost } from './local-host.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
 import type { RunParams } from './store.js';
@@ -208,5 +209,45 @@ describe('LocalRunHost sweep survives a process restart', () => {
     } finally {
       await hostB.stopHost();
     }
+  });
+});
+
+// ─── Settle reporting: the host hands `onRunSettled` to every drive ─────────
+
+describe('LocalRunHost settle reporting', () => {
+  it('reports a run it drove to settlement, with the run owner and workflow id', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const engine = makeRunHostFixtureEngine();
+    const reports: RunSettledInfo[] = [];
+
+    const host = new LocalRunHost({
+      store,
+      engine,
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 2_000,
+      heartbeatMs: 300,
+      onRunSettled: (info) => {
+        reports.push(info);
+      },
+    });
+
+    host.startHost();
+    try {
+      await host.start('run-report', runParams(), simpleDefinition(), { ownerType: 'user', ownerId: 'u-9' });
+      await waitFor(async () => reports.length > 0);
+    } finally {
+      await host.stopHost();
+    }
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      runId: 'run-report',
+      workflowId: 'wf-1',
+      outcome: 'completed',
+      owner: { ownerType: 'user', ownerId: 'u-9' },
+    });
   });
 });

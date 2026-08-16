@@ -5,6 +5,7 @@ import type { WorkflowDefinitionSummary } from "@valet/api/wire";
 import { triggerDataSchema } from "@valet/workflow";
 import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
 import { OwnerBadge } from "~/components/owner-badge";
+import { runCountLabel } from "~/lib/run-count";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Button, Spinner } from "~/components/primitives";
@@ -80,6 +81,7 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
   const del = useDeleteWorkflow();
   const navigate = useNavigate();
   const runCount = runsQ.data?.runs.length;
+  const countLabel = runCountLabel(runsQ.data);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [runOpen, setRunOpen] = useState(false);
 
@@ -125,9 +127,9 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
           {workflow.name}
         </Link>
         <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
-        {runCount !== undefined && (
+        {countLabel !== undefined && (
           <span className="shrink-0 text-xs font-normal text-muted">
-            {runCount} run{runCount === 1 ? "" : "s"}
+            {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
           </span>
         )}
       </div>

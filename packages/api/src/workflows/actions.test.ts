@@ -93,10 +93,10 @@ describe("save_workflow validation", () => {
   });
 });
 
-// DB-backed: create_webhook/get_webhook/delete_webhook go through the real
-// webhook-service.ts (unlike the pure-validation test above, they need a
-// real workflow_definitions/workflow_webhooks round trip).
-describe("webhook actions", () => {
+// DB-backed: these actions go through the real services (unlike the
+// pure-validation test above), so they need a real workflow_definitions
+// round trip plus a run store.
+describe("DB-backed actions", () => {
   let db: AppDb;
   let pglite: PGlite;
   let deps: WorkflowServiceDeps;
@@ -284,5 +284,88 @@ describe("webhook actions", () => {
 
     const unowned = await del.execute({ workflow_id: workflowId }, ctx({ userId: "someone-else" }));
     expect(unowned.success).toBe(false);
+  });
+
+  // The agent's batch tracker (batch-fanout design decision 5). An
+  // orchestrator watching a 250-item fan-out reads it through this action,
+  // so the reach and the guards need their own coverage.
+  describe("list_runs", () => {
+    interface RunPage {
+      runs: { runId: string; parentRunId?: string }[];
+      nextCursor?: string;
+    }
+
+    async function seedRun(workflowId: string, runId: string, parentRunId?: string): Promise<void> {
+      await deps.workflowStore.createRun(
+        runId,
+        { workflowId, definitionVersionId: "v1", parentRunId },
+        { version: "dag/v1", nodes: [], edges: [] },
+        "v1",
+        { ownerType: "user", ownerId: "user1" },
+      );
+    }
+
+    it("lists every reachable workflow's runs when workflow_id is omitted", async () => {
+      const first = await seedWorkflow();
+      const second = await seedWorkflow();
+      await seedRun(first, "wfrun_a");
+      await seedRun(second, "wfrun_b");
+      const list = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.list_runs")!;
+
+      const result = await list.execute({}, ctx());
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      const page = result.data as RunPage;
+      expect(new Set(page.runs.map((r) => r.runId))).toEqual(new Set(["wfrun_a", "wfrun_b"]));
+
+      // Another user reaches neither workflow, so the same call sees nothing.
+      const other = await list.execute({}, ctx({ userId: "someone-else" }));
+      expect(other.success).toBe(true);
+      if (!other.success) return;
+      expect((other.data as RunPage).runs).toEqual([]);
+    });
+
+    it("returns one batch parent's children for parent_run_id", async () => {
+      const workflowId = await seedWorkflow();
+      await seedRun(workflowId, "wfrun_parent");
+      await seedRun(workflowId, "wfrun_child_1", "wfrun_parent");
+      await seedRun(workflowId, "wfrun_child_2", "wfrun_parent");
+      await seedRun(workflowId, "wfrun_other_child", "wfrun_elsewhere");
+      const list = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.list_runs")!;
+
+      const result = await list.execute({ parent_run_id: "wfrun_parent" }, ctx());
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      const page = result.data as RunPage;
+      expect(new Set(page.runs.map((r) => r.runId))).toEqual(new Set(["wfrun_child_1", "wfrun_child_2"]));
+      expect(page.runs.every((r) => r.parentRunId === "wfrun_parent")).toBe(true);
+    });
+
+    it("pages, and names the corrective action for a bad status or cursor", async () => {
+      const workflowId = await seedWorkflow();
+      await seedRun(workflowId, "wfrun_p1");
+      await seedRun(workflowId, "wfrun_p2");
+      const list = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.list_runs")!;
+
+      const first = await list.execute({ workflow_id: workflowId, limit: 1 }, ctx());
+      if (!first.success) throw new Error("expected the first page to succeed");
+      const firstPage = first.data as RunPage;
+      expect(firstPage.runs).toHaveLength(1);
+      expect(firstPage.nextCursor).toBeDefined();
+
+      const second = await list.execute({ workflow_id: workflowId, limit: 1, cursor: firstPage.nextCursor }, ctx());
+      if (!second.success) throw new Error("expected the second page to succeed");
+      const secondPage = second.data as RunPage;
+      expect(secondPage.runs).toHaveLength(1);
+      expect(secondPage.runs[0]?.runId).not.toBe(firstPage.runs[0]?.runId);
+
+      const badStatus = await list.execute({ status: ["nope"] }, ctx());
+      expect(badStatus.success).toBe(false);
+      expect(badStatus.error).toContain("pending, running, parked, terminalizing, settled");
+
+      const badCursor = await list.execute({ cursor: "nonsense" }, ctx());
+      expect(badCursor.success).toBe(false);
+      expect(badCursor.error).toContain("nextCursor");
+    });
   });
 });

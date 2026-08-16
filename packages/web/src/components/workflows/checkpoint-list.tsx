@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
 import { jsonPreview } from "./run-detail-helpers";
 
@@ -7,6 +8,10 @@ export interface CheckpointLike {
   status: string;
   error?: string | null;
   result?: unknown;
+  /** The session a `session` node drove, when it started one. */
+  sessionId?: string;
+  /** The run a `workflow` node started, when it started one. */
+  childRunId?: string;
 }
 
 /** Raw checkpoint status strings → the same `NodeRunStatus` vocabulary the
@@ -91,6 +96,30 @@ function CheckpointRow({ checkpoint }: { checkpoint: CheckpointLike }) {
         <span className="flex-1 truncate text-sm font-medium text-ink">{checkpoint.nodeId}</span>
         <span className={`text-xs ${TEXT_COLOR[status]}`}>{LABEL[status]}</span>
       </div>
+      {/* The work the node started. On a failed node this is the only way
+          to read what actually went wrong. */}
+      {(checkpoint.sessionId || checkpoint.childRunId) && (
+        <div className="mt-1 flex gap-3 pl-6 text-xs">
+          {checkpoint.sessionId && (
+            <Link
+              to="/sessions/$sessionId"
+              params={{ sessionId: checkpoint.sessionId }}
+              className="text-muted hover:underline"
+            >
+              Open session
+            </Link>
+          )}
+          {checkpoint.childRunId && (
+            <Link
+              to="/workflows/runs/$runId"
+              params={{ runId: checkpoint.childRunId }}
+              className="text-muted hover:underline"
+            >
+              Open child run
+            </Link>
+          )}
+        </div>
+      )}
       {checkpoint.error != null && (
         <div className="mt-1 pl-6 text-xs text-danger-500">{checkpoint.error}</div>
       )}

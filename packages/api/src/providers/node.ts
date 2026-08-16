@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -19,9 +19,13 @@ import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js
 import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildReader, buildChildSender,
-  buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
-import { routeAttention } from "../orchestrator/attention.js";
+import {
+  buildChildReader,
+  buildChildSender,
+  buildChildSpawner,
+  ChildWatcher,
+} from "../orchestrator/children.js";
+import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
@@ -35,6 +39,7 @@ import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { buildRunSettledAttention } from "../workflows/run-attention.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -432,8 +437,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // the API either way.
     try {
       const run = await workflowStore.getRun(info.runId);
-      if (!run?.owner) return; // no recorded owner: nothing to notify
-      const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
+      const owner = principalFromOwner(run?.owner);
+      if (!owner) return; // no recorded owner: nothing to notify
       const isPolicyGate = info.kind === "policy_gate";
       await routeAttention(
         { db },
@@ -516,6 +521,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     onApprovalPending,
     onApprovalGrant,
     onGateResolved,
+    // Settle attention (batch-fanout design decision 4): a failed top-level
+    // run raises a notification through the same router the approval park
+    // above uses. See `run-attention.ts` for why child runs stay silent.
+    onRunSettled: buildRunSettledAttention({ db, store: workflowStore }),
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };

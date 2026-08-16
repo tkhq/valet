@@ -28,12 +28,18 @@ import type {
   GetWorkflowVersionResponse,
   ListWorkflowVersionsResponse,
 } from "@valet/api/wire";
-import { api, ApiError } from "./client";
+import { api, ApiError, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
   list: () => ["workflows"] as const,
   detail: (id: string) => ["workflows", id] as const,
-  runs: (id: string) => ["workflows", id, "runs"] as const,
+  // The page/filter is a trailing key element, so two pages of one list are
+  // two cache entries while the page-less form stays the prefix that
+  // invalidates all of them.
+  runs: (id: string, page?: WorkflowRunPage) =>
+    ["workflows", id, "runs", ...(page ? [page] : [])] as const,
+  runList: (filter?: WorkflowRunFilter) =>
+    ["workflows", "run-list", ...(filter ? [filter] : [])] as const,
   run: (runId: string) => ["workflows", "runs", runId] as const,
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
@@ -63,14 +69,29 @@ export function useWorkflow(
   });
 }
 
+/** One workflow's runs, newest first. Paged — read `nextCursor` to page on. */
 export function useWorkflowRuns(
   id: string,
+  page?: WorkflowRunPage,
   opts?: Partial<UseQueryOptions<ListWorkflowRunsResponse>>,
 ) {
   return useQuery<ListWorkflowRunsResponse>({
-    queryKey: qkWorkflows.runs(id),
-    queryFn: () => api.listWorkflowRuns(id),
+    queryKey: qkWorkflows.runs(id, page),
+    queryFn: () => api.listWorkflowRuns(id, page),
     enabled: !!id,
+    ...opts,
+  });
+}
+
+/** Runs across every workflow the caller can reach. Pass `parentRunId` to
+ * list one batch parent's child runs. */
+export function useRuns(
+  filter?: WorkflowRunFilter,
+  opts?: Partial<UseQueryOptions<ListWorkflowRunsResponse>>,
+) {
+  return useQuery<ListWorkflowRunsResponse>({
+    queryKey: qkWorkflows.runList(filter),
+    queryFn: () => api.listRuns(filter),
     ...opts,
   });
 }

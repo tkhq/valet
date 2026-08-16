@@ -121,6 +121,7 @@ function ForeachBodyForm({
   );
 }
 
+/** `allowOnError={false}`: the per-item policy is the foreach's own `onItemError`. */
 function BodyNodeForm({
   node,
   onChange,
@@ -130,9 +131,9 @@ function BodyNodeForm({
 }) {
   switch (node.type) {
     case "llm":
-      return <LlmForm node={node} onChange={onChange} />;
+      return <LlmForm node={node} onChange={onChange} allowOnError={false} />;
     case "tool":
-      return <ToolForm node={node} onChange={onChange} />;
+      return <ToolForm node={node} onChange={onChange} allowOnError={false} />;
     case "set":
       return <SetForm node={node} onChange={onChange} />;
     case "orchestrator":
@@ -140,6 +141,6 @@ function BodyNodeForm({
     case "session":
       return <SessionForm node={node} onChange={onChange} />;
     case "workflow":
-      return <WorkflowCallForm node={node} onChange={onChange} />;
+      return <WorkflowCallForm node={node} onChange={onChange} allowOnError={false} />;
   }
 }

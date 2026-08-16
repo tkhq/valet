@@ -26,6 +26,7 @@ import {
   Spinner,
 } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
+import { runCountLabel } from "~/lib/run-count";
 import { cn } from "~/lib/cn";
 
 /**
@@ -173,7 +174,7 @@ function WorkflowEditorPane({
             variant={drawer === "runs" ? "secondary" : "ghost"}
             onClick={() => setDrawer((d) => (d === "runs" ? null : "runs"))}
           >
-            Runs{runsQuery.data ? ` (${runsQuery.data.runs.length})` : ""}
+            Runs{runsQuery.data ? ` (${runCountLabel(runsQuery.data)})` : ""}
           </Button>
           <Button
             size="sm"
@@ -273,7 +274,10 @@ function RunsDrawer({
 }) {
   const runs = runsQuery.data?.runs ?? [];
   return (
-    <DrawerShell title={`Runs${runsQuery.data ? ` (${runs.length})` : ""}`} onClose={onClose}>
+    <DrawerShell
+      title={`Runs${runsQuery.data ? ` (${runCountLabel(runsQuery.data)})` : ""}`}
+      onClose={onClose}
+    >
       {runsQuery.isLoading && (
         <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted">
           <Spinner size={12} /> Loading runs…
@@ -313,6 +317,13 @@ function RunsDrawer({
           </li>
         ))}
       </ul>
+      {/* The list is one page. Say so — a silent cut reads as "these are all
+          the runs". A paging control belongs with the run-list rebuild. */}
+      {runsQuery.data?.nextCursor && (
+        <div className="px-4 py-3 text-xs text-muted">
+          Newest {runs.length} runs shown. Older runs stay reachable by run id.
+        </div>
+      )}
     </DrawerShell>
   );
 }

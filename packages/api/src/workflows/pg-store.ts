@@ -40,11 +40,16 @@
 import type { PgDb, PgQueryable } from '@valet/store-postgres';
 import {
   WorkflowFenceError,
+  decodeRunCursor,
+  encodeRunCursor,
+  type ListRunsFilter,
+  type ListRunsPage,
   type NodeCheckpoint,
   type RunParams,
   type RunSignal,
   type RunWaitCondition,
   type WorkflowRun,
+  type WorkflowRunListItem,
   type WorkflowStore,
 } from '@valet/workflow';
 
@@ -216,6 +221,29 @@ function rowToRun(row: WorkflowRunRow): WorkflowRun {
     // than NULL columns — map that sentinel back to `undefined` so this
     // matches `InMemoryWorkflowStore`'s owner-omitted-means-undefined shape.
     owner: row.ownerId === '' ? undefined : { ownerType: row.ownerType, ownerId: row.ownerId },
+  };
+}
+
+/**
+ * Maps one `listRuns` projection row. The parent columns are `->>` text
+ * extractions from the `params` jsonb — SQL `NULL` for a top-level run —
+ * and become `undefined`, matching `InMemoryWorkflowStore`.
+ */
+function rawToRunListItem(raw: Record<string, unknown>): WorkflowRunListItem {
+  const ownerId = asString(raw.owner_id, 'owner_id');
+  const parentIteration = toNumOrNull(raw.parent_iteration, 'parent_iteration');
+  return {
+    runId: asString(raw.id, 'id'),
+    workflowId: asString(raw.workflow_id, 'workflow_id'),
+    status: asString(raw.status, 'status') as RunStatus,
+    outcome: (asStringOrNull(raw.outcome, 'outcome') as RunOutcome | null) ?? undefined,
+    createdAt: toNum(raw.created_at, 'created_at'),
+    updatedAt: toNum(raw.updated_at, 'updated_at'),
+    owner: ownerId === '' ? undefined : { ownerType: asString(raw.owner_type, 'owner_type'), ownerId },
+    waitingOn: requiredJsonColumn<RunWaitCondition[]>(raw.waiting_on, 'waiting_on'),
+    parentRunId: asStringOrNull(raw.parent_run_id, 'parent_run_id') ?? undefined,
+    parentNodeId: asStringOrNull(raw.parent_node_id, 'parent_node_id') ?? undefined,
+    parentIteration: parentIteration ?? undefined,
   };
 }
 
@@ -420,6 +448,61 @@ export class PgWorkflowStore implements WorkflowStore {
       limit,
     ]);
     return result.rows.map((r) => rowToRun(rawToRunRow(r)));
+  }
+
+  /**
+   * Explicit column list, never `SELECT *`: the point of this method is to
+   * leave the `definition`/`params` jsonb snapshots in the table. The
+   * parent columns come out of `params` (see `RunParams`) so a batch
+   * parent's children are one query.
+   *
+   * The keyset predicate is written out rather than as a row comparison so
+   * the two columns bind as their own types, and it matches `ORDER BY
+   * created_at DESC, id DESC` exactly.
+   */
+  async listRuns(filter: ListRunsFilter): Promise<ListRunsPage> {
+    // An any-of filter with no values can never match. Answer without a query.
+    if (filter.workflowIds?.length === 0 || filter.status?.length === 0 || filter.outcome?.length === 0) {
+      return { runs: [] };
+    }
+
+    const params: unknown[] = [];
+    const bind = (value: unknown): string => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+    const inList = (values: readonly string[]): string => values.map((v) => bind(v)).join(', ');
+
+    const where: string[] = [];
+    if (filter.workflowIds) where.push(`workflow_id IN (${inList(filter.workflowIds)})`);
+    if (filter.status) where.push(`status IN (${inList(filter.status)})`);
+    if (filter.outcome) where.push(`outcome IN (${inList(filter.outcome)})`);
+    if (filter.parentRunId !== undefined) where.push(`params->>'parentRunId' = ${bind(filter.parentRunId)}`);
+    if (filter.since !== undefined) where.push(`created_at >= ${bind(filter.since)}`);
+    if (filter.cursor !== undefined) {
+      const after = decodeRunCursor(filter.cursor);
+      const at = bind(after.createdAt);
+      where.push(`(created_at < ${at} OR (created_at = ${at} AND id < ${bind(after.runId)}))`);
+    }
+
+    // One row past the page tells us whether another page exists.
+    const result = await this.db.query(
+      `SELECT id, workflow_id, status, outcome, owner_type, owner_id, created_at, updated_at,
+              waiting_on,
+              params->>'parentRunId' AS parent_run_id,
+              params->>'parentNodeId' AS parent_node_id,
+              params->>'parentIteration' AS parent_iteration
+       FROM workflow_runs
+       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ${bind(filter.limit + 1)}`,
+      params,
+    );
+
+    const hasMore = result.rows.length > filter.limit;
+    const runs = result.rows.slice(0, filter.limit).map(rawToRunListItem);
+    const last = runs[runs.length - 1];
+    return { runs, nextCursor: hasMore && last ? encodeRunCursor(last) : undefined };
   }
 
   private async getCheckpointRow(

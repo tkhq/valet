@@ -44,8 +44,13 @@ vi.mock("~/api/workflows", () => ({
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  // A page with `nextCursor` set: the workflow has more runs than this page
+  // holds, which is what the count and the drawer notice must say.
   useWorkflowRuns: () => ({
-    data: { runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }] },
+    data: {
+      runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }],
+      nextCursor: "1:wfrun_0",
+    },
     isLoading: false,
     error: null,
   }),
@@ -156,10 +161,12 @@ describe("WorkflowEditorPage", () => {
     );
   });
 
-  it("lists runs in the runs drawer", () => {
+  it("lists runs in the runs drawer, and says when the list is one page of more", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    fireEvent.click(screen.getByRole("button", { name: /Runs/ }));
+    // `1+`, not `1`: the count is the page's length, not the run total.
+    fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
+    expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {
