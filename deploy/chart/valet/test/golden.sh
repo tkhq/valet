@@ -404,4 +404,12 @@ fi
 pass "GitHub App env fallback: non-secret half in ConfigMap, secret half in Secret, opt-in"
 
 echo
+echo "== helm template (sandbox.image null — remote per-profile deploys) =="
+NULL_IMAGE_RENDER="$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set-json 'sandbox.image=null')"
+echo "$NULL_IMAGE_RENDER" | grep -q 'VALET_SANDBOX_IMAGE:' \
+  && fail "sandbox.image=null render: VALET_SANDBOX_IMAGE must be omitted so the api resolves seeded per-profile base sources"
+echo "$NULL_IMAGE_RENDER" | grep -q 'VALET_FULL_BASE_IMAGE:' \
+  || fail "sandbox.image=null render: per-profile base env vars must still render"
+pass "sandbox.image=null omits VALET_SANDBOX_IMAGE, keeps per-profile base vars"
+
 echo "All golden assertions passed."
