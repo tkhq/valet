@@ -925,6 +925,122 @@ export interface DeleteWorkflowWebhookResponse {
   deleted: boolean;
 }
 
+export interface GlobalWorkflowRunSummary extends WorkflowRunSummary {
+  workflowName: string;
+}
+
+export interface ListAllWorkflowRunsResponse {
+  runs: GlobalWorkflowRunSummary[];
+}
+
+// ── Workflow triggers (spec 2026-08-15) ──────────────────────────────────
+
+export interface WorkflowScheduleTriggerDetail {
+  cron: string;
+  timezone: string;
+  targetKind: "workflow" | "orchestrator";
+  prompt?: string;
+  input?: unknown;
+  nextFireAt: number;
+  lastFiredAt: number | null;
+}
+
+export interface WorkflowEventTriggerDetail {
+  eventKeys: string[];
+  filters: unknown[];
+}
+
+export type WorkflowTriggerItem =
+  | {
+      kind: "schedule";
+      id: string;
+      workflowId?: string;
+      name: string;
+      enabled: boolean;
+      detail: WorkflowScheduleTriggerDetail;
+    }
+  | {
+      kind: "event";
+      id: string;
+      workflowId: string;
+      name: string;
+      enabled: boolean;
+      detail: WorkflowEventTriggerDetail;
+    };
+
+export interface ListWorkflowTriggersResponse {
+  triggers: WorkflowTriggerItem[];
+}
+
+export type CreateWorkflowScheduleRequest = {
+  name: string;
+  cron: string;
+  timezone?: string;
+} & (
+  | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
+  | { target: { kind: "orchestrator"; prompt: string } }
+);
+
+export interface UpdateWorkflowScheduleRequest {
+  name?: string;
+  cron?: string;
+  timezone?: string;
+  enabled?: boolean;
+  prompt?: string;
+  input?: unknown;
+}
+
+export interface WorkflowScheduleResponse {
+  schedule: {
+    scheduleId: string;
+    targetKind: "workflow" | "orchestrator";
+    workflowId?: string;
+    prompt?: string;
+    name: string;
+    cron: string;
+    timezone: string;
+    enabled: boolean;
+    input?: unknown;
+    lastFiredAt: number | null;
+    nextFireAt: number;
+  };
+}
+
+export interface CreateWorkflowEventTriggerRequest {
+  workflowId: string;
+  name: string;
+  eventKeys: string[];
+  filters?: unknown[];
+}
+
+export interface UpdateWorkflowEventTriggerRequest {
+  name?: string;
+  eventKeys?: string[];
+  filters?: unknown[];
+  enabled?: boolean;
+}
+
+export interface WorkflowEventTriggerResponse {
+  trigger: {
+    triggerId: string;
+    workflowId: string;
+    name: string;
+    eventKeys: string[];
+    filters: unknown[];
+    enabled: boolean;
+  };
+}
+
+export interface WorkflowTriggerCatalogEntry {
+  key: string;
+  description: string;
+  filters: { field: string; description: string }[];
+}
+
+export interface GetWorkflowTriggerCatalogResponse {
+  catalog: { service: string; entries: WorkflowTriggerCatalogEntry[] }[];
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }

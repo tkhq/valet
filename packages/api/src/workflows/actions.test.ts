@@ -5,7 +5,8 @@ import { workflowsActionPlugin, ownerFromContext } from "./actions.js";
 import type { PluginActionContext } from "@valet/engine";
 import { createWorkflowDefinition, type WorkflowServiceDeps } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { workflowRuns } from "../schema/index.js";
+import { eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -47,6 +48,8 @@ describe("workflowsActionPlugin", () => {
       "workflows.resolve_approval",
       "workflows.save_workflow",
       "workflows.start_run",
+      "workflows.update_schedule",
+      "workflows.update_trigger",
     ]);
   });
 
@@ -284,5 +287,137 @@ describe("webhook actions", () => {
 
     const unowned = await del.execute({ workflow_id: workflowId }, ctx({ userId: "someone-else" }));
     expect(unowned.success).toBe(false);
+  });
+});
+
+// ── update_schedule / update_trigger — DB-backed ─────────────────────────
+
+describe("update actions", () => {
+  let db: AppDb;
+  let pglite: PGlite;
+  let deps: WorkflowServiceDeps;
+
+  const DB_USER = { id: "user_1", orgId: "org_1" };
+  const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
+
+  class StubRunHost implements RunHost {
+    async start(): Promise<void> {}
+    async wake(): Promise<void> {}
+    async scheduleWake(): Promise<void> {}
+    async terminate(): Promise<void> {}
+    startHost(): void {}
+    async stopHost(): Promise<void> {}
+  }
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    await applyAppMigrations(buildAppQueryable(pglite));
+    db = buildAppDb(pglite);
+    deps = {
+      db,
+      workflowStore: new InMemoryWorkflowStore(),
+      workflowRunHost: new StubRunHost(),
+      plugins: [githubPlugin],
+    };
+
+    await db.insert(workflowDefinitions).values({
+      id: "wf_actions_1",
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      name: "test workflow",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+  });
+
+  afterAll(async () => {
+    await pglite.close();
+  });
+
+  function findAction(id: string) {
+    const plugin = workflowsActionPlugin(() => deps);
+    const found = plugin.actions.find((a) => a.id === id);
+    if (!found) throw new Error(`${id} action missing`);
+    return found;
+  }
+
+  it("update_schedule updates an existing schedule and returns the summary", async () => {
+    const schedId = `sched_act_${Date.now()}`;
+    await db.insert(workflowSchedules).values({
+      id: schedId,
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      targetKind: "orchestrator",
+      workflowId: null,
+      prompt: "hello",
+      name: "original name",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      nextFireAt: NOW + 3600_000,
+      lastFiredAt: null,
+      createdBy: DB_USER.id,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+
+    const result = await findAction("workflows.update_schedule").execute(
+      { schedule_id: schedId, name: "renamed" },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.data as { name: string }).name).toBe("renamed");
+    }
+  });
+
+  it("update_schedule returns error for unknown schedule id", async () => {
+    const result = await findAction("workflows.update_schedule").execute(
+      { schedule_id: "no_such_schedule" },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not found");
+  });
+
+  it("update_trigger updates an existing trigger and returns the summary", async () => {
+    const trigId = `trig_act_${Date.now()}`;
+    await db.insert(eventSubscriptions).values({
+      id: trigId,
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      name: "original trigger",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [],
+      target: { kind: "workflow", workflowId: "wf_actions_1" },
+      enabled: true,
+      createdBy: DB_USER.id,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+
+    const result = await findAction("workflows.update_trigger").execute(
+      { trigger_id: trigId, name: "renamed trigger", enabled: false },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const data = result.data as { name: string; enabled: boolean };
+      expect(data.name).toBe("renamed trigger");
+      expect(data.enabled).toBe(false);
+    }
+  });
+
+  it("update_trigger returns error for unknown trigger id", async () => {
+    const result = await findAction("workflows.update_trigger").execute(
+      { trigger_id: "no_such_trigger" },
+      ctx({ orgId: DB_USER.orgId, userId: DB_USER.id }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not found");
   });
 });

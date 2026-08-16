@@ -20,7 +20,15 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { actionInvocations, workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
+import {
+  actionInvocations,
+  eventSubscriptions,
+  workflowDefinitions,
+  workflowRuns,
+  workflowSchedules,
+  workflowVersions,
+  workflowWebhooks,
+} from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { isOrgAdmin, isOrgMember } from "../services/org.js";
@@ -32,6 +40,7 @@ import {
 } from "../policies/service.js";
 import type {
   GetWorkflowRunResponse,
+  GlobalWorkflowRunSummary,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
   WorkflowRunSummary,
@@ -378,6 +387,23 @@ export async function deleteWorkflowDefinition(
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
+
+  // Triggers must not outlive the workflow: orphaned schedules would be
+  // disabled by the scheduler eventually, but the triggers list would show
+  // ghosts until then. Event subscriptions targeting the workflow are
+  // app-db rows with no FK, so remove them explicitly.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
+  const subs = await deps.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId));
+  for (const sub of subs) {
+    // `target` is a free-form jsonb column; guard the shape before reading
+    // so a malformed row cannot abort the cleanup loop mid-delete.
+    if (typeof sub.target !== "object" || sub.target === null) continue;
+    const target = sub.target as { kind?: string; workflowId?: string };
+    if (target.kind === "workflow" && target.workflowId === id) {
+      await deps.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
+    }
+  }
+
   // No FK/cascade on workflow_webhooks (it's keyed by workflowId, a plain
   // text column) — without this, a deleted workflow's hookId secret would
   // sit in the table forever, unreachable through any owner-facing route
@@ -852,4 +878,37 @@ export async function getWorkflowRunDetail(
     })),
     pendingGates,
   };
+}
+
+export async function listRecentWorkflowRuns(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  limit = 50,
+): Promise<GlobalWorkflowRunSummary[]> {
+  const defs = await listWorkflowDefinitions(deps, owner);
+  if (defs.length === 0) return [];
+  const nameById = new Map(defs.map((d) => [d.id, d.name]));
+
+  const runRows = await deps.db
+    .select({ id: workflowRuns.id })
+    .from(workflowRuns)
+    .where(inArray(workflowRuns.workflowId, [...nameById.keys()]))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(limit);
+
+  const runs: GlobalWorkflowRunSummary[] = [];
+  for (const r of runRows) {
+    const run = await deps.workflowStore.getRun(r.id);
+    if (!run) continue;
+    runs.push({
+      runId: run.runId,
+      workflowId: run.params.workflowId,
+      workflowName: nameById.get(run.params.workflowId) ?? run.params.workflowId,
+      status: run.status,
+      outcome: run.outcome,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+    });
+  }
+  return runs;
 }

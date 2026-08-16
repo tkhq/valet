@@ -20,6 +20,41 @@ const workflowsData = {
   ],
 };
 
+const triggersData = {
+  triggers: [
+    {
+      kind: "schedule" as const,
+      id: "sched_1",
+      workflowId: "wf_1",
+      name: "Nightly build",
+      enabled: true,
+      detail: {
+        cron: "0 2 * * *",
+        timezone: "UTC",
+        targetKind: "workflow" as const,
+        nextFireAt: Date.now() + 86400000,
+        lastFiredAt: null,
+      },
+    },
+  ],
+};
+
+const allRunsData = {
+  runs: [
+    {
+      runId: "wfrun_1",
+      workflowId: "wf_1",
+      workflowName: "Deploy pipeline",
+      status: "settled" as const,
+      outcome: "completed" as const,
+      createdAt: Date.now() - 10000,
+      updatedAt: Date.now() - 5000,
+    },
+  ],
+};
+
+let searchState: Record<string, unknown> = {};
+
 const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
 const createMutateAsync = vi.fn().mockResolvedValue({
@@ -35,6 +70,7 @@ vi.mock("@tanstack/react-router", () => ({
     <a {...rest}>{children}</a>
   ),
   useNavigate: () => navigate,
+  useSearch: () => searchState,
   createFileRoute: () => (config: unknown) => config,
 }));
 
@@ -44,12 +80,23 @@ vi.mock("~/api/workflows", () => ({
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
   useDeleteWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useWorkflowTriggers: () => ({ data: triggersData, isLoading: false, error: null }),
+  useAllWorkflowRuns: () => ({ data: allRunsData, isLoading: false, error: null }),
+  useUpdateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUpdateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useRunScheduleNow: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useTriggerCatalog: () => ({ data: { catalog: [] }, isLoading: false, error: null }),
+  useCreateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useCreateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 import { WorkflowsIndexPage } from "./workflows.index";
 
 describe("WorkflowsIndexPage", () => {
   it("renders each workflow definition's name as a link to its editor page", () => {
+    searchState = {};
     render(<WorkflowsIndexPage />);
     const link = screen.getByText("Deploy pipeline").closest("a");
     expect(link?.getAttribute("href") ?? link?.getAttribute("to")).toBeTruthy();
@@ -57,6 +104,7 @@ describe("WorkflowsIndexPage", () => {
   });
 
   it("starts a run and navigates to the run detail page when Run is clicked", async () => {
+    searchState = {};
     render(<WorkflowsIndexPage />);
     const runButtons = screen.getAllByRole("button", { name: "Run" });
     fireEvent.click(runButtons[0]);
@@ -71,6 +119,7 @@ describe("WorkflowsIndexPage", () => {
   });
 
   it("opens the New workflow dialog, defaults the name field, and posts the entered name on Create", async () => {
+    searchState = {};
     render(<WorkflowsIndexPage />);
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
 
@@ -94,5 +143,32 @@ describe("WorkflowsIndexPage", () => {
         params: { workflowId: "wf_new" },
       }),
     );
+  });
+
+  it("shows the Workflows tab by default with per-workflow trigger badges", () => {
+    searchState = {};
+    render(<WorkflowsIndexPage />);
+    expect(screen.getByText("Deploy pipeline")).toBeTruthy();
+    expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
+  });
+
+  it("renders the Runs tab from the global runs feed", () => {
+    searchState = { tab: "runs" };
+    render(<WorkflowsIndexPage />);
+    expect(screen.getByText("Deploy pipeline")).toBeTruthy(); // workflowName column
+    expect(screen.getByText("completed")).toBeTruthy(); // RunStatusChip label
+  });
+
+  it("renders the Triggers tab with the unified list", () => {
+    searchState = { tab: "triggers" };
+    render(<WorkflowsIndexPage />);
+    expect(screen.getByText("Nightly build")).toBeTruthy();
+  });
+
+  it("tab buttons navigate via search params", () => {
+    searchState = {};
+    render(<WorkflowsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /Triggers/ }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { tab: "triggers" } }));
   });
 });

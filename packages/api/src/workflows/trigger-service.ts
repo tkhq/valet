@@ -115,6 +115,53 @@ export async function listWorkflowTriggers(
     .filter((t) => workflowId === undefined || t.workflowId === workflowId);
 }
 
+export interface WorkflowTriggerPatch {
+  name?: string;
+  eventKeys?: string[];
+  filters?: unknown[];
+  enabled?: boolean;
+}
+
+export async function updateWorkflowTrigger(
+  db: AppDb,
+  plugins: ValetPlugin[],
+  orgId: string,
+  triggerId: string,
+  patch: WorkflowTriggerPatch,
+): Promise<
+  | { ok: true; trigger: WorkflowTriggerSummary }
+  | { ok: false; status: 400 | 404; error: string }
+> {
+  const rows = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)))
+    .limit(1);
+  const row = rows[0];
+  const current = row ? rowToTrigger(row) : null;
+  if (!row || !current) return { ok: false, status: 404, error: "trigger not found" };
+
+  const name = patch.name ?? current.name;
+  const eventKeys = patch.eventKeys ?? current.eventKeys;
+  const filters = patch.filters ?? current.filters;
+  const error = validateSubscription(plugins, {
+    name,
+    eventKeys,
+    filters,
+    target: { kind: "workflow", workflowId: current.workflowId },
+  });
+  if (error) return { ok: false, status: 400, error };
+
+  const updated = await db
+    .update(eventSubscriptions)
+    .set({ name, eventKeys, filters, enabled: patch.enabled ?? current.enabled, updatedAt: Date.now() })
+    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)))
+    .returning();
+  const trigger = rowToTrigger(updated[0]!);
+  if (!trigger) return { ok: false, status: 400, error: "trigger update produced an unexpected row shape" };
+  return { ok: true, trigger };
+}
+
 export async function deleteWorkflowTrigger(
   db: AppDb,
   orgId: string,
@@ -129,6 +176,6 @@ export async function deleteWorkflowTrigger(
   // Refuse to delete non-workflow subscriptions through this seam — those
   // belong to the orchestrator subscription surface.
   if (!row || rowToTrigger(row) === null) return "not_found";
-  await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, triggerId));
+  await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)));
   return "ok";
 }

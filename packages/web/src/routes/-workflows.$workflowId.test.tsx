@@ -16,6 +16,11 @@ import type { ReactNode } from "react";
 const navigate = vi.fn();
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
+const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
+  data: { triggers: [] },
+  isLoading: false,
+  error: null,
+}));
 
 const workflowData = {
   id: "wf_1",
@@ -67,6 +72,16 @@ vi.mock("~/api/workflows", () => ({
     isLoading: false,
     error: null,
   }),
+  useWorkflowTriggers: (workflowId?: string) => useWorkflowTriggersMock(workflowId),
+  useWorkflows: () => ({ data: { workflows: [] }, isLoading: false }),
+  useUpdateSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useUpdateEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useDeleteSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useDeleteEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useRunScheduleNow: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useCreateSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false, error: null }),
+  useCreateEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false, error: null }),
+  useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
 import { WorkflowEditorPage } from "./workflows.$workflowId";
@@ -160,6 +175,13 @@ describe("WorkflowEditorPage", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     fireEvent.click(screen.getByRole("button", { name: /Runs/ }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
+  });
+
+  it("renders the scoped triggers panel for this workflow", () => {
+    useWorkflowTriggersMock.mockClear();
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByText("Triggers")).toBeTruthy();
+    expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

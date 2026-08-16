@@ -15,6 +15,7 @@ import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Editor } from "~/components/workflows/editor/editor";
 import { WorkflowPreview } from "~/components/workflows/preview";
+import { TriggerList } from "~/components/workflows/trigger-list";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import { cn } from "~/lib/cn";
@@ -207,6 +208,10 @@ function WorkflowEditorPane({
             onClose={() => setDrawer(null)}
           />
         )}
+      </div>
+
+      <div className="border-t border-line px-4 py-3">
+        <TriggerList workflowId={workflowId} />
       </div>
     </div>
   );
