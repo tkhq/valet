@@ -217,6 +217,18 @@ describe("writeCredsFiles (pure — no Docker required)", () => {
     expect((await stat(dir)).mode & 0o777).toBe(0o755);
   });
 
+  it("file modes survive a restrictive umask (0077) — chmod is authoritative", async () => {
+    const prev = process.umask(0o077);
+    try {
+      const dir = join(tmp, "umask-creds");
+      await writeCredsFiles(dir, { token: "abc" }, { docker: true });
+      expect((await stat(join(dir, "token"))).mode & 0o777).toBe(0o644);
+      expect((await stat(dir)).mode & 0o777).toBe(0o755);
+    } finally {
+      process.umask(prev);
+    }
+  });
+
   it("non-docker sandboxes keep 0600 files and a 0700 dir", async () => {
     const dir = join(tmp, "plain-creds");
     await writeCredsFiles(dir, { token: "abc" });

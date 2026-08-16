@@ -147,6 +147,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# Exec-identity contract: `dockerd` gets its own primary group and NO
+# supplementary groups. Both providers depend on this — `docker exec -u
+# dockerd` and the k8s setpriv wrapper (`--init-groups`) must resolve the
+# same group set. If you add dockerd to a group here, both pick it up.
 RUN useradd -m -u 1500 dockerd \
     && grep -v '^dockerd:' /etc/subuid > /tmp/subuid.tmp && mv /tmp/subuid.tmp /etc/subuid \
     && grep -v '^dockerd:' /etc/subgid > /tmp/subgid.tmp && mv /tmp/subgid.tmp /etc/subgid \

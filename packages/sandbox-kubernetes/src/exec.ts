@@ -66,6 +66,13 @@ export function shQuote(value: string): string {
  * side effects (`su`/`sudo` would add both). HOME/USER/LOGNAME are set so
  * git and friends resolve the workload user's config, mirroring the docker
  * provider's `--env HOME=/home/dockerd`.
+ *
+ * Image contract for `--init-groups`: the sandbox image defines `dockerd`
+ * with its own primary group and NO supplementary groups (see the useradd
+ * in docker/Dockerfile.sandbox-k8s), so `--init-groups` resolves to exactly
+ * the primary group — the same group set `docker exec -u dockerd` produces.
+ * If the image ever adds `dockerd` to more groups, both providers pick the
+ * change up together; that symmetry is why this is not `--clear-groups`.
  */
 export function wrapAsWorkloadUser(shellCommand: string): string {
   return (

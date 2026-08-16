@@ -754,6 +754,11 @@ export async function writeCredsFiles(
     const tmp = join(dir, `.${name}.tmp`);
     await fs.writeFile(tmp, content, { encoding: "utf8", mode: fileMode });
     await fs.rename(tmp, join(dir, name));
+    // `writeFile`'s mode is masked by the process umask (a 0077 umask turns
+    // the docker-case 0644 into 0600, and the credential helper running as
+    // the workload user then cannot read the token). chmod explicitly, same
+    // as the directory above.
+    await fs.chmod(join(dir, name), fileMode);
   }
 }
 
