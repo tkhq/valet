@@ -26,12 +26,6 @@ function normalize(path: string): string {
   return "/" + stack.join("/");
 }
 
-function dirOf(path: string): string {
-  const idx = path.lastIndexOf("/");
-  if (idx <= 0) return "/";
-  return path.slice(0, idx);
-}
-
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 

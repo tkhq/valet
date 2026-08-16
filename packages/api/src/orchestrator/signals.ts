@@ -17,7 +17,6 @@
  * callers without admitSignal needing to know which one it was handed.
  */
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
   ValidationError as EngineValidationError,

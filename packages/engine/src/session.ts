@@ -37,7 +37,6 @@ import type {
   PromptReceipt,
   ProviderBundle,
   QueueItem,
-  QueueMode,
   RepoInstructions,
   RoleSpec,
   Sandbox,

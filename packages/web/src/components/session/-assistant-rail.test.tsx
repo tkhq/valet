@@ -133,6 +133,8 @@ function team(over: Partial<TeamSummary> = {}): TeamSummary {
     id: "team_1",
     orgId: "org_1",
     name: "Platform",
+    origin: "local",
+    externalId: null,
     createdAt: 1,
     memberCount: 3,
     callerRole: "member",

@@ -33,7 +33,6 @@ import type {
   PauseSessionResponse,
   RepoBinding,
   SandboxJwtResponse,
-  SessionDetail,
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";

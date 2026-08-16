@@ -73,7 +73,6 @@ export {
   recordSettlement,
   recordToolExecution,
   recordTurn,
-  resetMetricsForTest,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
@@ -161,7 +160,6 @@ export {
   GateManager,
   DecisionGateWithdrawnError,
   DecisionGateExpiredError,
-  DecisionGateConflictError,
   isDecisionGateWithdrawn,
   isDecisionGateExpired,
   GATE_EXPIRY_DEFAULT_MS,

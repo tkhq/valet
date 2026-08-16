@@ -57,6 +57,8 @@ function team(overrides: Partial<TeamSummary> = {}): TeamSummary {
     id: "t1",
     orgId: "o1",
     name: "Platform",
+    origin: "local",
+    externalId: null,
     createdAt: 0,
     memberCount: 6,
     callerRole: "member",

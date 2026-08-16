@@ -244,6 +244,8 @@ describe("SessionHeader — team assistant", () => {
           id: "team_1",
           orgId: "org_1",
           name: "Platform",
+          origin: "local",
+          externalId: null,
           createdAt: 1,
           memberCount: 3,
           callerRole,

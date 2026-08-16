@@ -1906,6 +1906,12 @@ export interface GetReposResponse {
 // git credential helper / `gh` shim POST `{host, owner?, repo?, purpose?}`;
 // the route resolves the session's bound repo — or, for an unbound owner,
 // org-level `auto` resolution — to a usable git credential.
+//
+// `PostSandboxGitCredentialRequest` has no TypeScript importer on purpose.
+// Its producer is the POSIX `sh` helper that `engine/git-credential-helper.ts`
+// generates, and the route hand-parses the body as `Record<string, unknown>`.
+// This interface is the only machine-readable statement of that contract.
+// Do not delete it as unused.
 
 export interface PostSandboxGitCredentialRequest {
   /** Git host from the credential request (e.g. `github.com`). For a bound

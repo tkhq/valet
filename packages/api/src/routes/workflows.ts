@@ -596,5 +596,3 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   const resp: RetryWorkflowRunResponse = { runId: result.runId };
   return c.json(resp, 201);
 });
-
-export type WorkflowsRouter = typeof workflowsRouter;

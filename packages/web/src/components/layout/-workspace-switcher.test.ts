@@ -15,7 +15,16 @@ import type { AssistantSummary, TeamSummary } from "@valet/api/wire";
 import { workspaceOptions } from "./workspace-switcher";
 
 function team(id: string, name = id): TeamSummary {
-  return { id, orgId: "org_1", name, createdAt: 0, memberCount: 2, callerRole: "member" };
+  return {
+    id,
+    orgId: "org_1",
+    name,
+    origin: "local",
+    externalId: null,
+    createdAt: 0,
+    memberCount: 2,
+    callerRole: "member",
+  };
 }
 
 function assistant(

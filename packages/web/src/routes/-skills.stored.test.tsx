@@ -172,6 +172,8 @@ describe("SkillsIndexPage with stored skills", () => {
           id: "team_1",
           orgId: "org_1",
           name: "Platform",
+          origin: "local",
+          externalId: null,
           createdAt: 1,
           memberCount: 2,
           callerRole: "member",

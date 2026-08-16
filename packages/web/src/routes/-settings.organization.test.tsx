@@ -462,6 +462,9 @@ describe("OrganizationTeamsPage", () => {
   });
 
   describe("identity-provider-managed teams", () => {
+    // Admin on purpose: the controls below are gated on authorization AND
+    // on origin, so a member fixture would pass for the wrong reason. This
+    // one proves the origin gate holds even for somebody allowed to mutate.
     const mirrored: TeamSummary = {
       id: "team_2",
       orgId: "org_1",
@@ -470,6 +473,7 @@ describe("OrganizationTeamsPage", () => {
       externalId: "/platform",
       createdAt: 0,
       memberCount: 1,
+      callerRole: "admin",
     };
 
     it("marks the team and offers no actions menu", () => {

@@ -4,7 +4,6 @@ export {
   GitHubIcon,
   GlobeIcon,
   ChannelGenericIcon,
-  ChannelsIcon,
   ApiIcon,
   getChannelIcon,
 } from './icons.js';

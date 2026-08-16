@@ -4,7 +4,6 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistrati
 import {
   VirtualSandboxProvider,
   type ChannelTransport,
-  type GatePromptRef,
   type InboundChannelEvent,
   type OutboundChannelMessage,
   type ValetPlugin,

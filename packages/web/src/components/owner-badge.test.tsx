@@ -69,6 +69,8 @@ function team(over: Partial<ListTeamsResponse["teams"][number]> = {}) {
     id: "team_1",
     orgId: "org_1",
     name: "Design",
+    origin: "local" as const,
+    externalId: null,
     createdAt: 1,
     memberCount: 3,
     callerRole: "member" as const,

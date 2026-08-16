@@ -5,7 +5,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, beforeEach } from "vitest";
-import { isNull, eq, and, like } from "drizzle-orm";
+import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionPolicies, invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";

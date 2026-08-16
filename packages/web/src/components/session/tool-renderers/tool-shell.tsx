@@ -40,9 +40,6 @@ export interface ToolShellProps {
   status: ToolStatus;
   /** Body content; rendered inside the expandable section. */
   children: ReactNode;
-  /** Default expanded state. Off by default for completed/error to keep
-   *  the chat dense; on while running so the user sees progress. */
-  defaultExpanded?: boolean;
 }
 
 const CATEGORY_STRIP: Record<ToolCategory, string> = {
@@ -90,10 +87,10 @@ export function ToolShell({
   summary,
   status,
   children,
-  defaultExpanded,
 }: ToolShellProps) {
-  const initial = defaultExpanded ?? (status !== "completed");
-  const [expanded, setExpanded] = useState(initial);
+  // Start collapsed for completed/error to keep the chat dense; start
+  // expanded while running so the user sees progress.
+  const [expanded, setExpanded] = useState(status !== "completed");
   const isError = status === "error";
 
   return (

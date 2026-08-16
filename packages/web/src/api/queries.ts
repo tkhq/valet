@@ -210,21 +210,6 @@ export function useSetSessionModel(sessionId: string) {
   });
 }
 
-export function useSetThreadModel(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<
-    PatchThreadResponse,
-    Error,
-    { threadId: string; model: string | null }
-  >({
-    mutationFn: ({ threadId, model }) =>
-      api.patchThread(sessionId, threadId, { model }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
-    },
-  });
-}
-
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({

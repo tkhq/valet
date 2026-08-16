@@ -5,7 +5,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/primitives";
 import { useModels } from "~/api/settings";
@@ -15,14 +14,9 @@ import { cn } from "~/lib/cn";
 
 /**
  * Model selector — a filterable, provider-grouped, keyboard-navigable
- * picker inspired by the V1 client's `/model` overlay. Two render variants:
- *
- *   - "compact" (default): small ghost button showing the current model's
- *     short label + a chevron. Used in tight headers (session header,
- *     thread row inline edit).
- *   - "row": full-width row layout with label + description; the "thread
- *     override" indicator is a tiny dot when `isOverride` is true. Used in
- *     the thread sidebar.
+ * picker inspired by the V1 client's `/model` overlay. It renders as a
+ * small ghost button with the current model's short label and a chevron,
+ * so it fits in a tight header.
  *
  * Options come from the org catalog (`GET /api/models`, Task 4/8), listed
  * in response order (already preference-ordered). By default Anthropic
@@ -38,23 +32,17 @@ import { cn } from "~/lib/cn";
  * Keyboard: ↑/↓ move highlight, Enter selects, / focuses search (from
  * anywhere in the dropdown). Search matches name/id/provider substrings.
  *
- * Pass `currentId` (string | undefined) — undefined renders as "Inherit
- * from session" when `inheritLabel` is given. `currentId` may be a value
- * that's no longer in the catalog — it's still labeled rather than blanked.
+ * `currentId` may be a value that is no longer in the catalog — it is
+ * still labeled rather than blanked. An undefined `currentId` reads as
+ * "Inherit": the session has no model of its own and follows the account
+ * default.
  */
 export interface ModelPickerProps {
   currentId?: string;
-  variant?: "compact" | "row";
   /** Called when the user picks a model. Returns the model id. */
   onSelect: (id: string) => void;
-  /** When given, renders an extra item that resets to the inherited default. */
-  onClear?: () => void;
-  /** Indicator next to compact label when this is an override. */
-  isOverride?: boolean;
   /** Disable interactions (e.g. while a mutation is in flight). */
   disabled?: boolean;
-  /** Label shown when currentId is undefined and onClear is set. */
-  inheritLabel?: string;
 }
 
 function labelFor(id: string, models: ModelInfo[]): string {
@@ -99,12 +87,8 @@ export function filterModels(models: ModelInfo[], query: string): ModelInfo[] {
 
 export function ModelPicker({
   currentId,
-  variant = "compact",
   onSelect,
-  onClear,
-  isOverride,
   disabled,
-  inheritLabel = "Inherit",
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -159,7 +143,7 @@ export function ModelPicker({
     el?.scrollIntoView({ block: "nearest" });
   }, [highlightIndex, open]);
 
-  const triggerLabel = currentId ? labelFor(currentId, models) : inheritLabel;
+  const triggerLabel = currentId ? labelFor(currentId, models) : "Inherit";
 
   function commitHighlighted() {
     const m = flat[highlightIndex];
@@ -192,28 +176,11 @@ export function ModelPicker({
           variant="ghost"
           size="sm"
           disabled={disabled}
-          className={cn(
-            "font-normal gap-1.5",
-            variant === "row" && "w-full justify-start",
-          )}
+          className="font-normal gap-1.5"
           aria-label="Choose model"
         >
-          <Sparkles
-            className={cn(
-              "h-3.5 w-3.5",
-              isOverride
-                ? "text-violet-600 dark:text-violet-400"
-                : "text-muted",
-            )}
-            aria-hidden
-          />
+          <Sparkles className="h-3.5 w-3.5 text-muted" aria-hidden />
           <span className="truncate text-xs">{triggerLabel}</span>
-          {isOverride && (
-            <span
-              className="inline-block h-1.5 w-1.5 rounded-full bg-violet-500"
-              aria-label="thread override"
-            />
-          )}
           <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
         </Button>
       </DropdownMenuTrigger>
@@ -339,22 +306,6 @@ export function ModelPicker({
             )}
           </span>
         </div>
-        {onClear && (
-          <>
-            <DropdownMenuSeparator className="m-0" />
-            <button
-              type="button"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                onClear();
-                setOpen(false);
-              }}
-              className="w-full px-3 py-1.5 text-left text-xs italic text-muted hover:bg-neutral-100 dark:hover:bg-neutral-800"
-            >
-              {inheritLabel}
-            </button>
-          </>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

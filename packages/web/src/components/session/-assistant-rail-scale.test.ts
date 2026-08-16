@@ -18,7 +18,16 @@ import {
 } from "./assistant-rail";
 
 function team(id: string, name = id, callerRole: "admin" | "member" | null = "member"): TeamSummary {
-  return { id, orgId: "org_1", name, createdAt: 0, memberCount: 2, callerRole };
+  return {
+    id,
+    orgId: "org_1",
+    name,
+    origin: "local",
+    externalId: null,
+    createdAt: 0,
+    memberCount: 2,
+    callerRole,
+  };
 }
 
 function own(id: string, over: Partial<AssistantSummary> = {}): AssistantSummary {

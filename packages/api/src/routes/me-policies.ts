@@ -214,6 +214,3 @@ meGrantsRouter.delete("/", async (c) => {
   const resp: DeleteGrantResponse = { ok: true };
   return c.json(resp);
 });
-
-export type MePolicyOverridesRouter = typeof mePolicyOverridesRouter;
-export type MeGrantsRouter = typeof meGrantsRouter;

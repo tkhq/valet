@@ -547,7 +547,7 @@ describe("KubernetesImageBuilder", () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);
     const first = await builder.build(baseSpec());
-    const second = await builder.build(baseSpec({ prebuildId: "pb-2" }));
+    await builder.build(baseSpec({ prebuildId: "pb-2" }));
     await new Promise((r) => setTimeout(r, 0));
 
     // First build is actively running.
