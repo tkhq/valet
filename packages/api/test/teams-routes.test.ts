@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
+import { teamMembers, teams } from "../src/schema/index.js";
 import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -333,6 +334,199 @@ describe("teams routes", () => {
       listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
       ({ teams } = (await listRes.json()) as ListTeamsResponse);
       expect(teams.find((t) => t.id === team.id)?.memberCount).toBe(2);
+    });
+  });
+
+  describe("identity-provider-managed teams", () => {
+    /**
+     * Seeds a team the way the login-time sync does: a direct insert with
+     * `origin: "idp"` and the full group path, and member rows written
+     * straight to the table. `createTeam` cannot make one — it always writes
+     * `local` — which is the point.
+     */
+    async function seedIdpTeam(name: string, externalId: string): Promise<string> {
+      const id = `team_idp_${name}`;
+      const { db } = api.providers;
+      await db.insert(teams).values({
+        id,
+        orgId: "local-org",
+        name,
+        origin: "idp",
+        externalId,
+        createdAt: Date.now(),
+      });
+      // local-user is a team admin here, so every refusal below is reached
+      // through the authz gate rather than short-circuited by it.
+      await db.insert(teamMembers).values({ teamId: id, userId: "local-user", role: "admin" });
+      return id;
+    }
+
+    it("refuses add-member with 409 and names the group to change", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}/members`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ userId: "test-member", role: "member" }),
+      });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code?: string };
+      expect(body.code).toBe("team_idp_managed");
+      // The corrective action must name the actual group, not "your IdP".
+      expect(body.error).toContain("/platform");
+      expect(body.error).toContain("identity provider");
+
+      // The refusal wrote nothing.
+      const members = await fetch(`${baseUrl}/api/teams/${teamId}/members`, { headers: HEADERS });
+      const { members: rows } = (await members.json()) as ListTeamMembersResponse;
+      expect(rows.map((m) => m.userId)).toEqual(["local-user"]);
+    });
+
+    it("refuses a role change with 409 and leaves the role alone", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}/members/local-user`, {
+        method: "PATCH",
+        headers: HEADERS,
+        body: JSON.stringify({ role: "member" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code?: string }).code).toBe("team_idp_managed");
+
+      const members = await fetch(`${baseUrl}/api/teams/${teamId}/members`, { headers: HEADERS });
+      const { members: rows } = (await members.json()) as ListTeamMembersResponse;
+      expect(rows).toEqual([{ userId: "local-user", role: "admin" }]);
+    });
+
+    it("refuses remove-member with 409 and keeps the member", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+      await api.providers.db
+        .insert(teamMembers)
+        .values({ teamId, userId: "test-member", role: "member" });
+
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}/members/test-member`, {
+        method: "DELETE",
+        headers: HEADERS,
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code?: string }).code).toBe("team_idp_managed");
+
+      const members = await fetch(`${baseUrl}/api/teams/${teamId}/members`, { headers: HEADERS });
+      const { members: rows } = (await members.json()) as ListTeamMembersResponse;
+      expect(rows.map((m) => m.userId).sort()).toEqual(["local-user", "test-member"]);
+    });
+
+    it("refuses delete with 409 and the team survives", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}`, { method: "DELETE", headers: HEADERS });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code?: string };
+      expect(body.code).toBe("team_idp_managed");
+      expect(body.error).toContain("/platform");
+
+      const listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
+      const { teams: rows } = (await listRes.json()) as ListTeamsResponse;
+      expect(rows.map((t) => t.id)).toContain(teamId);
+    });
+
+    it("an org admin is refused too — the gate is the team's origin, not the caller's role", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+
+      // test-admin is an org admin, the widest recovery path this router has.
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}`, { method: "DELETE", headers: ADMIN_HEADERS });
+      expect(res.status).toBe(409);
+    });
+
+    it("an unauthorized caller still gets 404, not 409 — the refusal must not leak existence", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+
+      // test-member is a plain org member and is not on this team. The authz
+      // gate runs first, so they learn nothing about the team at all — a 409
+      // here would confirm it exists.
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}`, { method: "DELETE", headers: MEMBER_HEADERS });
+      expect(res.status).toBe(404);
+    });
+
+    it("puts origin and externalId on the wire for both kinds of team", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      await seedIdpTeam("platform", "/platform");
+      await createTeam(baseUrl, "Growth");
+
+      const listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
+      const { teams: rows } = (await listRes.json()) as ListTeamsResponse;
+
+      const mirrored = rows.find((t) => t.name === "platform");
+      expect(mirrored?.origin).toBe("idp");
+      expect(mirrored?.externalId).toBe("/platform");
+
+      const own = rows.find((t) => t.name === "Growth");
+      expect(own?.origin).toBe("local");
+      expect(own?.externalId).toBeNull();
+    });
+
+    it("a local team beside a mirrored one keeps every mutation", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      await seedIdpTeam("platform", "/platform");
+      const { team } = (await (await createTeam(baseUrl, "Growth")).json()) as CreateTeamResponse;
+
+      const add = await fetch(`${baseUrl}/api/teams/${team.id}/members`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ userId: "test-member", role: "member" }),
+      });
+      expect(add.status).toBe(201);
+
+      const setRole = await fetch(`${baseUrl}/api/teams/${team.id}/members/test-member`, {
+        method: "PATCH",
+        headers: HEADERS,
+        body: JSON.stringify({ role: "admin" }),
+      });
+      expect(setRole.status).toBe(200);
+
+      const remove = await fetch(`${baseUrl}/api/teams/${team.id}/members/test-member`, {
+        method: "DELETE",
+        headers: HEADERS,
+      });
+      expect(remove.status).toBe(200);
+
+      const del = await fetch(`${baseUrl}/api/teams/${team.id}`, { method: "DELETE", headers: HEADERS });
+      expect(del.status).toBe(200);
+    });
+
+    it("has no rename route to leave unguarded", async () => {
+      // A tripwire, not a behaviour test. Renaming a mirrored team would put
+      // the row's name out of step with the group it mirrors, and the next
+      // sync would find the group by `external_id` and keep the stale name.
+      // There is no rename route today, so there is nothing to guard.
+      //
+      // If you add `PATCH /api/teams/:id`, this test fails. Replace it with
+      // one that proves the rename refuses on an `idp` team, exactly as the
+      // four mutations above do.
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}`, {
+        method: "PATCH",
+        headers: HEADERS,
+        body: JSON.stringify({ name: "renamed" }),
+      });
+      expect(res.status).toBe(404);
     });
   });
 

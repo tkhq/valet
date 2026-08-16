@@ -30,9 +30,31 @@ export interface InstanceMemberDecl {
   role: "admin" | "member";
 }
 
+/**
+ * How the identity provider's group claim maps onto teams. Non-secret, the
+ * same on every replica, and it changes the shape of instance state — so it
+ * belongs in the file, while the issuer and the client secret stay in env.
+ *
+ * Provider-agnostic on purpose: a provider that names these claims
+ * differently needs no code change, only different values here.
+ */
+export interface SsoTeamMapping {
+  /** Claim that carries full group paths, e.g. `["/platform/admins"]`. */
+  claim?: string;
+  /** Claim whose presence proves the group mapper ran. Any value counts. */
+  assertedClaim?: string;
+  /** Sub-group that grants admin on the parent team, e.g. `admins`. */
+  adminSubGroup?: string;
+  /**
+   * Top-level group paths this instance mirrors. Omitted means every
+   * top-level group the claim carries.
+   */
+  groups?: string[];
+}
+
 export interface InstanceConfig {
   version: 1;
-  auth?: { allowedEmailDomains?: string[] };
+  auth?: { allowedEmailDomains?: string[]; sso?: { teams?: SsoTeamMapping } };
   plugins?: { allow?: string[]; deny?: string[] };
   toolPolicies?: ToolPolicyRule[];
   org?: {
@@ -152,6 +174,86 @@ function validateEmail(value: unknown, fieldPath: string, path: string): string 
 // Section validators
 // ---------------------------------------------------------------------------
 
+/** Rejects a value that is blank once trimmed, mirroring `trimmedOr` in `auth/config.ts`. */
+function assertNonEmptyString(value: unknown, fieldPath: string, path: string): string {
+  const raw = assertString(value, fieldPath, path).trim();
+  if (raw.length === 0) {
+    err(`${path}: ${fieldPath} must not be empty. Set a value, or remove the key to use the default.`);
+  }
+  return raw;
+}
+
+/**
+ * Validates `auth.sso.teams`.
+ *
+ * Every rule here rejects config that would be silently inert or silently
+ * unsafe at run time, which no log line makes visible to an operator.
+ */
+function validateSsoTeams(value: unknown, path: string): SsoTeamMapping {
+  const obj = assertRecord(value, "auth.sso.teams", path);
+  const result: SsoTeamMapping = {};
+
+  for (const [key, v] of Object.entries(obj)) {
+    if (key === "claim") {
+      result.claim = assertNonEmptyString(v, "auth.sso.teams.claim", path);
+    } else if (key === "assertedClaim") {
+      result.assertedClaim = assertNonEmptyString(v, "auth.sso.teams.assertedClaim", path);
+    } else if (key === "adminSubGroup") {
+      const sub = assertNonEmptyString(v, "auth.sso.teams.adminSubGroup", path);
+      // A sub-group name that contains "/" makes the path ambiguous: a
+      // top-level group literally named "platform/admins" reports the same
+      // path as the "admins" sub-group of "platform", and no rule in the sync
+      // can separate the two. This file owns one half of that, so it refuses.
+      if (sub.includes("/")) {
+        err(
+          `${path}: auth.sso.teams.adminSubGroup must not contain "/", got ${JSON.stringify(sub)}. Use a plain sub-group name such as "admins".`,
+        );
+      }
+      result.adminSubGroup = sub;
+    } else if (key === "groups") {
+      const raw = assertStringArray(v, "auth.sso.teams.groups", path);
+      result.groups = raw.map((entry, i) => {
+        const group = entry.trim();
+        // The sync mirrors a top-level group and its admin sub-group only, so
+        // a deeper path listed here would mirror nothing and say nothing.
+        const segments = group.split("/").filter((segment) => segment.length > 0);
+        if (!group.startsWith("/") || segments.length !== 1) {
+          err(
+            `${path}: auth.sso.teams.groups[${i}] must be a top-level group path such as "/platform", got ${JSON.stringify(entry)}. Valet mirrors a top-level group and its admin sub-group only.`,
+          );
+        }
+        return `/${segments[0]}`;
+      });
+    } else {
+      err(`${path}: unknown key "auth.sso.teams.${key}". Remove it or check for a typo.`);
+    }
+  }
+
+  // The sync tells "in no groups" from "no mapper configured" by reading one
+  // claim when the other is absent. One name for both collapses that test,
+  // and an absent group claim would then empty every user's teams.
+  if (result.claim !== undefined && result.claim === result.assertedClaim) {
+    err(
+      `${path}: auth.sso.teams.claim and auth.sso.teams.assertedClaim are both ${JSON.stringify(result.claim)}. Give them different claim names; the second one proves the group mapper ran.`,
+    );
+  }
+
+  return result;
+}
+
+function validateSso(value: unknown, path: string): { teams?: SsoTeamMapping } {
+  const obj = assertRecord(value, "auth.sso", path);
+  const result: { teams?: SsoTeamMapping } = {};
+  for (const [key, v] of Object.entries(obj)) {
+    if (key === "teams") {
+      result.teams = validateSsoTeams(v, path);
+    } else {
+      err(`${path}: unknown key "auth.sso.${key}". Remove it or check for a typo.`);
+    }
+  }
+  return result;
+}
+
 function validateAuth(
   value: unknown,
   path: string,
@@ -164,6 +266,8 @@ function validateAuth(
       result.allowedEmailDomains = raw
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
+    } else if (key === "sso") {
+      result.sso = validateSso(v, path);
     } else {
       err(`${path}: unknown key "auth.${key}". Remove it or check for a typo.`);
     }
@@ -511,7 +615,50 @@ export function parseInstanceConfig(yamlText: string, path: string): InstanceCon
   if ("llmProviders" in raw) cfg.llmProviders = validateLlmProviders(raw["llmProviders"], path);
   if ("skillSources" in raw) cfg.skillSources = validateSkillSources(raw["skillSources"], path);
 
+  assertNoTeamGroupOverlap(cfg, path);
+
   return cfg;
+}
+
+/**
+ * Rejects a config where a declared team and a mirrored group ask for the
+ * same team name. Cross-section, so it runs here rather than inside
+ * `validateAuth`: it needs `teams` and `auth` both built.
+ *
+ * The two would otherwise race across restarts — whichever source created
+ * the row first would hold the name, and the loser would be skipped or would
+ * fail boot. Catching it in the file turns an ordering accident into an
+ * error the operator sees before anything is written.
+ *
+ * The comparison ignores case although `teams_org_name` does not. That is
+ * the point: team `Platform` and group `/platform` do NOT collide in
+ * Postgres, so they would produce two separate rows that read as one team in
+ * the list. Changing the index instead would be a migration plus a behavior
+ * change for teams that already exist.
+ *
+ * This check is the earliest of three, not the only one. It reports the
+ * clash before anything is written, and it needs `groups` to be declared —
+ * without that list, the file cannot know which groups the provider sends.
+ * The reconciler (`config-reconcile.ts`) and the login sync
+ * (`team-sync.ts`) fold the case again against the rows that actually
+ * exist, which is what covers a deployment that mirrors every group.
+ */
+function assertNoTeamGroupOverlap(cfg: InstanceConfig, path: string): void {
+  const groups = cfg.auth?.sso?.teams?.groups;
+  if (!groups || !cfg.teams) return;
+
+  const declared = new Map<string, string>();
+  for (const team of cfg.teams) declared.set(team.name.trim().toLowerCase(), team.name);
+
+  for (const group of groups) {
+    const teamName = group.replace(/^\//, "");
+    const clash = declared.get(teamName.toLowerCase());
+    if (clash !== undefined) {
+      err(
+        `${path}: teams[].name "${clash}" and auth.sso.teams.groups "${group}" both name team "${teamName}". Rename the team, or remove the group from the list.`,
+      );
+    }
+  }
 }
 
 /**
@@ -565,4 +712,76 @@ export function resolveAllowedEmailDomains(
 
   if (configDomains !== undefined) return configDomains;
   return envParsed;
+}
+
+/** The team mapping after env and file are reconciled. Every field resolved. */
+export interface ResolvedSsoTeamMapping {
+  claim: string;
+  assertedClaim: string;
+  adminSubGroup: string;
+  groups?: string[];
+}
+
+/** One env variable and the file key that replaces it. */
+interface MappingField {
+  envVar: string;
+  configKey: string;
+  declared: string | undefined;
+  envParsed: string;
+}
+
+/**
+ * Both-set guard + merge for the three `auth.sso.teams` claim names.
+ *
+ * Per field, not per section: the three variables are independent, and an
+ * operator may reasonably set only `AUTH_OIDC_TEAM_ADMIN_GROUP`. Same
+ * precedence as `resolveAllowedEmailDomains` — both set fails boot, the file
+ * wins when it declares the field, else the env-parsed value (which already
+ * carries `auth/config.ts`'s defaults).
+ *
+ * `groups` has no env sibling, so it passes through unguarded.
+ */
+export function resolveSsoTeamMapping(
+  cfg: InstanceConfig | null,
+  env: NodeJS.ProcessEnv,
+  envParsed: ResolvedSsoTeamMapping,
+): ResolvedSsoTeamMapping {
+  const configPath = env["VALET_CONFIG"];
+  const declared = cfg?.auth?.sso?.teams;
+
+  const fields: MappingField[] = [
+    {
+      envVar: "AUTH_OIDC_TEAM_CLAIM",
+      configKey: "auth.sso.teams.claim",
+      declared: declared?.claim,
+      envParsed: envParsed.claim,
+    },
+    {
+      envVar: "AUTH_OIDC_TEAM_ASSERTED_CLAIM",
+      configKey: "auth.sso.teams.assertedClaim",
+      declared: declared?.assertedClaim,
+      envParsed: envParsed.assertedClaim,
+    },
+    {
+      envVar: "AUTH_OIDC_TEAM_ADMIN_GROUP",
+      configKey: "auth.sso.teams.adminSubGroup",
+      declared: declared?.adminSubGroup,
+      envParsed: envParsed.adminSubGroup,
+    },
+  ];
+
+  const resolved: string[] = fields.map((field) => {
+    if (Boolean(env[field.envVar]) && field.declared !== undefined) {
+      err(`${field.envVar} is set and ${configPath} declares ${field.configKey}. Remove one.`);
+    }
+    return field.declared ?? field.envParsed;
+  });
+
+  const result: ResolvedSsoTeamMapping = {
+    claim: resolved[0]!,
+    assertedClaim: resolved[1]!,
+    adminSubGroup: resolved[2]!,
+  };
+  if (declared?.groups !== undefined) result.groups = declared.groups;
+  return result;
 }

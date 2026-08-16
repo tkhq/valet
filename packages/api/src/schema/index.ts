@@ -391,6 +391,32 @@ export const messages = pgTable(
 // Names unique per org; last-admin guards on role change/removal and
 // creator-auto-admin live in service code (`services/teams.ts`), inside one
 // transaction — not expressible as table constraints.
+//
+// `origin` records where a row came from, as `skills.origin` does below. It
+// names the ONE writer of that row's `team_members`:
+//
+//   `idp`    mirrors an identity-provider group. The login-time sync
+//            (`services/team-sync.ts`) owns its membership, and it removes as
+//            well as adds — that is what offboarding means.
+//   `config` is declared in `valet.yaml`. The boot reconciler
+//            (`services/config-reconcile.ts`) asserts the declared members and
+//            never deletes one, so the file cannot take access away.
+//   `local`  belongs to the people who made it in Valet. Only the team routes
+//            write it.
+//
+// No row has two writers, so no membership has two opinions and nothing can
+// oscillate between boot and login. Every sync write is scoped by
+// `origin = 'idp'`; every reconciler write is scoped by `origin = 'config'`.
+//
+// `external_id` holds the full group path (`/platform`). The path is what the
+// token claim carries, it survives a realm re-import, and it stays legible in
+// a query result. It is NULL for a `local` team and for a `config` team: the
+// file identifies a team by `teams[].name`, which `teams_org_name` already
+// keeps unique, so a second column would only duplicate the first. Postgres
+// treats NULLs as distinct, so `teams_org_external` constrains the mirrored
+// rows only, and unlimited NULL rows coexist in it. `origin` is part of that
+// key so `external_id` is a per-origin namespace the day a second origin
+// populates it.
 
 export const teams = pgTable(
   "teams",
@@ -398,9 +424,24 @@ export const teams = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     name: text("name").notNull(),
+    /**
+     * `local` = created in Valet. `config` = declared in `valet.yaml`.
+     * `idp` = mirrored from an identity-provider group.
+     */
+    origin: text("origin", { enum: ["local", "config", "idp"] })
+      .notNull()
+      .default("local"),
+    /**
+     * Full identity-provider group path this team mirrors. Null for a `local`
+     * and for a `config` team.
+     */
+    externalId: text("external_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [uniqueIndex("teams_org_name").on(t.orgId, t.name)],
+  (t) => [
+    uniqueIndex("teams_org_name").on(t.orgId, t.name),
+    uniqueIndex("teams_org_external").on(t.orgId, t.origin, t.externalId),
+  ],
 );
 
 export const teamMembers = pgTable(

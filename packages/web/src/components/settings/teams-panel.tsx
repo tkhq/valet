@@ -33,12 +33,48 @@ import {
 } from "~/api/settings";
 
 /**
+ * Says why a mirrored team has no controls, in the same words the API uses
+ * when it refuses the same change. A reader must not have to press a button
+ * to find out that it cannot work.
+ */
+function idpManagedNote(externalId: string | null): string {
+  const source = externalId ? `identity provider group ${externalId}` : "your identity provider";
+  return `Membership comes from ${source}. Add or remove people there, then ask them to sign in again.`;
+}
+
+/**
+ * Says what a declared team's controls do and do not survive.
+ *
+ * The member controls stay live here, unlike a mirrored team's, because the
+ * config file only adds. The reader still needs the half that does not last:
+ * a person removed here comes back at the next restart if the file still
+ * declares them.
+ */
+const CONFIG_MANAGED_NOTE =
+  "This team is declared in valet.yaml. You can change its members here, but a restart adds the " +
+  "declared members back. Edit the file to change that list, or to delete the team.";
+
+/**
  * Organization · Teams — the first-ever teams management UI over the
  * existing `/api/teams` router. List with inline create, per-team expand
  * revealing the member roster + add/remove/role-toggle, and delete-via-
  * confirm. All member display data (name/email/avatar) is cross-referenced
  * against `useOrgMembers()` since `TeamMemberSummary` on the wire is only
  * `{userId, role}`.
+ *
+ * A team with `origin === "idp"` mirrors an identity-provider group, and the
+ * API refuses every mutation on it. This panel therefore renders none of
+ * those controls — no delete, no role menu, no remove, no add — rather than
+ * disabling them, and shows `idpManagedNote` where they would have been. A
+ * disabled control the reader cannot explain is worse than no control.
+ * Creating a team is untouched: every team made here is `local`.
+ *
+ * A team with `origin === "config"` is declared in `valet.yaml`, and it is
+ * deliberately treated differently. The file only asserts members, so the
+ * member controls keep working and the panel keeps them. Only delete goes,
+ * because the API refuses it: the next boot would recreate the team empty.
+ * `CONFIG_MANAGED_NOTE` states the half a reader cannot see — that a restart
+ * puts the declared members back.
  */
 export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
   const teamsQ = useTeams();
@@ -143,6 +179,8 @@ function TeamRow({
   const deleteTeam = useDeleteTeam();
   const assistantsQ = useAssistants();
   const assistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", team.id);
+  const managed = team.origin === "idp";
+  const declared = team.origin === "config";
 
   return (
     <div className="py-3">
@@ -159,6 +197,21 @@ function TeamRow({
             aria-hidden
           />
           <span className="truncate text-sm font-medium text-ink">{team.name}</span>
+          {managed && (
+            // `title` carries the reason to a reader who never expands the
+            // row. The expanded body states it in full, so this is a second
+            // channel, not the only one.
+            <Badge variant="accent" className="shrink-0" title={idpManagedNote(team.externalId)}>
+              Identity provider
+            </Badge>
+          )}
+          {declared && (
+            // `neutral`, not the mirrored team's `accent`: this team's
+            // controls still work, so it must not read as equally locked.
+            <Badge variant="neutral" className="shrink-0" title={CONFIG_MANAGED_NOTE}>
+              Declared in valet.yaml
+            </Badge>
+          )}
           <span className="shrink-0 text-xs text-muted">
             {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
           </span>
@@ -178,7 +231,12 @@ function TeamRow({
             </Link>
           </Button>
         )}
-        {canMutate && (
+        {/* Two gates, both required. `canMutate` is authorization; origin is
+            provenance — the API refuses a delete on a mirrored team and on a
+            declared one, because the next boot would recreate a declared team
+            empty. Delete is the only item here, and an empty menu is worse
+            than no menu. */}
+        {canMutate && !managed && !declared && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -202,7 +260,7 @@ function TeamRow({
         )}
       </div>
 
-      {open && <TeamMembers teamId={team.id} teamName={team.name} orgMembers={orgMembers} canMutate={canMutate} />}
+      {open && <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />}
 
       <ConfirmDialog
         open={confirmDelete}
@@ -220,16 +278,18 @@ function TeamRow({
 }
 
 function TeamMembers({
-  teamId,
-  teamName,
+  team,
   orgMembers,
   canMutate,
 }: {
-  teamId: string;
-  teamName: string;
+  team: TeamSummary;
   orgMembers: OrgMemberWire[];
   canMutate: boolean;
 }) {
+  const teamId = team.id;
+  const teamName = team.name;
+  const managed = team.origin === "idp";
+  const declared = team.origin === "config";
   const membersQ = useTeamMembers(teamId);
   const setRole = useSetTeamMemberRole();
   const removeMember = useRemoveTeamMember();
@@ -242,6 +302,13 @@ function TeamMembers({
 
   return (
     <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
+      {/* Sits above the roster, where the add/remove controls would be, so a
+          reader finds the reason in the place they look for the control. The
+          declared note sits in the same place although its controls stay:
+          they work, and what the reader needs is how long the change lasts. */}
+      {managed && <p className="pt-1 text-xs text-muted">{idpManagedNote(team.externalId)}</p>}
+      {declared && <p className="pt-1 text-xs text-muted">{CONFIG_MANAGED_NOTE}</p>}
+
       {membersQ.isLoading && <LoadingRow label="Loading members…" className="py-2 text-xs" />}
       {membersQ.error != null && (
         <ErrorRow className="py-2 text-xs">Failed to load {teamName}'s members.</ErrorRow>
@@ -259,53 +326,57 @@ function TeamMembers({
             <span className="min-w-0 flex-1 truncate text-sm text-ink">
               {identity?.name ?? identity?.email ?? member.userId}
             </span>
-            {canMutate ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button type="button" variant="secondary" size="sm">
-                    <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
-                      {member.role === "admin" ? "Admin" : "Member"}
-                    </Badge>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem
-                    onSelect={() =>
-                      setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
-                    }
-                  >
-                    Admin
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() =>
-                      setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
-                    }
-                  >
-                    Member
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : (
+            {managed || !canMutate ? (
+              // Read-only in two cases. Managed: the role follows the
+              // identity provider's sub-group, so it is a fact to read here,
+              // not a control. Without mutate rights: the API would 404 the
+              // change anyway.
               <Badge variant={member.role === "admin" ? "accent" : "neutral"}>
                 {member.role === "admin" ? "Admin" : "Member"}
               </Badge>
-            )}
-            {canMutate && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
-                onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
-              >
-                <X className="h-3.5 w-3.5" aria-hidden />
-              </Button>
+            ) : (
+              <>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="secondary" size="sm">
+                      <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
+                        {member.role === "admin" ? "Admin" : "Member"}
+                      </Badge>
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
+                      }
+                    >
+                      Admin
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
+                      }
+                    >
+                      Member
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
+                  onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden />
+                </Button>
+              </>
             )}
           </div>
         );
       })}
 
-      {canMutate && addable.length > 0 && (
+      {canMutate && !managed && addable.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button type="button" variant="ghost" size="sm" className="gap-1.5">

@@ -750,10 +750,30 @@ export interface ForceSettleResponse {
 
 export type TeamRole = "admin" | "member";
 
+/**
+ * Where a team came from. `local` teams are created in Valet and Valet owns
+ * them. `idp` teams mirror an identity-provider group: the client shows them
+ * as read-only, and the API refuses to mutate them.
+ *
+ * A `config` team is declared in `valet.yaml`. It sits between the two: the
+ * file asserts its declared members at every boot but never removes anybody,
+ * so the client keeps the member controls and warns that a boot puts the
+ * declared members back. Delete is refused, because the next boot would
+ * recreate the team empty.
+ */
+export type TeamOrigin = "local" | "config" | "idp";
+
 export interface TeamSummary {
   id: string;
   orgId: string;
   name: string;
+  origin: TeamOrigin;
+  /**
+   * The identity-provider group path this team mirrors, e.g. `/platform`.
+   * Null for a `local` and for a `config` team. The client shows it, so a
+   * reader knows which group to change.
+   */
+  externalId: string | null;
   createdAt: number;
   memberCount: number;
   /** The caller's role on this team; null when the caller is not a member

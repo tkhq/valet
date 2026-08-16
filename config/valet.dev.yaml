@@ -4,6 +4,27 @@
 # ~/.valet/pg, the next boot restores this state. No secrets in this file.
 version: 1
 
+auth:
+  # How the identity provider's groups become teams. These values match the
+  # mappers and groups in docker/keycloak/valet-realm.json, so `make
+  # dev-keycloak` needs no further setup. They do nothing without an OIDC
+  # provider, which `make dev-local` does not start by default.
+  #
+  # Do NOT set AUTH_OIDC_TEAM_CLAIM, AUTH_OIDC_TEAM_ASSERTED_CLAIM or
+  # AUTH_OIDC_TEAM_ADMIN_GROUP while these keys are here. The api refuses to
+  # start when a variable and its key are both set.
+  sso:
+    teams:
+      claim: groups
+      assertedClaim: groups_asserted
+      adminSubGroup: admins
+      # The seeded realm puts alice in /platform/admins, and bob in /platform
+      # and /research. No team below may take one of these names: a declared
+      # team and a mirrored group cannot share a row.
+      groups:
+        - /platform
+        - /research
+
 org:
   name: Turnkey
   features:

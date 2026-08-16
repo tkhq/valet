@@ -26,6 +26,7 @@ import { buildAuth } from "./auth/index.js";
 import {
   loadInstanceConfig,
   resolveAllowedEmailDomains,
+  resolveSsoTeamMapping,
   InstanceConfigError,
   type InstanceConfig,
 } from "./config/instance-config.js";
@@ -170,10 +171,12 @@ try {
 // URL it needs at session-provision time — not after boot.
 const authConfig = loadAuthConfig(process.env);
 
-// Both-set guard + merge for allowedEmailDomains. Must run after authConfig
-// is loaded (we need the env-parsed domains) and after instanceConfig
-// (we need the config-declared domains). Throws InstanceConfigError with
-// the corrective-action message if both sources are set simultaneously.
+// Both-set guard + merge for allowedEmailDomains and for the sso team
+// mapping. Must run after authConfig is loaded (we need the env-parsed
+// values) and after instanceConfig (we need the config-declared ones), and
+// before `buildAuth` below, which reads `oidc.teamClaim` to declare the extra
+// claim fields the sso plugin passes through. Throws InstanceConfigError with
+// the corrective-action message if both sources set the same field.
 if (authConfig) {
   try {
     authConfig.allowedEmailDomains = resolveAllowedEmailDomains(
@@ -181,6 +184,19 @@ if (authConfig) {
       process.env,
       authConfig.allowedEmailDomains,
     );
+
+    const oidc = authConfig.oidc;
+    if (oidc) {
+      const mapping = resolveSsoTeamMapping(instanceConfig, process.env, {
+        claim: oidc.teamClaim,
+        assertedClaim: oidc.teamAssertedClaim,
+        adminSubGroup: oidc.teamAdminGroup,
+      });
+      oidc.teamClaim = mapping.claim;
+      oidc.teamAssertedClaim = mapping.assertedClaim;
+      oidc.teamAdminGroup = mapping.adminSubGroup;
+      oidc.teamGroups = mapping.groups;
+    }
   } catch (e) {
     if (e instanceof InstanceConfigError) {
       console.error(e.message);
@@ -330,7 +346,10 @@ if (instanceConfig) {
   // no admin, or duplicate skill sources). Fail boot with the
   // corrective-action message only — no stack spam. Rethrow anything else.
   try {
-    await reconcileInstanceConfig({ db: providers.db }, instanceConfig);
+    await reconcileInstanceConfig(
+      { db: providers.db, configPath: process.env.VALET_CONFIG },
+      instanceConfig,
+    );
   } catch (e) {
     if (e instanceof InstanceConfigError) {
       console.error(e.message);
@@ -352,6 +371,7 @@ const authWiring: AuthWiring = authConfig
           cfg: authConfig,
           credentialStore: providers.engineCredentials,
           instanceConfig,
+          configPath: process.env.VALET_CONFIG,
         }),
       }),
       authConfig,

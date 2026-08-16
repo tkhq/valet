@@ -18,7 +18,56 @@
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:5173/*"
-      }
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups-asserted",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups_asserted",
+            "claim.value": "true",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "name": "platform",
+      "subGroups": [
+        {
+          "name": "admins"
+        }
+      ]
+    },
+    {
+      "name": "research",
+      "subGroups": [
+        {
+          "name": "admins"
+        }
+      ]
     }
   ],
   "users": [
@@ -30,6 +79,7 @@
       "firstName": "Alice",
       "lastName": "Dev",
       "realmRoles": ["offline_access"],
+      "groups": ["/platform/admins"],
       "credentials": [
         {
           "type": "password",
@@ -46,6 +96,7 @@
       "firstName": "Bob",
       "lastName": "Dev",
       "realmRoles": ["offline_access"],
+      "groups": ["/platform", "/research"],
       "credentials": [
         {
           "type": "password",

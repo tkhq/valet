@@ -15,6 +15,7 @@ import type { ReactElement, ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { TeamSummary } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
 
@@ -90,8 +91,13 @@ let orgMembersData: {
   ],
 };
 
-let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number; callerRole: "admin" | "member" | null }> } = {
-  teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
+// Typed as the real wire shape, not a local literal: a field added to
+// `TeamSummary` then breaks this fixture at compile time instead of letting
+// the panel render against a shape the API no longer sends.
+let teamsData: { teams: TeamSummary[] } = {
+  teams: [
+    { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin" },
+  ],
 };
 
 let teamMembersData: { members: Array<{ userId: string; role: "admin" | "member" }> } = {
@@ -242,7 +248,9 @@ beforeEach(() => {
     ],
   };
   teamsData = {
-    teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
+    teams: [
+      { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin" },
+    ],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
   invitesData = { invites: [] };
@@ -451,6 +459,61 @@ describe("OrganizationTeamsPage", () => {
     expect(deleteTeamMutate).toHaveBeenCalledWith("team_1", expect.objectContaining({
       onSuccess: expect.any(Function),
     }));
+  });
+
+  describe("identity-provider-managed teams", () => {
+    const mirrored: TeamSummary = {
+      id: "team_2",
+      orgId: "org_1",
+      name: "platform",
+      origin: "idp",
+      externalId: "/platform",
+      createdAt: 0,
+      memberCount: 1,
+    };
+
+    it("marks the team and offers no actions menu", () => {
+      teamsData = { teams: [mirrored] };
+      render(<OrganizationTeamsPage />);
+
+      expect(screen.getByText("Identity provider")).toBeTruthy();
+      // The menu holds Delete only, and the API refuses it. An empty menu
+      // would be a control the reader cannot use.
+      expect(screen.queryByRole("button", { name: "platform actions" })).toBeNull();
+    });
+
+    it("offers no membership controls, and says why, naming the group", async () => {
+      teamsData = { teams: [mirrored] };
+      render(<OrganizationTeamsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "Expand platform" }));
+
+      // The reason sits with the roster, where the controls would be.
+      expect(
+        screen.getByText(/Membership comes from identity provider group \/platform\./),
+      ).toBeTruthy();
+      expect(screen.getByText(/sign in again/)).toBeTruthy();
+
+      expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
+      // The role still shows, as a fact rather than a menu.
+      expect(screen.getByText("Admin")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /Admin/ })).toBeNull();
+    });
+
+    it("leaves a local team beside it fully editable", async () => {
+      const user = userEvent.setup();
+      teamsData = { teams: [teamsData.teams[0], mirrored] };
+      render(<OrganizationTeamsPage />);
+
+      expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+      await user.click(screen.getByRole("button", { name: "Add member" }));
+      await user.click(await screen.findByText("Grace"));
+      expect(addTeamMemberMutate).toHaveBeenCalledWith({
+        teamId: "team_1",
+        body: { userId: "u2", role: "member" },
+      });
+    });
   });
 });
 
