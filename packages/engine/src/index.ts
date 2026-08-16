@@ -45,8 +45,8 @@ export {
 export {
   serializePrincipal,
   parsePrincipal,
-  orchestratorSessionId,
-  parseOrchestratorSessionId,
+  assistantSessionId,
+  parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
 export { buildRepoInstructionsFragment } from "./repo-instructions.js";
@@ -116,6 +116,7 @@ export {
   buildPluginCatalog,
   invokeAction,
   prepareActionArgs,
+  approvalModeForAction,
   RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,

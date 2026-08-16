@@ -3,12 +3,12 @@ import { Pencil } from "lucide-react";
 import type { GetOrchestratorInfoResponse, OrchestratorPresence } from "@valet/api/wire";
 import { Button } from "~/components/primitives";
 import { PresenceMark } from "./presence-mark";
-import { IdentityStep } from "./identity-step";
+import { IdentityFields } from "./identity-fields";
 
 /**
  * Dashboard hero (assistant-centered web UI, decision 10/11): the presence
  * mark plus a one-line status derived from live presence + unsettled
- * children, and an edit affordance that reopens `IdentityStep` inline,
+ * children, and an edit affordance that reopens `IdentityFields` inline,
  * prefilled, for renaming / re-personality.
  */
 export function presenceStatusLine(
@@ -27,7 +27,7 @@ export function IdentityHeader({ info }: { info: GetOrchestratorInfoResponse }) 
   if (editing) {
     return (
       <div className="rounded-lg border border-line bg-paper px-6 py-6">
-        <IdentityStep
+        <IdentityFields
           variant="edit"
           initialName={info.name}
           initialPersonality={info.personality}

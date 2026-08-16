@@ -133,9 +133,17 @@ A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the
 
 ## Web UI (`packages/web`)
 
-- `integration-row.tsx`: when the plugin's credential reports `connect: "oauth"`, render a primary **Connect** button — a plain anchor to `/api/credentials/:service/connect` (full-page navigation; the flow ends back on `/integrations`). Manual token entry remains available behind a secondary "enter token manually" toggle.
+- `integration-row.tsx`: **Connect** is a button that opens the pre-connect screen. It is no longer an anchor to `/api/credentials/:service/connect` — a bare anchor left no moment between the click and the redirect in which to tell the user what the credential gives away. The tile runs no connect path itself.
+- `connect-dialog.tsx`: the pre-connect screen. A split pane — the decision on the left, the tools this credential unlocks on the right — that resumes one of three paths behind **Continue**: the org's GitHub App OAuth, the generic `/api/credentials/:service/connect` redirect, or token entry in a second step. Manual token entry stays available on OAuth services, behind the same disclosure rather than beside it.
+- `connect-disclosure.ts`: derives every sentence on that screen from `PluginServiceSummary`. It has an explicit "cannot say" arm, and the screen renders it instead of filler. A service whose declared credential key no `ActionPlugin` reads (the google-calendar skew, below) resolves to that arm, and **Continue** is disabled.
 - `integrations.tsx`: read `?connected=` / `?error=` search params on mount, surface a success/error toast, and strip the params from the URL.
 - Disconnect is unchanged (`DELETE /api/credentials/:service`).
+
+### Why the screen states facts and offers no visibility choice
+
+The obvious design — two selectable cards, "only me" against "shared" — is not implementable today, so it is not offered. `Session.credentialProvider()` resolves every credential as `{ type: "user", id: userId }`, which means an org-scoped row is writable through `PUT /api/credentials/:service` but is never read by any plugin action; and `CredentialOwner` has no `team` arm at all. A control with those semantics would move a row between columns and change nothing about who can use the token. The second card states the exposure that is real instead: a team assistant runs on the credentials of whichever member starts it, and every member of that team can then instruct it and read its replies.
+
+To make the choice real, both of these must land: add `"team"` to `CredentialOwner`, and give the session's credential resolution an owner order (session owner principal, then actor user).
 
 ## Error handling summary
 
@@ -153,7 +161,7 @@ A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the
 
 - **Engine**: `validateValetPlugin` accepts/rejects the new `oauth` shapes (mode discriminant, oauth2-only).
 - **API unit/integration** (vitest, in-process Hono): a fake OAuth+MCP server fixture (serves `.well-known/oauth-authorization-server`, registration, authorize is not hit — we assert the 302 Location instead, token endpoint validates PKCE/client_secret). Covers: connect 302 URL shape for both modes, state round-trip, callback persistence into the credential store, user-mismatch rejection, denied-consent redirect, `ensureMcpOAuthClient` idempotency under concurrent calls, refresh-on-get including refresh-failure stamping.
-- **Web**: `-integrations.test.tsx` — Connect button rendered iff `connect: "oauth"`, manual fallback toggle, toast on `?connected=`.
+- **Web**: `-integrations.test.tsx` — Connect opens the pre-connect screen rather than redirecting, manual fallback behind it, toast on `?connected=`. `connect-disclosure.test.ts` covers the derivation and its "cannot say" arm; `connect-dialog.test.tsx` covers the rendered claims, the identity chip, the team-versus-personal split, and the refusal to start a connection the metadata cannot describe.
 - **Live pass** (human-in-the-loop, before merge): connect a real MCP service (Linear or Notion) end-to-end in the browser against `make dev-local`, verify the action actually runs with the stored token.
 
 ## Deviations / implementation notes
@@ -161,6 +169,8 @@ A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the
 - **Refresh serialization**: `RefreshingCredentialStore` serializes concurrent refreshes per credential key in-process (a pending-refresh map keyed by `userId:service`), with a double-check re-read of the stored credential before refreshing — a request that lost the race picks up the winner's already-rotated tokens instead of firing its own redundant (and potentially clobbering) refresh call.
 - **Missing `expires_in` on refresh**: if a token refresh response omits `expires_in`, the decorator stores `expiresAt: undefined` rather than guessing a TTL. This disables future auto-refresh for that credential (treated as non-expiring going forward) until the user reconnects. Accepted trade-off — no provider in the current fleet does this in practice, and guessing a TTL risks silently expiring a token that's actually still valid.
 - **Engine test location**: the `validateValetPlugin` oauth-shape coverage lives at `packages/engine/test/valet-plugin.test.ts` (per the package's vitest config `include` path), not under a new file.
+- **Per-service `actions` on `/api/plugins`**: each credential row carries the actions it unlocks, joined on `credentialService ?? service` — the same expression `invokeAction` uses to scope a credential provider. The join is what makes the pre-connect screen's central claim true by construction rather than by hand-maintained copy. `requiresApproval` is resolved server-side through the engine's exported `approvalModeForAction`, never re-derived from `riskLevel` by a client, because an `ActionPlugin` may pin `defaultApprovalMode` and override risk entirely.
+- **Google Calendar's credential key is skewed, and the join exposes it.** The plugin's credential declaration omits `service`, so the connect UI and `credential-connect.ts` both write the plugin name `google-calendar`; its `ActionPlugin` declares `service: "google_calendar"` and its actions read that. Connecting Calendar from `/integrations` therefore shows Connected while the tools cannot use the token, and signing in with Google gives working tools while the card shows Disconnected (`auth/provisioning.ts` already writes the underscored key for this reason). The join reports zero actions for the row, the pre-connect screen says it cannot confirm what the connection unlocks, and Continue is disabled — the screen under-reports rather than inventing five calendar tools. Unifying the key is the fix, and it is not in this change.
 
 ## Out of scope / follow-ups
 

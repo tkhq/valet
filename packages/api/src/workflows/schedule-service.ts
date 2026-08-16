@@ -100,6 +100,16 @@ export async function createWorkflowSchedule(
     };
   }
 
+  // The schedule row's own `ownerType`/`ownerId` (below) is unrelated to run
+  // billing for a workflow target — `scheduler.ts`'s `fire()` bills
+  // `def.ownerType`/`ownerId` (the workflow's real owner) directly, by
+  // design, never these fields. They matter only for an orchestrator-prompt
+  // target, which `deliverToOrchestrator` reads.
+  let scheduleOwner: { ownerType: "user" | "team" | "org"; ownerId: string } = {
+    ownerType: "user",
+    ownerId: user.id,
+  };
+
   if (hasWorkflow) {
     // Owner-scoped, not just org-scoped: checking only `orgId` let any org
     // member wire a schedule onto a workflow they don't own — and because
@@ -109,6 +119,12 @@ export async function createWorkflowSchedule(
     // `fire()` for the matching run-ownership fix.
     const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
     if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+    // Follow the workflow's own owner exactly. This used to widen a team
+    // workflow's schedule to the ORG, because `owner_type` could not hold a
+    // team — which handed a team's scheduled prompt to the org assistant,
+    // a strictly larger audience than the team that owns the workflow. The
+    // column now holds a team, so the schedule follows its workflow.
+    scheduleOwner = { ownerType: owned.ownerType, ownerId: owned.ownerId };
   }
 
   const inserted = await db
@@ -116,8 +132,8 @@ export async function createWorkflowSchedule(
     .values({
       id: randomUUID(),
       orgId: user.orgId,
-      ownerType: "user",
-      ownerId: user.id,
+      ownerType: scheduleOwner.ownerType,
+      ownerId: scheduleOwner.ownerId,
       targetKind: hasWorkflow ? "workflow" : "orchestrator",
       workflowId: hasWorkflow ? input.workflowId! : null,
       prompt: hasPrompt ? input.prompt! : null,
@@ -150,13 +166,26 @@ export async function deleteWorkflowSchedule(
   db: AppDb,
   orgId: string,
   scheduleId: string,
+  /** Scopes the delete to a schedule owned by THIS workflow when passed —
+   * the HTTP management routes are mounted under `/:id/schedules`, and
+   * without this a caller who owns any schedule in the org could delete
+   * a different workflow's row through the wrong path. */
+  workflowId?: string,
 ): Promise<"ok" | "not_found"> {
+  const conditions = [eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)];
+  if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
   const rows = await db
     .select({ id: workflowSchedules.id })
     .from(workflowSchedules)
-    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+    .where(and(...conditions))
     .limit(1);
   if (rows.length === 0) return "not_found";
-  await db.delete(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
+  // Delete under the same predicate the check used, not `id` alone. The
+  // scoping is unreachable-by-luck otherwise: ids are UUID primary keys and
+  // no code path reassigns `workflow_id` or `org_id`, so today the select
+  // and the delete cannot resolve to different rows. Repeating the
+  // conditions makes the constraint a property of the statement instead of
+  // an invariant a later change could break without touching this file.
+  await db.delete(workflowSchedules).where(and(...conditions));
   return "ok";
 }

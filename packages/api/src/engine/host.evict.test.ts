@@ -11,6 +11,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 describe("EngineHost.evictAll", () => {
   let api: TestApi | undefined;
@@ -24,7 +25,7 @@ describe("EngineHost.evictAll", () => {
     api = await bootTestApi();
     const { engineHost, engineStore } = api.providers;
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );

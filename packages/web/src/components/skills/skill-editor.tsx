@@ -17,29 +17,20 @@
  * Only a `local` skill reaches this form. A `repo` skill mirrors a file in
  * the repository it was synced from, and the next sync would overwrite an
  * edit made here — the detail page offers no Edit for one.
+ *
+ * No field here asks who owns the skill. The active workspace answers that —
+ * your own, or a team — and the org Library page answers it through
+ * `defaultScope`. An Owner select stood here and asked a second time, which
+ * let the form file a skill under a workspace the page was not showing.
  */
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import type { CreateSkillRequest, SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
 import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
-import { useOrg, useTeams } from "~/api/settings";
-import { ApiError } from "~/api/client";
-
-/** Server-side messages carry the corrective action; a network failure does
- * not, so it gets one here. */
-export function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    const payload = err.payload;
-    if (typeof payload === "object" && payload !== null && "error" in payload) {
-      const message = (payload as { error: unknown }).error;
-      if (typeof message === "string") return message;
-    }
-    return err.message;
-  }
-  if (err instanceof Error) return `${err.message}. Check the server is running, then try again.`;
-  return "Could not save the skill. Try again.";
-}
+import { useOrg } from "~/api/settings";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { errorText } from "~/lib/error-text";
 
 /**
  * Renders a prompt body the way a session reads it, with the argument markers
@@ -57,13 +48,6 @@ export function previewPromptBody(body: string): string {
     .replace(/\$(\d+)/g, (_m, n: string) => `⟨arg${n}⟩`);
 }
 
-/** Owner of a new skill: the caller, a team the caller belongs to, or the org
- * when the caller is an org admin. The value is "" for the caller, `OWNER_ORG`
- * for the org, or a `teamId` for a team. A stored skill does not change owner,
- * so the field is create-only. */
-const OWNER_SELF = "";
-const OWNER_ORG = "org";
-
 export function SkillEditor({
   skill,
   defaultScope,
@@ -72,8 +56,10 @@ export function SkillEditor({
 }: {
   /** Absent to create. Present to edit — its body must already be loaded. */
   skill?: SkillResponse;
-  /** Preselects the owner on a new skill. `"org"` is honored only for an org
-   * admin; anything else falls back to the caller. */
+  /** Files a new skill to the org library instead of to the active workspace.
+   * The org Library page's "New org skill" button sets it, through
+   * `/skills/new?scope=org`. Honored only for an org admin; for anybody else
+   * the active workspace owns the skill, as usual. */
   defaultScope?: "personal" | "org";
   onSaved: (saved: SkillResponse) => void;
   onCancel: () => void;
@@ -81,30 +67,25 @@ export function SkillEditor({
   const editing = skill !== undefined;
   const create = useCreateSkill();
   const update = useUpdateSkill();
-  const teams = useTeams();
+  // The org scope needs the caller's org role. The flag arrives async, and a
+  // stale `false` costs nothing here: it is read at submit time, not at mount,
+  // so a slow org query cannot silently file an org skill as personal.
   const org = useOrg();
   const isAdmin = org.data?.callerRole === "admin";
 
   const [name, setName] = useState(skill?.name ?? "");
   const [description, setDescription] = useState(skill?.description ?? "");
   const [content, setContent] = useState(skill?.content ?? "");
-  // Preselect the org scope only for an admin — a member never gets the
-  // option, so a member landing on `?scope=org` falls back to a personal skill.
-  const [teamId, setTeamId] = useState(defaultScope === "org" && isAdmin ? OWNER_ORG : OWNER_SELF);
-  // The admin flag arrives async: on the first render `org.data` is often
-  // still in flight, so the initializer above ran with `isAdmin === false`
-  // and picked "You". When the flag resolves true, honor `?scope=org` —
-  // but only while the field is untouched, never over a user's own choice.
-  const scopeTouched = useRef(false);
-  useEffect(() => {
-    if (defaultScope === "org" && isAdmin && !scopeTouched.current) {
-      setTeamId(OWNER_ORG);
-    }
-  }, [defaultScope, isAdmin]);
   const [invocation, setInvocation] = useState<"context" | "prompt">(
     skill?.invocation === "prompt" ? "prompt" : "context",
   );
   const [argHint, setArgHint] = useState(skill?.argHint ?? "");
+  // The active workspace owns a new skill, unless the page that opened this
+  // form asked for the org library. There was an Owner select here, which
+  // asked a second time what the nav's workspace switcher had already
+  // answered — and could disagree with it. Editing never moved ownership and
+  // still does not.
+  const workspace = useWorkspaceScope();
 
   const pending = create.isPending || update.isPending;
   const error = create.error ?? update.error;
@@ -120,16 +101,17 @@ export function SkillEditor({
       update.mutate({ id: skill.id, body }, { onSuccess: onSaved });
       return;
     }
-    // An org skill needs admin; a member never sees the option, and a stale
-    // `OWNER_ORG` (admin flag not yet loaded) falls back to a personal skill.
+    // Who owns the new skill. The org library wins when the page asked for it
+    // AND the caller may write there — the create route rejects an org skill
+    // from a member, so a member on `?scope=org` files a personal skill
+    // instead. Everybody else gets the active workspace: their own, or the
+    // team the nav switcher names.
     const ownerFields =
-      teamId === OWNER_ORG
-        ? isAdmin
-          ? { ownerType: "org" as const }
-          : {}
-        : teamId === OWNER_SELF
+      defaultScope === "org" && isAdmin
+        ? { ownerType: "org" as const }
+        : workspace.teamId === undefined
           ? {}
-          : { teamId };
+          : { teamId: workspace.teamId };
     const body: CreateSkillRequest = {
       name,
       description,
@@ -165,33 +147,6 @@ export function SkillEditor({
           </p>
         </div>
 
-        {!editing && ((teams.data?.teams.length ?? 0) > 0 || isAdmin) && (
-          <div className="space-y-1.5">
-            <Label htmlFor="skill-owner">Owner</Label>
-            <select
-              id="skill-owner"
-              value={teamId}
-              onChange={(e) => {
-                scopeTouched.current = true;
-                setTeamId(e.target.value);
-              }}
-              className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
-            >
-              <option value={OWNER_SELF}>You</option>
-              {teams.data?.teams.map((team) => (
-                <option key={team.id} value={team.id}>
-                  {team.name}
-                </option>
-              ))}
-              {/* Org visible only to an admin — the create API rejects an org
-                  skill from a member with a 403. */}
-              {isAdmin && <option value={OWNER_ORG}>Organization</option>}
-            </select>
-            <p className="text-xs text-muted">
-              A team or org skill reaches every member's sessions.
-            </p>
-          </div>
-        )}
       </div>
 
       <div className="space-y-1.5">
@@ -271,7 +226,7 @@ export function SkillEditor({
         />
       </div>
 
-      {!!error && <p className="text-sm text-danger-500">{errorText(error)}</p>}
+      {!!error && <p className="text-sm text-danger-500">{errorText(error, "Could not save the skill. Try again.")}</p>}
 
       <div className="flex items-center gap-2">
         <Button type="submit" size="sm" disabled={!complete || pending}>

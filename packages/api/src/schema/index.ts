@@ -416,25 +416,45 @@ export const teamMembers = pgTable(
   ],
 );
 
-// ─── Orchestrator identities ────────────────────────────────────────────────
-//
-// One durable identity per orchestrator (user/team/org), never rotated.
-// Unique per (orgId, ownerType, ownerId); handles unique per org (enforced
-// in service code once handles are assigned — no logic this phase).
+// ─── Assistants ─────────────────────────────────────────────────────────────
 
-export const orchestratorIdentities = pgTable(
-  "orchestrator_identities",
+/**
+ * An assistant: a named agent a principal owns, with its own session.
+ *
+ * Replaces `orchestrator_identities`, whose `UNIQUE (org, owner_type,
+ * owner_id)` was the one-assistant-per-principal rule. A principal now owns
+ * any number, and is the assistant's OWNER and SCOPE rather than its
+ * identity. See `docs/specs/2026-08-13-assistants-design.md`.
+ *
+ * `sessionId` is `assistant:{id}` for every row, the default included — one
+ * address, so no consumer has to branch on which kind of assistant it holds.
+ */
+export const assistants = pgTable(
+  "assistants",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
+    /** What the reader calls it. Was `orchestrator_identities.handle`. */
+    name: text("name"),
     sessionId: text("session_id").notNull(),
-    handle: text("handle"),
+    /**
+     * The one a machine picks when nobody chose. Workflow orchestrator
+     * nodes, event subscriptions and channel bindings all say "the team's
+     * assistant" and have no basis for choosing between several, so they
+     * resolve to this. Exactly one per principal, held by a partial unique
+     * index — see the migration.
+     */
+    isDefault: boolean("is_default").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Null while live. Archiving hides an assistant without destroying the
+     * conversation it held; the default cannot be archived while default. */
+    archivedAt: bigint("archived_at", { mode: "number" }),
   },
   (t) => [
-    uniqueIndex("orchestrator_identities_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("assistants_session").on(t.sessionId),
+    index("assistants_owner").on(t.orgId, t.ownerType, t.ownerId),
   ],
 );
 
@@ -1321,7 +1341,7 @@ export const eventSubscriptions = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     // "team" is intentionally excluded: subscription dispatch targets only user/org orchestrators.
-    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     /** Event key patterns; trailing `.*` wildcard supported (e.g. "github.pull_request.*"). */
@@ -1350,7 +1370,7 @@ export const workflowSchedules = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull().default("user"),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
     /** Fire target: start a workflow run, or prompt the orchestrator
      * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
@@ -1453,7 +1473,7 @@ export type SessionThreadRow = typeof sessionThreads.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type TeamRow = typeof teams.$inferSelect;
 export type TeamMemberRow = typeof teamMembers.$inferSelect;
-export type OrchestratorIdentityRow = typeof orchestratorIdentities.$inferSelect;
+export type AssistantRow = typeof assistants.$inferSelect;
 export type ChildWatchRow = typeof childWatches.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
 export type UserNotificationPreferenceRow = typeof userNotificationPreferences.$inferSelect;

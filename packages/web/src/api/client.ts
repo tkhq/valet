@@ -9,7 +9,19 @@
 import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
+  CreateAssistantRequest,
+  CreateAssistantResponse,
+  EnsureAssistantSessionResponse,
+  ListAssistantsResponse,
+  PatchAssistantRequest,
+  PatchAssistantResponse,
   CancelWorkflowRunResponse,
+  CreateWorkflowScheduleRequest,
+  CreateWorkflowScheduleResponse,
+  DeleteWorkflowScheduleResponse,
+  DeleteWorkflowWebhookResponse,
+  ListWorkflowSchedulesResponse,
+  WorkflowWebhookResponse,
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
@@ -112,8 +124,17 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  CreateEventSubscriptionRequest,
+  CreateEventSubscriptionResponse,
+  GetEventCatalogResponse,
+  GetEventResponse,
+  ListEventsResponse,
+  ListEventSubscriptionsResponse,
+  PatchEventSubscriptionRequest,
+  PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
+  RedeliverEventResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -260,6 +281,28 @@ export const api = {
       `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
     ),
 
+  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
+  // also how the client learns each assistant's session id, so it replaces
+  // the client-side id derivation the rail used to do.
+  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
+  createAssistant: (body: CreateAssistantRequest) =>
+    request<CreateAssistantResponse>("POST", "/assistants", body),
+  patchAssistant: (id: string, body: PatchAssistantRequest) =>
+    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
+  // Archive, not destroy: the row keeps `archived_at` and the conversation
+  // it held survives. `DELETE` carries it because the wire's
+  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
+  // house convention for a soft remove is the same verb as `deleteTeam`.
+  archiveAssistant: (id: string) =>
+    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
+  /** Get-or-create one assistant's session. Creating an assistant writes no
+   * session, so the chat page calls this before opening the conversation. */
+  ensureAssistantSession: (id: string) =>
+    request<EnsureAssistantSessionResponse>(
+      "POST",
+      `/assistants/${encodeURIComponent(id)}/session`,
+    ),
+
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
   getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
@@ -268,7 +311,10 @@ export const api = {
   searchMemory: (q: string) =>
     request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
   getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
-  writeMemoryDoc: (body: { path: string; content: string }) =>
+  // `content` and `pinned` are both optional: the route leaves the body
+  // alone when `content` is absent, which is how the doc view pins a file
+  // without rewriting it.
+  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }) =>
     request<unknown>("PUT", "/memory", body),
   deleteMemoryDoc: (path: string) =>
     request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
@@ -417,6 +463,52 @@ export const api = {
       `/workflows/runs/${encodeURIComponent(runId)}/retry`,
     ),
 
+  // events (event-system design): org feed, per-event detail with delivery
+  // attempts, the plugin trigger catalog, and subscription CRUD
+  getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
+  listEvents: (params?: { service?: string; key?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.service) qs.set("service", params.service);
+    if (params?.key) qs.set("key", params.key);
+    const q = qs.toString();
+    return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
+  },
+  getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
+  redeliverEvent: (id: string) =>
+    request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
+  listEventSubscriptions: () =>
+    request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
+  createEventSubscription: (body: CreateEventSubscriptionRequest) =>
+    request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
+  patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
+    request<PatchEventSubscriptionResponse>(
+      "PATCH",
+      `/event-subscriptions/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deleteEventSubscription: (id: string) =>
+    request<void>("DELETE", `/event-subscriptions/${encodeURIComponent(id)}`),
+  // workflow triggers: webhook URL management + cron schedules
+  getWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+  mintWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
+  deleteWorkflowWebhook: (id: string) =>
+    request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
+  listWorkflowSchedules: (id: string) =>
+    request<ListWorkflowSchedulesResponse>("GET", `/workflows/${encodeURIComponent(id)}/schedules`),
+  createWorkflowSchedule: (id: string, body: CreateWorkflowScheduleRequest) =>
+    request<CreateWorkflowScheduleResponse>(
+      "POST",
+      `/workflows/${encodeURIComponent(id)}/schedules`,
+      body,
+    ),
+  deleteWorkflowSchedule: (id: string, scheduleId: string) =>
+    request<DeleteWorkflowScheduleResponse>(
+      "DELETE",
+      `/workflows/${encodeURIComponent(id)}/schedules/${encodeURIComponent(scheduleId)}`,
+    ),
+
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
@@ -498,6 +590,8 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
+  ensureTeamOrchestrator: (id: string) =>
+    request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),

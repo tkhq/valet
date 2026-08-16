@@ -9,16 +9,27 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
+import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import {
+  eventDeliveries,
+  events,
+  eventSubscriptions,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+} from "../schema/index.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
+  EventSubscriptionFilterWire,
+  EventSubscriptionTargetWire,
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionResponse,
+  RedeliverEventResponse,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -52,20 +63,35 @@ async function postSubscription(
   });
 }
 
+interface SeedSubscriptionOpts {
+  name?: string;
+  eventKeys?: string[];
+  filters?: EventSubscriptionFilterWire[];
+  target?: EventSubscriptionTargetWire;
+  enabled?: boolean;
+}
+
 /** Seeds a subscription row directly (bypassing route validation) — used for
- * cross-org 404 cases where the route would refuse to create the row. */
-async function seedSubscriptionRow(a: TestApi, id: string, orgId: string): Promise<void> {
+ * cross-org 404 cases where the route would refuse to create the row, and for
+ * redelivery cases that need a disabled row or a workflow target without a
+ * CRUD round trip. */
+async function seedSubscriptionRow(
+  a: TestApi,
+  id: string,
+  orgId: string,
+  opts: SeedSubscriptionOpts = {},
+): Promise<void> {
   const now = Date.now();
   await a.providers.db.insert(eventSubscriptions).values({
     id,
     orgId,
     ownerType: "user",
     ownerId: "someone",
-    name: `seeded ${id}`,
-    eventKeys: ["github.push"],
-    filters: [],
-    target: { kind: "orchestrator" },
-    enabled: true,
+    name: opts.name ?? `seeded ${id}`,
+    eventKeys: opts.eventKeys ?? ["github.push"],
+    filters: opts.filters ?? [],
+    target: opts.target ?? { kind: "orchestrator" },
+    enabled: opts.enabled ?? true,
     createdBy: "someone",
     createdAt: now,
     updatedAt: now,
@@ -410,6 +436,41 @@ describe("PATCH /api/event-subscriptions/:id", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("404s a colleague's personal subscription in the SAME org, row unchanged", async () => {
+    const a = await boot();
+    // seedSubscriptionRow's row is ownerType "user"/ownerId "someone" —
+    // neither the default caller ("local-user") nor "test-member" below.
+    await seedSubscriptionRow(a, "sub_colleague", "local-org");
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_colleague`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(404);
+
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, "sub_colleague"));
+    expect(rows[0].enabled).toBe(true);
+  });
+
+  it("an org-owned subscription is mutable by any org member", async () => {
+    const a = await boot();
+    const created = (await (
+      await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "org" } })
+    ).json()) as CreateEventSubscriptionResponse;
+    expect(created.ownerType).toBe("org");
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("DELETE /api/event-subscriptions/:id", () => {
@@ -432,6 +493,23 @@ describe("DELETE /api/event-subscriptions/:id", () => {
     expect(res.status).toBe(404);
 
     const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_foreign"));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("404s a colleague's personal subscription in the SAME org, row survives", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_colleague", "local-org");
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_colleague`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, "sub_colleague"));
     expect(rows).toHaveLength(1);
   });
 });
@@ -497,6 +575,36 @@ describe("GET /api/events/:id", () => {
       attempts: 2,
       lastError: "boom",
     });
+    // A failing delivery must say WHEN it retries and WHAT it is trying to
+    // reach; without both, it reads the same as a dead one.
+    expect(body.deliveries[0].nextAttemptAt).toBe(5_000);
+    expect(body.deliveries[0].subscriptionName).toBe("seeded sub_1");
+  });
+
+  it("reports no next attempt for a delivery that gave up", async () => {
+    const a = await boot();
+    await seedEventRow(a, { id: "ev_dead", receivedAt: 1_000 });
+    await seedSubscriptionRow(a, "sub_dead", "local-org", { name: "PR reviewer" });
+    // A dead row keeps the `next_attempt_at` of the attempt that gave up, so
+    // shipping the column raw would promise a retry that never comes.
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_dead",
+      eventId: "ev_dead",
+      subscriptionId: "sub_dead",
+      status: "dead",
+      attempts: 4,
+      lastError: "Error: connect ECONNREFUSED 127.0.0.1:8788",
+      nextAttemptAt: 9_000,
+      createdAt: 1_000,
+    });
+
+    const res = await fetch(`${a.baseUrl}/api/events/ev_dead`);
+    const body = (await res.json()) as GetEventResponse;
+    expect(body.deliveries[0].status).toBe("dead");
+    expect(body.deliveries[0].nextAttemptAt).toBeNull();
+    expect(body.deliveries[0].subscriptionName).toBe("PR reviewer");
+    // The error is the one field a reader needs whole.
+    expect(body.deliveries[0].lastError).toBe("Error: connect ECONNREFUSED 127.0.0.1:8788");
   });
 
   it("404s an event belonging to another org", async () => {
@@ -505,5 +613,306 @@ describe("GET /api/events/:id", () => {
 
     const res = await fetch(`${a.baseUrl}/api/events/ev_foreign`);
     expect(res.status).toBe(404);
+  });
+});
+
+// ── Redelivery ──────────────────────────────────────────────────────────────
+
+/** Records the run ids the dispatcher starts, and never runs anything. The
+ * recorded ids are the point: the dispatcher derives a run id from the
+ * delivery id (`wfrun_evt_${deliveryId}`) and returns early when that run
+ * exists, so a redelivery that reused a delivery id would report success and
+ * start nothing. */
+function recordingRunHost(): { host: RunHost; started: string[] } {
+  const started: string[] = [];
+  return {
+    started,
+    host: {
+      start: async (runId: string) => {
+        started.push(runId);
+      },
+      wake: async () => {},
+      scheduleWake: async () => {},
+      terminate: async () => {},
+      startHost: () => {},
+      stopHost: async () => {},
+    },
+  };
+}
+
+async function seedWorkflowRow(a: TestApi, id: string): Promise<void> {
+  const now = Date.now();
+  await a.providers.db.insert(workflowDefinitions).values({
+    id,
+    orgId: "local-org",
+    ownerType: "user",
+    ownerId: "local-user",
+    name: `workflow ${id}`,
+    definition: { version: "dag/v1", nodes: [], edges: [] },
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+async function deliveriesFor(a: TestApi, eventId: string) {
+  return a.providers.db.select().from(eventDeliveries).where(eq(eventDeliveries.eventId, eventId));
+}
+
+async function redeliver(baseUrl: string, eventId: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/events/${eventId}/redeliver`, { method: "POST" });
+}
+
+describe("POST /api/events/:id/redeliver", () => {
+  /** Workflow targets on a recording run host: a redelivery dispatches for
+   * real, without a live workflow engine in a route test. */
+  async function bootWithRunHost(): Promise<{ a: TestApi; started: string[] }> {
+    const { host, started } = recordingRunHost();
+    api = await bootTestApi({ plugins: [githubPlugin], workflowRunHost: host });
+    return { a: api, started };
+  }
+
+  it("creates NEW delivery rows and dispatches them, leaving the dead row intact", async () => {
+    const { a, started } = await bootWithRunHost();
+    await seedWorkflowRow(a, "wf_redeliver");
+    await seedEventRow(a, { id: "ev_1", receivedAt: 1_000 });
+    await seedSubscriptionRow(a, "sub_1", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+    // The 9am attempt that gave up.
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_dead",
+      eventId: "ev_1",
+      subscriptionId: "sub_1",
+      status: "dead",
+      attempts: 4,
+      lastError: "workflow wf_redeliver not found in org local-org",
+      nextAttemptAt: 2_000,
+      createdAt: 1_000,
+    });
+
+    const res = await redeliver(a.baseUrl, "ev_1");
+    expect(res.status).toBe(200);
+    expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 1 });
+
+    const rows = await deliveriesFor(a, "ev_1");
+    expect(rows).toHaveLength(2);
+    const fresh = rows.find((r) => r.id !== "del_dead");
+    expect(fresh).toBeDefined();
+
+    // The dispatcher must start a run under the NEW delivery id. A reused id
+    // would resolve to `wfrun_evt_del_dead` and be swallowed by the
+    // already-exists early return. (The route nudges the dispatcher, so the
+    // delivery may already be done here; this poll covers both orderings.)
+    await a.providers.eventDispatcher.pollOnce();
+    await expect.poll(() => started, { timeout: 5_000 }).toEqual([`wfrun_evt_${fresh!.id}`]);
+
+    // The dead row is the record of what happened; it is never revived.
+    const settled = await deliveriesFor(a, "ev_1");
+    expect(settled.find((r) => r.id === "del_dead")).toMatchObject({ status: "dead", attempts: 4 });
+    expect(settled.find((r) => r.id === fresh!.id)?.status).toBe("delivered");
+  });
+
+  it("targets the subscriptions matching NOW: skips disabled, includes one created after the event", async () => {
+    const { a } = await bootWithRunHost();
+    await seedWorkflowRow(a, "wf_redeliver");
+    await seedEventRow(a, { id: "ev_1", receivedAt: 1_000 });
+    // Deliberately switched off — the owner does not want this event.
+    await seedSubscriptionRow(a, "sub_off", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+      enabled: false,
+    });
+    // Created after the event, and repaired — the owner does want it.
+    await seedSubscriptionRow(a, "sub_fixed", "local-org", {
+      eventKeys: ["github.pull_request.*"],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+
+    const res = await redeliver(a.baseUrl, "ev_1");
+    expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 1 });
+    const rows = await deliveriesFor(a, "ev_1");
+    expect(rows.map((r) => r.subscriptionId)).toEqual(["sub_fixed"]);
+  });
+
+  it("applies the subscription filters, not just the event key", async () => {
+    const { a } = await bootWithRunHost();
+    await seedWorkflowRow(a, "wf_redeliver");
+    // seedEventRow's payload is repository acme/widgets.
+    await seedEventRow(a, { id: "ev_1", receivedAt: 1_000 });
+    await seedSubscriptionRow(a, "sub_other_repo", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "repo", op: "eq", value: "acme/other" }],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+
+    const res = await redeliver(a.baseUrl, "ev_1");
+    expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 0 });
+    expect(await deliveriesFor(a, "ev_1")).toHaveLength(0);
+  });
+
+  it("200s with created 0 when nothing matches, so the UI can say so", async () => {
+    const a = await boot();
+    await seedEventRow(a, { id: "ev_1", receivedAt: 1_000 });
+
+    const res = await redeliver(a.baseUrl, "ev_1");
+    expect(res.status).toBe(200);
+    expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 0 });
+  });
+
+  it("404s an event in another org and writes nothing", async () => {
+    const a = await boot();
+    await seedEventRow(a, { id: "ev_foreign", orgId: "other-org", receivedAt: 1_000 });
+    await seedSubscriptionRow(a, "sub_foreign", "other-org", {
+      eventKeys: ["github.pull_request.opened"],
+    });
+
+    const res = await redeliver(a.baseUrl, "ev_foreign");
+    expect(res.status).toBe(404);
+    expect(await deliveriesFor(a, "ev_foreign")).toHaveLength(0);
+  });
+});
+
+/**
+ * A team owns event subscriptions the same way it owns workflows, skills and
+ * sessions: the subscription names the TEAM as owner, and the dispatcher
+ * delivers into that team's default assistant rather than the assistant of
+ * whichever member happened to create it.
+ *
+ * Membership is the bar to create one, matching team workflows and team
+ * sessions — a member who can start a team workflow by hand can equally
+ * arrange for an event to start it. A caller who is not on the team gets 404,
+ * never 403, so a subscription never confirms a team's existence.
+ */
+describe("event subscriptions — team ownership", () => {
+  async function bootWithTeam(): Promise<TestApi> {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    // A second team the caller is NOT on, to prove the refusal below is about
+    // membership and not about the id being unknown.
+    await a.providers.db.insert(teams).values({ id: "team_2", orgId: "local-org", name: "Other", createdAt: now });
+    return a;
+  }
+
+  const teamBody: CreateEventSubscriptionRequest = {
+    ...VALID_BODY,
+    target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+  };
+
+  it("stamps a team target with the TEAM as owner, not the creating member", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(created.ownerType).toBe("team");
+    expect(created.ownerId).toBe("team_1");
+    expect(created.ownerId).not.toBe("test-member");
+    // The row agrees with the response — the owner is persisted, not just
+    // reported, because the dispatcher reads the row and never the response.
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0]?.ownerType).toBe("team");
+    expect(rows[0]?.ownerId).toBe("team_1");
+    // `createdBy` still records the human, which is what the dispatcher hands
+    // the engine as the actor — a team id is not a user.
+    expect(rows[0]?.createdBy).toBe("test-member");
+  });
+
+  it("404s a team the caller is not a member of, without naming it", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_2" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("team not found");
+    expect(body.error).not.toContain("Other");
+  });
+
+  it("404s a team id that does not exist at all — same answer as one you're not on", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_nope" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a team target with no teamId — it names no team", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("team orchestrator target requires teamId");
+  });
+
+  it("400s a teamId on a user target — it would read as delivering to the team, and does not", async () => {
+    const a = await bootWithTeam();
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "user", teamId: "team_1" } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("teamId is only valid when orchestrator is team");
+  });
+
+  it("lets another member of the same team change and delete it", async () => {
+    const a = await bootWithTeam();
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-admin", role: "member" });
+    const created = (await (
+      await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" })
+    ).json()) as CreateEventSubscriptionResponse;
+
+    const patched = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-admin" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patched.status).toBe(200);
+    expect(((await patched.json()) as PatchEventSubscriptionResponse).enabled).toBe(false);
+
+    const deleted = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-admin" },
+    });
+    expect(deleted.status).toBe(204);
+  });
+
+  it("404s a non-member trying to change or delete a team subscription", async () => {
+    const a = await bootWithTeam();
+    const created = (await (
+      await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" })
+    ).json()) as CreateEventSubscriptionResponse;
+
+    const patched = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "outsider" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patched.status).toBe(404);
+
+    const deleted = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "outsider" },
+    });
+    expect(deleted.status).toBe(404);
+
+    // Still there, and still enabled — the refusal changed nothing.
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0]?.enabled).toBe(true);
   });
 });

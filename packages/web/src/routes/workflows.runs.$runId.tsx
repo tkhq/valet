@@ -1,12 +1,12 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import type { WorkflowRunCheckpoint, WorkflowRunDetail } from "@valet/api/wire";
+import type { WorkflowRunDetail } from "@valet/api/wire";
 import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
 import { ApprovalCard } from "~/components/workflows/approval-card";
+import { CheckpointList } from "~/components/workflows/checkpoint-list";
 import { PolicyGateCard } from "~/components/workflows/policy-gate-card";
 import {
   findApprovalPrompt,
   findPendingApproval,
-  jsonPreview,
   runNeedsApproval,
   statusByNodeId,
 } from "~/components/workflows/run-detail-helpers";
@@ -161,45 +161,9 @@ export function RunDetailBody({
           <ApprovalCard runId={runId} nodeId={legacyPending.nodeId} prompt={legacyPrompt} />
         )}
 
-        <ul className="space-y-2">
-          {checkpoints.map((cp) => (
-            <li
-              key={`${cp.nodeId}:${cp.iteration}`}
-              className="rounded border border-line bg-paper p-3"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-ink">{cp.nodeId}</span>
-                <span className="text-xs text-muted">{cp.status}</span>
-              </div>
-              {cp.error && <div className="mt-1 text-xs text-danger-500">{cp.error}</div>}
-              {isPolicyDenied(cp) && (
-                <div className="mt-1 text-xs text-danger-500">
-                  Denied by {resolveDeniedBy(cp)}
-                </div>
-              )}
-              {cp.result !== undefined && !isPolicyDenied(cp) && (
-                <pre className="mt-2 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
-                  {jsonPreview(cp.result)}
-                </pre>
-              )}
-            </li>
-          ))}
-          {checkpoints.length === 0 && <li className="text-sm text-muted">No checkpoints yet.</li>}
-        </ul>
+        <CheckpointList checkpoints={checkpoints} />
       </div>
     </>
   );
 }
 
-/** Returns true when a completed tool checkpoint was denied by policy. */
-function isPolicyDenied(cp: WorkflowRunCheckpoint): boolean {
-  if (typeof cp.result !== "object" || cp.result === null) return false;
-  return (cp.result as Record<string, unknown>).policyDenied === true;
-}
-
-/** Extracts the resolvedBy value from a denied checkpoint result, if present. */
-function resolveDeniedBy(cp: WorkflowRunCheckpoint): string {
-  if (typeof cp.result !== "object" || cp.result === null) return "policy";
-  const v = (cp.result as Record<string, unknown>).resolvedBy;
-  return typeof v === "string" ? v : "policy";
-}

@@ -16,7 +16,9 @@
  * "Remove" and not "Disable".
  *
  * `scope` picks which sources show and which scope a new source takes:
- *   - `personal` (default) — the caller's own and team sources.
+ *   - `personal` (default) — the caller's own and team sources. A new source
+ *     goes to the active workspace, which the nav switcher sets: your own, or
+ *     a team. No Owner select asks a second time.
  *   - `org` — org sources only; a new source is added with `ownerType: "org"`.
  * `readOnly` hides the add form and the per-row Sync/Remove actions — the org
  * panel passes it for a member, who may read org sources but not change them.
@@ -24,6 +26,8 @@
 import { useState, type FormEvent } from "react";
 import { Button, Input, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
+import { OwnerBadge } from "~/components/owner-badge";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -53,12 +57,22 @@ export function SkillSourcesPanel({
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
   const add = useAddSkillSource();
+  // The active workspace owns a personal-panel source. There was an Owner
+  // select here, which asked a second time what the nav's workspace switcher
+  // had already answered — and could disagree with it, so the page could show
+  // one workspace's repositories while the form filed a new one under
+  // another. The org panel is fixed to the org and never reads this.
+  const workspace = useWorkspaceScope();
 
   function submit(e: FormEvent) {
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
-    add.mutate(scope === "org" ? { repo: value, ownerType: "org" } : { repo: value });
+    add.mutate(
+      scope === "org"
+        ? { repo: value, ownerType: "org" }
+        : { repo: value, ...(workspace.teamId === undefined ? {} : { teamId: workspace.teamId }) },
+    );
     setRepo("");
   }
 
@@ -129,7 +143,13 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate font-mono text-sm text-ink">{source.repo}</span>
-          <ScopeBadge scope={scopeForOwnerType(source.ownerType)} />
+          {/* One badge for the scope axis, as on `SkillCard`: a team row takes
+              `OwnerBadge`, which names the team and links to its assistant. */}
+          {source.ownerType === "team" ? (
+            <OwnerBadge ownerType={source.ownerType} ownerId={source.ownerId} />
+          ) : (
+            <ScopeBadge scope={scopeForOwnerType(source.ownerType)} />
+          )}
           {pinned.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">{pinned}</span>
           )}

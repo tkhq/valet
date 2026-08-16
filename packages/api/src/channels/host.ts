@@ -15,7 +15,6 @@
 import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
-  orchestratorSessionId,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -34,7 +33,7 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { agentSessions } from "../schema/index.js";
-import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
@@ -593,7 +592,10 @@ export class ChannelHost {
     userId: string,
   ): Promise<void> {
     const orgId = this.orgId ?? (await this.deps.resolveOrgId());
-    const { session } = await ensureOrchestratorSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
+    // An inbound channel message names a USER, never one of that user's
+    // assistants, so it goes to the user's default — the same target every
+    // other machine-driven path resolves to.
+    const { session } = await ensureDefaultAssistantSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
     });
@@ -665,18 +667,18 @@ export class ChannelHost {
       return;
     }
 
-    // Resolution deliberately looks up the user's orchestrator session
+    // Resolution deliberately looks up the user's default assistant session
     // rather than reusing `mapped.sessionId` — the ownership check above
     // only proved `mapped.sessionId` belongs to `userId`, not that it IS
-    // the orchestrator session. This relies on the invariant that
-    // channel-keyed threads (see `channelThreadFor`) exist only on
-    // orchestrator sessions: `handleMessage` always threads through
-    // `ensureOrchestratorSession`, so any gate whose ref maps back to a
-    // channel thread must have been raised on that same orchestrator
-    // session. If that invariant is ever violated, `resolveDecision` below
-    // throws on a gateId that doesn't exist on this session — caught by
+    // that session. This relies on the invariant that channel-keyed threads
+    // (see `channelThreadFor`) exist only on the default assistant's
+    // session: `handleMessage` always threads through
+    // `ensureDefaultAssistantSession`, so any gate whose ref maps back to a
+    // channel thread must have been raised on that same session. If that
+    // invariant is ever violated, `resolveDecision` below throws on a
+    // gateId that doesn't exist on this session — caught by
     // `handleUpdate`'s try/catch (fails safe, not silently wrong).
-    const session = await this.deps.engineHost.orchestratorSessionFor({ type: "user", id: userId }, {
+    const { session } = await ensureDefaultAssistantSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
     });

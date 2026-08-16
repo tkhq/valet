@@ -6,11 +6,11 @@
  * *API* calls the service makes to resolve the head sha + recipe, per
  * `PrebuildService`'s doc comment):
  *
- *   1. `POST /api/org/image-catalog` registers a git-having base image (a
- *      locally-built alpine+git image — prebuild base images MUST carry
- *      git, see `routes/image-catalog.ts`'s doc comment).
- *   2. `POST /api/org/prebuilds/configs` creates a config for the repo.
- *   3. `POST /api/org/prebuilds/configs/:id/rebuild` dispatches a REAL
+ *   1. `POST /api/org/sources` registers a git-having base image (a
+ *      locally-built alpine+git image — base images MUST carry git, see
+ *      `routes/sources.ts`'s doc comment).
+ *   2. `POST /api/org/sources` creates a repo source for the repo.
+ *   3. `POST /api/org/sources/:id/bake` dispatches a REAL
  *      `docker build` (via `DockerImageBuilder`); the test polls
  *      `syncActiveBuilds()` directly (no interval wired in `bootTestApi`)
  *      until the row reaches `pushed`.
@@ -121,8 +121,8 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
     "catalog -> config -> real build -> session resolves + stages the prebuilt repo -> cold control -> retention keeps 2",
     async () => {
       // A tiny base image WITH git — the generated Dockerfile's first RUN is
-      // the clone, so git must already be present in the base (T2's finding,
-      // documented on `routes/image-catalog.ts`).
+      // the clone, so git must already be present in the base (documented on
+      // `routes/sources.ts`).
       const build = spawnSync(
         "docker",
         ["build", "-t", BASE_IMAGE, "-"],

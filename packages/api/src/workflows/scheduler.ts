@@ -115,6 +115,9 @@ export class WorkflowScheduler {
         orgId: schedule.orgId,
         ownerType: schedule.ownerType,
         ownerId: schedule.ownerId,
+        // The schedule's author, not its owner: on a team or org schedule
+        // the owner is not a user, and nobody is present when cron fires.
+        actorUserId: schedule.createdBy,
         signal: {
           kind: "signal",
           signalType: "schedule",

@@ -13,6 +13,10 @@ import {
 import type {
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  CreateWorkflowScheduleRequest,
+  CreateWorkflowScheduleResponse,
+  ListWorkflowSchedulesResponse,
+  WorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
@@ -24,7 +28,7 @@ import type {
   GetWorkflowVersionResponse,
   ListWorkflowVersionsResponse,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { api, ApiError } from "./client";
 
 export const qkWorkflows = {
   list: () => ["workflows"] as const,
@@ -33,6 +37,8 @@ export const qkWorkflows = {
   run: (runId: string) => ["workflows", "runs", runId] as const,
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
+  webhook: (id: string) => ["workflows", id, "webhook"] as const,
+  schedules: (id: string) => ["workflows", id, "schedules"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -211,6 +217,79 @@ export function useCancelRun(runId: string) {
     mutationFn: () => api.cancelWorkflowRun(runId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+    },
+  });
+}
+
+// ── Triggers: webhook + schedules ────────────────────────────────────────
+
+/** The webhook status read treats "no webhook configured" (404) as `null`
+ * rather than an error — absence is the normal starting state. */
+export function useWorkflowWebhook(id: string) {
+  return useQuery<WorkflowWebhookResponse | null>({
+    queryKey: qkWorkflows.webhook(id),
+    queryFn: async () => {
+      try {
+        return await api.getWorkflowWebhook(id);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+  });
+}
+
+export function useMintWorkflowWebhook(id: string) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowWebhookResponse, Error, void>({
+    mutationFn: () => api.mintWorkflowWebhook(id),
+    onSuccess: (webhook) => {
+      // Seed the cache from the response before the refetch lands: after a
+      // rotate, the old URL is revoked the moment the POST returns, so the
+      // screen must not keep showing it while a refetch round-trips.
+      qc.setQueryData(qkWorkflows.webhook(id), webhook);
+      void qc.invalidateQueries({ queryKey: qkWorkflows.webhook(id) });
+    },
+  });
+}
+
+export function useDeleteWorkflowWebhook(id: string) {
+  const qc = useQueryClient();
+  return useMutation<{ deleted: boolean }, Error, void>({
+    mutationFn: () => api.deleteWorkflowWebhook(id),
+    // onSettled, not onSuccess: a failed delete (e.g. already gone) must
+    // also reconcile the cached row with the server.
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qkWorkflows.webhook(id) });
+    },
+  });
+}
+
+export function useWorkflowSchedules(id: string) {
+  return useQuery<ListWorkflowSchedulesResponse>({
+    queryKey: qkWorkflows.schedules(id),
+    queryFn: () => api.listWorkflowSchedules(id),
+  });
+}
+
+export function useCreateWorkflowSchedule(id: string) {
+  const qc = useQueryClient();
+  return useMutation<CreateWorkflowScheduleResponse, Error, CreateWorkflowScheduleRequest>({
+    mutationFn: (body) => api.createWorkflowSchedule(id, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkWorkflows.schedules(id) });
+    },
+  });
+}
+
+export function useDeleteWorkflowSchedule(id: string) {
+  const qc = useQueryClient();
+  return useMutation<{ deleted: boolean }, Error, string>({
+    mutationFn: (scheduleId) => api.deleteWorkflowSchedule(id, scheduleId),
+    // onSettled, not onSuccess: a failed delete (e.g. a row another tab
+    // already removed) must also reconcile the stale list.
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qkWorkflows.schedules(id) });
     },
   });
 }

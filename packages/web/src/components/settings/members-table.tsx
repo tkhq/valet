@@ -12,20 +12,13 @@ import {
   Tooltip,
 } from "~/components/primitives";
 import { useSetOrgMemberRole } from "~/api/settings";
+import { formatDate } from "~/lib/format-when";
 
 const SOLE_ADMIN_TOOLTIP = "an organization needs at least one admin";
 
 function initials(name: string | null, email: string): string {
   const source = (name ?? email).trim();
   return source.slice(0, 1).toUpperCase() || "?";
-}
-
-function formatJoined(ts: number): string {
-  return new Date(ts).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
 }
 
 /**
@@ -59,7 +52,7 @@ export function MembersTable({ members }: { members: OrgMemberWire[] }) {
                 <div className="truncate text-xs text-muted">{member.email}</div>
               </div>
               <div className="hidden shrink-0 text-xs text-muted sm:block">
-                Joined {formatJoined(member.joinedAt)}
+                Joined {formatDate(member.joinedAt)}
               </div>
               <RoleControl
                 role={member.role}

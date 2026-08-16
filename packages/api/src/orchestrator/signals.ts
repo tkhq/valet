@@ -19,7 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
-  parseOrchestratorSessionId,
+  parseAssistantSessionId,
   ValidationError as EngineValidationError,
   type PromptReceipt,
   type Principal,
@@ -110,17 +110,20 @@ async function authorizeEdge(
     toData.parentSessionId === args.from.sessionId || fromData.parentSessionId === args.to;
   if (isParentChild) return { fromData, toData };
 
-  // (b) orchestrator -> orchestrator, same org only. Uses the decision-1
-  // helper (never an ad-hoc prefix check) to recognize orchestrator ids.
-  const fromIsOrchestrator = parseOrchestratorSessionId(args.from.sessionId) !== null;
-  const toIsOrchestrator = parseOrchestratorSessionId(args.to) !== null;
-  if (fromIsOrchestrator && toIsOrchestrator) {
+  // (b) assistant -> assistant, same org only. Uses the decision-1 helper
+  // (never an ad-hoc prefix check) to recognize assistant ids. The rule is
+  // about the two sessions' OWNERS, read below from durable session state,
+  // so it holds for a non-default assistant exactly as it does for a
+  // default one.
+  const fromIsAssistant = parseAssistantSessionId(args.from.sessionId) !== null;
+  const toIsAssistant = parseAssistantSessionId(args.to) !== null;
+  if (fromIsAssistant && toIsAssistant) {
     if (fromData.orgId !== toData.orgId) {
       await writeDropLog(deps.db, {
         orgId: fromData.orgId,
         reason: "edge_denied",
         conversationKey: args.dispatchId,
-        detail: `cross-org orchestrator signal denied: ${fromData.orgId} -> ${toData.orgId}`,
+        detail: `cross-org assistant signal denied: ${fromData.orgId} -> ${toData.orgId}`,
       });
       throw new SignalEdgeDeniedError(args.from.sessionId, args.to, "cross-org");
     }

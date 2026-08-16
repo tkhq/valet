@@ -29,9 +29,11 @@ import type {
   PauseSessionResponse,
   ResolveDecisionRequest,
   SandboxJwtResponse,
+  SessionRunState,
   SetNotificationPreferenceRequest,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
+import { useLiveQuery } from "~/lib/use-live-query";
 import { api } from "./client";
 
 // ── Query key factory ────────────────────────────────────────────────────
@@ -53,10 +55,36 @@ export const qk = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
+/**
+ * The run states that keep the sessions list polling.
+ *
+ * `working` changes on its own — that is the whole reason the page is open.
+ * `needs_you` changes when a person answers the gate, and the person can
+ * answer from a chat channel or a second tab, so this page has to follow
+ * that too. The rest are quiet: `failed`, `sleeping` and `idle` only move
+ * when someone sends new work, and every path that sends work already
+ * invalidates this query.
+ */
+const LIVE_SESSION_STATES: ReadonlySet<SessionRunState> = new Set<SessionRunState>([
+  "working",
+  "needs_you",
+]);
+
+/** The "is anything moving?" rule for the sessions list. Exported because
+ * the poll cost of the page depends on it, so it gets its own test. */
+export function sessionsAreLive(data: ListSessionsResponse): boolean {
+  return data.sessions.some((s) => LIVE_SESSION_STATES.has(s.runState));
+}
+
+/**
+ * Polls while any session is working or blocked on a person, and stops when
+ * none are. See `lib/use-live-query.ts` for the policy.
+ */
 export function useSessions(opts?: UseQueryOptions<ListSessionsResponse>) {
-  return useQuery<ListSessionsResponse>({
+  return useLiveQuery<ListSessionsResponse>({
     queryKey: qk.sessions(),
     queryFn: () => api.listSessions(),
+    isLive: sessionsAreLive,
     ...opts,
   });
 }

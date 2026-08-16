@@ -12,12 +12,15 @@
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { catalogForService } from "../events/ingest.js";
+import { eventKeyMatches, filtersMatch, type SubscriptionFilter } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
+import { isTeamMember } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -31,9 +34,35 @@ import type {
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
+  RedeliverEventResponse,
 } from "../wire/types.js";
 
 export const eventsRouter = new Hono<AppEnv>();
+
+/**
+ * A subscription is mutable by whoever can act on its owner: any member for
+ * an org-owned one, or only the creator for a personal (`user`-owned) one.
+ * Everyone in the org can still SEE every subscription in the list (shared
+ * visibility into what automations exist) — this gate is mutation-only, so
+ * an org member cannot toggle or delete a colleague's personal automation
+ * even though they can see it exists.
+ */
+/**
+ * Who may change an existing subscription. The rule is "you can change what
+ * you could have created": an org one is org-wide by construction, a team
+ * one belongs to its members, and a personal one to its owner. A caller who
+ * fails this gets the same 404 as a missing row, so a subscription id never
+ * confirms a team the caller is not on.
+ */
+async function canMutateSubscription(
+  db: AppDb,
+  row: { ownerType: "user" | "team" | "org"; ownerId: string },
+  userId: string,
+): Promise<boolean> {
+  if (row.ownerType === "org") return true;
+  if (row.ownerType === "team") return isTeamMember(db, row.ownerId, userId);
+  return row.ownerId === userId;
+}
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
@@ -132,13 +161,21 @@ export function validateSubscription(
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
     return "workflow target requires workflowId";
   }
-  if (
-    target.kind === "orchestrator" &&
-    target.orchestrator !== undefined &&
-    target.orchestrator !== "user" &&
-    target.orchestrator !== "org"
-  ) {
-    return `unknown target orchestrator: ${String(target.orchestrator)}`;
+  if (target.kind === "orchestrator") {
+    const who = target.orchestrator;
+    if (who !== undefined && who !== "user" && who !== "team" && who !== "org") {
+      return `unknown target orchestrator: ${String(who)}`;
+    }
+    // `orchestrator` and `teamId` are one choice expressed in two fields, so
+    // each is refused without the other. A team target with no id names no
+    // team; a teamId on a user or org target names a team the delivery would
+    // never reach, and would read as if it did.
+    if (who === "team" && (typeof target.teamId !== "string" || target.teamId.length === 0)) {
+      return "team orchestrator target requires teamId";
+    }
+    if (who !== "team" && target.teamId !== undefined) {
+      return "teamId is only valid when orchestrator is team";
+    }
   }
   return null;
 }
@@ -226,21 +263,25 @@ eventsRouter.get("/events/:id", async (c) => {
   const row = rows[0];
   if (!row) return c.json({ error: "event not found" }, 404);
 
+  // The join carries the subscription NAME onto each delivery, so a row can
+  // say what it was trying to reach. It also does the org scoping the
+  // previous `subscriptionId IN (org subscriptions)` subquery did, over the
+  // same set: a delivery whose subscription row is deleted has no join
+  // partner and stays hidden, exactly as before.
   const deliveryRows = await db
-    .select()
+    .select({
+      id: eventDeliveries.id,
+      subscriptionId: eventDeliveries.subscriptionId,
+      subscriptionName: eventSubscriptions.name,
+      status: eventDeliveries.status,
+      attempts: eventDeliveries.attempts,
+      lastError: eventDeliveries.lastError,
+      deliveredAt: eventDeliveries.deliveredAt,
+      nextAttemptAt: eventDeliveries.nextAttemptAt,
+    })
     .from(eventDeliveries)
-    .where(
-      and(
-        eq(eventDeliveries.eventId, id),
-        inArray(
-          eventDeliveries.subscriptionId,
-          db
-            .select({ id: eventSubscriptions.id })
-            .from(eventSubscriptions)
-            .where(eq(eventSubscriptions.orgId, user.orgId)),
-        ),
-      ),
-    )
+    .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
+    .where(and(eq(eventDeliveries.eventId, id), eq(eventSubscriptions.orgId, user.orgId)))
     .orderBy(desc(eventDeliveries.createdAt));
 
   const resp: GetEventResponse = {
@@ -248,12 +289,98 @@ eventsRouter.get("/events/:id", async (c) => {
     deliveries: deliveryRows.map((d) => ({
       id: d.id,
       subscriptionId: d.subscriptionId,
+      subscriptionName: d.subscriptionName,
       status: d.status,
       attempts: d.attempts,
       lastError: d.lastError,
       deliveredAt: d.deliveredAt,
+      // `next_attempt_at` keeps its last value after a delivery settles: a
+      // dead row holds the timestamp of the attempt that gave up, and a
+      // delivered row holds its claim lease. Report it only while another
+      // attempt is really coming, or the UI promises a retry that the
+      // dispatcher will never make.
+      nextAttemptAt: d.status === "pending" || d.status === "failed" ? d.nextAttemptAt : null,
     })),
   };
+  return c.json(resp);
+});
+
+/**
+ * `POST /api/events/:id/redeliver` — replay one event through the
+ * subscriptions that match it NOW.
+ *
+ * Three decisions worth stating, because each one is load-bearing:
+ *
+ * 1. **New delivery rows, always.** The dispatcher derives a workflow run id
+ *    from the delivery id (`wfrun_evt_${deliveryId}`) and returns early when
+ *    that run exists, so a "retry" that reset an old row would report
+ *    success and start nothing. Redelivery therefore INSERTs, and never
+ *    revives, a delivery row. A dead row stays dead as the record of what
+ *    happened.
+ * 2. **The subscriptions that match now, not the ones that matched then.**
+ *    Someone who repaired a broken subscription expects this event to reach
+ *    it, so a subscription created or fixed after the event still gets a
+ *    delivery. Someone who disabled a subscription does not, so
+ *    `enabled = false` rows are skipped. The match itself is the ingest
+ *    match (`eventKeyMatches` + `filtersMatch` over the service catalog),
+ *    called here so the two paths cannot drift.
+ * 3. **No de-duplication against deliveries still in flight.** A `pending`
+ *    or `failed` row is still on the dispatcher's due list, so redelivering
+ *    an event mid-backoff can start a second run. The caller decides that:
+ *    the UI names the scheduled retries in its confirm step. Suppressing the
+ *    new row instead would make an explicit press do nothing.
+ *
+ * Access follows the other event routes: org scope, and a cross-org event
+ * answers 404 like a missing one. The fan-out is the same fan-out any
+ * webhook for this event would cause, and every target is an enabled
+ * subscription its owner chose to arm.
+ */
+eventsRouter.post("/events/:id/redeliver", async (c) => {
+  const { db, plugins, eventDispatcher } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const rows = await db
+    .select()
+    .from(events)
+    .where(and(eq(events.id, id), eq(events.orgId, user.orgId)))
+    .limit(1);
+  const event = rows[0];
+  if (!event) return c.json({ error: "event not found" }, 404);
+
+  const subs = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)));
+
+  // Both jsonb columns come back `unknown`; their shapes are owned by
+  // `validateSubscription` above, which gates every write to this table.
+  const catalog = catalogForService(plugins, event.service);
+  const matched = subs.filter(
+    (sub) =>
+      eventKeyMatches(event.eventKey, sub.eventKeys as string[]) &&
+      filtersMatch(event.payload, event.eventKey, sub.filters as SubscriptionFilter[], catalog),
+  );
+
+  if (matched.length > 0) {
+    const now = Date.now();
+    await db.insert(eventDeliveries).values(
+      matched.map((sub) => ({
+        id: randomUUID(),
+        eventId: event.id,
+        subscriptionId: sub.id,
+        status: "pending" as const,
+        attempts: 0,
+        nextAttemptAt: now,
+        createdAt: now,
+      })),
+    );
+    // Same in-process nudge the ingest path uses, so redelivery does not
+    // wait for the next 1s poll tick.
+    eventDispatcher.nudge();
+  }
+
+  const resp: RedeliverEventResponse = { created: matched.length };
   return c.json(resp);
 });
 
@@ -289,11 +416,35 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
-  // Orchestrator targets choose the owning orchestrator: the caller's user
-  // orchestrator (default) or the org orchestrator.
-  const orchestrator = body.target.kind === "orchestrator" ? (body.target.orchestrator ?? "user") : "user";
-  const ownerType = orchestrator === "org" ? ("org" as const) : ("user" as const);
-  const ownerId = orchestrator === "org" ? user.orgId : user.id;
+  // Orchestrator targets choose the owning orchestrator: the caller's own
+  // (the default), a team they are on, or the org's. The owner decides which
+  // default assistant the dispatcher delivers into, so a team target is the
+  // whole reason a team can be event-driven at all.
+  //
+  // Membership, not team-admin, is the bar — the same bar team workflows and
+  // team sessions already use. A subscription is automation the team shares,
+  // and a member who can start a team workflow by hand can equally arrange
+  // for an event to start it.
+  let ownerType: "user" | "team" | "org" = "user";
+  let ownerId = user.id;
+  if (body.target.kind === "orchestrator") {
+    const who = body.target.orchestrator ?? "user";
+    if (who === "org") {
+      ownerType = "org";
+      ownerId = user.orgId;
+    } else if (who === "team") {
+      // `validateSubscription` already refused a team target with no teamId.
+      const teamId = body.target.teamId as string;
+      if (!(await isTeamMember(db, teamId, user.id))) {
+        // 404, not 403: a team the caller is not on must be indistinguishable
+        // from one that does not exist — same convention as the sessions,
+        // workflows and teams routes.
+        return c.json({ error: "team not found" }, 404);
+      }
+      ownerType = "team";
+      ownerId = teamId;
+    }
+  }
 
   const now = Date.now();
   const id = randomUUID();
@@ -344,7 +495,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "subscription not found" }, 404);
+  // A personal subscription owned by someone else answers the same 404 as
+  // a missing one — same "cross-owner access is indistinguishable from
+  // not-found" convention as workflows/teams routes.
+  if (!row || !(await canMutateSubscription(db, row, user.id))) {
+    return c.json({ error: "subscription not found" }, 404);
+  }
 
   let body: PatchEventSubscriptionRequest;
   try {
@@ -388,13 +544,16 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const deleted = await db
-    .delete(eventSubscriptions)
+  const rows = await db
+    .select({ ownerType: eventSubscriptions.ownerType, ownerId: eventSubscriptions.ownerId })
+    .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
-    .returning({ id: eventSubscriptions.id });
-  if (deleted.length === 0) return c.json({ error: "subscription not found" }, 404);
+    .limit(1);
+  const row = rows[0];
+  if (!row || !(await canMutateSubscription(db, row, user.id))) {
+    return c.json({ error: "subscription not found" }, 404);
+  }
 
+  await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, id));
   return c.body(null, 204);
 });
-
-export type EventsRouter = typeof eventsRouter;

@@ -1,8 +1,5 @@
 @import "../theme.css";
-@import "@fontsource/newsreader/400.css";
-@import "@fontsource/newsreader/400-italic.css";
-@import "@fontsource/newsreader/500.css";
-@import "@fontsource/newsreader/500-italic.css";
+@import "./code-block.css";
 
 @tailwind base;
 @tailwind components;

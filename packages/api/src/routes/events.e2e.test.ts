@@ -26,6 +26,7 @@ import type {
   CreateEventSubscriptionResponse,
   CreateWorkflowResponse,
   PostGithubAppManifestResponse,
+  RedeliverEventResponse,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -91,6 +92,12 @@ function issueCreateBody(teamKey: string, id: string): string {
     webhookId: `wh-${id}`,
     createdAt: new Date().toISOString(),
   });
+}
+
+/** Every run of one workflow. Reads through the module-level `api`, like the
+ * `expect.poll` closures below. */
+async function runsOf(workflowId: string) {
+  return api!.providers.db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, workflowId));
 }
 
 async function postLinear(baseUrl: string, body: string, deliveryId: string): Promise<Response> {
@@ -199,6 +206,76 @@ describe("event system e2e: signed webhook → subscription match → workflow r
       .from(workflowRuns)
       .where(eq(workflowRuns.workflowId, workflow.id));
     expect(runsAfter).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("event system e2e: redelivery starts a SECOND workflow run", () => {
+  it("replays a delivered event through a new delivery row and a new run", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin, linearPlugin] });
+    await seedLinearOrg(api);
+
+    const wfRes = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ name: "on-issue", definition: VALID_DEFINITION }),
+    });
+    const workflow = (await wfRes.json()) as CreateWorkflowResponse;
+
+    const subRes = await fetch(`${api.baseUrl}/api/event-subscriptions`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        name: "tkai issues",
+        eventKeys: ["linear.issue.create"],
+        filters: [],
+        target: { kind: "workflow", workflowId: workflow.id },
+      }),
+    });
+    expect(subRes.status).toBe(201);
+
+    // ── First pass: the event arrives and runs once ─────────────────────
+    expect((await postLinear(api.baseUrl, issueCreateBody("TKAI", "iss-1"), "del-1")).status).toBe(204);
+    await api.providers.eventDispatcher.pollOnce();
+
+    const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(eventRows).toHaveLength(1);
+    const eventId = eventRows[0].id;
+
+    await expect
+      .poll(async () => (await runsOf(workflow.id)).map((r) => r.status), { timeout: 10_000 })
+      .toEqual(["settled"]);
+    const firstRunId = (await runsOf(workflow.id))[0].id;
+
+    // ── Redelivery: the user repaired the workflow and wants this event ──
+    const redeliverRes = await fetch(`${api.baseUrl}/api/events/${eventId}/redeliver`, { method: "POST" });
+    expect(redeliverRes.status).toBe(200);
+    expect((await redeliverRes.json()) as RedeliverEventResponse).toEqual({ created: 1 });
+
+    await api.providers.eventDispatcher.pollOnce();
+
+    // Two delivery rows with DIFFERENT ids. This is the whole point: the
+    // dispatcher derives the run id from the delivery id and returns early
+    // when that run exists, so a redelivery that reused the first delivery
+    // id would report success and start nothing.
+    const deliveryRows = await api.providers.db
+      .select()
+      .from(eventDeliveries)
+      .where(eq(eventDeliveries.eventId, eventId));
+    expect(deliveryRows).toHaveLength(2);
+    expect(new Set(deliveryRows.map((d) => d.id)).size).toBe(2);
+
+    // Two runs, both really executed by the real host, one per delivery.
+    await expect
+      .poll(async () => (await runsOf(workflow.id)).map((r) => ({ status: r.status, outcome: r.outcome })), {
+        timeout: 10_000,
+      })
+      .toEqual([
+        { status: "settled", outcome: "completed" },
+        { status: "settled", outcome: "completed" },
+      ]);
+    const runIds = (await runsOf(workflow.id)).map((r) => r.id).sort();
+    expect(runIds).toEqual(deliveryRows.map((d) => `wfrun_evt_${d.id}`).sort());
+    expect(runIds).toContain(firstRunId);
   }, 30_000);
 });
 

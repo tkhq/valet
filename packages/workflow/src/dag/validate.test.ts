@@ -193,7 +193,7 @@ describe('validateWorkflowDefinition', () => {
         ui: {
           nodes: {
             trigger: { position: { x: 0, y: 0 } },
-            'set-a': { position: { x: 260, y: 0 }, collapsed: true },
+            'set-a': { position: { x: 260, y: 0 } },
             stop: { position: { x: 520, y: 0 } },
           },
           viewport: { x: 0, y: 0, zoom: 1 },

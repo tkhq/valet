@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
 import { triggerDataSchema } from "@valet/workflow";
 import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
+import { OwnerBadge } from "~/components/owner-badge";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Button, Spinner } from "~/components/primitives";
@@ -113,18 +114,23 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
 
   return (
     <li className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3">
-      <Link
-        to="/workflows/$workflowId"
-        params={{ workflowId: workflow.id }}
-        className="min-w-0 text-sm font-medium text-ink hover:underline"
-      >
-        {workflow.name}
+      {/* The owner badge is a link of its own, so it sits beside the name
+          link, not inside it. */}
+      <div className="flex min-w-0 items-center gap-2">
+        <Link
+          to="/workflows/$workflowId"
+          params={{ workflowId: workflow.id }}
+          className="min-w-0 truncate text-sm font-medium text-ink hover:underline"
+        >
+          {workflow.name}
+        </Link>
+        <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
         {runCount !== undefined && (
-          <span className="ml-2 text-xs text-muted font-normal">
+          <span className="shrink-0 text-xs font-normal text-muted">
             {runCount} run{runCount === 1 ? "" : "s"}
           </span>
         )}
-      </Link>
+      </div>
       {hasSchema && schema && (
         <RunWorkflowDialog
           workflowId={workflow.id}

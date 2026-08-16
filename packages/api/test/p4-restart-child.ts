@@ -20,7 +20,7 @@
  * needs. Once the spawner call resolves, this script prints
  * `READY:<childSessionId>|<queueItemId>|<parentSessionId>|<parentThreadId>`
  * (pipe-delimited — `parentSessionId` is an orchestrator id and itself
- * contains colons, e.g. `orchestrator:user:local-user`)
+ * contains colons, e.g. `assistant:asst_...`)
  * once and hangs; the test process SIGKILLs it from the outside (same
  * kill-from-parent idiom as kill-mid-gate.test.ts, safer than a self-kill
  * racing stdout flush).
@@ -43,6 +43,7 @@ import { SourceService } from "../src/bakes/source-service.js";
 import { deriveSecretKey } from "../src/lib/secret-crypto.js";
 import { FsBlobStore } from "../src/providers/blob-fs.js";
 import { orgMembers, orgs, users } from "../src/schema/index.js";
+import { defaultAssistantSessionFor } from "../src/test-helpers/assistant-session.js";
 
 const [pgDataDir] = process.argv.slice(2);
 if (!pgDataDir) {
@@ -113,7 +114,7 @@ async function main(): Promise<void> {
   spawnerRef = spawner;
 
   const principal = { type: "user" as const, id: "local-user" };
-  const session = await engineHost.orchestratorSessionFor(principal, {
+  const session = await defaultAssistantSessionFor({ db, engineHost }, principal, {
     actorUserId: "local-user",
     orgId: "local-org",
   });

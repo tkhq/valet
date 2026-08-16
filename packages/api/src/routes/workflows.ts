@@ -18,6 +18,7 @@ import {
   getWorkflowDefinition,
   getWorkflowRunDetail,
   getWorkflowVersion,
+  isAuthorizedForOwner,
   listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowVersions,
@@ -27,19 +28,33 @@ import {
   updateWorkflowDefinition,
   validateDefinitionInput,
   type WorkflowOwner,
+  type WorkflowOwnerRef,
+  type WorkflowOwnerType,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
+  workflowWebhookUrl,
 } from "../workflows/webhook-service.js";
+import {
+  createWorkflowSchedule,
+  deleteWorkflowSchedule,
+  listWorkflowSchedules,
+  type WorkflowScheduleSummary,
+} from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  CreateWorkflowScheduleRequest,
+  CreateWorkflowScheduleResponse,
+  DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
+  ListWorkflowSchedulesResponse,
+  WorkflowScheduleWire,
   GetWorkflowResponse,
   GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
@@ -66,6 +81,30 @@ function serviceCtx(c: {
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId },
     env: buildValidateEnvironment(actionPluginByService),
   };
+}
+
+const OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
+
+function isWorkflowOwnerType(value: string): value is WorkflowOwnerType {
+  return OWNER_TYPES.has(value);
+}
+
+/** The `?ownerType=&ownerId=` filter, or undefined when absent. Returns an
+ * error string when one half is present and the other is not — the same
+ * shape `GET /api/assistants` and `GET /api/sessions` take, so one client
+ * builds one query for all three. */
+function readOwnerFilter(
+  ownerType: string | undefined,
+  ownerId: string | undefined,
+): { scope?: WorkflowOwnerRef; error?: string } {
+  if (ownerType === undefined && ownerId === undefined) return {};
+  if (ownerType === undefined || ownerId === undefined) {
+    return { error: "Filter by owner with both ownerType and ownerId, or send neither." };
+  }
+  if (!isWorkflowOwnerType(ownerType)) {
+    return { error: "ownerType must be 'user', 'team' or 'org'." };
+  }
+  return { scope: { ownerType, ownerId } };
 }
 
 // ── Definitions ───────────────────────────────────────────────────────────
@@ -108,9 +147,30 @@ workflowsRouter.post("/", async (c) => {
   return c.json(resp, 201);
 });
 
+/**
+ * Without a filter this returns every workflow the caller can reach: their
+ * own, plus every team they belong to. `?ownerType=&ownerId=` narrows that
+ * to one owner, for a client that shows one workspace at a time.
+ */
 workflowsRouter.get("/", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const resp: ListWorkflowsResponse = { workflows: await listWorkflowDefinitions(deps, owner) };
+
+  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+  // The same check `GET /api/workflows/:id` runs, asked of the owner instead
+  // of a row, and answered here rather than in the query — an id from a
+  // query string never reaches SQL unchecked. 404 because a filter the
+  // caller may not use must read exactly like a filter that matches
+  // nothing. An `ownerType=org` filter always lands here: no rule admits
+  // anybody to an org-owned workflow, so one is no more listable than it is
+  // openable.
+  if (filter.scope && !(await isAuthorizedForOwner(deps.db, owner, filter.scope))) {
+    return c.json({ error: "owner not found" }, 404);
+  }
+
+  const resp: ListWorkflowsResponse = {
+    workflows: await listWorkflowDefinitions(deps, owner, filter.scope),
+  };
   return c.json(resp);
 });
 
@@ -164,6 +224,10 @@ workflowsRouter.delete("/:id", async (c) => {
 });
 
 // ── Runs ──────────────────────────────────────────────────────────────────
+// The owner filter stops at the list above. Every per-workflow route below
+// — runs, versions, webhook, schedules — already resolves one workflow id
+// and checks its owner, and a workflow has exactly one owner, so an owner
+// filter on those could only restate what the path already says.
 
 workflowsRouter.post("/:id/runs", async (c) => {
   const { deps, owner } = serviceCtx(c);
@@ -231,7 +295,10 @@ workflowsRouter.post("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await mintOrRotateWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, 404);
-  const resp: WorkflowWebhookResponse = result.webhook;
+  const resp: WorkflowWebhookResponse = {
+    ...result.webhook,
+    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  };
   return c.json(resp);
 });
 
@@ -240,7 +307,10 @@ workflowsRouter.get("/:id/webhook", async (c) => {
   const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: "workflow not found" }, 404);
   if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
-  const resp: WorkflowWebhookResponse = result.webhook;
+  const resp: WorkflowWebhookResponse = {
+    ...result.webhook,
+    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  };
   return c.json(resp);
 });
 
@@ -249,6 +319,89 @@ workflowsRouter.delete("/:id/webhook", async (c) => {
   const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
   const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
+  return c.json(resp);
+});
+
+// ── Schedules (cron triggers) ─────────────────────────────────────────────
+// Owner-scoped like the webhook routes above: every route resolves the
+// workflow through `getWorkflowDefinition` first, so an unowned workflow
+// 404s identically to a missing one. The schedule service also carries
+// orchestrator-prompt schedules; this surface manages only the
+// workflow-scoped kind, so every row it returns has a `workflowId`.
+
+function toScheduleWire(s: WorkflowScheduleSummary, workflowId: string): WorkflowScheduleWire {
+  return {
+    scheduleId: s.scheduleId,
+    workflowId: s.workflowId ?? workflowId,
+    name: s.name,
+    cron: s.cron,
+    timezone: s.timezone,
+    enabled: s.enabled,
+    lastFiredAt: s.lastFiredAt,
+    nextFireAt: s.nextFireAt,
+  };
+}
+
+workflowsRouter.get("/:id/schedules", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  const schedules = await listWorkflowSchedules(deps.db, owner.orgId, id);
+  const resp: ListWorkflowSchedulesResponse = {
+    schedules: schedules.map((s) => toScheduleWire(s, id)),
+  };
+  return c.json(resp);
+});
+
+workflowsRouter.post("/:id/schedules", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+
+  let body: CreateWorkflowScheduleRequest;
+  try {
+    body = (await c.req.json()) as CreateWorkflowScheduleRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ error: "name must be a non-empty string" }, 400);
+  }
+  if (!body.cron || typeof body.cron !== "string") {
+    return c.json({ error: "cron must be a 5-field cron expression string" }, 400);
+  }
+  if (body.timezone !== undefined && typeof body.timezone !== "string") {
+    return c.json({ error: "timezone must be an IANA timezone string" }, 400);
+  }
+  if (
+    body.input !== undefined &&
+    (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))
+  ) {
+    return c.json({ error: "input must be a JSON object" }, 400);
+  }
+
+  const result = await createWorkflowSchedule(
+    deps.db,
+    { id: owner.userId, orgId: owner.orgId },
+    { workflowId: id, name, cron: body.cron, timezone: body.timezone, input: body.input },
+  );
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  const resp: CreateWorkflowScheduleResponse = toScheduleWire(result.schedule, id);
+  return c.json(resp, 201);
+});
+
+workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const scheduleId = c.req.param("scheduleId");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  const result = await deleteWorkflowSchedule(deps.db, owner.orgId, scheduleId, id);
+  if (result === "not_found") return c.json({ error: "schedule not found" }, 404);
+  const resp: DeleteWorkflowScheduleResponse = { deleted: true };
   return c.json(resp);
 });
 

@@ -20,7 +20,14 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { actionInvocations, workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
+import {
+  actionInvocations,
+  workflowDefinitions,
+  workflowRuns,
+  workflowSchedules,
+  workflowVersions,
+  workflowWebhooks,
+} from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { isOrgAdmin, isOrgMember } from "../services/org.js";
@@ -53,6 +60,18 @@ export interface WorkflowServiceDeps {
 export interface WorkflowOwner {
   userId: string;
   orgId: string;
+}
+
+/** The owner types `workflow_definitions.owner_type` holds. Read off the
+ * column so the two can never drift. */
+export type WorkflowOwnerType = (typeof workflowDefinitions.$inferSelect)["ownerType"];
+
+/** One owner, in the `{owner_type, owner_id}` shape every workflow row
+ * carries. `listWorkflowDefinitions` takes one to narrow its result to a
+ * single owner. */
+export interface WorkflowOwnerRef {
+  ownerType: WorkflowOwnerType;
+  ownerId: string;
 }
 
 export function newWorkflowId(prefix: string): string {
@@ -118,8 +137,15 @@ async function isAuthorizedFor(
  * `getWorkflowRunDetail` below) — a run started against a team-owned
  * workflow carries the SAME `{ownerType, ownerId}` shape (scheduler.ts /
  * events/dispatcher.ts copy it straight from the definition row at start
- * time), so both need the identical direct-or-team-member check. */
-async function isAuthorizedForOwner(
+ * time), so both need the identical direct-or-team-member check.
+ *
+ * Exported for the list route's `?ownerType=&ownerId=` filter, which asks
+ * this same question about an owner named in a query string before it
+ * narrows to it. Sharing the check is what keeps "which workflows may I
+ * list" and "which workflow may I open" from drifting apart. An org owner
+ * is false here: no rule admits anybody to an org-owned workflow yet, so
+ * one is neither listable nor openable. */
+export async function isAuthorizedForOwner(
   db: AppDb,
   owner: WorkflowOwner,
   target: { ownerType: string; ownerId: string },
@@ -146,21 +172,35 @@ export async function ownedDefinitionRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
+/**
+ * The caller's own workflows unioned with every team they belong to.
+ * `scope` narrows that to one owner — a workspace picker asking for one
+ * team's workflows. It carries no authorization: the caller has already
+ * checked the user may reach that owner (`isAuthorizedForOwner`), because
+ * an id that arrives in a query string is a request, not a permission.
+ */
 export async function listWorkflowDefinitions(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
+  scope?: WorkflowOwnerRef,
 ): Promise<WorkflowDefinitionSummary[]> {
-  const myTeams = await listTeamsForUser(deps.db, owner.userId);
+  // A scoped list reads one owner, so it never needs the team roster.
+  const myTeams = scope ? [] : await listTeamsForUser(deps.db, owner.userId);
   const teamIds = myTeams.map((t) => t.id);
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, teamIds))
       : undefined;
+  const where = scope
+    ? and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId))
+    : teamMatch
+      ? or(ownerMatch, teamMatch)
+      : ownerMatch;
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(teamMatch ? or(ownerMatch, teamMatch) : ownerMatch)
+    .where(where)
     .orderBy(desc(workflowDefinitions.updatedAt));
   return rows.map(rowToDefinition);
 }
@@ -384,6 +424,11 @@ export async function deleteWorkflowDefinition(
   // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
   // which is now gone) but never actually removed.
   await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
+  // Same reasoning as webhooks: workflow_schedules.workflow_id is a plain
+  // text column with no cascade, and the scheduler sweeps ALL enabled rows
+  // regardless of owner reachability — an orphan keeps firing forever
+  // against a workflow that no longer exists.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
   return "deleted";
 }
 

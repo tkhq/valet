@@ -5,9 +5,10 @@ import { useNotifications } from "~/api/queries";
 import { ActivityStrip, mergeActivity } from "~/components/assistant/activity-strip";
 import { ThreadsCard } from "~/components/assistant/threads-card";
 import { IdentityHeader } from "~/components/assistant/identity-header";
-import { IdentityStep } from "~/components/assistant/identity-step";
+import { IdentityFields } from "~/components/assistant/identity-fields";
 import { MemoryCard } from "~/components/assistant/memory-card";
 import { UsageCard } from "~/components/assistant/usage-card";
+import { TeamsCard } from "~/components/assistant/teams-card";
 import { Spinner } from "~/components/primitives";
 
 /**
@@ -51,7 +52,7 @@ export function Dashboard() {
   if (info.data.name === null) {
     return (
       <div className="flex-1 grid place-items-center p-8">
-        <IdentityStep className="w-full max-w-md" variant="onboarding" />
+        <IdentityFields className="w-full max-w-md" variant="onboarding" />
       </div>
     );
   }
@@ -76,6 +77,7 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
           </div>
           <MemoryCard />
           <UsageCard />
+          <TeamsCard />
         </div>
 
         <ActivityStrip

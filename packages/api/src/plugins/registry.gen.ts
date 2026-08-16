@@ -20,3 +20,22 @@ import plugin15 from "@valet/plugin-typefully/plugin";
 import plugin16 from "@valet/plugin-workflows/plugin";
 
 export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16];
+
+/** Brand slug per plugin, from each manifest's `iconSlug`. The connect UI
+ * maps a slug to a brand mark; a plugin with no entry keeps the fallback
+ * monogram. */
+export const pluginIconSlugs: Record<string, string> = {
+  "cloudflare": "cloudflare",
+  "deepwiki": "deepwiki",
+  "github": "github",
+  "gmail": "gmail",
+  "google-calendar": "google-calendar",
+  "google-workspace": "google-drive",
+  "linear": "linear",
+  "notion": "notion",
+  "sentry": "sentry",
+  "slack": "slack",
+  "stripe": "stripe",
+  "telegram": "telegram",
+  "typefully": "typefully",
+};

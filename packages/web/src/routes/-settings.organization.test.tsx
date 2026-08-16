@@ -36,6 +36,30 @@ const removeTeamMemberMutate = vi.fn();
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
 
+/** Renders a real anchor so `getByRole("link")` and href assertions work
+ * without mounting a router. */
+function RouterLinkStub({
+  to,
+  search,
+  children,
+  className,
+}: {
+  to: string;
+  search?: Record<string, string | undefined>;
+  children: ReactNode;
+  className?: string;
+}) {
+  const params = Object.entries(search ?? {}).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined,
+  );
+  const qs = params.length > 0 ? `?${new URLSearchParams(params).toString()}` : "";
+  return (
+    <a href={`${to}${qs}`} className={className}>
+      {children}
+    </a>
+  );
+}
+
 let orgData: {
   id: string;
   name: string;
@@ -66,8 +90,8 @@ let orgMembersData: {
   ],
 };
 
-let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number }> } = {
-  teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
+let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number; callerRole: "admin" | "member" | null }> } = {
+  teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
 };
 
 let teamMembersData: { members: Array<{ userId: string; role: "admin" | "member" }> } = {
@@ -88,10 +112,34 @@ let invitesData: {
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
-  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
-    <a {...rest}>{children}</a>
-  ),
+  // `RouterLinkStub` over a bare anchor: it renders a real `href` from `to`
+  // and `search`, which the link assertions below need.
+  Link: RouterLinkStub,
 }));
+
+// The teams panel links to each team's DEFAULT assistant, whose id only the
+// assistants list carries.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: {
+        assistants: [
+          {
+            id: "asst_team_1",
+            owner: { type: "team" as const, id: "team_1" },
+            sessionId: "assistant:asst_team_1",
+            isDefault: true,
+            createdAt: 1,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -109,6 +157,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
     useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
     useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useMe: () => ({ data: { orgRole: "admin" }, isLoading: false, error: null }),
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
     useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
@@ -193,7 +242,7 @@ beforeEach(() => {
     ],
   };
   teamsData = {
-    teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
+    teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1, callerRole: "admin" }],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
   invitesData = { invites: [] };
@@ -209,7 +258,7 @@ describe("OrganizationGeneralPage", () => {
     expect(patchOrgMutate).toHaveBeenCalledWith({ name: "Acme Corp" });
   });
 
-  it("shows read-only id and created rows", () => {
+  it("shows the read-only id row", () => {
     render(<OrganizationGeneralPage />);
     expect(screen.getByLabelText("Organization ID")).toHaveProperty("value", "org_1");
   });

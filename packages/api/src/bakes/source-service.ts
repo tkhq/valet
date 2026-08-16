@@ -404,8 +404,8 @@ export class SourceService {
     this.cacheBudgetGb = Number.isFinite(budget) && budget > 0 ? budget : 20;
   }
 
-  /** The wired builder's backend id, or `null` when prebuilds are
-   * unavailable — backs `GET /api/org/prebuilds/meta`. */
+  /** The wired builder's backend id, or `null` when image builds are
+   * unavailable. */
   get builderBackend(): string | null {
     return this.builder?.backend ?? null;
   }

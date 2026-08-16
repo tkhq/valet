@@ -58,8 +58,12 @@ export function UsageCard() {
 
             {data.org && data.org.members.length > 1 && (
               <div className="pt-1 space-y-1.5">
+                {/* These rows are `data.org.members` — the whole org
+                    roster, never a team's. "Team" now names a real,
+                    narrower thing in this product, so calling this that
+                    would misreport whose spend is on screen. */}
                 <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
-                  Team
+                  Organization
                 </div>
                 {data.org.members.map((m) => (
                   <MemberBar

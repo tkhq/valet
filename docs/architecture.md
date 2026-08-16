@@ -297,7 +297,7 @@ single pre-1.0 `0000` migrations, edited in place.
 | Identity & auth | `orgs`, `user`, better-auth tables (`session`, `account`, `verification`, `sso_provider`, `apikey`, `oauth_application`, `oauth_access_token`, `oauth_consent`), `org_members`, `invites`, `sandbox_tokens` |
 | Sessions & UI | `agent_sessions`, `session_threads`, `messages` |
 | Teams | `teams`, `team_members` |
-| Orchestrator & attention | `orchestrator_identities`, `child_watches`, `notifications`, `user_notification_preferences`, `event_drop_log` |
+| Orchestrator & attention | `assistants`, `child_watches`, `notifications`, `user_notification_preferences`, `event_drop_log` |
 | Channels | `channel_bindings`, `user_identity_links`, `identity_link_codes` |
 | Memory | `memory_files` (tsvector full-text search) |
 | Workflows | `workflow_definitions`, `workflow_runs`, `workflow_checkpoints`, `workflow_signals`, `action_invocations` |
@@ -346,8 +346,10 @@ Each user's orchestrator is a full engine session — same threads, queue, and
 gates — with a persona, memory tools (`mem_*` over the `memory_files` tree),
 a daily journal, and a `childSpawner` for launching child coding sessions
 (depth-limited to 1). It runs sandbox-less. An **attention router** turns
-stuck submissions and child decision gates into notifications, delivered
-in-app and DM'd over linked channels.
+stuck submissions and pending decision gates into notifications, delivered
+in-app and DM'd over linked channels. A gate goes to the owner who can answer
+it: the parent's owner for a child session, the session's own owner for every
+other session.
 
 ## Workflows
 

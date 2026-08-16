@@ -112,7 +112,7 @@ export interface NodeProviderOpts {
   /**
    * This process's own base URL, handed to `EngineHost` for orchestrator
    * sessions' `toolConfig.apiBaseUrl` (Phase 4 decision 15/17). Required
-   * for `orchestratorSessionFor`; regular sessions don't need it.
+   * for `assistantSessionFor`; regular sessions don't need it.
    */
   apiBaseUrl?: string;
   /**

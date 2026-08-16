@@ -5,7 +5,7 @@
  *   PUT    /api/memory                  → write (create/update)
  *   POST   /api/memory/patch            → exact-replace body patch
  *   DELETE /api/memory?path=            → remove
- *   GET    /api/memory/search?q=        → FTS5 search
+ *   GET    /api/memory/search?q=        → full-text search, with a matched-text snippet per hit
  *   GET    /api/memory/export           → OKF bundle manifest (include=all only, decision 12)
  *   POST   /api/memory/import           → OKF bundle import
  *
@@ -14,20 +14,28 @@
  * `x-valet-owner`/`x-valet-actor` headers verbatim (this is how the
  * `mem_*` engine tools, running inside a session with an arbitrary
  * owner/actor, reach these routes). Absent that header, the route falls
- * back to the normal session user — who this phase only ever operates on
- * their own `user:{id}` scope (team/org-owned writes are internal-token
- * only, since there's no "acting as a team" session concept yet).
+ * back to the normal session user.
+ *
+ * A browser caller names the scope it wants with `?ownerType=&ownerId=` —
+ * the same pair `routes/assistants.ts` takes, on every route here and every
+ * method. Send neither and the caller gets their own `user:{id}` memory,
+ * which is what every client sent before the workspace switcher existed.
+ * Send both and `resolveScope` authorizes the owner before it hands the
+ * scope on: reads through `canViewSession`, writes through
+ * `canAdministerSession`. `authorizeOwner` explains why those two differ.
  */
 import { Hono, type Context } from "hono";
 import { and, asc, eq } from "drizzle-orm";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
-import { parsePrincipal } from "@valet/engine";
+import { parsePrincipal, type Principal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { memoryFiles } from "../schema/index.js";
+import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   exportFiles,
@@ -42,7 +50,93 @@ import {
 
 export const memoryRouter = new Hono<AppEnv>();
 
-function resolveScope(c: Context<AppEnv>): MemoryScope {
+/** What the caller wants to do with the scope it asked for. A team read and
+ * a team write are authorized by different rules — see `authorizeOwner`. */
+type ScopeAccess = "read" | "write";
+
+const OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
+
+function isOwnerType(value: string): value is Principal["type"] {
+  return OWNER_TYPES.has(value);
+}
+
+/**
+ * The `?ownerType=&ownerId=` pair, or `undefined` when the caller sent
+ * neither. Spelled as `routes/assistants.ts` spells it, error text included:
+ * one convention for "name an owner", not a second one for memory.
+ *
+ * Query parameters rather than a body field, on the write routes too. The
+ * scope must resolve the same way for a GET, a PUT and a DELETE, and a
+ * body-carried owner would make the scope depend on a parse that two of
+ * those methods do not have.
+ */
+function readOwnerParam(ownerType: string | undefined, ownerId: string | undefined): Principal | undefined {
+  if (ownerType === undefined && ownerId === undefined) return undefined;
+  if (ownerType === undefined || ownerId === undefined) {
+    throw new ValidationError("Filter by owner with both ownerType and ownerId, or send neither.");
+  }
+  if (!isOwnerType(ownerType)) {
+    throw new ValidationError("ownerType must be 'user', 'team' or 'org'.");
+  }
+  return { type: ownerType, id: ownerId };
+}
+
+/** Presents an owner principal in the shape `services/session-access.ts`
+ * reads. `userId` is the principal's own id for a user, and the synthetic
+ * `{type}:{id}` for a team or an org — the same synthetic id
+ * `workflows/engine-deps.ts` stamps, so the direct-owner comparison inside
+ * `canViewSession` can never match a real user by accident. */
+function ownerLike(owner: Principal): SessionOwnerLike {
+  return {
+    userId: owner.type === "user" ? owner.id : `${owner.type}:${owner.id}`,
+    ownerType: owner.type,
+    ownerId: owner.id,
+  };
+}
+
+/**
+ * May `callerId` reach `owner`'s memory for this access? One membership
+ * rule, taken from `services/session-access.ts` — this file adds no query
+ * of its own against `team_members`.
+ *
+ * Reads follow membership (`canViewSession`): a live member of a team may
+ * read what the team remembers, the same rule that lets that member open
+ * the team's sessions and list its assistants.
+ *
+ * Writes follow authority (`canAdministerSession`), which on a team means a
+ * team admin or an org admin. The two are deliberately not the same check.
+ * A read gives the caller the corpus. A write puts text INTO a corpus that
+ * every member's agent then loads as trusted context, so one member could
+ * steer every teammate's agent with a planted instruction. The blast radius
+ * differs, so the check differs. This repo already splits view from
+ * administer for that reason; team memory takes the same split.
+ *
+ * Two consequences, both inherited from those checks rather than invented
+ * here:
+ *
+ *   - Org-owned memory reaches nobody, through either check. That is the
+ *     limit `canViewSession` already holds for an org-owned session. Do not
+ *     add an org rule here. Add it there, once one exists.
+ *   - An org admin may write a team's memory without being able to read it,
+ *     because `canAdministerTeam` admits an org admin and `isTeamMember`
+ *     does not. Team-owned sessions and assistants behave the same way
+ *     today.
+ */
+function authorizeOwner(db: AppDb, owner: Principal, callerId: string, access: ScopeAccess): Promise<boolean> {
+  return access === "write"
+    ? canAdministerSession(db, ownerLike(owner), callerId)
+    : canViewSession(db, ownerLike(owner), callerId);
+}
+
+/**
+ * Async because the browser branch authorizes a named owner, and that
+ * authorization reads `team_members`. The check lives here, in the one
+ * function every route already calls, rather than in ten route bodies: a
+ * route that forgets to call `resolveScope` serves nothing, while a route
+ * that forgot a separate authorization step would serve another team's
+ * memory. One chokepoint cannot be half-applied.
+ */
+async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
   const internalHeader = c.req.header("x-valet-internal");
   if (isValidInternalToken(internalHeader)) {
     const ownerHeader = c.req.header("x-valet-owner");
@@ -54,20 +148,37 @@ function resolveScope(c: Context<AppEnv>): MemoryScope {
     if (!owner) {
       throw new ValidationError(`invalid x-valet-owner header: '${ownerHeader}'`);
     }
+    // The verified internal token is what carries the owner tuple, so the
+    // `?ownerType=&ownerId=` parameters are ignored on this branch.
     return { owner, actorUserId: actorHeader };
   }
 
   // Sandbox principal (Task 7): the owner tuple derives from the verified
   // token, never from headers — a sandbox always acts as the session's
   // owning user, so any `x-valet-owner`/`x-valet-actor` headers on this
-  // request are ignored.
+  // request are ignored. The `?ownerType=&ownerId=` parameters are ignored
+  // here for the same reason: a sandbox does not choose its own scope.
   const sandbox = c.var.sandbox;
   if (sandbox) {
     return { owner: { type: "user", id: sandbox.userId }, actorUserId: sandbox.userId };
   }
 
   const user = c.var.user;
-  return { owner: { type: "user", id: user.id }, actorUserId: user.id };
+  const requested = readOwnerParam(c.req.query("ownerType"), c.req.query("ownerId"));
+  // No owner named: the caller's own memory, exactly as before.
+  if (!requested) {
+    return { owner: { type: "user", id: user.id }, actorUserId: user.id };
+  }
+
+  const { db } = c.var.providers;
+  if (!(await authorizeOwner(db, requested, user.id, access))) {
+    // 404, not 403 — the existence-hiding convention `routes/assistants.ts`
+    // and `routes/teams.ts` follow. A refusal must not tell the caller
+    // whether the team exists.
+    throw new NotFoundError("owner");
+  }
+  // The actor stays the human who sent the request. Only the owner moves.
+  return { owner: requested, actorUserId: user.id };
 }
 
 /** Maps service-layer errors to HTTP responses. Rethrows anything else so
@@ -93,7 +204,7 @@ function handleServiceError(err: unknown): { body: { error: string; code?: strin
 memoryRouter.get("/", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "read");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -141,7 +252,7 @@ function djb2(text: string): string {
 memoryRouter.get("/journal-summary", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "read");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -206,11 +317,13 @@ memoryRouter.get("/journal-summary", async (c) => {
  * against `scope.owner` instead of going through the service's
  * `listFiles` (which would union team files under a `team:{id}/` virtual
  * prefix). Dual auth reuses `resolveScope`, same as every other route here.
+ * A caller who names a team owner therefore gets that team's files and
+ * nothing else — one owner per response, still no union.
  */
 memoryRouter.get("/tree", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "read");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -242,7 +355,7 @@ memoryRouter.get("/tree", async (c) => {
 memoryRouter.put("/", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "write");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -295,7 +408,7 @@ memoryRouter.put("/", async (c) => {
 memoryRouter.post("/patch", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "write");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -330,7 +443,7 @@ memoryRouter.post("/patch", async (c) => {
 memoryRouter.delete("/", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "write");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -354,7 +467,7 @@ memoryRouter.delete("/", async (c) => {
 memoryRouter.get("/search", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "read");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -386,7 +499,7 @@ memoryRouter.get("/search", async (c) => {
 memoryRouter.get("/graph", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "read");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -413,7 +526,7 @@ memoryRouter.get("/graph", async (c) => {
 memoryRouter.get("/export", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "read");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -434,7 +547,7 @@ memoryRouter.get("/export", async (c) => {
 memoryRouter.post("/import", async (c) => {
   let scope: MemoryScope;
   try {
-    scope = resolveScope(c);
+    scope = await resolveScope(c, "write");
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);

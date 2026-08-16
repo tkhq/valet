@@ -2,9 +2,11 @@
  * Integration tests for the assistant-identity endpoints (assistant-centered
  * web UI Task 2, decisions 4/5/6/20):
  *
- *   - GET  /api/orchestrator/info    — never creates; presence derivation.
+ *   - GET  /api/orchestrator/info    — resolves the caller's default
+ *     assistant row (one insert on first visit) but never the engine
+ *     session; presence derivation.
  *   - PATCH /api/orchestrator/info   — works before the engine session
- *     exists; name -> orchestrator_identities.handle; personality -> the
+ *     exists; name -> assistants.name; personality -> the
  *     assistant/personality.md memory file; evicts the cached engine
  *     session (cache-only, never the destructive `session.destroy()`).
  *   - GET  /api/orchestrator/children — child_watches ⋈ agent_sessions.
@@ -15,7 +17,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
-import { agentSessions, childWatches, orchestratorIdentities } from "../schema/index.js";
+import { agentSessions, assistants, childWatches } from "../schema/index.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { writeFile } from "../services/memory.js";
 import type {
@@ -32,39 +35,55 @@ afterEach(async () => {
   api = undefined;
 });
 
-const ORCH_SESSION_ID = "orchestrator:user:local-user";
+/** The caller's default assistant session id. An assistant addresses its
+ * session by its own generated id, so no test can spell it as a literal any
+ * more — every seeding helper below asks the API for it first. */
+async function assistantSessionIdFor(target: TestApi): Promise<string> {
+  const res = await fetch(`${target.baseUrl}/api/orchestrator/info`);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as GetOrchestratorInfoResponse;
+  return body.sessionId;
+}
 
 describe("GET /api/orchestrator/info", () => {
-  it("never creates: reports name/personality null and presence idle before any ensure", async () => {
+  // The route resolves the caller's DEFAULT assistant, so it does create
+  // that one row — the response carries its session id, and the id is no
+  // longer derivable from the caller. It still creates nothing that runs:
+  // no engine session and no `agent_sessions` row.
+  it("reports name/personality null and presence idle before any ensure, creating only the assistant row", async () => {
     api = await bootTestApi();
 
     const res = await fetch(`${api.baseUrl}/api/orchestrator/info`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetOrchestratorInfoResponse;
-    expect(body).toEqual({
-      sessionId: ORCH_SESSION_ID,
-      name: null,
-      personality: null,
-      presence: "idle",
-      activeChildren: 0,
-    });
+    expect(body.sessionId).toMatch(/^assistant:asst_/);
+    expect(body.name).toBeNull();
+    expect(body.personality).toBeNull();
+    expect(body.presence).toBe("idle");
+    expect(body.activeChildren).toBe(0);
 
-    // Never creates — no identity row, no agent_sessions row.
-    const identityRows = await api.providers.db.select().from(orchestratorIdentities);
-    expect(identityRows).toHaveLength(0);
+    const assistantRows = await api.providers.db.select().from(assistants);
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.isDefault).toBe(true);
+    expect(assistantRows[0]?.name).toBeNull();
+
+    // Nothing that runs was created.
+    expect(await api.providers.db.select().from(agentSessions)).toHaveLength(0);
+    expect(api.providers.engineHost.isLive(body.sessionId)).toBe(false);
   });
 
-  it("presence is 'working' when child_watches has an unsettled row for this orchestrator", async () => {
+  it("presence is 'working' when child_watches has an unsettled row for this assistant", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
 
+    const sessionId = await assistantSessionIdFor(api);
     const now = Date.now();
     await db
       .insert(childWatches)
       .values({
         childSessionId: "child-1",
         queueItemId: "qi-1",
-        parentSessionId: ORCH_SESSION_ID,
+        parentSessionId: sessionId,
         parentThreadId: "th-1",
         actorUserId: "local-user",
         orgId: "local-org",
@@ -109,7 +128,8 @@ describe("GET /api/orchestrator/info", () => {
     });
     expect(patchRes.status).toBe(200);
 
-    const session = await api.providers.engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(
+      api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -121,12 +141,13 @@ describe("GET /api/orchestrator/info", () => {
     api = await bootTestApi();
     const { db } = api.providers;
 
+    const sessionId = await assistantSessionIdFor(api);
     await db
       .insert(childWatches)
       .values({
         childSessionId: "child-1",
         queueItemId: "qi-1",
-        parentSessionId: ORCH_SESSION_ID,
+        parentSessionId: sessionId,
         parentThreadId: "th-1",
         actorUserId: "local-user",
         orgId: "local-org",
@@ -142,11 +163,11 @@ describe("GET /api/orchestrator/info", () => {
 });
 
 describe("PATCH /api/orchestrator/info", () => {
-  it("upserts the identity row and writes the personality memory file BEFORE the engine session exists", async () => {
+  it("names the default assistant and writes the personality memory file BEFORE the engine session exists", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
 
-    // No ensure has happened — no agent_sessions row for the orchestrator id.
+    // No ensure has happened — no agent_sessions row for the assistant id.
     const patchRes = await fetch(`${api.baseUrl}/api/orchestrator/info`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -156,12 +177,10 @@ describe("PATCH /api/orchestrator/info", () => {
     const patchBody = (await patchRes.json()) as PatchOrchestratorInfoResponse;
     expect(patchBody).toEqual({ ok: true });
 
-    const identityRows = await db
-      .select()
-      .from(orchestratorIdentities)
-      .where(eq(orchestratorIdentities.sessionId, ORCH_SESSION_ID));
-    expect(identityRows).toHaveLength(1);
-    expect(identityRows[0]?.handle).toBe("Wren");
+    const assistantRows = await db.select().from(assistants);
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.name).toBe("Wren");
+    expect(assistantRows[0]?.isDefault).toBe(true);
 
     const infoRes = await fetch(`${api.baseUrl}/api/orchestrator/info`);
     const infoBody = (await infoRes.json()) as GetOrchestratorInfoResponse;
@@ -178,7 +197,9 @@ describe("PATCH /api/orchestrator/info", () => {
     expect(memBody.file.origin).toBe("user-stated");
   });
 
-  it("a second PATCH updates the existing identity row rather than inserting a second one", async () => {
+  // A rename must never mint a second assistant: the principal would then
+  // hold two, and the one automation targets would be the unnamed original.
+  it("a second PATCH renames the existing assistant rather than inserting a second one", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
 
@@ -193,12 +214,10 @@ describe("PATCH /api/orchestrator/info", () => {
       body: JSON.stringify({ name: "Atlas" }),
     });
 
-    const rows = await db
-      .select()
-      .from(orchestratorIdentities)
-      .where(eq(orchestratorIdentities.sessionId, ORCH_SESSION_ID));
+    const rows = await db.select().from(assistants);
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.handle).toBe("Atlas");
+    expect(rows[0]?.name).toBe("Atlas");
+    expect(rows[0]?.isDefault).toBe(true);
   });
 
   it("evicts the cache (not destroy): the engine session row survives a PATCH after ensure", async () => {
@@ -233,6 +252,7 @@ describe("GET /api/orchestrator/children", () => {
     api = await bootTestApi();
     const { db } = api.providers;
 
+    const sessionId = await assistantSessionIdFor(api);
     const now = Date.now();
     await db
       .insert(agentSessions)
@@ -269,7 +289,7 @@ describe("GET /api/orchestrator/children", () => {
         {
           childSessionId: "child-a",
           queueItemId: "qi-a",
-          parentSessionId: ORCH_SESSION_ID,
+          parentSessionId: sessionId,
           parentThreadId: "th-1",
           actorUserId: "local-user",
           orgId: "local-org",
@@ -279,7 +299,7 @@ describe("GET /api/orchestrator/children", () => {
         {
           childSessionId: "child-b",
           queueItemId: "qi-b",
-          parentSessionId: ORCH_SESSION_ID,
+          parentSessionId: sessionId,
           parentThreadId: "th-1",
           actorUserId: "local-user",
           orgId: "local-org",
@@ -308,7 +328,7 @@ describe("GET /api/orchestrator/children", () => {
     });
   });
 
-  it("only returns children watched by the caller's own orchestrator", async () => {
+  it("only returns children watched by the caller's own assistant", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
 
@@ -332,7 +352,7 @@ describe("GET /api/orchestrator/children", () => {
       .values({
         childSessionId: "other-child",
         queueItemId: "qi-other",
-        parentSessionId: "orchestrator:user:someone-else",
+        parentSessionId: "assistant:asst_someone_else",
         parentThreadId: "th-1",
         actorUserId: "someone-else",
         orgId: "local-org",
@@ -356,7 +376,8 @@ describe("Persona injection (decision 5): rename + personality survive a wake, t
     const ensureRes = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
     const { sessionId } = (await ensureRes.json()) as EnsureOrchestratorResponse;
 
-    const before = await engineHost.orchestratorSessionFor(
+    const before = await defaultAssistantSessionFor(
+      api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -387,7 +408,8 @@ describe("Persona injection (decision 5): rename + personality survive a wake, t
     expect(patchRes.status).toBe(200);
     expect(engineHost.isLive(sessionId)).toBe(false);
 
-    const after = await engineHost.orchestratorSessionFor(
+    const after = await defaultAssistantSessionFor(
+      api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );

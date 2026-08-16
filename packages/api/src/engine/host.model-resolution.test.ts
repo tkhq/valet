@@ -25,6 +25,7 @@ import { setOrgModelPreferences } from "../services/org.js";
 import { NoCredentialsError } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const orgId = "org-res";
 const ANTHROPIC_MODEL = "claude-haiku-4-5";
@@ -381,7 +382,7 @@ describe("EngineHost model resolution wiring", () => {
     const { db, engineHost } = api.providers;
     await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -394,7 +395,7 @@ describe("EngineHost model resolution wiring", () => {
     await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
     await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -404,7 +405,7 @@ describe("EngineHost model resolution wiring", () => {
   it("new-session precedence: hardcoded claude-haiku-4-5 when nothing is set", async () => {
     api = await bootTestApi();
     const { engineHost } = api.providers;
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -426,7 +427,7 @@ describe("EngineHost model resolution wiring", () => {
     // .../:id/key without also rewriting orgPreferences.
     await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`, "anthropic/claude-haiku-4-5"]);
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -446,7 +447,7 @@ describe("EngineHost model resolution wiring", () => {
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
     await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`, "anthropic/claude-haiku-4-5"]);
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -466,7 +467,7 @@ describe("EngineHost model resolution wiring", () => {
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
     await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`]);
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );

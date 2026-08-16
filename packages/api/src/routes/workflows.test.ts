@@ -13,13 +13,23 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
-import { actionInvocations, actionPolicies, orgs, runtimeGrants, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import {
+  actionInvocations,
+  actionPolicies,
+  orgs,
+  runtimeGrants,
+  workflowDefinitions,
+  workflowSchedules,
+  workflowVersions,
+} from "../schema/index.js";
 import {
   getWorkflowRunDetail,
   listWorkflowRuns,
 } from "../workflows/service.js";
 import type {
   CreateWorkflowResponse,
+  CreateWorkflowScheduleResponse,
+  ListWorkflowSchedulesResponse,
   DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
@@ -136,6 +146,142 @@ describe("GET /api/workflows + /:id", () => {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/workflows?ownerType=&ownerId=", () => {
+  const HALF_FILTER_ERROR = "Filter by owner with both ownerType and ownerId, or send neither.";
+
+  /** A team-owned workflow, created the way a client creates one. */
+  async function createTeamWorkflow(
+    baseUrl: string,
+    teamId: string,
+    name: string,
+  ): Promise<CreateWorkflowResponse> {
+    const res = await fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, definition: VALID_DEFINITION, teamId }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateWorkflowResponse;
+  }
+
+  it("returns the own-plus-teams union unchanged when neither param is given", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ name: "someone-elses", definition: VALID_DEFINITION }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name).sort()).toEqual(["personal", "team-owned"]);
+  });
+
+  it("narrows to one team the caller is on", async () => {
+    api = await bootTestApi();
+    const platform = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const growth = await createTeam(api.providers.db, { orgId: "local-org", name: "Growth", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, platform.id, "platform-wf");
+    await createTeamWorkflow(api.baseUrl, growth.id, "growth-wf");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=${platform.id}`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["platform-wf"]);
+    expect(workflows.map((w) => w.ownerId)).toEqual([platform.id]);
+  });
+
+  it("narrows to the caller's own rows, dropping the teams", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=user&ownerId=local-user`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["personal"]);
+  });
+
+  it("404s a team the caller is not on, and the error names neither the team nor its id", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=${team.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("owner not found");
+    expect(body.error).not.toContain(team.id);
+    expect(body.error).not.toContain("Platform");
+  });
+
+  it("answers an owner that does not exist exactly as it answers one the caller may not reach", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const asOutsider = { "x-valet-test-user-id": "test-member" };
+
+    const forbidden = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=${team.id}`, {
+      headers: asOutsider,
+    });
+    const missing = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=team_nonexistent`, {
+      headers: asOutsider,
+    });
+
+    expect(forbidden.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual(await forbidden.json());
+  });
+
+  it("404s another user's rows, org admin included", async () => {
+    api = await bootTestApi();
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ name: "someone-elses", definition: VALID_DEFINITION }),
+    });
+
+    // `local-user` administers the org. Org administration is not a read
+    // path into a member's personal workflows.
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=user&ownerId=test-member`);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s an org filter — nothing admits a caller to an org-owned workflow yet", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=org&ownerId=local-org`);
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a half-given filter, naming the fix", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+
+    const typeOnly = await fetch(`${api.baseUrl}/api/workflows?ownerType=team`);
+    expect(typeOnly.status).toBe(400);
+    expect(((await typeOnly.json()) as { error: string }).error).toBe(HALF_FILTER_ERROR);
+
+    const idOnly = await fetch(`${api.baseUrl}/api/workflows?ownerId=${team.id}`);
+    expect(idOnly.status).toBe(400);
+    expect(((await idOnly.json()) as { error: string }).error).toBe(HALF_FILTER_ERROR);
+  });
+
+  it("400s an ownerType outside the three an owner column holds", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=squad&ownerId=whatever`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("ownerType must be 'user', 'team' or 'org'.");
   });
 });
 
@@ -437,7 +583,6 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(detail.run.runId).toBe(runId);
     expect(detail.run.workflowId).toBe(created.id);
     expect(detail.checkpoints).toEqual([]);
-    expect(detail.signals).toEqual([]);
 
     // Park the run on the approval signal before resolving — the new route
     // validates the run is actually waiting on this gate.
@@ -1635,3 +1780,156 @@ describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
     expect(body.deleted).toBe(false);
   });
 });
+
+describe("GET/POST/DELETE /api/workflows/:id/schedules", () => {
+  it("creates a schedule and lists it for that workflow only", async () => {
+    api = await bootTestApi();
+    const a = await createWorkflow(api.baseUrl, "with-schedule");
+    const b = await createWorkflow(api.baseUrl, "without-schedule");
+
+    const created = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+    expect(created.status).toBe(201);
+    const schedule = (await created.json()) as CreateWorkflowScheduleResponse;
+    expect(schedule.workflowId).toBe(a.id);
+    expect(schedule.enabled).toBe(true);
+    expect(schedule.timezone).toBe("UTC");
+    expect(schedule.nextFireAt).toBeGreaterThan(Date.now());
+
+    const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
+    const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyA.schedules.map((s) => s.scheduleId)).toEqual([schedule.scheduleId]);
+
+    const listB = await fetch(`${api.baseUrl}/api/workflows/${b.id}/schedules`);
+    const bodyB = (await listB.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyB.schedules).toEqual([]);
+  });
+
+  it("400s an invalid cron with the corrective error text", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "bad", cron: "every day at nine" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("cron");
+  });
+
+  it("404s schedule routes on another owner's workflow", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const asOther = { "x-valet-test-user-id": "test-member" };
+
+    const list = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      headers: asOther,
+    });
+    expect(list.status).toBe(404);
+
+    const post = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...asOther },
+      body: JSON.stringify({ name: "sneaky", cron: "0 9 * * *" }),
+    });
+    expect(post.status).toBe(404);
+  });
+
+  it("DELETE removes only a schedule that belongs to that workflow", async () => {
+    api = await bootTestApi();
+    const a = await createWorkflow(api.baseUrl, "schedule-owner");
+    const b = await createWorkflow(api.baseUrl, "other-workflow");
+
+    const created = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+    const schedule = (await created.json()) as CreateWorkflowScheduleResponse;
+
+    // Through the WRONG workflow's path: 404, row survives.
+    const cross = await fetch(
+      `${api.baseUrl}/api/workflows/${b.id}/schedules/${schedule.scheduleId}`,
+      { method: "DELETE" },
+    );
+    expect(cross.status).toBe(404);
+
+    const del = await fetch(
+      `${api.baseUrl}/api/workflows/${a.id}/schedules/${schedule.scheduleId}`,
+      { method: "DELETE" },
+    );
+    expect(del.status).toBe(200);
+    const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
+    const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyA.schedules).toEqual([]);
+  });
+
+  it("400s a whitespace-only name and trims a valid one", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const blank = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "   ", cron: "0 9 * * *" }),
+    });
+    expect(blank.status).toBe(400);
+
+    const padded = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "  nightly  ", cron: "0 9 * * *" }),
+    });
+    expect(padded.status).toBe(201);
+    const schedule = (await padded.json()) as CreateWorkflowScheduleResponse;
+    expect(schedule.name).toBe("nightly");
+  });
+
+  it("400s a non-object input (a schedule fires it into every run's trigger payload)", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    for (const badInput of ["a string", 42, ["array"]]) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "nightly", cron: "0 9 * * *", input: badInput }),
+      });
+      expect(res.status).toBe(400);
+    }
+
+    const ok = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *", input: { key: "value" } }),
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  it("deleting the workflow deletes its schedules too", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+
+    const del = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+
+    // The workflow is gone, so the schedules route 404s — assert against
+    // the store directly to prove the row itself was deleted, not just
+    // made unreachable through the now-404ing management route.
+    const rows = await api.providers.db
+      .select()
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.workflowId, created.id));
+    expect(rows).toEqual([]);
+  });
+});
+

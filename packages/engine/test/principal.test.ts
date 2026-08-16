@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   serializePrincipal,
   parsePrincipal,
-  orchestratorSessionId,
-  parseOrchestratorSessionId,
+  assistantSessionId,
+  parseAssistantSessionId,
   type Principal,
 } from "../src/index.js";
 
@@ -33,33 +33,32 @@ describe("principal helpers", () => {
     expect(parsePrincipal("bogus:u1")).toBeNull();
   });
 
-  it("orchestratorSessionId formats orchestrator:type:id", () => {
-    expect(orchestratorSessionId({ type: "user", id: "u1" })).toBe("orchestrator:user:u1");
-    expect(orchestratorSessionId({ type: "org", id: "o1" })).toBe("orchestrator:org:o1");
+  // The address is the ASSISTANT's own id, not its owner's. A principal
+  // owns any number of assistants, so an owner cannot identify a session.
+  it("assistantSessionId formats assistant:{assistantId}", () => {
+    expect(assistantSessionId("asst_1")).toBe("assistant:asst_1");
   });
 
-  it("parseOrchestratorSessionId round-trips every orchestrator session id", () => {
-    const principals: Principal[] = [
-      { type: "user", id: "u1" },
-      { type: "team", id: "team-42" },
-      { type: "org", id: "org_abc" },
-    ];
-    for (const p of principals) {
-      expect(parseOrchestratorSessionId(orchestratorSessionId(p))).toEqual(p);
+  it("parseAssistantSessionId round-trips every assistant session id", () => {
+    for (const assistantId of ["asst_1", "asst_a-b_c", "asst_00000000-0000-4000-8000-000000000000"]) {
+      expect(parseAssistantSessionId(assistantSessionId(assistantId))).toBe(assistantId);
     }
   });
 
-  it("parseOrchestratorSessionId rejects junk", () => {
-    expect(parseOrchestratorSessionId("")).toBeNull();
-    expect(parseOrchestratorSessionId("orchestrator")).toBeNull();
-    expect(parseOrchestratorSessionId("orchestrator:user")).toBeNull();
-    expect(parseOrchestratorSessionId("not-orchestrator:user:u1")).toBeNull();
-    expect(parseOrchestratorSessionId("orchestrator:bogus:u1")).toBeNull();
-    expect(parseOrchestratorSessionId("orchestrator:user:")).toBeNull();
-    expect(parseOrchestratorSessionId("th-abc123")).toBeNull();
+  it("assistants owned by one principal get different addresses", () => {
+    expect(assistantSessionId("asst_1")).not.toBe(assistantSessionId("asst_2"));
   });
 
-  it("parseOrchestratorSessionId is not fooled by an ordinary session id", () => {
-    expect(parseOrchestratorSessionId("web:default")).toBeNull();
+  it("parseAssistantSessionId rejects junk", () => {
+    expect(parseAssistantSessionId("")).toBeNull();
+    expect(parseAssistantSessionId("assistant")).toBeNull();
+    expect(parseAssistantSessionId("assistant:")).toBeNull();
+    expect(parseAssistantSessionId("not-assistant:asst_1")).toBeNull();
+    expect(parseAssistantSessionId("th-abc123")).toBeNull();
+  });
+
+  it("parseAssistantSessionId is not fooled by an ordinary session id", () => {
+    expect(parseAssistantSessionId("web:default")).toBeNull();
+    expect(parseAssistantSessionId("wf:run_1:node_1")).toBeNull();
   });
 });

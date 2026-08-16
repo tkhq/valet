@@ -12,14 +12,8 @@ import {
 } from "~/components/primitives";
 import { RadioCard } from "./radio-card";
 import { useCreateInvite, useInvites, useRevokeInvite } from "~/api/invites";
-
-function formatDate(ts: number): string {
-  return new Date(ts).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
+import { formatDate } from "~/lib/format-when";
+import { useCopyToClipboard } from "~/lib/use-copy";
 
 function inviteLink(code: string): string {
   return `${window.location.origin}/signup?invite=${code}`;
@@ -209,19 +203,8 @@ function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (op
 }
 
 function InviteLinkReveal({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
   const link = inviteLink(code);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be denied/unavailable — the link is still
-      // selectable text in the block below.
-    }
-  }
 
   return (
     <div className="space-y-2 rounded-md border border-line bg-ink-wash p-4">
@@ -229,7 +212,7 @@ function InviteLinkReveal({ code }: { code: string }) {
         <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded border border-line bg-[--bg] px-3 py-2 font-mono text-xs text-ink">
           {link}
         </code>
-        <Button type="button" variant="secondary" size="sm" onClick={() => void copy()}>
+        <Button type="button" variant="secondary" size="sm" onClick={() => void copy(link)}>
           {copied ? "Copied" : "Copy"}
         </Button>
       </div>

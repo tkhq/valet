@@ -28,7 +28,27 @@ import {
   Spinner,
   Tooltip,
 } from "~/components/primitives";
+import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
+
+/**
+ * What an untitled thread is called.
+ *
+ * This used to be `Thread ${index + 1}`, which is a number that claims an
+ * identity and then reassigns it: threads sort newest-first, so every new
+ * thread pushed "Thread 5" down to "Thread 6" and renumbered every row
+ * below it. At two threads nobody notices. At thirty it is a wall of
+ * numbers that all move.
+ *
+ * A creation stamp never swaps between rows. It is also the only thing we
+ * actually know about a thread nobody has titled and nothing has been said
+ * in. The newest thread keeps a friendlier name because it is the one the
+ * "New thread" button just created and is about to be typed into.
+ */
+export function untitledThreadLabel(thread: ThreadSummary, index: number): string {
+  if (index === 0) return "New thread";
+  return formatWhen(thread.createdAt);
+}
 
 const BUCKET_STORAGE_KEY = "valet:thread-bucket";
 
@@ -44,6 +64,10 @@ function loadStoredBucket(): ThreadOriginBucket {
 
 const CHILDREN_POLL_MS = 30_000;
 const CHILDREN_INVALIDATE_DEBOUNCE_MS = 500;
+
+/** Stable no-op so the live-update effect doesn't re-subscribe each render
+ * when children are turned off. */
+const NO_REFETCH = () => {};
 
 /** Pure: groups children by the thread that spawned them. */
 export function groupChildrenByThread(
@@ -76,9 +100,11 @@ export function childStatusDotClassName(status: OrchestratorChildSummary["status
  * treatment (moss left rail + soft ink wash), and the full title is
  * recoverable via hover tooltip when truncated.
  */
-export function ThreadTree() {
+export function ThreadTree({ sessionId: override, showChildren = true }: ThreadTreeProps = {}) {
   const info = useOrchestratorInfo();
-  const sessionId = info.data?.sessionId;
+  // No `override` means the caller's own assistant — the original and still
+  // the default behavior.
+  const sessionId = override ?? info.data?.sessionId;
 
   if (!sessionId) {
     return (
@@ -88,13 +114,31 @@ export function ThreadTree() {
     );
   }
 
-  return <ThreadTreeInner sessionId={sessionId} />;
+  return <ThreadTreeInner sessionId={sessionId} showChildren={showChildren} />;
 }
 
-function ThreadTreeInner({ sessionId }: { sessionId: string }) {
+export interface ThreadTreeProps {
+  /** Whose threads to show. Defaults to the caller's own assistant. */
+  sessionId?: string;
+  /**
+   * Nest child sessions under the thread that spawned them. Must be false
+   * for any session other than the caller's own assistant:
+   * `GET /api/orchestrator/children` resolves the CALLER's orchestrator
+   * rather than `sessionId`, so leaving it on would nest the viewer's
+   * personal children under someone else's threads.
+   */
+  showChildren?: boolean;
+}
+
+function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
   const threadsQ = useThreads(sessionId);
-  const childrenQ = useOrchestratorChildren({ refetchInterval: CHILDREN_POLL_MS });
-  useInvalidateChildrenOnQueueState(sessionId, childrenQ.refetch);
+  const childrenQ = useOrchestratorChildren({
+    refetchInterval: CHILDREN_POLL_MS,
+    enabled: showChildren,
+  });
+  // `refetch()` fires even on a disabled query, so gate the live-update
+  // hook too rather than relying on `enabled` alone.
+  useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
   const replaceSandbox = useReplaceSandbox(sessionId);
@@ -104,13 +148,24 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
   const navigate = useNavigate({ from: "/chat" });
 
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
-  // Newest first — the thread you were just working in belongs at the top.
+  // Sorted by CREATION, newest first — deliberately not by last activity.
+  //
+  // Chat products sort history by last activity and it reads fine there,
+  // because a document only moves when a person touches it. These rows are
+  // agents that work while you look away, so an activity sort makes the
+  // list reorder itself under the cursor: you look back and the thread you
+  // were about to click has moved. Creation order is stable, so a thread
+  // stays where you last saw it.
+  //
+  // This will look like a bug to anyone arriving from a chat app. It is
+  // not. If recency is ever wanted, it belongs behind an explicit sort
+  // control that is off by default.
   const threads = useMemo(
     () => [...(threadsQ.data?.threads ?? [])].sort((a, b) => b.createdAt - a.createdAt),
     [threadsQ.data],
   );
   const activeThreadId = search.thread ?? threads[0]?.id;
-  const grouped = groupChildrenByThread(childrenQ.data?.children ?? []);
+  const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
 
   const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
   const [query, setQuery] = useState("");
@@ -311,7 +366,7 @@ function ThreadNode({
   onReplaceSandbox: () => void;
   onDismissChild: (childSessionId: string) => void;
 }) {
-  const label = thread.title ?? (index === 0 ? "today" : `Thread ${index + 1}`);
+  const label = thread.title ?? untitledThreadLabel(thread, index);
 
   return (
     <div>

@@ -546,12 +546,91 @@ export interface SearchFilesParams {
   limit?: number;
 }
 
+/** One run of snippet text. `match` is true for the words that matched the
+ * query, so the client can emphasize them. */
+export interface SearchSnippetSegment {
+  text: string;
+  match: boolean;
+}
+
 export interface SearchResult {
   path: string;
   title: string;
   description: string;
   type: string;
   rank: number;
+  /** Matched text from the body, in reading order. Empty when the file has
+   * no body to excerpt. */
+  snippet: SearchSnippetSegment[];
+}
+
+/**
+ * `ts_headline` wraps each hit in `StartSel`/`StopSel`, which default to
+ * `<b>` and `</b>`. That HTML never leaves this module.
+ *
+ * Memory documents are agent-authored, and `ts_headline` copies the source
+ * text into the headline without escaping it, so handing the raw headline
+ * to React through `dangerouslySetInnerHTML` would turn every remembered
+ * document into a stored-XSS vector. Instead the markers are set to two
+ * ASCII control characters that markdown prose never contains, and
+ * `parseSnippet` below splits them into `{ text, match }` segments. The
+ * client renders those as React text nodes and `<mark>` elements, so no
+ * markup crosses the wire and the marker choice stays an implementation
+ * detail of this file.
+ */
+const SNIPPET_START = "\u0002"; // ASCII STX
+const SNIPPET_STOP = "\u0003"; // ASCII ETX
+
+/** Both markers, for the `translate(...)` call that strips them from the
+ * source text first: a document that already contains one of these
+ * characters must not be able to fake a highlight boundary. */
+const SNIPPET_MARKER_CHARS = `${SNIPPET_START}${SNIPPET_STOP}`;
+
+/** One fragment, not several: a result row shows two lines, and stitched
+ * fragments spend that space on ellipses. Measured against PGlite,
+ * `MaxFragments=1` opens the window a few words before the match, so the
+ * excerpt reads as the sentence that matched rather than starting mid-word
+ * at the hit (which is what the default `MaxFragments=0` produces). */
+const SNIPPET_OPTIONS = `StartSel=${SNIPPET_START},StopSel=${SNIPPET_STOP},MaxWords=26,MinWords=10,MaxFragments=1`;
+
+/** Per-row cap on the text handed to `ts_headline`. The function re-parses
+ * the document it excerpts, so an unbounded multi-MB body makes one search
+ * expensive. Matches `memory-graph.ts`'s per-file link-scan budget. A match
+ * past this offset produces a leading excerpt instead of the matched line. */
+export const MAX_SNIPPET_SCAN_CHARS = 256 * 1024;
+
+/**
+ * Splits a `ts_headline` result into text/match segments. Runs of
+ * whitespace collapse to one space so a snippet reads as a single line in a
+ * result list. Only a complete `START`…`STOP` pair marks a match; a stray
+ * marker is dropped, so no control character can reach the DOM even if the
+ * `translate(...)` guard on the source text is ever removed.
+ */
+export function parseSnippet(headline: string): SearchSnippetSegment[] {
+  const flat = headline.replace(/\s+/g, " ").trim();
+  const segments: SearchSnippetSegment[] = [];
+
+  function push(text: string, match: boolean): void {
+    // Dropping a stray marker can leave the two spaces that surrounded it,
+    // so collapse once more after the strip. Leading/trailing single spaces
+    // stay — they are what separates one segment from the next.
+    const clean = text.split(SNIPPET_START).join("").split(SNIPPET_STOP).join("").replace(/\s+/g, " ");
+    if (clean !== "") segments.push({ text: clean, match });
+  }
+
+  let cursor = 0;
+  while (cursor < flat.length) {
+    const start = flat.indexOf(SNIPPET_START, cursor);
+    if (start === -1) break;
+    const stop = flat.indexOf(SNIPPET_STOP, start + 1);
+    if (stop === -1) break;
+    push(flat.slice(cursor, start), false);
+    push(flat.slice(start + 1, stop), true);
+    cursor = stop + 1;
+  }
+  push(flat.slice(cursor), false);
+
+  return segments;
 }
 
 /** Narrows an unknown error to one carrying a string `code` property —
@@ -582,6 +661,12 @@ function errorMessage(err: unknown): string {
  * path for typical malformed user input the way it was under fts5. Expired
  * rows (`expires < now`) are excluded. Read-union applies: results from team
  * scopes carry the virtual `team:{id}/` prefix.
+ *
+ * Each row also carries a matched-text snippet from `ts_headline`, built
+ * from the same `tsQuery` this function already computes — one query, no
+ * extra round trip. Postgres projects the target list above the sort (plan:
+ * `Limit -> Result -> Sort -> Scan`), so `ts_headline` runs for the
+ * returned rows only, not for every row that matched.
  */
 export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchFilesParams): Promise<SearchResult[]> {
   const owners = await resolveReadableOwners(db, scope);
@@ -594,6 +679,17 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
 
   const tsQuery = sql`websearch_to_tsquery('english', ${params.query})`;
   const rankExpr = sql<number>`ts_rank_cd(search_vector, ${tsQuery})`;
+  // `left(...)` bounds the work per row; `translate(...)` removes any
+  // marker character the stored body already holds, so only ts_headline
+  // can produce a highlight boundary. The scan cap is a compile-time
+  // constant, inlined with `sql.raw` because `left`'s second argument has
+  // to resolve as an integer.
+  const snippetExpr = sql<string>`ts_headline(
+    'english',
+    translate(left(${memoryFiles.content}, ${sql.raw(String(MAX_SNIPPET_SCAN_CHARS))}), ${SNIPPET_MARKER_CHARS}, ''),
+    ${tsQuery},
+    ${SNIPPET_OPTIONS}
+  )`;
 
   let rows: Array<{
     path: string;
@@ -603,6 +699,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     ownerType: string;
     ownerId: string;
     rank: number;
+    snippet: string;
   }>;
   try {
     rows = await db
@@ -614,6 +711,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
         ownerType: memoryFiles.ownerType,
         ownerId: memoryFiles.ownerId,
         rank: rankExpr,
+        snippet: snippetExpr,
       })
       .from(memoryFiles)
       .where(
@@ -646,6 +744,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     description: r.description,
     type: r.type,
     rank: r.rank,
+    snippet: parseSnippet(r.snippet),
   }));
 }
 

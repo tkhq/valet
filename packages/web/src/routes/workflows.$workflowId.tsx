@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { MoreHorizontal } from "lucide-react";
 import { triggerDataSchema, type WorkflowDefinition } from "@valet/workflow";
 import type { ListWorkflowRunsResponse } from "@valet/api/wire";
 import {
@@ -14,8 +15,16 @@ import {
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Editor } from "~/components/workflows/editor/editor";
+import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+} from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import { cn } from "~/lib/cn";
 
@@ -99,10 +108,10 @@ function WorkflowEditorPane({
   };
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  // Right-side drawer: runs list / version history. Header buttons toggle
-  // it — the old bottom collapsible was invisible under a full-height
-  // canvas ("no way to view the list of runs").
-  const [drawer, setDrawer] = useState<"runs" | "history" | null>(null);
+  // Right-side drawer: runs list / version history / triggers. Header
+  // buttons toggle it — the old bottom collapsible was invisible under a
+  // full-height canvas ("no way to view the list of runs").
+  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether
   // the name is dirty (`externalDirty`) so a rename rides the same
@@ -168,14 +177,30 @@ function WorkflowEditorPane({
           </Button>
           <Button
             size="sm"
-            variant={drawer === "history" ? "secondary" : "ghost"}
-            onClick={() => setDrawer((d) => (d === "history" ? null : "history"))}
+            variant={drawer === "triggers" ? "secondary" : "ghost"}
+            onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
-            History
+            Triggers
           </Button>
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant={drawer === "history" ? "secondary" : "ghost"}
+                aria-label="More"
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
+                Version history
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -199,6 +224,11 @@ function WorkflowEditorPane({
           onCancelExternal={handleCancelName}
         />
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
+        {drawer === "triggers" && (
+          <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
+            <TriggersPanel workflowId={workflowId} />
+          </DrawerShell>
+        )}
         {drawer === "history" && (
           <HistoryDrawer
             workflowId={workflowId}

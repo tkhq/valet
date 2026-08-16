@@ -1,13 +1,12 @@
 import type { Model } from "@mariozechner/pi-ai";
-import { and, eq } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   Engine,
-  orchestratorSessionId,
-  parseOrchestratorSessionId,
+  assistantSessionId,
+  parseAssistantSessionId,
   NoCredentialsError,
   type BlobStore,
   type ChildReader,
@@ -57,7 +56,8 @@ import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orchestratorIdentities, orgs, users } from "../schema/index.js";
+import { agentSessions, orgs, users } from "../schema/index.js";
+import { loadAssistant } from "../assistants/service.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
@@ -91,9 +91,9 @@ export interface EngineHostOpts {
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
-   * The app db handle — required by `orchestratorSessionFor` (memory
-   * snapshot assembly, journal bootstrap, the compaction hook, and the
-   * `orchestrator_identities` upsert). Every session builder also uses it
+   * The app db handle — required by `assistantSessionFor` (the assistant
+   * row lookup, memory snapshot assembly, journal bootstrap, and the
+   * compaction hook). Every session builder also uses it
    * (when present) to mint/revoke the session's sandbox token (Task 8,
    * auth-v2 plan) — absent only in tests that don't wire one up, which
    * degrade gracefully to no sandbox env injection.
@@ -103,7 +103,7 @@ export interface EngineHostOpts {
    * This process's own base URL (e.g. `http://127.0.0.1:${port}`), handed
    * to orchestrator sessions as `toolConfig.apiBaseUrl` so the `mem_*`
    * tools can reach the memory HTTP routes (decision 15). Required for
-   * `orchestratorSessionFor`.
+   * `assistantSessionFor`.
    */
   apiBaseUrl?: string;
   /**
@@ -210,7 +210,7 @@ export interface EngineHostOpts {
    * `provisioning`/`ready` without ever passing through `suspended` in this
    * process's lifetime. `onSessionReady` closes that gap: invoked on EVERY
    * `ready` transition of EVERY session build (`buildSession`,
-   * `buildOrchestratorSession`, `buildChildSession`, `buildWorkflowSession`),
+   * `buildAssistantSession`, `buildChildSession`, `buildWorkflowSession`),
    * regardless of `wasSuspended`. Task 4 wires this to the same
    * "clear `hibernated` -> `active`" write `onWake` performs — the write is
    * conditioned on the row currently being `"hibernated"` (a no-op
@@ -505,19 +505,19 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
-    // Orchestrator ids must always wake through `orchestratorSessionFor` so
-    // they get persona/memory-snapshot/mem_* tools/queueMode reconstructed
-    // from configuration, never the generic `buildSession` path. Every
-    // caller of `sessionFor` (messages.ts, ws.ts, sessions.ts, boot
-    // restore) can be handed an orchestrator session id, so this dispatch
-    // lives here rather than being duplicated at each call site. Delegating
-    // before touching `this.cache`/`this.inflight` is deliberate:
-    // `orchestratorSessionFor` does its own cache/inflight bookkeeping
-    // against the *same* maps (keyed by the same `sessionId`), so checking
-    // here first would just be a redundant, and potentially stale, read.
-    const principal = parseOrchestratorSessionId(sessionId);
-    if (principal) {
-      return this.orchestratorSessionFor(principal, { actorUserId: meta.userId, orgId: meta.orgId });
+    // Assistant ids must always wake through `assistantSessionFor` so they
+    // get persona/memory-snapshot/mem_* tools/queueMode reconstructed from
+    // configuration, never the generic `buildSession` path. Every caller of
+    // `sessionFor` (messages.ts, ws.ts, sessions.ts, boot restore) can be
+    // handed an assistant session id, so this dispatch lives here rather
+    // than being duplicated at each call site. Delegating before touching
+    // `this.cache`/`this.inflight` is deliberate: `assistantSessionFor`
+    // does its own cache/inflight bookkeeping against the *same* maps
+    // (keyed by the same `sessionId`), so checking here first would just be
+    // a redundant, and potentially stale, read.
+    const assistantId = parseAssistantSessionId(sessionId);
+    if (assistantId) {
+      return this.assistantSessionFor(assistantId, { actorUserId: meta.userId, orgId: meta.orgId });
     }
 
     const cached = this.cache.get(sessionId);
@@ -1105,10 +1105,17 @@ export class EngineHost {
   }
 
   /**
-   * Resolve (or lazily create) the well-known orchestrator session for
-   * `principal` (Phase 4 decision 17). Wakes instantly and sandbox-less: the
-   * sandbox is a `SandboxCreateOpts` template, never a pre-created/warm
-   * sandbox — cold attachment is the orchestrator's steady state.
+   * Resolve (or lazily create) the session of one assistant (Phase 4
+   * decision 17, retargeted by the assistants design). Wakes instantly and
+   * sandbox-less: the sandbox is a `SandboxCreateOpts` template, never a
+   * pre-created/warm sandbox — cold attachment is an assistant's steady
+   * state.
+   *
+   * Takes an assistant id, not a principal: a principal owns any number of
+   * assistants, so only the id says which session is meant. Callers that
+   * hold a principal go through `resolveDefaultAssistant`
+   * (`assistants/service.ts`) first, which is the one place a principal
+   * becomes an assistant.
    *
    * `CreateSessionOptions` is reconstructed from configuration on every
    * wake (persona, memory snapshot, tools, toolConfig), not from whatever
@@ -1116,49 +1123,61 @@ export class EngineHost {
    * wake" section — so a restored session gets a freshly-assembled snapshot
    * and today's journal, same as a brand-new one.
    */
-  async orchestratorSessionFor(principal: Principal, meta: { actorUserId: string; orgId: string }): Promise<Session> {
-    const sessionId = orchestratorSessionId(principal);
+  async assistantSessionFor(assistantId: string, meta: { actorUserId: string; orgId: string }): Promise<Session> {
+    const sessionId = assistantSessionId(assistantId);
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
 
-    const promise = this.buildOrchestratorSession(sessionId, principal, meta).finally(() => {
+    const promise = this.buildAssistantSession(sessionId, assistantId, meta).finally(() => {
       this.inflight.delete(sessionId);
     });
     this.inflight.set(sessionId, promise);
     return promise;
   }
 
-  private async buildOrchestratorSession(
+  private async buildAssistantSession(
     sessionId: string,
-    principal: Principal,
+    assistantId: string,
     meta: { actorUserId: string; orgId: string },
   ): Promise<Session> {
     if (!this.opts.db) {
-      throw new Error("EngineHost: orchestratorSessionFor requires opts.db");
+      throw new Error("EngineHost: assistantSessionFor requires opts.db");
     }
     if (!this.opts.apiBaseUrl) {
-      throw new Error("EngineHost: orchestratorSessionFor requires opts.apiBaseUrl");
+      throw new Error("EngineHost: assistantSessionFor requires opts.apiBaseUrl");
     }
     const db = this.opts.db;
     const apiBaseUrl = this.opts.apiBaseUrl;
 
-    const workspace = join(homedir(), ".valet", "orchestrator", `${principal.type}-${principal.id}`);
+    const assistant = await loadAssistant(db, assistantId);
+    if (!assistant) {
+      throw new Error(
+        `EngineHost: no assistant ${assistantId}. Create one through POST /api/assistants, ` +
+          `or resolve the owner's default with resolveDefaultAssistant, before waking its session.`,
+      );
+    }
+    // The OWNER, not the assistant: memory, journal and skills belong to the
+    // principal and are shared by every assistant it owns. Only the
+    // workspace directory below is per-assistant.
+    const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
+
+    const workspace = join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
 
     const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
-    const personaPrefix = await this.resolvePersonaPrefix(db, scope, meta.orgId, principal);
+    const personaPrefix = await this.resolvePersonaPrefix(db, scope, assistant.name);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
-    // `principal`, not `meta.actorUserId`: an orchestrator session belongs to
+    // `principal`, not `meta.actorUserId`: an assistant session belongs to
     // the principal and is shared by everyone who can reach it, exactly like
     // the memory snapshot this method assembles from `scope.owner`. Scoping
-    // to the actor instead would put whoever woke a team orchestrator's
+    // to the actor instead would put whoever woke a team assistant's
     // personal skills in front of every other member of that team.
     const extras = await this.sessionExtras(principal, meta.orgId);
 
@@ -1212,7 +1231,7 @@ export class EngineHost {
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
       // fresher snapshot is a cache eviction (session destroy/restart),
-      // which forces the next `orchestratorSessionFor` call back through
+      // which forces the next `assistantSessionFor` call back through
       // this method to reassemble it.
       systemContext: [{ name: "memory-snapshot", content: snapshotContent, order: 10 }],
       compactionHooks: [journalCompactionHook(db, scope)],
@@ -1244,83 +1263,24 @@ export class EngineHost {
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
 
-    await this.ensureOrchestratorIdentity(db, principal, meta.orgId, sessionId);
-
     return session;
   }
 
-  /** Upserts the `orchestrator_identities` row on first creation of a
-   * principal's orchestrator (decision 17/20) — a no-op past the first
-   * successful wake since the unique index on (org, ownerType, ownerId)
-   * never changes for a durable, never-rotated orchestrator identity.
-   *
-   * Concurrent first-ensure calls (e.g. two tabs waking the same
-   * orchestrator simultaneously) can both see `existing` as undefined and
-   * both attempt the insert — `onConflictDoNothing` on the unique index
-   * makes the loser's insert a no-op instead of an uncaught unique-constraint
-   * throw that would 500 the request. */
-  private async ensureOrchestratorIdentity(
-    db: AppDb,
-    principal: Principal,
-    orgId: string,
-    sessionId: string,
-  ): Promise<void> {
-    const existingRows = await db
-      .select()
-      .from(orchestratorIdentities)
-      .where(
-        and(
-          eq(orchestratorIdentities.orgId, orgId),
-          eq(orchestratorIdentities.ownerType, principal.type),
-          eq(orchestratorIdentities.ownerId, principal.id),
-        ),
-      )
-      .limit(1);
-    if (existingRows[0]) return;
-
-    await db
-      .insert(orchestratorIdentities)
-      .values({
-        id: randomUUID(),
-        orgId,
-        ownerType: principal.type,
-        ownerId: principal.id,
-        sessionId,
-        createdAt: Date.now(),
-      })
-      .onConflictDoNothing();
-  }
-
   /**
-   * `You are {name}. {personality}` prefix for the orchestrator's
+   * `You are {name}. {personality}` prefix for the assistant's
    * `systemPrompt` (assistant-centered web UI decision 5): `name` from
-   * `orchestrator_identities.handle`, `personality` from the
-   * `assistant/personality.md` memory file, capped at
-   * `PERSONALITY_INJECT_CAP` chars. Absent name → `""` (neutral persona,
-   * unchanged) regardless of whether a personality file exists — the
-   * identity step always sets name first, so an orphaned personality file
-   * without a name shouldn't happen, but if it ever does we don't want a
-   * prefix with no name in it.
+   * `assistants.name`, `personality` from the `assistant/personality.md`
+   * memory file, capped at `PERSONALITY_INJECT_CAP` chars. Absent name →
+   * `""` (neutral persona, unchanged) regardless of whether a personality
+   * file exists — the identity step always sets name first, so an orphaned
+   * personality file without a name shouldn't happen, but if it ever does
+   * we don't want a prefix with no name in it.
    */
   private async resolvePersonaPrefix(
     db: AppDb,
     scope: MemoryScope,
-    orgId: string,
-    principal: Principal,
+    name: string | null,
   ): Promise<string> {
-    const identityRows = await db
-      .select()
-      .from(orchestratorIdentities)
-      .where(
-        and(
-          eq(orchestratorIdentities.orgId, orgId),
-          eq(orchestratorIdentities.ownerType, principal.type),
-          eq(orchestratorIdentities.ownerId, principal.id),
-        ),
-      )
-      .limit(1);
-    const identity = identityRows[0];
-    const name = identity?.handle;
     if (!name) return "";
 
     // Own-scope only (never a team member's file — `readOwnFile` bypasses
@@ -1375,7 +1335,7 @@ export class EngineHost {
    * deletes the underlying engine session row via
    * `SessionStore.deleteSession`). Used when an identity/persona change
    * needs picking up on the next wake (PATCH /api/orchestrator/info,
-   * decision 4/5): the next `orchestratorSessionFor` call misses the cache
+   * decision 4/5): the next `assistantSessionFor` call misses the cache
    * and rebuilds `systemPrompt`/`systemContext` from current configuration,
    * restoring the same durable session (same transcript) rather than
    * creating a new one. Safe to call on an id that isn't cached — no-op.
@@ -1640,7 +1600,7 @@ export class EngineHost {
 
   /**
    * `users.default_model` for `userId`, or `undefined` if unset or the host
-   * has no `db` (only `orchestratorSessionFor` requires `db`; the other
+   * has no `db` (only `assistantSessionFor` requires `db`; the other
    * builders degrade gracefully to the hardcoded default when it's absent,
    * e.g. in tests that don't wire one up). Deliberately uncached — split-
    * settings decision 9 requires a settings change to apply on the very next

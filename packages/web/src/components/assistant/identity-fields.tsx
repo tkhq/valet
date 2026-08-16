@@ -4,11 +4,15 @@ import { Button, Input, Textarea } from "~/components/primitives";
 import { useSaveIdentity } from "~/api/orchestrator";
 
 /**
- * Name + personality editing fields, extracted from `IdentityStep` (the
- * dashboard's onboarding/edit flow) so `/settings/assistant` can host the
- * same controls without duplicating the reroll/chip/submit logic. Pure
- * helpers (`pickRandomName`, `appendTraitSentence`, `identitySubmitBody`)
- * stay in `identity-step.tsx` — both call sites import them from there.
+ * Name + personality editing fields for the assistant (assistant-centered
+ * web UI, decision 11). Three surfaces mount the same controls: the
+ * dashboard shows them full-page-centered on the first visit
+ * (`info.name === null`), the identity header reopens them inline and
+ * prefilled, and `/settings/assistant` hosts them. `variant` changes the
+ * copy and the chrome only, not the behavior.
+ *
+ * The pure helpers (`pickRandomName`, `appendTraitSentence`,
+ * `identitySubmitBody`) live here with the component that calls them.
  */
 // 300 unique names, loosely grouped by theme. The reroll is uniform random,
 // so ordering doesn't matter — groups exist only to keep curation sane.

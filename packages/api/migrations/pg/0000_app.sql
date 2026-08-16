@@ -274,17 +274,27 @@ CREATE TABLE "team_members" (
 --> statement-breakpoint
 CREATE INDEX "team_members_user" ON "team_members" ("user_id");
 --> statement-breakpoint
-CREATE TABLE "orchestrator_identities" (
+CREATE TABLE "assistants" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
+	"name" text,
 	"session_id" text NOT NULL,
-	"handle" text,
-	"created_at" bigint NOT NULL
+	"is_default" boolean DEFAULT false NOT NULL,
+	"created_at" bigint NOT NULL,
+	"archived_at" bigint
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "orchestrator_identities_owner" ON "orchestrator_identities" ("org_id","owner_type","owner_id");
+CREATE UNIQUE INDEX "assistants_session" ON "assistants" ("session_id");
+--> statement-breakpoint
+-- Exactly one default per principal. PARTIAL, not a plain unique: every
+-- non-default assistant shares the same (org, owner_type, owner_id), so a
+-- full unique index would allow only one assistant per principal — the very
+-- rule this table exists to remove.
+CREATE UNIQUE INDEX "assistants_default_owner" ON "assistants" ("org_id","owner_type","owner_id") WHERE "is_default";
+--> statement-breakpoint
+CREATE INDEX "assistants_owner" ON "assistants" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE TABLE "child_watches" (
 	"child_session_id" text PRIMARY KEY NOT NULL,

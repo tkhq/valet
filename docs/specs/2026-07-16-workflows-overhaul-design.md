@@ -88,3 +88,28 @@ The manual-trigger path now enforces the trigger node's `dataSchema`
 
 Webhook/schedule/event trigger payloads are not validated against
 `dataSchema` in this pass — manual runs only.
+
+## 2026-08-10 addendum: triggers + team-owner surface in the web UI
+
+The editor page gains a Triggers drawer (`packages/web/src/components/
+workflows/triggers-drawer.tsx`) — the first UI over two trigger APIs that
+were HTTP/agent-only before:
+
+- **Webhook:** mint, copy, rotate, and delete the arbitrary-URL trigger
+  (decision 5). Rotate and delete confirm before acting because the URL
+  carries the bearer secret.
+- **Schedules:** new routes `GET/POST /api/workflows/:id/schedules` and
+  `DELETE /api/workflows/:id/schedules/:scheduleId` over the existing
+  `schedule-service.ts`. The routes resolve the workflow through
+  `getWorkflowDefinition` first (own-rows 404 convention), and a delete
+  requires the schedule to belong to that workflow. The service also
+  carries orchestrator-prompt schedules; this surface manages only the
+  workflow-scoped kind.
+
+The New-workflow dialog takes its owner from the nav's active workspace
+(`CreateWorkflowRequest.teamId` existed on the wire but had no UI). It
+carries no Owner select of its own: a second control would duplicate the
+workspace switcher and could contradict it. The workflows list badges
+team-owned rows with the team name. `TeamSummary` gains `callerRole` so
+the teams settings panel can hide mutation controls the API's
+`canAdministerTeam` gate would 404 anyway.

@@ -45,19 +45,9 @@ import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
+  workflowWebhookUrl,
 } from "./webhook-service.js";
-import { publicUrlFromEnv } from "../channels/host.js";
 import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
-
-/** `POST /api/hooks/workflows/:workflowId/:hookId`'s path, absolute when a
- * public origin is configured (same `VALET_PUBLIC_URL`/`BETTER_AUTH_URL`
- * resolution `ChannelHost` uses), else path-only so the agent can still
- * report to the user with an "attach your deployment's origin" caveat. */
-function webhookUrl(workflowId: string, hookId: string): string {
-  const path = `/api/hooks/workflows/${workflowId}/${hookId}`;
-  const origin = publicUrlFromEnv(process.env);
-  return origin ? `${origin}${path}` : path;
-}
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
  * emit dozens of errors on a badly-shaped definition; the first ~20 are
@@ -703,7 +693,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!result.ok) return { success: false, error: result.error };
       return {
         success: true,
-        data: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) },
+        data: { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId) },
       };
     },
   });
@@ -721,7 +711,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!result.webhook) return { success: true, data: { webhook: null } };
       return {
         success: true,
-        data: { webhook: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) } },
+        data: { webhook: { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId) } },
       };
     },
   });

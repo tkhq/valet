@@ -64,6 +64,13 @@ vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
 }));
 
+// A team card carries an `OwnerBadge`, which reads the teams list. No fixture
+// below is team-owned, so the badge never mounts — the mock is here so that
+// adding a team-owned fixture does not need a query client as well.
+vi.mock("~/api/settings", () => ({
+  useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+}));
+
 import { SkillsIndexPage } from "./skills.index";
 
 describe("SkillsIndexPage", () => {
@@ -106,14 +113,12 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText("github")).toBeTruthy();
   });
 
-  it("counts the skills, the plugins that ship them, and the caller's own", () => {
-    render(<SkillsIndexPage />);
-    expect(screen.getByText("5 skills · 3 plugins · 1 yours")).toBeTruthy();
-  });
-
   it("links each card to its detail route", () => {
-    render(<SkillsIndexPage />);
-    const link = screen.getByText("Slack tools").closest("a");
+    const { container } = render(<SkillsIndexPage />);
+    // The card's link covers the card instead of wrapping it — a team card's
+    // owner badge in the title row is a link of its own — so it is addressed
+    // by the name it carries for a reader, not through the title text.
+    const link = container.querySelector('a[aria-label="Read Slack tools"]');
     expect(link?.getAttribute("to")).toBe("/skills/$skillName");
   });
 
@@ -126,7 +131,8 @@ describe("SkillsIndexPage", () => {
     currentData = { skills: [] };
     render(<SkillsIndexPage />);
     expect(screen.getByText(/No skills yet/)).toBeTruthy();
-    // No counter when there is nothing to count.
+    // The header carries no counter at all now: the grid's own chips and
+    // search say what is in the list, so a running total said it twice.
     expect(screen.queryByText(/\d+ skills? · \d+ plugins?/)).toBeNull();
   });
 

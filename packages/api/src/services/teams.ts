@@ -20,6 +20,7 @@ import {
   workflowDefinitions,
   type TeamRow,
 } from "../schema/index.js";
+import { isOrgAdmin } from "./org.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -262,6 +263,43 @@ export async function isTeamMember(db: AppQueryable, teamId: string, userId: str
     .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
     .limit(1);
   return rows.length > 0;
+}
+
+/**
+ * Live administration check — the one definition of "may administer this
+ * team". True for a team admin of `teamId`, and for an admin of the team's
+ * org (per `org_members.role`, not the global `users.role` operator flag).
+ * Org admin is a deliberate recovery path, for example when the team's last
+ * admin left the org. Keep it narrow: do not extend it to plain org
+ * membership.
+ *
+ * Two surfaces share this check, and they must not drift:
+ *
+ *   1. The team mutation routes — delete the team, add/set-role/remove a
+ *      member (`routes/teams.ts`).
+ *   2. Administration of a team-owned resource, where the team holds the
+ *      authority instead of a row's `user_id`
+ *      (`canAdministerSession` in `services/session-access.ts`).
+ *
+ * Reads the org from the team row rather than from the caller's request
+ * context, so callers that hold no `orgId` ask the same question as callers
+ * that do. An unknown team id is false: no team, no authority.
+ *
+ * Membership is re-read on every call, never cached — same contract as
+ * `isTeamMember`.
+ */
+export async function canAdministerTeam(db: AppQueryable, teamId: string, userId: string): Promise<boolean> {
+  const teamRows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, teamId)).limit(1);
+  const team = teamRows[0];
+  if (!team) return false;
+  if (await isOrgAdmin(db, team.orgId, userId)) return true;
+
+  const memberRows = await db
+    .select({ role: teamMembers.role })
+    .from(teamMembers)
+    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
+    .limit(1);
+  return memberRows[0]?.role === "admin";
 }
 
 /**

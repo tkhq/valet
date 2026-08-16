@@ -46,25 +46,16 @@ export function IntegrationsPage() {
   const builtIn = plugins
     .filter((p) => !isService(p))
     .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
-  const connectedCount = services.filter((p) => p.services.some((s) => s.connected)).length;
-  const connectableCount = services.filter((p) => p.services.length > 0).length;
 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-6 py-10">
-        <div className="flex items-end justify-between gap-4">
-          <h1 className="font-display text-2xl text-ink">Integrations</h1>
-          {!isLoading && !error && connectableCount > 0 && (
-            <span className="shrink-0 font-mono text-xs text-muted">
-              {connectedCount} of {connectableCount} connected
-            </span>
-          )}
-        </div>
+        <h1 className="font-display text-2xl text-ink">Integrations</h1>
 
         {connectResult?.kind === "connected" && (
           <div
             role="status"
-            className="mt-4 rounded border border-moss/30 bg-moss/10 px-3 py-2 text-sm text-ink"
+            className="mt-4 rounded border border-line bg-moss-wash px-3 py-2 text-sm text-ink"
           >
             Connected {connectResult.value}.
           </div>
@@ -72,7 +63,7 @@ export function IntegrationsPage() {
         {connectResult?.kind === "error" && (
           <div
             role="status"
-            className="mt-4 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-sm text-danger-600"
+            className="mt-4 rounded border border-line bg-danger-wash px-3 py-2 text-sm text-danger-600"
           >
             Connection failed: {connectResult.value}
           </div>

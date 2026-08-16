@@ -7,6 +7,45 @@ import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 
+/**
+ * What the submit button does with the text in the composer.
+ *
+ * `steer` and `queue` are not interchangeable, and the difference is not the
+ * client's to guess: the engine gives a user's own orchestrator the `steer`
+ * queue mode and every other principal — a team orchestrator included — the
+ * `followup` mode (`packages/api/src/engine/host.ts`). A "Steer" label on a
+ * followup queue promises an interrupt that does not happen, so the label
+ * comes from the live `queue.state` frame or falls back to `queue`.
+ */
+type SubmitAction = "send" | "steer" | "queue";
+
+const ACTION_LABEL: Record<SubmitAction, string> = {
+  send: "Send",
+  steer: "Steer",
+  queue: "Queue",
+};
+
+/**
+ * One line of copy that tells the user what happens to the message. Shown
+ * only while the agent works — while it is idle, "Send" needs no gloss.
+ *
+ * The steer wording is literal. A steer admission supersedes the running
+ * submission and aborts the live agent run, then the claim loop starts the
+ * new message (`Thread.handleSteerSupersession`). It does not append to the
+ * turn that is already in flight.
+ */
+const ACTION_HINT: Record<SubmitAction, string> = {
+  send: "",
+  steer: "Steer stops the current turn. The agent starts your message immediately.",
+  queue: "The agent completes the current turn. Then it reads your message.",
+};
+
+const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
+  send: "Send a message — Enter to send, Shift+Enter for a new line",
+  steer: "Steer the current turn — Enter to steer, Shift+Enter for a new line",
+  queue: "Queue a message for after this turn — Enter to queue, Shift+Enter for a new line",
+};
+
 export function Composer({
   sessionId,
   threadId,
@@ -108,16 +147,22 @@ export function Composer({
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
 
-  // Disable submit while engine is mid-turn or while we don't yet know the
-  // active thread id. Prompts queue server-side, but the UX is clearer if
-  // we wait for idle, and we MUST know the thread id to correctly tag the
-  // optimistic message.
-  const busy = send.isPending || (agentStatus !== "idle" && agentStatus !== "error");
-  const canSend = !busy && !!threadId && text.trim().length > 0;
+  // A mid-turn message is allowed — the engine admits it either way. Only
+  // an in-flight POST or an unknown thread id blocks submit, and the thread
+  // id is mandatory because the optimistic message carries it.
+  const working = agentStatus !== "idle" && agentStatus !== "error";
+  // `collect` also lands on `queue`: a collect-mode message waits for its
+  // window to close, so "after the current turn" stays true for it.
+  const action: SubmitAction = !working
+    ? "send"
+    : queueState?.mode === "steer"
+      ? "steer"
+      : "queue";
+  const canSend = !send.isPending && !!threadId && text.trim().length > 0;
 
   async function submit() {
     const t = text.trim();
-    if (!t || busy || !threadId) return;
+    if (!t || send.isPending || !threadId) return;
     setText("");
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
@@ -161,7 +206,7 @@ export function Composer({
   useEffect(() => {
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      if (!busy || !threadId || abortPending) return;
+      if (!working || !threadId || abortPending) return;
       e.preventDefault();
       abortMutate(
         { threadId },
@@ -170,7 +215,7 @@ export function Composer({
     }
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
-  }, [busy, threadId, abortPending, abortMutate]);
+  }, [working, threadId, abortPending, abortMutate]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {
@@ -236,6 +281,9 @@ export function Composer({
       className="border-t border-[--border] p-3 bg-[--bg]"
     >
       <QueueIndicator queueState={queueState} />
+      {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
+      {/* `relative` anchors the command popup to the input row, so the hint
+          above it never moves the popup. */}
       <div className="relative flex gap-2 items-end">
         {(popupOpen || noticeOpen) && (
           <CommandPopup
@@ -256,16 +304,12 @@ export function Composer({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder={
-            threadId
-              ? "Send a message — Enter to send, Shift+Enter for a new line"
-              : "Loading thread…"
-          }
+          placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
           rows={2}
           className="flex-1"
           disabled={send.isPending || !threadId}
         />
-        {busy ? (
+        {working && (
           <Button
             type="button"
             variant="secondary"
@@ -279,12 +323,16 @@ export function Composer({
             <Square className="h-3.5 w-3.5 fill-current" />
             <span>Stop</span>
           </Button>
-        ) : (
-          <Button type="submit" disabled={!canSend} size="lg">
-            <Send className="h-4 w-4" />
-            <span>Send</span>
-          </Button>
         )}
+        <Button
+          type="submit"
+          disabled={!canSend}
+          size="lg"
+          title={working ? ACTION_HINT[action] : undefined}
+        >
+          <Send className="h-4 w-4" />
+          <span>{ACTION_LABEL[action]}</span>
+        </Button>
       </div>
     </form>
   );
