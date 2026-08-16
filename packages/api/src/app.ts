@@ -52,6 +52,9 @@ import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
+import { slackWebhookRouter } from "./routes/slack-webhook.js";
+import { slackAppRouter } from "./routes/slack-app.js";
+import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { eventsRouter } from "./routes/events.js";
@@ -128,6 +131,13 @@ export function createApp(
   // gate below, since the caller is the provider (Telegram etc.), not a
   // logged-in Valet user. Mounting BEFORE `buildAuthMiddleware` is what
   // makes this route public — do not move it below that line.
+  //
+  // Slack gets its own ingress, mounted first so the more specific path
+  // beats `channelsRouter`'s `/:channelType/webhook`. Slack delivers Events
+  // API traffic and interactivity to one app-level URL; that route verifies
+  // the signing-secret HMAC once against the org credential's metadata and
+  // fans each update out to both the channel host and the event pipeline.
+  app.route(SLACK_WEBHOOK_MOUNT, slackWebhookRouter);
   app.route("/api/channels", channelsRouter);
 
   // PUBLIC GitHub App webhook ingress — same reasoning as `channelsRouter`
@@ -246,6 +256,7 @@ export function createApp(
   app.route("/api/me/grants", meGrantsRouter);
   app.route("/api/org/github-app", githubAppRouter);
   app.route("/api/org/linear", linearConnectRouter);
+  app.route("/api/org/slack", slackAppRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/sources", sourcesPublicRouter);
   app.route("/api/repos", reposRouter);

@@ -2392,3 +2392,76 @@ export interface DeleteGrantRequest {
 export interface DeleteGrantResponse {
   ok: true;
 }
+
+// ── REST: Slack agent app setup ──────────────────────────────────────────
+//
+// `GET /api/org/slack` — org-admin only. Returns the app manifest an
+// operator pastes into Slack's app-creation form, plus the connection state
+// of the org's Slack credential. Slack's `apps.manifest.create` needs an
+// app-configuration token this deployment does not hold, so the flow is
+// paste-in rather than API-driven.
+//
+// The manifest targets Slack's agent messaging experience: the feature key
+// is `agent_view`, and the app subscribes `app_home_opened` /
+// `app_context_changed` / `message.im`. See `services/slack-app.ts`.
+
+/** Slack's app-manifest schema — only the fields this flow sets.
+ * https://docs.slack.dev/reference/app-manifest/ */
+export interface SlackAppManifestWire {
+  display_information: {
+    /** Maximum 35 characters; Slack rejects the whole manifest above that. */
+    name: string;
+    /** Maximum 140 characters. */
+    description?: string;
+    background_color?: string;
+  };
+  features: {
+    /** The agent messaging experience. The older `assistant_view` is
+     * deprecated, and its `assistant_description` is renamed here. */
+    agent_view: {
+      /** Maximum 300 characters. */
+      agent_description: string;
+      suggested_prompts: { title: string; message: string }[];
+    };
+    app_home: {
+      home_tab_enabled: boolean;
+      messages_tab_enabled: boolean;
+      /** Must be false. True disables the composer, and the user cannot
+       * type to the agent at all. */
+      messages_tab_read_only_enabled: boolean;
+    };
+    bot_user: { display_name: string; always_online: boolean };
+  };
+  oauth_config: { scopes: { bot: string[] } };
+  settings: {
+    /** `request_url` is omitted in Socket Mode. */
+    event_subscriptions: { request_url?: string; bot_events: string[] };
+    interactivity: { is_enabled: boolean; request_url?: string };
+    org_deploy_enabled: boolean;
+    socket_mode_enabled: boolean;
+    token_rotation_enabled: boolean;
+  };
+}
+
+export interface GetSlackAppResponse {
+  /** `webhook` when this deployment has a public URL Slack can reach;
+   * `socket_mode` otherwise, which is the local-development path. */
+  ingress: "webhook" | "socket_mode";
+  /** The events + interactivity URL in the manifest. `null` in Socket Mode. */
+  requestUrl: string | null;
+  /** Where the operator pastes the manifest. */
+  createUrl: string;
+  manifest: SlackAppManifestWire;
+  /** Scopes the connection refuses to save without. */
+  requiredScopes: string[];
+  /** Scopes the manifest requests; each missing one costs one feature. */
+  optionalScopes: string[];
+  /** An org Slack credential exists. */
+  connected: boolean;
+  /** Workspace the credential belongs to, recorded at connect time. */
+  teamName?: string;
+  teamId?: string;
+  /** Requested scopes the installed app did not grant, from the scope list
+   * recorded at connect time. Empty when nothing is missing. */
+  missingScopes: string[];
+}

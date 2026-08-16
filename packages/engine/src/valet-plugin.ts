@@ -79,6 +79,12 @@ export interface EventCatalogEntry {
   description: string;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
   filters: { field: string; path: string; description: string }[];
+  /**
+   * High-volume keys (e.g. slack.message) opt into match-gated persistence:
+   * ingest matches subscriptions FIRST and skips the insert entirely when
+   * nothing matches. Default false = always persist.
+   */
+  ephemeral?: boolean;
 }
 
 export interface TriggerDef {
@@ -143,13 +149,44 @@ export interface InboundChannelEvent {
   dispatchId: string;
   conversationKey: string;
   sender: ChannelSender;
-  kind: "message" | "command" | "gate_callback";
+  /**
+   * `surface_opened` fires when the user opens the conversation without
+   * saying anything (Slack: `app_home_opened` on the messages tab). It
+   * carries no text. The host answers it with suggested prompts, so an
+   * empty conversation offers a way in.
+   */
+  kind: "message" | "command" | "gate_callback" | "surface_opened";
   text?: string;
   /** Set when kind === "command" (e.g. /start <code>). */
   command?: { name: string; args?: string };
   media?: InboundChannelMedia[];
   /** Set when kind === "gate_callback". `ref` identifies the gate-prompt message. */
-  gateCallback?: { actionId: string; callbackId: string; ref: GatePromptRef };
+  gateCallback?: {
+    actionId: string;
+    callbackId: string;
+    ref: GatePromptRef;
+    /**
+     * Explicit gate id when the transport can embed it in the callback
+     * payload (Slack Block Kit button values hold 2,000 chars). Gates then
+     * survive a host restart. Transports with tiny callback payloads
+     * (Telegram's 64-byte callback_data) omit it, and the host falls back to
+     * its in-memory ref map.
+     */
+    gateId?: string;
+  };
+  /**
+   * What the user is looking at when the event fired (Slack: the entities on
+   * `app_context_changed`, which the provider then injects into messages).
+   * Advisory only — treat `type` as an open enum.
+   */
+  context?: { entities?: Array<{ type: string; value: string }> };
+  /**
+   * Provider-side reply anchor for the turn this message starts (Slack's
+   * `thread_ts`). The streaming bridge sends it back on `startStream` so the
+   * reply lands under the user's own message. Transports without threading
+   * omit it.
+   */
+  threadTs?: string;
   raw: RawChannelUpdate;
 }
 
@@ -170,7 +207,7 @@ export interface ChannelGatePrompt {
 
 export interface ChannelGateResolution {
   actionId?: string;
-  /** Human-readable outcome line, e.g. "✅ Approved by conner". */
+  /** Human-readable outcome line, e.g. "✅ Approved". */
   label: string;
 }
 
@@ -178,6 +215,45 @@ export interface FetchedChannelMedia {
   data: Uint8Array;
   mimeType: string;
   name?: string;
+}
+
+/** An open provider-side stream. `messageId` is the provider's handle for the
+ * streaming message (Slack: the `ts` returned by chat.startStream). */
+export interface StreamRef {
+  conversationKey: string;
+  messageId: string;
+  threadTs: string;
+}
+
+export interface SuggestedPrompt {
+  title: string;
+  message: string;
+}
+
+/**
+ * Why a stream call failed, in terms the host can act on. The host must not
+ * read provider error codes, so each transport maps its own vocabulary onto
+ * these four kinds. Anything unmapped stays `unknown` and is treated as
+ * fatal for the stream, never as retryable — retrying an unclassified error
+ * forever is how a turn burns tokens into a message nobody sees.
+ *
+ * - `rate_limited`: back off for `retryAfterMs`, keep the text, send it later.
+ * - `stream_gone`: the provider no longer owns the message. Stop appending.
+ * - `stopped_by_user`: the reader pressed stop. Abort the turn as well.
+ * - `unknown`: close the stream and report.
+ */
+export type ChannelStreamErrorKind = "rate_limited" | "stream_gone" | "stopped_by_user" | "unknown";
+
+export class ChannelStreamError extends Error {
+  constructor(
+    readonly kind: ChannelStreamErrorKind,
+    message: string,
+    /** Only meaningful when kind === "rate_limited". */
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "ChannelStreamError";
+  }
 }
 
 export interface ChannelTransport {
@@ -205,10 +281,70 @@ export interface ChannelTransport {
   answerCallback?(callbackId: string, text?: string): Promise<void>;
   /** Register the webhook endpoint with the provider (webhook mode only). */
   registerWebhook?(url: string, secretToken: string): Promise<void>;
+  /**
+   * Engine thread key for a conversationKey. Absent → the host default,
+   * `${channelType}:${lastKeySegment}`. Slack overrides it because its
+   * conversationKey carries a team id the thread key does not need.
+   */
+  threadKeyFromConversationKey?(conversationKey: string): string;
+  /**
+   * Inverse of `threadKeyFromConversationKey`, for outbound delivery: rebuild
+   * the conversationKey from a stored engine thread key. `null` = not one of
+   * this transport's keys. Needed whenever the round trip is lossy — Slack's
+   * team id lives on the transport, not in the thread key.
+   */
+  conversationKeyFromThreadKey?(threadKey: string): string | null;
+
+  // ── Streaming egress ────────────────────────────────────────────────
+  //
+  // A transport that streams implements all three of start/append/stop. The
+  // host calls them only when all three are present, so Telegram — which
+  // posts finished messages — is unaffected. Every one of them rejects with
+  // `ChannelStreamError` so the host can tell a retryable rate limit from a
+  // dead stream without reading provider error codes.
+
+  /** Open a stream. `threadTs` anchors it to the user's own message. */
+  startStream?(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef>;
+  /** Append markdown to an open stream. */
+  appendStream?(ref: StreamRef, markdown: string): Promise<void>;
+  /** Close a stream. `final` carries the last markdown and any trailing blocks. */
+  stopStream?(ref: StreamRef, final?: { markdown?: string }): Promise<void>;
+  /** Show a transient working indicator on a thread. */
+  setStatus?(conversationKey: string, threadTs: string, status: string): Promise<void>;
+  /** Offer starter prompts. `threadTs` omitted = the conversation's entry point. */
+  setSuggestedPrompts?(
+    conversationKey: string,
+    prompts: SuggestedPrompt[],
+    opts?: { threadTs?: string; title?: string },
+  ): Promise<void>;
+  /** Name a thread, once, after its first turn. */
+  setThreadTitle?(conversationKey: string, threadTs: string, title: string): Promise<void>;
+}
+
+/** True when a transport implements the whole streaming triple. Feature-detected
+ * rather than declared, so a transport cannot claim streaming it cannot finish —
+ * a half-implemented triple would open streams it can never close. */
+export function canStream(
+  transport: ChannelTransport,
+): transport is ChannelTransport &
+  Required<Pick<ChannelTransport, "startStream" | "appendStream" | "stopStream">> {
+  return (
+    typeof transport.startStream === "function" &&
+    typeof transport.appendStream === "function" &&
+    typeof transport.stopStream === "function"
+  );
 }
 
 export interface ChannelTransportFactory {
   channelType: string;
+  /**
+   * How inbound reaches the host. "registered-webhook" (the default): the
+   * host mints a per-boot secret and calls `transport.registerWebhook`.
+   * "external-webhook": the provider's webhook URL is app-level config the
+   * operator sets, and verification uses a provider-issued secret held on the
+   * credential — the host neither mints a secret nor registers anything.
+   */
+  ingress?: "registered-webhook" | "external-webhook";
   create(ctx: TransportContext): ChannelTransport;
 }
 

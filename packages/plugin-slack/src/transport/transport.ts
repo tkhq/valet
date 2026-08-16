@@ -1,0 +1,918 @@
+/**
+ * Slack channel transport for the agent messaging experience (`agent_view`).
+ *
+ * The surface is a direct message between one person and the app, and every
+ * turn is a thread whose root is the user's own message. That shape drives
+ * three decisions this file makes differently from a general channel adapter:
+ *
+ * 1. It routes direct messages only. Channel posts and @mentions belong to
+ *    the event pipeline (`../triggers.ts`), not to a conversation.
+ * 2. The conversation key holds no thread id. A DM channel is stable per
+ *    user, while `thread_ts` changes every turn, so the thread id travels
+ *    with each event and each stream instead of being encoded in the key.
+ * 3. Replies stream. `chat.startStream`/`appendStream`/`stopStream` put the
+ *    agent's text on screen as it is produced, the way the web UI shows it.
+ *    The host drives that lifecycle; this file provides the three calls and
+ *    translates Slack's error vocabulary into `ChannelStreamError`.
+ *
+ * Under `agent_view` the thread root is the user's own message and carries no
+ * `assistant_app_thread` subtype. Nothing here keys off that subtype.
+ */
+import {
+  ChannelStreamError,
+  type ChannelGatePrompt,
+  type ChannelGateResolution,
+  type ChannelStreamErrorKind,
+  type ChannelTransport,
+  type ChannelTransportFactory,
+  type FetchedChannelMedia,
+  type GatePromptRef,
+  type InboundChannelEvent,
+  type InboundChannelMedia,
+  type OutboundChannelAttachment,
+  type OutboundChannelMessage,
+  type RawChannelUpdate,
+  type SendRef,
+  type StreamRef,
+  type SuggestedPrompt,
+  type TransportContext,
+} from "@valet/engine";
+import { buildContentBlocks, SLACK_MAX_BLOCKS, SLACK_TEXT_LIMIT } from "../message-chunking.js";
+import { SKIP_SUBTYPES } from "../subtypes.js";
+import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
+import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
+import { verifySlackSignatureSync } from "./verify.js";
+
+const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
+const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
+
+/** Cap the in-memory url_private / gate-text / turn maps. */
+const MAX_TRACKED_ENTRIES = 500;
+
+// ─── Conversation-key codec ─────────────────────────────────────────────────
+//
+// conversationKey: "slack:{teamId}:{channelId}"
+// engine threadKey: "slack:{channelId}"
+//
+// The team id stays out of the thread key because the transport already knows
+// it — one credential serves one workspace. It stays IN the conversation key
+// because the host round-trips that value into outbound calls and a bare
+// channel id would not say which workspace it belongs to.
+
+export interface SlackConversationRef {
+  teamId: string;
+  channelId: string;
+}
+
+export function conversationKeyFor(teamId: string, channelId: string): string {
+  return `slack:${teamId}:${channelId}`;
+}
+
+export function parseConversationKey(key: string): SlackConversationRef | null {
+  if (!key.startsWith("slack:")) return null;
+  const parts = key.slice("slack:".length).split(":");
+  if (parts.length !== 2 || parts.some((p) => p === "")) return null;
+  return { teamId: parts[0], channelId: parts[1] };
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === "number" ? v : undefined;
+}
+
+function rec(v: unknown): Record<string, unknown> | undefined {
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+/**
+ * Clean Slack-specific markup from message text. The app's own mention is
+ * removed, other user mentions fall back to "@USERID", channel links
+ * `<#C…|name>` become #name, and link syntax collapses to its label.
+ */
+export function cleanSlackText(text: string, selfUserId?: string): string {
+  let cleaned = text;
+  if (selfUserId) cleaned = cleaned.split(`<@${selfUserId}>`).join("");
+  cleaned = cleaned.replace(/<@([A-Z0-9]+)>/g, "@$1");
+  cleaned = cleaned.replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1");
+  cleaned = cleaned.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "$2");
+  cleaned = cleaned.replace(/<(https?:\/\/[^>]+)>/g, "$1");
+  return cleaned.trim();
+}
+
+/**
+ * Slack error codes that end a stream, mapped to what the host should do.
+ * Anything absent here is `unknown`, which the host treats as fatal — see
+ * `ChannelStreamErrorKind`.
+ */
+const STREAM_ERROR_KINDS: Record<string, ChannelStreamErrorKind> = {
+  stopped_by_user: "stopped_by_user",
+  message_not_in_streaming_state: "stream_gone",
+  message_not_owned_by_app: "stream_gone",
+  message_not_found: "stream_gone",
+  channel_not_found: "stream_gone",
+  is_archived: "stream_gone",
+  // slackFetch already slept and retried three times before surfacing these,
+  // so no Retry-After value survives to pass on. The host must choose its own
+  // backoff; a number invented here would be worse than none.
+  rate_limited: "rate_limited",
+  ratelimited: "rate_limited",
+};
+
+/** Re-throw a Slack failure as the host-facing stream error. */
+function asStreamError(err: unknown): never {
+  if (err instanceof SlackApiError) {
+    const kind = STREAM_ERROR_KINDS[err.detail] ?? "unknown";
+    throw new ChannelStreamError(kind, err.message);
+  }
+  throw new ChannelStreamError("unknown", err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * Split streamed markdown so no piece exceeds `maxLen`, losing nothing.
+ *
+ * `splitText` in message-chunking drops the newline it splits on, which suits
+ * discrete blocks but would delete paragraph breaks from a stream. Here the
+ * newline stays at the head of the next piece, so concatenating the pieces
+ * reproduces the input exactly.
+ */
+export function splitForStream(text: string, maxLen: number): string[] {
+  const pieces: string[] = [];
+  let rest = text;
+  while (rest.length > maxLen) {
+    let cut = rest.lastIndexOf("\n", maxLen);
+    if (cut <= 0) cut = maxLen;
+    pieces.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest !== "") pieces.push(rest);
+  return pieces;
+}
+
+interface SlackFileRef {
+  urlPrivate: string;
+  thumb?: string;
+  mimeType: string;
+  name?: string;
+  size?: number;
+}
+
+export class SlackTransport implements ChannelTransport {
+  readonly channelType = "slack";
+  /** Socket Mode ingress; only present when the credential carries an app token. */
+  readonly poll?: (signal: AbortSignal) => AsyncIterable<RawChannelUpdate>;
+
+  /** fileId → private download URLs captured at parseUpdate time. */
+  private readonly fileRefs = new Map<string, SlackFileRef>();
+  /** `${conversationKey}#${messageId}` → gate-prompt mrkdwn text, for updateGatePrompt. */
+  private readonly gateTexts = new Map<string, string>();
+  /**
+   * conversationKey → `thread_ts` of the most recent inbound turn.
+   *
+   * Two host calls carry no per-turn handle: `sendTyping(conversationKey)`
+   * and `sendGatePrompt(conversationKey, gate)`. Slack needs a `thread_ts`
+   * for both — a status shimmer attaches to a thread, and a gate must appear
+   * under the turn that raised it. A DM has one person in it, so the last
+   * inbound turn is the right thread for both.
+   */
+  private readonly lastTurn = new Map<string, string>();
+
+  constructor(
+    private readonly api: SlackApi,
+    private readonly teamId: string,
+    private readonly signingSecret?: string,
+    private readonly botUserId?: string,
+    appToken?: string,
+  ) {
+    if (appToken !== undefined) {
+      this.poll = (signal) => this.socketModePoll(appToken, signal);
+    }
+  }
+
+  // ─── Ingress ──────────────────────────────────────────────────────────
+
+  /**
+   * Slack signs every delivery with the app's signing secret, which is
+   * provider-issued and stored on the credential. That is unlike a transport
+   * whose webhook the host registers with a secret it minted.
+   *
+   * `webhookSecret` is the key the rest of Valet uses for a provider-issued
+   * webhook secret: `routes/slack-webhook.ts` passes it, the Slack
+   * `TriggerDef`s read it, and `routes/credentials.ts` stores it under that
+   * name. `signingSecret` is accepted as well so a credential saved under
+   * the older key still verifies.
+   */
+  verifyWebhook(
+    req: { headers: Record<string, string>; rawBody: Uint8Array },
+    secrets: Record<string, string> = {},
+  ): RawChannelUpdate[] | null {
+    const secret = secrets.webhookSecret ?? secrets.signingSecret ?? this.signingSecret;
+    if (secret === undefined || secret === "") return null;
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
+    const bodyText = new TextDecoder().decode(req.rawBody);
+    if (!verifySlackSignatureSync(headers, bodyText, secret)) return null;
+    try {
+      if (bodyText.startsWith("payload=")) {
+        // Interactivity posts form-encoded with a single `payload` JSON param.
+        const payload = new URLSearchParams(bodyText).get("payload");
+        if (payload === null) return null;
+        return [JSON.parse(payload) as unknown];
+      }
+      return [JSON.parse(bodyText) as unknown];
+    } catch {
+      return null;
+    }
+  }
+
+  parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null {
+    const u = rec(update);
+    if (!u) return null;
+    if (u.type === "block_actions") return this.parseBlockActions(u, update);
+    if (u.type !== "event_callback") return null;
+
+    const eventId = str(u.event_id);
+    const event = rec(u.event);
+    if (!eventId || !event) return null;
+    const teamId = str(u.team_id) ?? this.teamId;
+
+    switch (str(event.type)) {
+      case "message":
+        return this.parseMessage(event, eventId, teamId, update);
+      case "app_home_opened":
+        return this.parseHomeOpened(event, eventId, teamId, update);
+      case "app_context_changed":
+        // Consumed on purpose. The app subscribes to this event because the
+        // subscription is what makes Slack attach `context` to message.im and
+        // app_home_opened, which is where this transport reads it. The
+        // standalone event adds nothing the next real event will not carry.
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  private parseMessage(
+    event: Record<string, unknown>,
+    eventId: string,
+    teamId: string,
+    update: RawChannelUpdate,
+  ): InboundChannelEvent | null {
+    // Drop the app's own output. Streamed replies come back as message events
+    // on the same DM; without this the agent answers itself forever.
+    if (event.bot_id !== undefined && event.bot_id !== null) return null;
+    const subtype = str(event.subtype);
+    if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
+    if (subtype !== undefined && subtype !== "file_share") return null;
+
+    // The agent surface is the DM. Channel traffic is the event pipeline's.
+    if (str(event.channel_type) !== "im") return null;
+
+    const channel = str(event.channel);
+    const user = str(event.user);
+    const ts = str(event.ts) ?? str(event.event_ts);
+    if (!channel || !user || !ts) return null;
+    if (this.botUserId !== undefined && user === this.botUserId) return null;
+
+    const conversationKey = conversationKeyFor(teamId, channel);
+    // A turn replies under the user's own message. When the user types into
+    // an existing thread, that thread's root wins.
+    const threadTs = str(event.thread_ts) ?? ts;
+    this.remember(this.lastTurn, conversationKey, threadTs);
+
+    const text = cleanSlackText(str(event.text) ?? "", this.botUserId);
+    const media = this.mediaOf(event);
+    if (text === "" && media === undefined) return null;
+
+    const inbound: InboundChannelEvent = {
+      dispatchId: `slack:${eventId}`,
+      conversationKey,
+      sender: { externalId: user },
+      kind: "message",
+      text: text !== "" ? text : undefined,
+      media,
+      threadTs,
+      raw: update,
+    };
+    const context = this.contextOf(event);
+    if (context) inbound.context = context;
+    return inbound;
+  }
+
+  /**
+   * `app_home_opened` on the messages tab is the current signal that someone
+   * opened the conversation. It replaces the legacy
+   * `assistant_thread_started`. The home tab fires the same event, so the tab
+   * check is what separates the two.
+   */
+  private parseHomeOpened(
+    event: Record<string, unknown>,
+    eventId: string,
+    teamId: string,
+    update: RawChannelUpdate,
+  ): InboundChannelEvent | null {
+    if (str(event.tab) !== "messages") return null;
+    const channel = str(event.channel);
+    const user = str(event.user);
+    if (!channel || !user) return null;
+
+    const inbound: InboundChannelEvent = {
+      dispatchId: `slack:${eventId}`,
+      conversationKey: conversationKeyFor(teamId, channel),
+      sender: { externalId: user },
+      kind: "surface_opened",
+      raw: update,
+    };
+    const context = this.contextOf(event);
+    if (context) inbound.context = context;
+    return inbound;
+  }
+
+  /**
+   * Read the app context Slack attaches once the app subscribes to
+   * `app_context_changed`. An empty context serializes as `"context": {}`
+   * with no `entities` key, so the array is never assumed to exist.
+   */
+  private contextOf(event: Record<string, unknown>): InboundChannelEvent["context"] {
+    const raw = rec(event.context);
+    if (!raw || !Array.isArray(raw.entities)) return undefined;
+    const entities: Array<{ type: string; value: string }> = [];
+    for (const item of raw.entities) {
+      const entity = rec(item);
+      const type = str(entity?.type);
+      const value = str(entity?.value);
+      if (type && value) entities.push({ type, value });
+    }
+    return entities.length > 0 ? { entities } : undefined;
+  }
+
+  private parseBlockActions(u: Record<string, unknown>, raw: RawChannelUpdate): InboundChannelEvent | null {
+    const triggerId = str(u.trigger_id);
+    if (!triggerId) return null;
+    const actions = Array.isArray(u.actions) ? u.actions : [];
+    const action = rec(actions[0]);
+    if (!action) return null;
+    const value = str(action.value);
+    if (!value) return null;
+    const parts = value.split("|");
+    if (parts.length < 3 || parts[0] !== "g" || parts[1] === "") return null;
+    const gateId = parts[1];
+    const actionId = parts.slice(2).join("|");
+    if (actionId === "") return null;
+
+    const container = rec(u.container);
+    const messageTs = str(container?.message_ts);
+    const channelId = str(rec(u.channel)?.id) ?? str(container?.channel_id);
+    const userRec = rec(u.user);
+    const userId = str(userRec?.id);
+    if (!messageTs || !channelId || !userId) return null;
+
+    const teamId = str(rec(u.team)?.id) ?? this.teamId;
+    const conversationKey = conversationKeyFor(teamId, channelId);
+
+    return {
+      dispatchId: `slack:ia:${triggerId}`,
+      conversationKey,
+      sender: { externalId: userId, displayName: str(userRec?.username) ?? str(userRec?.name) },
+      kind: "gate_callback",
+      threadTs: str(container?.thread_ts) ?? messageTs,
+      gateCallback: {
+        actionId,
+        gateId,
+        callbackId: triggerId,
+        ref: { conversationKey, messageId: messageTs },
+      },
+      raw,
+    };
+  }
+
+  private mediaOf(event: Record<string, unknown>): InboundChannelMedia[] | undefined {
+    const files = Array.isArray(event.files) ? event.files : [];
+    const media: InboundChannelMedia[] = [];
+    for (const item of files) {
+      const file = rec(item);
+      if (!file) continue;
+      const fileId = str(file.id);
+      const urlPrivate = str(file.url_private);
+      if (!fileId || !urlPrivate) continue;
+      const mimeType = str(file.mimetype) ?? "application/octet-stream";
+      const name = str(file.name);
+      const size = num(file.size);
+      const thumb = str(file.thumb_1024) ?? str(file.thumb_720) ?? str(file.thumb_480) ?? str(file.thumb_360);
+      this.remember(this.fileRefs, fileId, { urlPrivate, thumb, mimeType, name, size });
+      media.push({
+        kind: mimeType.startsWith("image/") ? "photo" : "document",
+        fileId,
+        mimeType,
+        fileName: name,
+        fileSize: size,
+      });
+    }
+    return media.length > 0 ? media : undefined;
+  }
+
+  private remember<V>(map: Map<string, V>, key: string, value: V): void {
+    map.set(key, value);
+    if (map.size > MAX_TRACKED_ENTRIES) {
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) map.delete(oldest);
+    }
+  }
+
+  // ─── Socket Mode (local-dev ingress) ──────────────────────────────────
+
+  private async *socketModePoll(appToken: string, signal: AbortSignal): AsyncIterable<RawChannelUpdate> {
+    // Reconnect backoff is only reset after a connection that STAYED UP for at
+    // least this long. Otherwise a connect→immediate-disconnect storm (Slack
+    // refusing/rotating the socket) would reset the backoff to the floor on
+    // every accept and spin at ~1 reconnect/sec against connections.open.
+    const MIN_HEALTHY_DWELL_MS = 30_000;
+    let backoffMs = 1000;
+    while (!signal.aborted) {
+      let ws: WebSocket;
+      let connectedAt = 0;
+      try {
+        const url = await this.api.connectionsOpen(appToken);
+        ws = await openWebSocket(url, signal);
+        connectedAt = Date.now();
+      } catch {
+        if (signal.aborted) return;
+        await sleep(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, 60_000);
+        continue;
+      }
+
+      const queue: RawChannelUpdate[] = [];
+      let closed = false;
+      let notify: (() => void) | null = null;
+      const wake = (): void => {
+        notify?.();
+        notify = null;
+      };
+      const onAbort = (): void => ws.close();
+      signal.addEventListener("abort", onAbort);
+      ws.addEventListener("close", () => {
+        closed = true;
+        wake();
+      });
+      ws.addEventListener("error", () => {
+        closed = true;
+        wake();
+      });
+      ws.addEventListener("message", (ev: MessageEvent) => {
+        const data: unknown = ev.data;
+        if (typeof data !== "string") return;
+        let msg: Record<string, unknown> | undefined;
+        try {
+          msg = rec(JSON.parse(data));
+        } catch {
+          return;
+        }
+        if (!msg) return;
+        if (msg.type === "disconnect") {
+          // Slack asks us to reconnect (deploys, connection rotation).
+          ws.close();
+          return;
+        }
+        const envelopeId = str(msg.envelope_id);
+        if (envelopeId !== undefined) ws.send(JSON.stringify({ envelope_id: envelopeId }));
+        // events_api payloads are event_callback bodies; interactive payloads
+        // are block_actions objects — both are parseUpdate inputs. Slash
+        // command envelopes are acked but not yielded.
+        if ((msg.type === "events_api" || msg.type === "interactive") && msg.payload !== undefined) {
+          queue.push(msg.payload);
+          wake();
+        }
+      });
+
+      try {
+        while (true) {
+          while (queue.length > 0) {
+            const next = queue.shift();
+            if (next !== undefined) yield next;
+            if (signal.aborted) return;
+          }
+          if (closed) break;
+          await new Promise<void>((resolve) => {
+            notify = resolve;
+            if (closed || queue.length > 0) wake();
+          });
+        }
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+        try {
+          ws.close();
+        } catch {
+          // already closed
+        }
+      }
+
+      if (signal.aborted) return;
+      // A connection that stayed up is healthy — reset so the next reconnect
+      // is prompt. A short-lived one keeps escalating the backoff.
+      if (Date.now() - connectedAt >= MIN_HEALTHY_DWELL_MS) backoffMs = 1000;
+      await sleep(backoffMs);
+      backoffMs = Math.min(backoffMs * 2, 60_000);
+    }
+  }
+
+  // ─── Streaming egress ─────────────────────────────────────────────────
+
+  async startStream(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef> {
+    const target = this.mustParse(conversationKey);
+    try {
+      // No recipient_user_id: Slack requires it only when streaming into a
+      // channel, and this surface is a DM. Add it if `missing_recipient_user_id`
+      // ever comes back.
+      const res = await this.api.startStream({ channel: target.channelId, threadTs: ctx.threadTs });
+      return { conversationKey, messageId: res.ts, threadTs: ctx.threadTs };
+    } catch (err) {
+      asStreamError(err);
+    }
+  }
+
+  /**
+   * Append markdown to an open stream. Slack caps `markdown_text` at 12,000
+   * characters and drops the excess without an error, so anything longer is
+   * split and sent in order. The host batches deltas; this is the last guard
+   * against silent text loss.
+   */
+  async appendStream(ref: StreamRef, markdown: string): Promise<void> {
+    const target = this.mustParse(ref.conversationKey);
+    const safe = neutralizeSlackMentions(markdown);
+    if (safe === "") return;
+    try {
+      for (const piece of splitForStream(safe, SLACK_MARKDOWN_TEXT_LIMIT)) {
+        await this.api.appendStream({ channel: target.channelId, ts: ref.messageId, markdownText: piece });
+      }
+    } catch (err) {
+      asStreamError(err);
+    }
+  }
+
+  /**
+   * Close the stream, optionally with a last piece of markdown.
+   *
+   * A `final` longer than the 12,000-character limit is appended in pieces
+   * first and only its tail rides on the stop call. Truncating instead would
+   * silently drop the end of the answer, which is the one part the reader was
+   * waiting for.
+   */
+  async stopStream(ref: StreamRef, final?: { markdown?: string }): Promise<void> {
+    const target = this.mustParse(ref.conversationKey);
+    const markdown = final?.markdown;
+    const safe =
+      markdown !== undefined && markdown !== "" ? neutralizeSlackMentions(markdown) : undefined;
+    try {
+      let tail = safe;
+      if (safe !== undefined && safe.length > SLACK_MARKDOWN_TEXT_LIMIT) {
+        const pieces = splitForStream(safe, SLACK_MARKDOWN_TEXT_LIMIT);
+        tail = pieces.pop();
+        for (const piece of pieces) {
+          await this.api.appendStream({ channel: target.channelId, ts: ref.messageId, markdownText: piece });
+        }
+      }
+      await this.api.stopStream({ channel: target.channelId, ts: ref.messageId, markdownText: tail });
+    } catch (err) {
+      asStreamError(err);
+    }
+  }
+
+  // ─── Assistant thread controls ────────────────────────────────────────
+
+  async setStatus(conversationKey: string, threadTs: string, status: string): Promise<void> {
+    const target = this.mustParse(conversationKey);
+    await this.api.setThreadStatus(target.channelId, threadTs, status);
+  }
+
+  /**
+   * Offer starter prompts. `threadTs` is omitted for a conversation with no
+   * turn yet, which puts the prompts at the top of the Messages tab.
+   */
+  async setSuggestedPrompts(
+    conversationKey: string,
+    prompts: SuggestedPrompt[],
+    opts?: { threadTs?: string; title?: string },
+  ): Promise<void> {
+    if (prompts.length === 0) return;
+    const target = this.mustParse(conversationKey);
+    await this.api.setSuggestedPrompts({
+      channelId: target.channelId,
+      prompts,
+      threadTs: opts?.threadTs,
+      title: opts?.title,
+    });
+  }
+
+  async setThreadTitle(conversationKey: string, threadTs: string, title: string): Promise<void> {
+    const target = this.mustParse(conversationKey);
+    await this.api.setThreadTitle(target.channelId, threadTs, title);
+  }
+
+  // ─── Discrete-message egress ──────────────────────────────────────────
+
+  async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
+    const target = this.mustParse(conversationKey);
+    const threadTs = this.lastTurn.get(conversationKey);
+    const formatted = markdownToSlackMrkdwn(message.markdown);
+    let text = formatted;
+    let blocks: Record<string, unknown>[] | undefined;
+    if (message.markdown.length > SLACK_TEXT_LIMIT) {
+      // One API call with blocks — never several messages (chat.postMessage is
+      // limited to 1/sec/channel; see message-chunking.ts).
+      blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
+      text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+    }
+    const res = await this.api.postMessage({ channel: target.channelId, text, threadTs, blocks });
+    return { conversationKey, messageId: res.ts };
+  }
+
+  async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef> {
+    const target = this.mustParse(conversationKey);
+    const name = attachment.type === "file" ? attachment.name : (attachment.name ?? `image-${Date.now()}.png`);
+    const { uploadUrl, fileId } = await this.api.getUploadUrlExternal(name, attachment.data.byteLength);
+    await this.api.uploadToUrl(uploadUrl, attachment.data, attachment.mimeType);
+    await this.api.completeUploadExternal({
+      fileId,
+      channelId: target.channelId,
+      threadTs: this.lastTurn.get(conversationKey),
+      initialComment: attachment.caption,
+    });
+    // files.completeUploadExternal returns no message ts; the file id is the
+    // only stable handle for what was shared.
+    return { conversationKey, messageId: fileId };
+  }
+
+  // ─── Approval gates ───────────────────────────────────────────────────
+
+  /**
+   * A gate is its own message, not a chunk inside the stream. A parked turn
+   * can wait hours for an answer, and Slack documents no timeout for a stream
+   * left open — so the host closes the stream first and posts this
+   * separately. Interactivity is unaffected by `agent_view`.
+   */
+  async sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef> {
+    const target = this.mustParse(conversationKey);
+    const text = markdownToSlackMrkdwn(gate.body ? `**${gate.title}**\n\n${gate.body}` : `**${gate.title}**`);
+    const blocks: Record<string, unknown>[] = [
+      { type: "section", text: { type: "mrkdwn", text } },
+      {
+        type: "actions",
+        elements: gate.actions.map((action) => ({
+          type: "button",
+          text: { type: "plain_text", text: action.label },
+          action_id: action.id,
+          // Slack allows 2,000-char values, so the real gate id rides along
+          // instead of being looked up by message reference (Telegram's
+          // 64-byte callback_data cannot carry it). The host reads it from
+          // `gateCallback.gateId`. It does not do so yet — `gateForRef` still
+          // resolves through the in-memory ref map — so an api restart still
+          // loses a pending gate until that call site changes.
+          value: `g|${gate.gateId}|${action.id}`,
+          ...(action.style !== undefined ? { style: action.style } : {}),
+        })),
+      },
+    ];
+    const res = await this.api.postMessage({
+      channel: target.channelId,
+      text,
+      threadTs: this.lastTurn.get(conversationKey),
+      blocks,
+    });
+    this.remember(this.gateTexts, `${conversationKey}#${res.ts}`, text);
+    return { conversationKey, messageId: res.ts };
+  }
+
+  async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {
+    const target = this.mustParse(ref.conversationKey);
+    const key = `${ref.conversationKey}#${ref.messageId}`;
+    const original = this.gateTexts.get(key);
+    const text = original !== undefined ? `${original}\n\n${resolution.label}` : resolution.label;
+    // Keep a single section block (which clears the buttons) and pin
+    // parse: "none" — chat.update defaults parse to "client" and would
+    // re-render link markup.
+    await this.api.updateMessage({
+      channel: target.channelId,
+      ts: ref.messageId,
+      text,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+      parse: "none",
+    });
+    this.gateTexts.delete(key);
+  }
+
+  /**
+   * Slack has no bot typing indicator; the agent surface has a thread status
+   * shimmer instead. Failures are swallowed — a missing shimmer must not fail
+   * the turn, and the status lapses on its own after two minutes.
+   */
+  async sendTyping(conversationKey: string): Promise<void> {
+    const threadTs = this.lastTurn.get(conversationKey);
+    if (threadTs === undefined) return;
+    try {
+      await this.setStatus(conversationKey, threadTs, "is thinking...");
+    } catch {
+      // Not an agent thread, or the scope is missing — nothing to show.
+    }
+  }
+
+  async fetchMedia(media: InboundChannelMedia): Promise<FetchedChannelMedia | null> {
+    let ref = this.fileRefs.get(media.fileId);
+    if (!ref) {
+      // Re-derive url_private via files.info (e.g. after an api restart).
+      try {
+        const file = await this.api.filesInfo(media.fileId);
+        const urlPrivate = str(file.url_private);
+        if (!urlPrivate) return null;
+        ref = {
+          urlPrivate,
+          thumb: str(file.thumb_1024) ?? str(file.thumb_720) ?? str(file.thumb_480) ?? str(file.thumb_360),
+          mimeType: str(file.mimetype) ?? media.mimeType ?? "application/octet-stream",
+          name: str(file.name) ?? media.fileName,
+          size: num(file.size) ?? media.fileSize,
+        };
+      } catch {
+        return null;
+      }
+    }
+    const isImage = ref.mimeType.startsWith("image/");
+    const maxBytes = isImage ? MAX_IMAGE_DOWNLOAD_BYTES : MAX_FILE_DOWNLOAD_BYTES;
+    // Prefer a Slack-generated thumbnail for images over the full-size file.
+    const url = isImage && ref.thumb !== undefined ? ref.thumb : ref.urlPrivate;
+    if (url === ref.urlPrivate && ref.size !== undefined && ref.size > maxBytes) return null;
+    let data: Uint8Array | null;
+    try {
+      data = await this.api.downloadFile(url, maxBytes);
+    } catch {
+      return null;
+    }
+    if (data === null) return null;
+    // When we served a Slack-generated thumbnail (images), the bytes are a
+    // JPEG/PNG derivative, not the original encoding — report a matching
+    // mimeType so a downstream decoder/vision API isn't handed e.g. image/heic
+    // bytes that are actually JPEG. Full-file downloads keep the real mime.
+    const servedThumb = isImage && ref.thumb !== undefined && url === ref.thumb;
+    const mimeType = servedThumb ? "image/jpeg" : ref.mimeType;
+    return { data, mimeType, name: ref.name };
+  }
+
+  // ─── Key mappings ─────────────────────────────────────────────────────
+
+  threadKeyFromConversationKey(conversationKey: string): string {
+    const target = parseConversationKey(conversationKey);
+    if (!target) return conversationKey;
+    return `slack:${target.channelId}`;
+  }
+
+  conversationKeyFromThreadKey(threadKey: string): string | null {
+    if (!threadKey.startsWith("slack:")) return null;
+    const channelId = threadKey.slice("slack:".length);
+    if (channelId === "" || channelId.includes(":")) return null;
+    return conversationKeyFor(this.teamId, channelId);
+  }
+
+  // ─── Feature-detected extras (not part of ChannelTransport) ───────────
+
+  /** Workspace-member typeahead for the identity-link flow (users.list, bot token). */
+  async listWorkspaceMembers(query: string): Promise<Array<{ id: string; name: string; realName?: string }>> {
+    const q = query.trim().toLowerCase();
+    const out: Array<{ id: string; name: string; realName?: string }> = [];
+    let cursor: string | undefined;
+    // Bound the SCAN, not just the match count: a selective query that matches
+    // few/no members would otherwise page through the entire directory (~250
+    // users.list calls in a 50k-member workspace), hanging the typeahead and
+    // hammering rate limits. Cap pages regardless of how many matches accrue.
+    const MAX_PAGES = 10;
+    let pages = 0;
+    do {
+      const page = await this.api.listUsers(cursor);
+      pages += 1;
+      for (const member of page.members) {
+        if (member.isBot || member.deleted || member.id === "USLACKBOT") continue;
+        if (
+          q !== "" &&
+          !member.name.toLowerCase().includes(q) &&
+          !(member.realName ?? "").toLowerCase().includes(q)
+        ) {
+          continue;
+        }
+        out.push({ id: member.id, name: member.name, realName: member.realName });
+        if (out.length >= 20) return out;
+      }
+      cursor = page.nextCursor;
+      if (pages >= MAX_PAGES) break;
+    } while (cursor !== undefined);
+    return out;
+  }
+
+  /** Open (or fetch) the app↔user IM and return its conversationKey. */
+  async openDirectConversation(slackUserId: string): Promise<string> {
+    const channelId = await this.api.openConversation(slackUserId);
+    return conversationKeyFor(this.teamId, channelId);
+  }
+
+  /**
+   * Parse a conversation key and prove it belongs to this workspace.
+   *
+   * The team check is not decoration. A three-segment key that this transport
+   * did not mint — for example one a host built with a hard-coded middle
+   * segment — still parses, and its channel id still posts somewhere
+   * plausible, so the damage would be a reply in the wrong place rather than
+   * an error. Comparing the team id against the credential's own turns that
+   * silent misdelivery into a named failure, and stops a key from one
+   * workspace addressing another.
+   */
+  private mustParse(conversationKey: string): SlackConversationRef {
+    const target = parseConversationKey(conversationKey);
+    if (!target) {
+      throw new Error(
+        `Not a Slack conversation key: "${conversationKey}". Expected "slack:{teamId}:{channelId}".`,
+      );
+    }
+    if (target.teamId !== this.teamId) {
+      throw new Error(
+        `Slack conversation key "${conversationKey}" names workspace "${target.teamId}", but this transport serves "${this.teamId}". Rebuild the key with conversationKeyFromThreadKey().`,
+      );
+    }
+    return target;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function openWebSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
+    const ws = new WebSocket(url);
+    const onAbort = (): void => {
+      ws.close();
+      reject(new Error("aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    ws.addEventListener("open", () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(ws);
+    });
+    ws.addEventListener("error", () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error(`websocket connect failed: ${url}`));
+    });
+  });
+}
+
+export const slackTransportFactory: ChannelTransportFactory = {
+  channelType: "slack",
+  // Slack's request URL is app-level configuration the operator sets in the
+  // app manifest, and verification uses the app's own signing secret. The
+  // host must not mint a secret or try to register anything.
+  ingress: "external-webhook",
+  create(ctx: TransportContext): ChannelTransport {
+    const token = ctx.credential.accessToken;
+    if (!token) {
+      throw new Error(
+        "Slack transport requires a bot token. Connect Slack in Settings → Integrations and save the bot token.",
+      );
+    }
+    const metadata = ctx.credential.metadata ?? {};
+    // teamId is load-bearing for outbound: conversation keys embed it, and an
+    // empty one makes every send and gate key unparseable. Fail at
+    // construction rather than on the first reply. The credential-save route
+    // populates it from auth.test.
+    const teamId = typeof metadata.teamId === "string" ? metadata.teamId : "";
+    if (teamId === "") {
+      throw new Error(
+        "Slack transport requires metadata.teamId. Re-save the Slack credential so auth.test can populate it.",
+      );
+    }
+    // `webhookSecret` is the canonical key `routes/credentials.ts` writes and
+    // every other provider in this repo uses. `signingSecret` is read as a
+    // fallback so a credential saved under the older key still works.
+    const signingSecret = [metadata.webhookSecret, metadata.signingSecret].find(
+      (value): value is string => typeof value === "string" && value !== "",
+    );
+    const botUserId = typeof metadata.botUserId === "string" ? metadata.botUserId : undefined;
+    const appToken =
+      typeof metadata.appToken === "string" && metadata.appToken !== "" ? metadata.appToken : undefined;
+    if (signingSecret === undefined && appToken === undefined) {
+      // Outbound still works, so this is a warning rather than a throw — but
+      // nothing the user types will ever arrive, which is worth saying once.
+      console.warn(
+        "[slack] no signingSecret and no appToken: outbound only. Add the app signing secret for webhook ingress, or an app-level token for Socket Mode.",
+      );
+    }
+    return new SlackTransport(
+      new SlackApi(token, ctx.config.apiBaseUrl),
+      teamId,
+      signingSecret,
+      botUserId,
+      appToken,
+    );
+  },
+};
