@@ -113,7 +113,7 @@ dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@echo "$(GREEN)Starting @valet/api on :8788$(NC)"
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
-	cd packages/api && VALET_LOCAL_AUTH=1 PORT=8788 $(PNPM) run dev
+	cd packages/api && VALET_LOCAL_AUTH=$${VALET_LOCAL_AUTH:-1} PORT=8788 $(PNPM) run dev
 
 dev-web: ## Start the new web client (@valet/web) on :5173
 	@echo "$(GREEN)Starting @valet/web on :5173 (proxy → :8788)$(NC)"
