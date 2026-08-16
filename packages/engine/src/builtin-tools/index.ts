@@ -495,6 +495,17 @@ export const taskTool = defineTool({
     repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
     branch: Type.Optional(Type.String()),
     model: Type.Optional(Type.String()),
+    profile: Type.Optional(
+      Type.Union([Type.Literal("headless"), Type.Literal("full")], {
+        description:
+          'Sandbox profile for the child (default "headless"). "full" ships the interactive services (terminal, code-server).',
+      }),
+    ),
+    docker: Type.Optional(
+      Type.Boolean({
+        description: "Provision the child's sandbox with a rootless docker daemon (docker-in-sandbox).",
+      }),
+    ),
   }),
   execute: async (args, ctx) => {
     // ctx.config is `Record<string, unknown>` (verbatim toolConfig
@@ -513,6 +524,8 @@ export const taskTool = defineTool({
       repo: args.repo,
       branch: args.branch,
       model: args.model,
+      profile: args.profile,
+      docker: args.docker,
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
     const result = await spawner(req, {

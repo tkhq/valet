@@ -144,6 +144,50 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
   });
 
+  it("threads profile/docker to the child's sandbox options and persists them on the row (defaults: headless, no docker)", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    const parent = await api.providers.engineHost.sessionFor("parent-docker", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    const ctx = {
+      parentSessionId: "parent-docker",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    const dockerChild = await spawner({ prompt: "test dind", profile: "full", docker: true }, ctx);
+    const built = api.providers.engineHost.liveSession(dockerChild.childSessionId);
+    expect(built?.options.sandbox?.profile).toBe("full");
+    expect(built?.options.sandbox?.docker).toBe(true);
+    const dockerRows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, dockerChild.childSessionId))
+      .limit(1);
+    expect(dockerRows[0]?.profile).toBe("full");
+    expect(dockerRows[0]?.docker).toBe(true);
+
+    // Omitted flags keep today's defaults — headless, docker off.
+    const plainChild = await spawner({ prompt: "plain" }, ctx);
+    const plainBuilt = api.providers.engineHost.liveSession(plainChild.childSessionId);
+    expect(plainBuilt?.options.sandbox?.profile).toBe("headless");
+    expect(plainBuilt?.options.sandbox?.docker).toBeUndefined();
+    const plainRows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, plainChild.childSessionId))
+      .limit(1);
+    expect(plainRows[0]?.profile).toBe("headless");
+    expect(plainRows[0]?.docker).toBe(false);
+  });
+
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

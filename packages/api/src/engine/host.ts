@@ -1794,6 +1794,10 @@ export class EngineHost {
       owner: Principal;
       workspace: string;
       modelId?: string;
+      /** Interactive-service profile (default "headless"). */
+      profile?: "headless" | "full";
+      /** Rootless docker daemon in the child's sandbox (docker-in-sandbox). */
+      docker?: boolean;
     },
   ): Promise<Session> {
     const cached = this.cache.get(childSessionId);
@@ -1818,6 +1822,10 @@ export class EngineHost {
       owner: Principal;
       workspace: string;
       modelId?: string;
+      /** Interactive-service profile (default "headless"). */
+      profile?: "headless" | "full";
+      /** Rootless docker daemon in the child's sandbox (docker-in-sandbox). */
+      docker?: boolean;
     },
   ): Promise<Session> {
     // `opts.owner` is the child's own principal: the `task` tool reads the
@@ -1829,7 +1837,8 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
-    const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
+    const profile = opts.profile ?? "headless";
+    const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
     // A child spawned with a repo binding (the spawner inserts the
@@ -1870,9 +1879,12 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: {
         workspace: opts.workspace,
-        image: this.opts.defaultImage,
+        // Per-profile stock default, same fall-through as a REST-created
+        // session (`sessionFor`).
+        image: this.opts.defaultImages?.[profile] ?? this.opts.defaultImage,
         env: sandboxMint?.env,
-        profile: "headless" as const,
+        profile,
+        ...(opts.docker ? { docker: true } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
       },
       model,
