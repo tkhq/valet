@@ -188,7 +188,6 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Every weekday morning, collect the reviews waiting on you, your own open pull requests, and the " +
       "issues assigned to you, then send one ranked digest to your orchestrator.",
     category: "digest",
-    icon: "☀️",
     apps: ["github", "claude"],
     steps: [
       "Search GitHub for pull requests that requested your review.",
@@ -216,7 +215,6 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Once a week, find your open pull requests with no activity for five days and ask you what to do " +
       "with them. The run stays silent in a week when nothing has gone quiet.",
     category: "nudge",
-    icon: "🔔",
     apps: ["github", "claude"],
     steps: [
       "Search GitHub for your open pull requests, oldest update first.",

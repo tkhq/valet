@@ -66,6 +66,33 @@ if (typeof document !== "undefined") {
     get: () => 40,
   });
 
+  // vitest 4's jsdom environment does not provide `localStorage`, though it
+  // provides `window` and a real origin. The workspace scope persists there
+  // (`lib/workspace-scope.tsx`), and its provider reads it during the first
+  // render, so without this every test that renders a scoped surface fails
+  // before asserting anything. Same class of gap as the shims above: jsdom
+  // is missing a browser API this app legitimately uses.
+  //
+  // Per-file, not shared: each test file gets its own jsdom global, so this
+  // starts empty for every file and needs no reset between them.
+  if (typeof globalThis.localStorage === "undefined") {
+    const store = new Map<string, string>();
+    const storage: Storage = {
+      get length() {
+        return store.size;
+      },
+      key: (i) => [...store.keys()][i] ?? null,
+      getItem: (k) => store.get(k) ?? null,
+      setItem: (k, v) => void store.set(k, String(v)),
+      removeItem: (k) => void store.delete(k),
+      clear: () => store.clear(),
+    };
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+    if (typeof window !== "undefined") {
+      Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+    }
+  }
+
   // Edge labels ("when" badges) measure their own text via SVG's `getBBox`,
   // which jsdom doesn't implement at all (not even as a zero-returning
   // stub) and throws instead. A fixed box is enough for the label to mount.

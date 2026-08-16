@@ -103,7 +103,6 @@ export const linearTemplates: WorkflowTemplate[] = [
       'Once a week, read the issues assigned to you and produce a summary plus a list of suggested ' +
       'changes. It suggests only. Nothing in Linear is changed by the run.',
     category: 'triage',
-    icon: '📋',
     apps: ['linear', 'claude'],
     steps: [
       'Read the Linear issues assigned to you.',

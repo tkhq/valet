@@ -113,14 +113,19 @@ describe("TemplateGallery", () => {
     expect(screen.getByText("Nightly memory sweep")).toBeTruthy();
     expect(screen.getByText(/merges duplicates and prunes stale notes/i)).toBeTruthy();
     expect(screen.getByText("Every day at 6:00 AM UTC")).toBeTruthy();
-    expect(screen.getByText("No integrations needed")).toBeTruthy();
+    // A template needing nothing draws no service chain. The card used to
+    // spell that out in a footer line; absence of the chain says it, and the
+    // Use-template button says the template is ready.
+    expect(screen.queryByText("No integrations needed")).toBeNull();
+    expect(screen.getByRole("button", { name: "Use template" })).toBeTruthy();
   });
 
   it("refuses to install a template whose services are not connected, and routes to connecting them", () => {
     templatesQuery.data = { templates: [triageDigest] };
     render(<TemplateGallery />);
 
-    expect(screen.getByText("Connect Slack and Linear first, then install this.")).toBeTruthy();
+    // The prose that repeated this is gone; the control still names the work.
+    expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
 
     const connect = screen.getByText("Connect integrations").closest("a");
@@ -141,8 +146,10 @@ describe("TemplateGallery", () => {
     };
     render(<TemplateGallery />);
 
-    expect(screen.getByText("Connect Slack first, then install this.")).toBeTruthy();
+    // One missing service names itself on the button rather than in a
+    // sentence above it.
     expect(screen.getByText("Connect Slack")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
   });
 
   it("shows the steps and the limits before installing", () => {

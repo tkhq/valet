@@ -143,7 +143,6 @@ export const gmailTemplates: WorkflowTemplate[] = [
       'Every weekday, move low-priority unread mail onto one label and out of the inbox, so what is left ' +
       'can be read in a single pass. Newsletters and automated notices move; mail from a person stays.',
     category: 'inbox',
-    icon: '🧹',
     apps: ['gmail', 'claude'],
     steps: [
       'Read the labels that already exist on the account.',

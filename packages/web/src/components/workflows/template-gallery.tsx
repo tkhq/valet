@@ -27,13 +27,6 @@ import { useWorkflowTemplates } from "~/api/templates";
 import { InstallTemplateDialog } from "./install-template-dialog";
 import { describeCadence } from "./cadence";
 
-/** "Slack", "Slack and Linear", "Slack, Linear and GitHub". */
-export function joinNames(names: string[]): string {
-  if (names.length === 0) return "";
-  if (names.length === 1) return names[0]!;
-  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-}
-
 /** The services a template needs that the caller has not connected. */
 export function missingServices(requires: WorkflowTemplateRequirement[]): string[] {
   return requires.filter((r) => !r.connected).map((r) => displayName(r.service));
@@ -102,19 +95,18 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
         </div>
       )}
 
-      <div className="text-sm font-medium text-ink">{template.name}</div>
-      <p className="mt-1 text-xs leading-relaxed text-muted">{template.description}</p>
-
-      {!ready && (
-        <p className="mt-3 text-xs leading-relaxed text-danger-600 dark:text-danger-500">
-          Connect {joinNames(missing)} first, then install this.
-        </p>
-      )}
+      <div className="text-sm font-medium text-pretty text-ink">{template.name}</div>
+      {/* Two lines, not the whole paragraph. A gallery is scanned, not read:
+          the card has to say what this does at a glance, and the install
+          dialog carries the full description for the one the reader picks. */}
+      <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted">{template.description}</p>
 
       <div className="mt-auto flex items-end justify-between gap-3 pt-4">
-        <div className="min-w-0 font-mono text-xs leading-relaxed text-muted">
-          <div>{describeCadence(template.schedule)}</div>
-          <div className="truncate">{usesLine(template.requires)}</div>
+        {/* Cadence only. The service chain above already names what this
+            needs, and the button already says what to connect — repeating
+            either here was the same fact three times on one card. */}
+        <div className="min-w-0 truncate text-xs text-muted">
+          {describeCadence(template.schedule)}
         </div>
         {ready ? (
           <Button size="sm" className="shrink-0" onClick={() => setOpen(true)}>
@@ -138,9 +130,3 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
   );
 }
 
-/** The mono "what it touches" line. Named services, because a row of letter
- * tiles does not tell a reader which services they are. */
-function usesLine(requires: WorkflowTemplateRequirement[]): string {
-  if (requires.length === 0) return "No integrations needed";
-  return requires.map((r) => displayName(r.service)).join(" · ");
-}

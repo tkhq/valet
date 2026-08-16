@@ -341,7 +341,6 @@ export const workflowTemplates: WorkflowTemplate[] = [
       "Every night, your orchestrator merges duplicate memory entries, removes finished work that holds " +
       "no lasting fact, and reports what it changed. It needs no integration.",
     category: "maintenance",
-    icon: "🌙",
     apps: ["claude"],
     steps: [
       "Search memory for entries that cover the same subject.",
@@ -365,7 +364,6 @@ export const workflowTemplates: WorkflowTemplate[] = [
       "Every weekday morning, read GitHub, Linear, and your joined Slack channels, then send one ranked " +
       "digest to your orchestrator.",
     category: "digest",
-    icon: "📨",
     apps: ["github", "linear", "slack", "claude"],
     steps: [
       "Search GitHub for pull requests that requested your review.",
@@ -395,7 +393,6 @@ export const workflowTemplates: WorkflowTemplate[] = [
       "Once a week, gather what is worth raising live — decisions needed, blockers, risks to a date, and " +
       "finished work — from GitHub, Linear, and threaded Slack discussions.",
     category: "digest",
-    icon: "🗣️",
     apps: ["github", "linear", "slack", "claude"],
     steps: [
       "Read your recent pull requests.",
@@ -425,7 +422,6 @@ export const workflowTemplates: WorkflowTemplate[] = [
       "Apply a single instruction to every row of a list — account tiering, vertical tagging, drafting one " +
       "artifact per customer — then summarize the batch. Runs on demand, up to 100 rows.",
     category: "batch",
-    icon: "🗂️",
     apps: ["claude"],
     steps: [
       "Paste the rows and write the instruction.",
