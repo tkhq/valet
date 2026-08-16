@@ -16,6 +16,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
   orchestratorSessionId,
+  parseOrchestratorSessionId,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -38,6 +39,8 @@ import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
+import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
+import { ChannelStreamBridge } from "./stream-bridge.js";
 
 export interface ChannelHostDeps {
   db: AppDb;
@@ -50,6 +53,8 @@ export interface ChannelHostDeps {
   publicUrl?: string;
   /** Resolves the single org id (single-org assumption, same as auth middleware). */
   resolveOrgId: () => Promise<string>;
+  /** Durable open-stream state. Defaults to the Postgres store over `db`. */
+  activeStreams?: ActiveStreamStore;
   now?: () => number;
 }
 
@@ -149,8 +154,37 @@ export class ChannelHost {
   /** Guards against a second `start()` re-creating transports/poll loops
    * on top of already-running ones; reset in `stop()`. */
   private started = false;
+  /** Engine deltas → provider streams. Only transports that implement the
+   * whole start/append/stop triple ever reach it. */
+  private readonly streamBridge: ChannelStreamBridge;
 
-  constructor(private readonly deps: ChannelHostDeps) {}
+  constructor(private readonly deps: ChannelHostDeps) {
+    this.streamBridge = new ChannelStreamBridge({
+      eventStream: deps.eventStream,
+      streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
+      transportFor: (channelType) => this.transportFor(channelType),
+      markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
+      abortTurn: async (sessionId, threadId) => {
+        // Streams only ever run on a channel thread, and channel threads only
+        // exist on orchestrator sessions (see `handleGateCallback`'s note on
+        // the same invariant). So the session id names its own owner, and no
+        // ambient actor has to be invented here.
+        const principal = parseOrchestratorSessionId(sessionId);
+        if (!principal || principal.type !== "user") return;
+        const session = await this.deps.engineHost.orchestratorSessionFor(principal, {
+          actorUserId: principal.id,
+          orgId: this.orgId ?? (await this.deps.resolveOrgId()),
+        });
+        await session.abort({ threadId });
+      },
+      now: deps.now,
+    });
+  }
+
+  /** The streaming bridge, for tests and for routes that need its state. */
+  streams(): ChannelStreamBridge {
+    return this.streamBridge;
+  }
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
@@ -215,6 +249,19 @@ export class ChannelHost {
       }
     }
     this.startOutbound();
+    this.streamBridge.start();
+    // Close streams a previous boot left open. Runs after the transports are
+    // up because closing one needs its transport, and after `startOutbound`
+    // so a slow sweep cannot delay live traffic.
+    const bootedAt = this.now();
+    for (const channelType of this.transports.keys()) {
+      try {
+        const closed = await this.streamBridge.sweepOnBoot(channelType, bootedAt);
+        if (closed > 0) console.log(`[channels] ${channelType}: closed ${closed} stream(s) left open by a restart`);
+      } catch (err) {
+        console.error(`[channels] ${channelType}: boot stream sweep failed`, err);
+      }
+    }
   }
 
   /**
@@ -284,6 +331,9 @@ export class ChannelHost {
     await Promise.all(this.pollLoops);
     this.pollControllers.clear();
     this.pollLoops = [];
+    // Before the transports go away: a stream closed here is one the next
+    // boot does not have to apologise for.
+    await this.streamBridge.stop();
     this.stopOutbound();
     this.started = false;
   }
@@ -399,6 +449,11 @@ export class ChannelHost {
     reason: "end_turn" | "error" | "abort",
   ): Promise<void> {
     if (reason !== "end_turn") return;
+    // A streamed message is already on screen. Posting it again as a discrete
+    // message would show the reader the same answer twice, once under the
+    // stream. Checked before any await: the marker is written on
+    // `message_start`, which always precedes this event.
+    if (this.streamBridge.isStreamed(sessionId, messageId)) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
     const mapped = this.channelThreadFor(thread.key);
@@ -483,6 +538,12 @@ export class ChannelHost {
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
+
+    // Close any open stream FIRST, so the approval card lands after the text
+    // that led to it. Sequenced here rather than from the bridge's own
+    // subscriber, because two independent subscribers to `decision_gate` have
+    // no defined order and the reader would sometimes see the card first.
+    await this.streamBridge.closeForGate(sessionId, gate.threadId);
 
     const ref = await transport.sendGatePrompt(mapped.conversationKey, {
       gateId: gate.id,
@@ -654,6 +715,22 @@ export class ChannelHost {
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
     const thread = session.thread(threadKey);
+
+    // Register the turn before the prompt is submitted, so the first
+    // `message_start` already knows where to stream. Nothing opens yet: a
+    // turn that parks on an approval gate before writing any text must not
+    // leave an empty stream on screen. Transports without a reply anchor
+    // (Telegram) supply no threadTs and never stream.
+    if (event.threadTs !== undefined) {
+      this.streamBridge.noteInboundTurn({
+        channelType,
+        conversationKey: event.conversationKey,
+        sessionId: session.id,
+        threadId: thread.id,
+        threadTs: event.threadTs,
+        orgId,
+      });
+    }
 
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];
