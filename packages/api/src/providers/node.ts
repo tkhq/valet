@@ -338,6 +338,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
+    defaultImages: {
+      headless: process.env.VALET_HEADLESS_BASE_IMAGE ?? resolveDefaultImage(process.env),
+      full: process.env.VALET_FULL_BASE_IMAGE ?? resolveDefaultImage(process.env),
+    },
     idleMinutes: resolveIdleMinutes(process.env),
     ...(resolvePrebuildPreflight(process.env) ? { prebuildPreflight: resolvePrebuildPreflight(process.env) } : {}),
     ...buildHibernationHooks(db),
@@ -387,6 +391,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
+
+  // Backfill default bases for existing orgs (idempotent). Fires once at
+  // boot in the background; never blocks startup.
+  (async () => {
+    const rows = await db.select({ id: orgs.id }).from(orgs);
+    for (const { id } of rows) {
+      try {
+        await prebuildService.seedDefaultBasesIfMissing(id);
+      } catch (err) {
+        console.error(`seedDefaultBasesIfMissing(${id}) failed:`, err);
+      }
+    }
+  })();
 
   const channelHost = new ChannelHost({
     db,

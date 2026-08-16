@@ -91,6 +91,15 @@ export interface EngineHostOpts {
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
+   * Optional per-profile override for the fall-through stock image.
+   * When present, `stockImage` in `resolveSnapshot` uses
+   * `defaultImages[profile] ?? defaultImage` for the session's profile.
+   * Used to keep full-profile sessions from silently falling through to
+   * the headless base image during the boot window (before the org's
+   * default-full base bake lands).
+   */
+  defaultImages?: Partial<Record<"headless" | "full", string>>;
+  /**
    * The app db handle — required by `orchestratorSessionFor` (memory
    * snapshot assembly, journal bootstrap, the compaction hook, and the
    * `orchestrator_identities` upsert). Every session builder also uses it
@@ -599,10 +608,13 @@ export class EngineHost {
       meta.repos,
       specProvider !== undefined,
     );
-    // Initial sandbox image: the stock default. The specProvider closure may
-    // resolve a prebuild image override at provision time — the engine applies
-    // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImage;
+    // Initial sandbox image: the per-profile stock default. Full-profile
+    // sessions use `defaultImages["full"]` so the boot-window fall-through
+    // (before the org's default-full base bake lands) picks the full image
+    // rather than silently booting the headless base. The specProvider closure
+    // may resolve a prebuild image override at provision time — the engine
+    // applies DesiredSandboxSpec.image when the specProvider returns one.
+    const image = this.opts.defaultImages?.[profile] ?? this.opts.defaultImage;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -784,7 +796,11 @@ export class EngineHost {
 
     const host = this;
     const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
-    const stockImage = this.opts.defaultImage ?? "";
+    const profile: "headless" | "full" = meta.profile ?? "headless";
+    const stockImage =
+      this.opts.defaultImages?.[profile] ??
+      this.opts.defaultImage ??
+      "";
 
     return async () => {
       const snap = await resolveSnapshot({

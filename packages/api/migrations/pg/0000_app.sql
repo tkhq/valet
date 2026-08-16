@@ -727,6 +727,7 @@ CREATE TABLE "image_sources" (
 	"external_ref" text,
 	"pull_secret_name" text,
 	"setup_commands" jsonb,
+	"profile" text CHECK (profile IS NULL OR profile IN ('headless','full')),
 	"repo_host" text,
 	"repo_full_name" text,
 	"clone_url" text,
@@ -739,7 +740,7 @@ CREATE TABLE "image_sources" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "image_sources_org_repo" ON "image_sources" ("org_id","repo_host","repo_full_name") WHERE kind = 'repo';
 --> statement-breakpoint
-CREATE UNIQUE INDEX "image_sources_org_base" ON "image_sources" ("org_id") WHERE kind = 'base';
+CREATE UNIQUE INDEX "image_sources_org_base_profile" ON "image_sources" ("org_id","profile") WHERE kind = 'base';
 --> statement-breakpoint
 CREATE TABLE "bakes" (
 	"id" text PRIMARY KEY NOT NULL,

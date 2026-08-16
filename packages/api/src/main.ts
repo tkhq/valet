@@ -330,7 +330,7 @@ if (instanceConfig) {
   // no admin, or duplicate skill sources). Fail boot with the
   // corrective-action message only — no stack spam. Rethrow anything else.
   try {
-    await reconcileInstanceConfig({ db: providers.db }, instanceConfig);
+    await reconcileInstanceConfig({ db: providers.db, sourceService: providers.prebuildService }, instanceConfig);
   } catch (e) {
     if (e instanceof InstanceConfigError) {
       console.error(e.message);
@@ -352,6 +352,7 @@ const authWiring: AuthWiring = authConfig
           cfg: authConfig,
           credentialStore: providers.engineCredentials,
           instanceConfig,
+          sourceService: providers.prebuildService,
         }),
       }),
       authConfig,
