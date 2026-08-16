@@ -33,6 +33,8 @@ export {
   parseTemplate,
   renderTemplate,
   renderJsonTemplates,
+  collectTemplatePaths,
+  collectUnresolvedTemplatePaths,
   TemplateParseError,
   TemplateEvalError,
 } from './dag/expression.js';

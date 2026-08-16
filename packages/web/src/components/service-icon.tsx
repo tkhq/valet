@@ -123,6 +123,13 @@ export function brandHex(id: string): string {
  */
 export type ServiceIconTone = "brand" | "quiet" | "accent";
 
+/**
+ * `md` is the card avatar. `sm` is the inline scale, for a run of marks read
+ * as one line — the app chain on a workflow template card, where the tile
+ * sits beside body text rather than heading it.
+ */
+export type ServiceIconSize = "sm" | "md";
+
 export interface ServiceIconProps {
   /** Brand slug (`PluginServiceSummary.iconSlug`) or, with no slug on the
    * wire, the plugin or service id. */
@@ -130,12 +137,32 @@ export interface ServiceIconProps {
   /** The name beside the icon. The monogram takes its first letter. */
   label: string;
   tone?: ServiceIconTone;
+  size?: ServiceIconSize;
   className?: string;
 }
 
-const TILE = "grid h-9 w-9 shrink-0 place-items-center rounded-lg";
+const TILE = "grid shrink-0 place-items-center";
+const TILE_SIZE: Record<ServiceIconSize, string> = {
+  sm: "h-6 w-6 rounded-md",
+  md: "h-9 w-9 rounded-lg",
+};
+/** The mark insets within its tile; the monogram fills it. */
+const MARK_SIZE: Record<ServiceIconSize, string> = {
+  sm: "h-3.5 w-3.5",
+  md: "h-5 w-5",
+};
+const MONOGRAM_SIZE: Record<ServiceIconSize, string> = {
+  sm: "text-[11px]",
+  md: "text-sm",
+};
 
-export function ServiceIcon({ slug, label, tone = "brand", className }: ServiceIconProps) {
+export function ServiceIcon({
+  slug,
+  label,
+  tone = "brand",
+  size = "md",
+  className,
+}: ServiceIconProps) {
   const mark = tone === "accent" ? undefined : brandMark(slug);
 
   // Decorative: the service name is always beside it in text, so a screen
@@ -145,9 +172,15 @@ export function ServiceIcon({ slug, label, tone = "brand", className }: ServiceI
       <span
         aria-hidden="true"
         data-brand-mark={slug}
-        className={cn(TILE, "bg-ink-wash", tone === "quiet" ? "text-muted" : "text-ink", className)}
+        className={cn(
+          TILE,
+          TILE_SIZE[size],
+          "bg-ink-wash",
+          tone === "quiet" ? "text-muted" : "text-ink",
+          className,
+        )}
       >
-        <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5" focusable="false">
+        <svg viewBox="0 0 24 24" fill="currentColor" className={MARK_SIZE[size]} focusable="false">
           <path d={mark.path} />
         </svg>
       </span>
@@ -161,7 +194,9 @@ export function ServiceIcon({ slug, label, tone = "brand", className }: ServiceI
       aria-hidden="true"
       className={cn(
         TILE,
-        "text-sm font-semibold text-white",
+        TILE_SIZE[size],
+        MONOGRAM_SIZE[size],
+        "font-semibold text-white",
         tone === "accent" && "bg-moss",
         className,
       )}

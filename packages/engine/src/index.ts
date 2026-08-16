@@ -156,6 +156,7 @@ export {
   type ChannelGatePrompt,
   type ChannelGateResolution,
 } from "./valet-plugin.js";
+export { type WorkflowTemplate, type WorkflowTemplateSchedule } from "./workflow-template.js";
 export {
   GateManager,
   DecisionGateWithdrawnError,

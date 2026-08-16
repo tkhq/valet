@@ -30,6 +30,7 @@ import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
@@ -227,6 +228,7 @@ export function createApp(
   app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);
   app.route("/api/workflows", workflowsRouter);
+  app.route("/api/templates", templatesRouter);
   app.route("/api/plugins", pluginsRouter);
   app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);

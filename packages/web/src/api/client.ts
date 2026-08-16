@@ -92,6 +92,9 @@ import type {
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
+  ListWorkflowTemplatesResponse,
+  InstallWorkflowTemplateRequest,
+  InstallWorkflowTemplateResponse,
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
@@ -552,6 +555,15 @@ export const api = {
     request<DeleteWorkflowScheduleResponse>(
       "DELETE",
       `/workflows/${encodeURIComponent(id)}/schedules/${encodeURIComponent(scheduleId)}`,
+    ),
+
+  // workflow templates — the starting points the gallery on /workflows offers
+  listWorkflowTemplates: () => request<ListWorkflowTemplatesResponse>("GET", "/templates"),
+  installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
+    request<InstallWorkflowTemplateResponse>(
+      "POST",
+      `/templates/${encodeURIComponent(id)}/install`,
+      body,
     ),
 
   // settings shell (split-settings design): per-user profile, org, models

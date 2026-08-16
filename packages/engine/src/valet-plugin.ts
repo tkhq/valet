@@ -15,6 +15,7 @@
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
+import type { WorkflowTemplate } from "./workflow-template.js";
 
 /** How the connect UI obtains an oauth2 credential (integration-OAuth design). */
 export type OAuthDeclaration =
@@ -361,6 +362,8 @@ export interface ValetPlugin {
   transports?: ChannelTransportFactory[];
   /** Action-backed slash commands this plugin exposes. */
   commands?: CommandDef[];
+  /** Installable workflow templates this plugin contributes to the gallery. */
+  templates?: WorkflowTemplate[];
 }
 
 export interface PluginValidationIssue {
@@ -563,6 +566,42 @@ export function validateValetPlugin(
     );
     if (typeof c.action !== "string" || !actionIds.has(c.action)) {
       issues.push({ path: `${path}.action`, message: "must name an action declared by this plugin" });
+    }
+  });
+
+  checkArray(v.templates, "templates", issues, (tpl, path) => {
+    const t = asRecord(tpl, path, issues);
+    if (!t) return;
+    for (const key of ["id", "name", "description", "category"] as const) {
+      if (typeof t[key] !== "string" || t[key].length === 0) {
+        issues.push({ path: `${path}.${key}`, message: "required non-empty string" });
+      }
+    }
+    for (const key of ["apps", "steps"] as const) {
+      if (!Array.isArray(t[key]) || t[key].some((entry) => typeof entry !== "string")) {
+        issues.push({ path: `${path}.${key}`, message: "required string array" });
+      }
+    }
+    if (t.caveats !== undefined && (!Array.isArray(t.caveats) || t.caveats.some((entry) => typeof entry !== "string"))) {
+      issues.push({ path: `${path}.caveats`, message: "must be a string array when present" });
+    }
+    // Only the shape is checked here. The dag/v1 contract is checked by the
+    // host's own definition validator, which produces messages an author can
+    // act on — see the WorkflowTemplate doc comment.
+    if (typeof t.definition !== "object" || t.definition === null) {
+      issues.push({ path: `${path}.definition`, message: "required dag/v1 workflow definition object" });
+    }
+    if (t.schedule !== undefined) {
+      const schedule = asRecord(t.schedule, `${path}.schedule`, issues);
+      if (!schedule) return;
+      for (const key of ["name", "cron", "description"] as const) {
+        if (typeof schedule[key] !== "string" || schedule[key].length === 0) {
+          issues.push({ path: `${path}.schedule.${key}`, message: "required non-empty string" });
+        }
+      }
+      if (schedule.timezone !== undefined && typeof schedule.timezone !== "string") {
+        issues.push({ path: `${path}.schedule.timezone`, message: "must be a string when present" });
+      }
     }
   });
 

@@ -101,7 +101,22 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'onError'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential', 'onError'],
+  // A tool node carries BOTH policies, and they answer different questions.
+  // `onError` decides what a node FAILURE does to the rest of the run;
+  // `onDeny`/`approvalTimeout` decide what a policy GATE's refusal or
+  // expiry does. A denial is not an error, so one field cannot serve both.
+  tool: [
+    'id',
+    'type',
+    'service',
+    'action',
+    'params',
+    'summary',
+    'credential',
+    'onError',
+    'onDeny',
+    'approvalTimeout',
+  ],
   workflow: ['id', 'type', 'workflowId', 'input', 'onError'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
@@ -459,6 +474,22 @@ function validateNodeFields(
         );
       }
       checkErrorPolicy(label, 'tool', node.onError, errors);
+      // A policy gate on a tool node parks the run (`nodes/tool.ts`), so a
+      // definition needs a way to say what a denial or a timeout does. Both
+      // fields are checked the same way the approval node's are — one rule
+      // for one meaning. They are separate from `onError` above: a gate
+      // refusing is a decision, not a failure.
+      if (node.onDeny !== undefined && node.onDeny !== 'fail' && node.onDeny !== 'skip') {
+        errors.push(`${label}: tool.onDeny must be "fail" or "skip", got ${JSON.stringify(node.onDeny)}`);
+      }
+      if (
+        node.approvalTimeout !== undefined &&
+        (typeof node.approvalTimeout !== 'string' || parseDurationMs(node.approvalTimeout) === null)
+      ) {
+        errors.push(
+          `${label}: unparseable tool.approvalTimeout ${JSON.stringify(node.approvalTimeout)} — use a number + unit like "30m", "24h"`,
+        );
+      }
       break;
     case 'foreach':
       // Field checks live in validateForeachNode (needs nodesById).
