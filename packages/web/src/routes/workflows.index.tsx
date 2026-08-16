@@ -6,7 +6,9 @@ import { triggerDataSchema } from "@valet/workflow";
 import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
+import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { Button, Spinner } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 
 /**
  * `/workflows` — the definitions list (plan decision 11). Each row's name
@@ -16,16 +18,37 @@ import { Button, Spinner } from "~/components/primitives";
  * workflow"), which POSTs the entered name + a minimal definition and
  * navigates straight to the editor. Editing an existing definition happens
  * on its editor page, not here.
+ *
+ * Templates live on this page too, and where they live depends on what the
+ * caller already has. With no workflows, the gallery IS the page: an empty
+ * automation product with no starting points is the hardest possible first
+ * run, and a person with nothing to list needs nothing else on screen. With
+ * workflows, the list stays the page and templates move behind a tab — one
+ * click away, one row of chrome, and never between somebody and the twenty
+ * workflows they came here to open.
+ *
+ * The gallery is mounted only when it is shown, so the templates request is
+ * never made for a caller who stays on their list.
  */
 export const Route = createFileRoute("/workflows/")({
   component: WorkflowsIndexPage,
 });
 
+type Tab = "workflows" | "templates";
+
+const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
+  { id: "workflows", label: "Your workflows" },
+  { id: "templates", label: "Templates" },
+];
+
 export function WorkflowsIndexPage() {
   const { data, isLoading, error } = useWorkflows();
   const [newOpen, setNewOpen] = useState(false);
+  const [tab, setTab] = useState<Tab>("workflows");
 
   const workflows = data?.workflows ?? [];
+  const settled = !isLoading && !error;
+  const empty = settled && workflows.length === 0;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -47,26 +70,56 @@ export function WorkflowsIndexPage() {
         {!isLoading && error && (
           <div className="text-sm text-danger-500">Failed to load workflows.</div>
         )}
-        {!isLoading && !error && workflows.length === 0 && (
-          <div className="text-sm text-muted">
-            No workflows yet —{" "}
-            <button
-              type="button"
-              onClick={() => setNewOpen(true)}
-              className="text-ink underline underline-offset-2 hover:text-moss"
-            >
-              create one
-            </button>
-            .
-          </div>
+
+        {empty && (
+          <>
+            <p className="text-sm text-muted">
+              No workflows yet. Start from a template, or build one from scratch with{" "}
+              <button
+                type="button"
+                onClick={() => setNewOpen(true)}
+                className="text-ink underline underline-offset-2 hover:text-moss"
+              >
+                New workflow
+              </button>
+              .
+            </p>
+            <TemplateGallery />
+          </>
         )}
 
-        {!isLoading && workflows.length > 0 && (
-          <ul className="space-y-2">
-            {workflows.map((wf) => (
-              <DefinitionRow key={wf.id} workflow={wf} />
-            ))}
-          </ul>
+        {settled && workflows.length > 0 && (
+          <>
+            <div className="flex items-center gap-2" role="tablist" aria-label="Workflows or templates">
+              {TABS.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === entry.id}
+                  onClick={() => setTab(entry.id)}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs transition-colors",
+                    tab === entry.id
+                      ? "border-moss bg-moss text-white"
+                      : "border-line bg-paper text-muted hover:text-ink",
+                  )}
+                >
+                  {entry.label}
+                </button>
+              ))}
+            </div>
+
+            {tab === "workflows" ? (
+              <ul className="space-y-2">
+                {workflows.map((wf) => (
+                  <DefinitionRow key={wf.id} workflow={wf} />
+                ))}
+              </ul>
+            ) : (
+              <TemplateGallery />
+            )}
+          </>
         )}
       </div>
     </div>

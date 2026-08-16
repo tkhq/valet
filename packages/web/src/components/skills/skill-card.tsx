@@ -22,7 +22,7 @@
 import { Link } from "@tanstack/react-router";
 import type { SkillSummary, StoredSkillSummary } from "@valet/api/wire";
 import { Badge } from "~/components/primitives";
-import { brandHex } from "~/components/integrations/integration-row";
+import { brandHex } from "~/components/integrations/service-mark";
 import { displayName } from "~/components/integrations/display-name";
 import { cn } from "~/lib/cn";
 import { ScopeBadge, scopeForSkill } from "./scope-badge";

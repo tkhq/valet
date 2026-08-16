@@ -925,6 +925,110 @@ export interface DeleteWorkflowWebhookResponse {
   deleted: boolean;
 }
 
+// ── REST: workflow templates ─────────────────────────────────────────────
+//
+// A template is a workflow definition a plugin ships, plus the copy the
+// gallery needs to explain it BEFORE it is installed. Install publishes a
+// normal workflow owned by the caller, through the same create path every
+// other definition takes, so an installed template is editable, runnable,
+// and deletable like any other workflow.
+//
+// The summary is deliberately presentation-shaped: `steps`, `schedule`, and
+// `requires` answer the three questions a person asks of a card — what does
+// it do, when does it run, and what must I connect first.
+
+/**
+ * A service the template's tool nodes call, with the caller's connection
+ * state. `connected: false` blocks install: a workflow tool node reads the
+ * credential of the run's owner, so the first run would fail on a missing
+ * token. A template that fails on its first run is worse than one the
+ * gallery refuses to install.
+ */
+export interface WorkflowTemplateRequirement {
+  /** Credential service key, matching `PluginServiceSummary.service`. */
+  service: string;
+  connected: boolean;
+  /**
+   * Set when the plugin resolves its actions at run time (an MCP-backed
+   * service). The action NAMES this template calls are then unverifiable
+   * when the definition is saved, and can still fail on the first run.
+   */
+  dynamic?: true;
+}
+
+/**
+ * One field the installer fills in. Derived server-side from the template's
+ * trigger `dataSchema`: `hidden` entries are dropped, and `label` falls back
+ * to the field name, so the gallery never shows a raw field id.
+ */
+export interface WorkflowTemplateInput {
+  name: string;
+  type: "string" | "number" | "boolean";
+  label: string;
+  placeholder?: string;
+  description?: string;
+  required: boolean;
+  default?: string | number | boolean;
+}
+
+/** The cron a template arms at install. Null when it only runs on demand. */
+export interface WorkflowTemplateSchedule {
+  /** 5-field cron expression, as `workflow_schedules.cron` stores it. */
+  cron: string;
+  /** IANA timezone name. */
+  timezone: string;
+}
+
+export interface WorkflowTemplateSummary {
+  id: string;
+  name: string;
+  /** One sentence, in the words of the person who wants the outcome. */
+  description: string;
+  /** What the workflow does, one plain-language line per step. */
+  steps: string[];
+  schedule: WorkflowTemplateSchedule | null;
+  requires: WorkflowTemplateRequirement[];
+  inputs: WorkflowTemplateInput[];
+  /**
+   * Limits the installer must know BEFORE installing — a step whose action
+   * name resolves only at run time, an action an org policy can gate into a
+   * parked run, a batch-size cap. Shown in the install dialog.
+   */
+  caveats: string[];
+}
+
+export interface ListWorkflowTemplatesResponse {
+  templates: WorkflowTemplateSummary[];
+}
+
+export interface InstallWorkflowTemplateRequest {
+  /**
+   * Values for `WorkflowTemplateSummary.inputs`, written into the installed
+   * definition. A scheduled run applies no `dataSchema` defaults, so a
+   * parameter the schedule needs is baked in here rather than read from the
+   * trigger at run time.
+   */
+  inputs?: Record<string, unknown>;
+  /**
+   * Install into a team workspace instead of the caller's own, exactly as
+   * `CreateWorkflowRequest.teamId` does. The caller must be a current
+   * member; a non-member or an unknown id is not found.
+   *
+   * A team install is refused for a SCHEDULED template that calls any tool
+   * action: a scheduled run acts as the workflow's owner, and a team owner
+   * has no connected account, so every such step would fail on every run.
+   */
+  teamId?: string;
+}
+
+export interface InstallWorkflowTemplateResponse {
+  workflowId: string;
+  /** The installed name. A repeat install of one template is numbered. */
+  workflowName: string;
+  /** Present when the template armed a cron schedule. */
+  scheduleId?: string;
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }

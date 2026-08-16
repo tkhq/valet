@@ -30,12 +30,28 @@ export interface WorkflowEditorState {
   viewport?: { x: number; y: number; zoom: number };
 }
 
+/**
+ * One declared trigger input.
+ *
+ * `label`, `placeholder` and `hidden` are presentation only. They let a
+ * definition declare each input ONCE, here, and let the run form derive its
+ * fields from the same declaration — without them a template must repeat
+ * its input list somewhere else, and the two copies drift. `hidden` marks a
+ * field that belongs to the invocation contract but is never typed by a
+ * person, such as a value a webhook maps in.
+ */
 export interface WorkflowInputDefinition {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   required?: boolean;
   default?: unknown;
   description?: string;
   enum?: unknown[];
+  /** Field name shown on the run form. Falls back to the schema key. */
+  label?: string;
+  /** Example value shown in the empty field. */
+  placeholder?: string;
+  /** True keeps the field out of the run form. */
+  hidden?: boolean;
 }
 
 export interface WorkflowPolicy {

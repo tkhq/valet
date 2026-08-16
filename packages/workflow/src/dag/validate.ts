@@ -101,7 +101,7 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
+  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential', 'onDeny', 'approvalTimeout'],
   workflow: ['id', 'type', 'workflowId', 'input'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
@@ -448,6 +448,21 @@ function validateNodeFields(
         errors.push(
           `${label}: tool.credential must be "auto", "app" or "user", got ${JSON.stringify(node.credential)} — ` +
             `"app" makes the action run as the installed application, "user" as the workflow owner`,
+        );
+      }
+      // A policy gate on a tool node parks the run (`nodes/tool.ts`), so a
+      // definition needs a way to say what a denial or a timeout does. Both
+      // fields are checked the same way the approval node's are — one rule
+      // for one meaning.
+      if (node.onDeny !== undefined && node.onDeny !== 'fail' && node.onDeny !== 'skip') {
+        errors.push(`${label}: tool.onDeny must be "fail" or "skip", got ${JSON.stringify(node.onDeny)}`);
+      }
+      if (
+        node.approvalTimeout !== undefined &&
+        (typeof node.approvalTimeout !== 'string' || parseDurationMs(node.approvalTimeout) === null)
+      ) {
+        errors.push(
+          `${label}: unparseable tool.approvalTimeout ${JSON.stringify(node.approvalTimeout)} — use a number + unit like "30m", "24h"`,
         );
       }
       break;

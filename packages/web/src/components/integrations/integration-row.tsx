@@ -2,7 +2,7 @@
  * Cards for `/integrations` (two-column facelift of the Task-15 connect
  * surface).
  *
- * One tile per plugin: a brand monogram, name + connection state, the
+ * One tile per plugin: a `ServiceMark`, name + connection state, the
  * description, and a footer with the mono "reach" meta (tool count /
  * "tools load on connect" / "no key needed") and the connect controls.
  * The token-entry reveal expands INSIDE the tile so connecting never
@@ -19,6 +19,7 @@ import { Badge, Button, Textarea } from "~/components/primitives";
 import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
 import { useConnectGithub } from "~/api/repos";
 import { displayName } from "./display-name";
+import { ServiceMark } from "./service-mark";
 
 const TOKEN_FIELD_LABEL: Record<PluginServiceSummary["type"], string> = {
   api_key: "API key",
@@ -49,58 +50,6 @@ function reachMeta(plugin: PluginSummary): string | null {
   return null;
 }
 
-// ── Brand monograms ──────────────────────────────────────────────────────
-
-/** Recognizable brand hues for the monogram tile; unknown services hash
- * into a small default palette so third-party plugins still get a stable
- * color. Full-strength hexes on purpose — the CSS-var tokens can't take
- * opacity modifiers (theme.css trap). */
-const BRAND_HEX: Record<string, string> = {
-  github: "#24292f",
-  gmail: "#ea4335",
-  "google-calendar": "#4285f4",
-  google_calendar: "#4285f4",
-  "google-workspace": "#34a853",
-  google_workspace: "#34a853",
-  slack: "#611f69",
-  linear: "#5e6ad2",
-  notion: "#111111",
-  sentry: "#362d59",
-  stripe: "#635bff",
-  cloudflare: "#f6821f",
-  deepwiki: "#0ea5e9",
-  typefully: "#1d9bf0",
-  telegram: "#229ed9",
-  figma: "#a259ff",
-  browser: "#64748b",
-  workflows: "#5f7a5a",
-  personas: "#b98a2f",
-  "sandbox-tunnels": "#64748b",
-};
-
-const FALLBACK_HEX = ["#0ea5e9", "#f97316", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1"];
-
-export function brandHex(id: string): string {
-  const known = BRAND_HEX[id];
-  if (known) return known;
-  let h = 5381;
-  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) | 0;
-  return FALLBACK_HEX[Math.abs(h) % FALLBACK_HEX.length];
-}
-
-function Monogram({ id, quiet }: { id: string; quiet?: boolean }) {
-  const label = displayName(id);
-  return (
-    <span
-      aria-hidden="true"
-      className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-semibold text-white"
-      style={{ backgroundColor: quiet ? "#a8a29b" : brandHex(id) }}
-    >
-      {label.charAt(0).toUpperCase()}
-    </span>
-  );
-}
-
 // ── Tiles ────────────────────────────────────────────────────────────────
 
 export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
@@ -113,7 +62,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
         <ServiceBlock
           service={single}
           title={displayName(plugin.name)}
-          monogramId={plugin.name}
+          markId={plugin.name}
           description={plugin.description}
           meta={meta}
         />
@@ -121,7 +70,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
         <>
           <CardHeading
             title={displayName(plugin.name)}
-            monogramId={plugin.name}
+            markId={plugin.name}
             description={plugin.description}
           />
           <CardFooter meta={meta} />
@@ -134,7 +83,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
                   <ServiceBlock
                     service={service}
                     title={displayName(service.service)}
-                    monogramId={service.service}
+                    markId={service.service}
                   />
                 </li>
               ))}
@@ -149,7 +98,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
 export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
   return (
     <div className="flex items-start gap-3 rounded-lg bg-ink-wash p-4">
-      <Monogram id={plugin.name} quiet />
+      <ServiceMark id={plugin.name} quiet />
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-ink">{displayName(plugin.name)}</div>
         {plugin.description && (
@@ -167,18 +116,18 @@ export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
 
 function CardHeading({
   title,
-  monogramId,
+  markId,
   description,
   state,
 }: {
   title: string;
-  monogramId: string;
+  markId: string;
   description?: string;
   state?: React.ReactNode;
 }) {
   return (
     <div className="flex items-start gap-3">
-      <Monogram id={monogramId} />
+      <ServiceMark id={markId} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{title}</span>
@@ -205,13 +154,13 @@ function CardFooter({ meta, right }: { meta?: string | null; right?: React.React
 function ServiceBlock({
   service,
   title,
-  monogramId,
+  markId,
   description,
   meta,
 }: {
   service: PluginServiceSummary;
   title: string;
-  monogramId: string;
+  markId: string;
   description?: string;
   meta?: string | null;
 }) {
@@ -282,7 +231,7 @@ function ServiceBlock({
     <>
       <CardHeading
         title={title}
-        monogramId={monogramId}
+        markId={markId}
         description={description}
         state={service.connected ? <Badge variant="success">Connected</Badge> : undefined}
       />

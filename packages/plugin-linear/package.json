@@ -22,7 +22,8 @@
   "dependencies": {
     "@valet/engine": "workspace:*",
     "@valet/sdk": "workspace:*",
-    "@valet/shared": "workspace:*"
+    "@valet/shared": "workspace:*",
+    "@valet/workflow": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.3.3",

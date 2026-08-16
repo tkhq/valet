@@ -360,7 +360,9 @@ describe('validateWorkflowDefinition', () => {
   });
 
   describe('tool node', () => {
-    function toolDefinition(overrides: Partial<Pick<ToolNode, 'service' | 'action' | 'credential'>>): WorkflowDefinition {
+    function toolDefinition(
+      overrides: Partial<Pick<ToolNode, 'service' | 'action' | 'credential' | 'onDeny' | 'approvalTimeout'>>,
+    ): WorkflowDefinition {
       return definition({
         nodes: [
           { id: 'trigger', type: 'trigger' },
@@ -420,6 +422,55 @@ describe('validateWorkflowDefinition', () => {
         expect(
           result.errors.some((e) => e.includes('tool.credential must be "auto", "app" or "user"')),
         ).toBe(true);
+      }
+    });
+
+    // A policy gate parks the run on a tool node, so a definition has to be
+    // able to say what a denial or a timeout does. The executor implements
+    // both fields; the key list used to omit them, which made every such
+    // definition unsavable.
+    it('accepts the gate-behavior fields the executor implements', () => {
+      expect(validateWorkflowDefinition(toolDefinition({ onDeny: 'skip' }))).toEqual({ ok: true });
+      expect(validateWorkflowDefinition(toolDefinition({ onDeny: 'fail', approvalTimeout: '24h' }))).toEqual({ ok: true });
+    });
+
+    it('rejects an unknown onDeny value', () => {
+      const result = validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            rawNode({ id: 'call', type: 'tool', service: 'github', action: 'create_comment', params: {}, onDeny: 'retry' }),
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'call' },
+            { from: 'call', to: 'stop' },
+          ],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('tool.onDeny must be "fail" or "skip"'))).toBe(true);
+      }
+    });
+
+    it('rejects an unparseable approvalTimeout, and names the form to use', () => {
+      const result = validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            rawNode({ id: 'call', type: 'tool', service: 'github', action: 'create_comment', params: {}, approvalTimeout: 'soon' }),
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'call' },
+            { from: 'call', to: 'stop' },
+          ],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('unparseable tool.approvalTimeout'))).toBe(true);
       }
     });
   });

@@ -9,11 +9,19 @@
  * does, since this suite only cares that navigation was requested, not
  * that the router actually resolved it.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-const workflowsData = {
+const workflowsData: {
+  workflows: Array<{
+    id: string;
+    name: string;
+    definition: unknown;
+    createdAt: number;
+    updatedAt: number;
+  }>;
+} = {
   workflows: [
     { id: "wf_1", name: "Deploy pipeline", definition: {}, createdAt: 1, updatedAt: 1 },
     { id: "wf_2", name: "Nightly digest", definition: {}, createdAt: 2, updatedAt: 2 },
@@ -46,7 +54,19 @@ vi.mock("~/api/workflows", () => ({
   useDeleteWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
+// The gallery has its own suite; here it only has to be identifiable, so the
+// page's placement rule can be asserted without a second templates fixture.
+vi.mock("~/components/workflows/template-gallery", () => ({
+  TemplateGallery: () => <div data-testid="template-gallery" />,
+}));
+
 import { WorkflowsIndexPage } from "./workflows.index";
+
+const populated = [...workflowsData.workflows];
+
+beforeEach(() => {
+  workflowsData.workflows = [...populated];
+});
 
 describe("WorkflowsIndexPage", () => {
   it("renders each workflow definition's name as a link to its editor page", () => {
@@ -94,5 +114,28 @@ describe("WorkflowsIndexPage", () => {
         params: { workflowId: "wf_new" },
       }),
     );
+  });
+
+  it("puts templates behind a tab so an existing list stays the page", () => {
+    render(<WorkflowsIndexPage />);
+
+    expect(screen.getByText("Deploy pipeline")).toBeTruthy();
+    expect(screen.queryByTestId("template-gallery")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+
+    expect(screen.getByTestId("template-gallery")).toBeTruthy();
+    expect(screen.queryByText("Deploy pipeline")).toBeNull();
+  });
+
+  it("makes the gallery the whole page when there are no workflows", () => {
+    workflowsData.workflows = [];
+    render(<WorkflowsIndexPage />);
+
+    expect(screen.getByTestId("template-gallery")).toBeTruthy();
+    // No tabs: with nothing to list, a "Your workflows" tab is chrome over
+    // an empty list.
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getByText(/no workflows yet/i)).toBeTruthy();
   });
 });

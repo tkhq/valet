@@ -20,7 +20,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@valet/engine": "workspace:*"
+    "@valet/engine": "workspace:*",
+    "@valet/workflow": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.3.3",

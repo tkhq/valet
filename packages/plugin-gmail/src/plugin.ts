@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { gmailPlugin } from "./actions/actions.js";
+import { gmailTemplates } from "./templates.js";
 
 const skillMd = readFileSync(fileURLToPath(new URL("../skills/gmail/SKILL.md", import.meta.url)), "utf8");
 
@@ -11,6 +12,7 @@ const plugin: ValetPlugin = {
   description: "Gmail integration for reading and sending emails",
   actions: [gmailPlugin],
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "gmail")],
+  templates: gmailTemplates,
   credentials: [
     {
       type: "oauth2",

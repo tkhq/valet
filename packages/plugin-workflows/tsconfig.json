@@ -5,6 +5,15 @@
     "rootDir": "./src",
     "types": []
   },
-  "include": ["src/**/*"],
-  "references": [{ "path": "../engine" }]
+  "include": [
+    "src/**/*"
+  ],
+  "references": [
+    {
+      "path": "../engine"
+    },
+    {
+      "path": "../workflow"
+    }
+  ]
 }
