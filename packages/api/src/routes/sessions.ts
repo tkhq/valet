@@ -34,6 +34,7 @@ import type {
   PauseSessionResponse,
   RepoBinding,
   SandboxJwtResponse,
+  SandboxProfile,
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
@@ -424,13 +425,20 @@ sessionsRouter.get("/:id", async (c) => {
   return c.json(detail);
 });
 
-// ── Patch (`model` and/or `title`) ────────────────────────────────────────
+// ── Patch (`model`, `title`, and/or `profile`) ───────────────────────────
 
 /** Upper bound on a hand-typed session name. The auto-titler caps itself at
  * 60 characters. A person renaming a session sometimes wants more room, so
  * the manual limit is larger, but it stays bounded: the header and the
  * session lists render this string. */
 const MAX_SESSION_TITLE_CHARS = 200;
+
+/** The profile row is written before the sandbox is replaced, so a failed
+ * replacement leaves a saved setting and a stale sandbox. Say both, and name
+ * the one action that finishes the job. */
+function profileSavedButSandboxFailed(reason: string): string {
+  return `Profile saved, but the sandbox did not restart (${reason}). Use "Replace sandbox" in the session menu to apply it.`;
+}
 
 sessionsRouter.patch("/:id", async (c) => {
   const { db, engineHost, engineStore } = c.var.providers;
@@ -455,10 +463,11 @@ sessionsRouter.patch("/:id", async (c) => {
 
   const wantsModel = body.model !== undefined;
   const wantsTitle = body.title !== undefined;
-  // A body with neither field keeps the message this guard has always sent.
-  // The model picker is still the only caller that can omit a field by
-  // accident, and a contract test pins this exact response.
-  if (!wantsModel && !wantsTitle) {
+  const wantsProfile = body.profile !== undefined;
+  // A body with no field at all keeps the message this guard has always
+  // sent. The model picker is still the only caller that can omit a field
+  // by accident, and a contract test pins this exact response.
+  if (!wantsModel && !wantsTitle && !wantsProfile) {
     return c.json({ error: "model is required" }, 400);
   }
   if (wantsModel && (typeof body.model !== "string" || body.model.length === 0)) {
@@ -482,6 +491,27 @@ sessionsRouter.patch("/:id", async (c) => {
     }
   }
 
+  // A profile change recreates the sandbox, so it is refused mid-turn for
+  // the same reason `POST /:id/sandbox/replace` is: the running turn would
+  // lose the sandbox under it. An unchanged value is not a change and needs
+  // no guard.
+  let nextProfile: SandboxProfile | undefined;
+  if (wantsProfile) {
+    if (body.profile !== "headless" && body.profile !== "full") {
+      return c.json({ error: "profile must be 'headless' or 'full'." }, 400);
+    }
+    if (body.profile !== row.profile) nextProfile = body.profile;
+  }
+  if (nextProfile !== undefined) {
+    const busy = await engineStore.listUnsettledSubmissions(id);
+    if (busy.length > 0) {
+      return c.json(
+        { error: "a turn is running. Wait for it to finish, then change the profile." },
+        409,
+      );
+    }
+  }
+
   // Materialize the engine session only when the model changes. A rename
   // must not start a sandbox — the header renames hibernated sessions too.
   let model: string | undefined;
@@ -500,16 +530,62 @@ sessionsRouter.patch("/:id", async (c) => {
     model = engineSession.options.modelSpec ?? engineSession.options.model.id;
   }
 
-  // The title write lands after every validation, so a rejected model never
+  // A live session froze its profile into `SandboxCreateOpts` when it was
+  // built, and the attachment reuses that object on every re-provision. So
+  // read whether a sandbox exists BEFORE the cache entry goes away: that
+  // answers whether a running container has to be replaced, or whether the
+  // next provision picks the new profile up on its own.
+  let hadSandbox = false;
+  if (nextProfile !== undefined && engineHost.isLive(id)) {
+    const live = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    hadSandbox = live.attachment.current() !== null;
+  }
+
+  // The writes land after every validation, so a rejected model never
   // leaves a half-applied patch behind.
   let effectiveRow = row;
-  if (nextTitle !== undefined) {
+  if (nextTitle !== undefined || nextProfile !== undefined) {
     const now = Date.now();
     await db
       .update(agentSessions)
-      .set({ title: nextTitle, updatedAt: now })
+      .set({
+        ...(nextTitle !== undefined ? { title: nextTitle } : {}),
+        ...(nextProfile !== undefined ? { profile: nextProfile } : {}),
+        updatedAt: now,
+      })
       .where(eq(agentSessions.id, id));
-    effectiveRow = { ...row, title: nextTitle, updatedAt: now };
+    effectiveRow = {
+      ...row,
+      ...(nextTitle !== undefined ? { title: nextTitle } : {}),
+      ...(nextProfile !== undefined ? { profile: nextProfile } : {}),
+      updatedAt: now,
+    };
+  }
+
+  if (nextProfile !== undefined) {
+    // Drop the cached session so the next build reads the new profile.
+    engineHost.evictCache(id);
+    if (hadSandbox) {
+      // The old container still runs the old profile. Rebuild from the
+      // updated row, then replace the sandbox so the change is live now
+      // rather than at some later re-provision.
+      const rebuilt = await engineHost.sessionFor(id, await loadSessionMeta(db, effectiveRow));
+      // Re-check right before the replacement. A submission admitted while
+      // the rebuild ran wins, the same TOCTOU rule `POST /:id/sandbox/replace`
+      // applies. The row already carries the new profile, so say so.
+      const recheck = await engineStore.listUnsettledSubmissions(id);
+      if (recheck.length > 0) {
+        return c.json({ error: profileSavedButSandboxFailed("a turn started") }, 409);
+      }
+      try {
+        await rebuilt.attachment.replace();
+      } catch (err) {
+        return c.json({ error: profileSavedButSandboxFailed((err as Error).message) }, 502);
+      }
+      if (rebuilt.attachment.state !== "ready") {
+        return c.json({ error: profileSavedButSandboxFailed("the new sandbox never became ready") }, 502);
+      }
+    }
   }
 
   const [{ n }] = await db

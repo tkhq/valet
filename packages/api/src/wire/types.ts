@@ -331,6 +331,16 @@ export interface PatchSessionRequest {
   model?: string;
   /** New session name. Trimmed server-side. Must not be empty. */
   title?: string;
+  /**
+   * Raise the session to `"full"` to run the terminal and the VS Code
+   * server in its sandbox, or drop it back to `"headless"`.
+   *
+   * The profile is baked into the sandbox at create time (the container
+   * command and, on kubernetes, the Service), so a change recreates the
+   * sandbox. The workspace survives; an open terminal does not. The request
+   * is refused while a turn is unsettled.
+   */
+  profile?: SandboxProfile;
 }
 
 export type PatchSessionResponse = SessionDetail;

@@ -38,6 +38,12 @@ So this pass is three things at once: bring interactive services back into the v
 
 5. **Session/profile plumbing.** `SandboxCreateOpts` gains `profile?: "headless" | "full"` (default headless). Interactive sessions created from the web default to `full`; orchestrator and workflow-spawned sessions stay headless. The profile is captured at session build like the rest of the sandbox env (same once-per-build semantics as `mintSandboxEnv`).
 
+   *Amended 2026-08-17.* The profile is a session setting, not a creation-time constant. `PATCH /api/sessions/:id` accepts `profile`, so a person can turn the terminal and the VS Code server on for a session that started headless — the assistant session most of all, which had no other way to reach the tabs. The defaults above are unchanged: nothing is raised to `full` on its own.
+
+   The once-per-build capture still holds, and it is what makes the change non-trivial. A built session froze the profile into its `SandboxCreateOpts`, and `SandboxAttachment` reuses that object on every re-provision. So the route persists the new value, evicts the cached session, and replaces a running sandbox. The workspace survives the replacement; an open terminal does not, so the request is refused while a turn is unsettled, and the web asks for confirmation first.
+
+   `buildAssistantSession` reads the profile from the `agent_sessions` row rather than from its caller's meta. An assistant session is woken by the web, by a channel message, and by a workflow, and only the first waker's build is cached — reading the row is what stops a Slack message from pinning the session back to headless.
+
 6. **Failure behavior.** Gateway up but service down → gateway returns a minimal 502 page naming the service (ttyd/code-server) — the iframe shows it as-is. Sandbox hibernated/unprovisioned → the proxy route returns 409 with a wake hint and the UI triggers the normal ensureReady path (compatible with the hibernation spec's wake-on-touch). JWT expired mid-session → cookie carries on; a fully expired cookie surfaces as the gateway's 401 page and the UI silently re-mints + reloads the iframe once.
 
 ## Exit criteria (the dogfood)

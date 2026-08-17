@@ -1,6 +1,14 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useRef, useState } from "react";
-import { Check, ClipboardCopy, MoreHorizontal, Moon, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Check,
+  ClipboardCopy,
+  MoreHorizontal,
+  Moon,
+  RefreshCw,
+  SquareTerminal,
+  Trash2,
+} from "lucide-react";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import {
   Badge,
@@ -19,6 +27,7 @@ import {
   useRenameSession,
   useReplaceSandbox,
   useSetSessionModel,
+  useSetSessionProfile,
 } from "~/api/queries";
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useAssistants } from "~/api/assistants";
@@ -83,12 +92,14 @@ export function SessionHeader({
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
+  const setProfile = useSetSessionProfile(session.id);
   const me = useMe();
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
   const teams = useTeams();
   const assistants = useAssistants();
-  // One error slot for the header actions (pause, replace, rename).
+  // One error slot for every header action: pause, replace, rename, and the
+  // Terminal/VS Code switch.
   const [actionError, setActionError] = useState<string | null>(null);
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
   const [editingTitle, setEditingTitle] = useState(false);
@@ -129,6 +140,26 @@ export function SessionHeader({
       await replace.mutateAsync();
     } catch (err) {
       setActionError(extractActionError(err, "Failed to replace the sandbox."));
+    }
+  }
+
+  // The profile decides whether the sandbox starts a terminal server and a
+  // VS Code server. It is baked into the container at create time, so the
+  // switch restarts the sandbox. Name that cost before doing it — the
+  // workspace files survive, an open terminal does not.
+  async function toggleInteractiveServices() {
+    const turningOn = session.profile !== "full";
+    const prompt = turningOn
+      ? "Turn on Terminal and VS Code? The workspace sandbox restarts now. Your files are kept. Anything open in a terminal is lost."
+      : "Turn off Terminal and VS Code? The workspace sandbox restarts now. Your files are kept. Anything open in a terminal is lost.";
+    if (!confirm(prompt)) return;
+    setActionError(null);
+    try {
+      await setProfile.mutateAsync(turningOn ? "full" : "headless");
+    } catch (err) {
+      setActionError(
+        extractActionError(err, "Failed to change the session's services. Try again."),
+      );
     }
   }
 
@@ -233,9 +264,11 @@ export function SessionHeader({
   // box here would store a string nobody ever sees.
   const canRename = canAdminister && !isAssistantSession;
 
-  // The edit box replaces the title cluster only. The action cluster on the
-  // right keeps rendering, so a rename never hides the model picker, the
-  // status badges, or the error slot that reports a failed rename.
+  // The edit box replaces the title cluster. The right-hand side keeps the
+  // read-only signals — sandbox, connection, agent status — and the error
+  // slot, so the row does not jump and a failed rename still has somewhere
+  // to report. The action buttons are dropped while editing: they act on a
+  // session the person is in the middle of naming.
   if (editingTitle) {
     return (
       <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
@@ -376,7 +409,7 @@ export function SessionHeader({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="sm" aria-label="Session menu">
-                  {del.isPending || replace.isPending ? (
+                  {del.isPending || replace.isPending || setProfile.isPending ? (
                     <Spinner size={14} />
                   ) : (
                     <MoreHorizontal className="h-4 w-4" />
@@ -384,6 +417,15 @@ export function SessionHeader({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={setProfile.isPending}
+                  onSelect={() => void toggleInteractiveServices()}
+                >
+                  <SquareTerminal className="h-3.5 w-3.5 mr-2" aria-hidden />
+                  {session.profile === "full"
+                    ? "Turn off Terminal and VS Code…"
+                    : "Turn on Terminal and VS Code…"}
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={replace.isPending}
                   onSelect={() => void replaceSandbox()}
