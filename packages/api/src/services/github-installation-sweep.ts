@@ -102,7 +102,17 @@ const DEFAULT_INTERVAL_MS = 60_000;
 /** A revoked key or a deleted App costs one request per this period, not one
  * per tier interval. */
 const MAX_BACKOFF_MS = 6 * 60 * 60_000;
-const MAX_BACKOFF_DOUBLINGS = 5;
+/**
+ * Guard on the exponent, not the real ceiling. `MAX_BACKOFF_MS` is the
+ * ceiling; this only stops `2 ** failures` growing without bound after a
+ * long outage.
+ *
+ * It must be high enough that EVERY tier can actually reach the six-hour
+ * ceiling, or a short tier caps early and the stated rule is not the rule.
+ * The shortest tier is two minutes and six hours is 180 of those, so eight
+ * doublings suffice; 20 leaves room for a shorter tier later.
+ */
+const MAX_BACKOFF_DOUBLINGS = 20;
 /** Ceiling for the wait after repeated empty results. An App installed
  * nowhere only changes when a person installs it, so an hour is soon
  * enough and costs 24 requests a day rather than 720. */
