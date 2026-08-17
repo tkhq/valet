@@ -113,7 +113,8 @@ trigger arg types" and gave up.
   (`trigger-input.ts`) collapses the alias, and every consumer that
   branches on the type — run-time input validation, the run form, the
   editor's trigger form, template inputs — normalizes first, so
-  `integer` behaves identically to `number` on every surface.
+  `integer` behaves identically to `number` on every surface. The alias
+  adds no integer-only check: a non-integer value like `7.5` is accepted.
 
 ## 2026-08-10 addendum: triggers + team-owner surface in the web UI
 
