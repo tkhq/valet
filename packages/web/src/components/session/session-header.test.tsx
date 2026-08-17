@@ -267,11 +267,19 @@ describe("SessionHeader — team assistant", () => {
     };
   }
 
-  it("titles an unnamed team assistant with the team's name, not the viewer's own", () => {
+  it("titles an unnamed team assistant the way the rail does, not with the viewer's own name", () => {
     withTeam("member");
     renderTeamHeader();
-    expect(screen.getByText("Platform")).toBeTruthy();
+    // The same `assistantLabel` the rail uses. It used to fall back to the
+    // TEAM's name here, so one assistant was called "Default assistant" in
+    // the rail and "Platform" in the header — two names for one thing.
+    expect(screen.getByText("Default assistant")).toBeTruthy();
+    // The guarantee this test has always been about: never the viewer's own
+    // assistant name.
     expect(screen.queryByText("Assistant")).toBeNull();
+    // The team is still named, on the badge, so dropping it from the title
+    // costs no information.
+    expect(screen.getByText("Platform")).toBeTruthy();
   });
 
   it("titles a named team assistant with its own name", () => {
@@ -282,10 +290,12 @@ describe("SessionHeader — team assistant", () => {
     expect(screen.getByText("Triage")).toBeTruthy();
   });
 
-  it("marks it as shared with a Team badge", () => {
+  it("marks it as shared with a badge naming the owning team", () => {
     withTeam("member");
     renderTeamHeader();
-    expect(screen.getByText("Team")).toBeTruthy();
+    // The team's own name, not the bare word "Team": a person on several
+    // teams cannot tell them apart from a generic label.
+    expect(screen.getByText("Platform")).toBeTruthy();
   });
 
   /**
