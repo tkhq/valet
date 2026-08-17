@@ -89,9 +89,29 @@ describe("selectDueOrg", () => {
 
   it("skips an org whose backoff has not expired, and takes it once it has", () => {
     const state: SweepState = createSweepState();
-    state.set("a", { failures: 2, nextDueAt: NOW + 30_000 });
+    state.set("a", { failures: 2, emptyStreak: 0, nextDueAt: NOW + 30_000 });
     expect(selectDueOrg([candidate({ orgId: "a" })], NOW, state)).toBeNull();
     expect(selectDueOrg([candidate({ orgId: "a" })], NOW + 31_000, state)?.orgId).toBe("a");
+  });
+
+  // An App installed nowhere writes no row, so its freshness marker stays
+  // null and its tier stays the shortest one. Without a widening wait it is
+  // re-checked every two minutes for as long as the process runs.
+  it("widens the wait for an org that keeps reporting no installations", () => {
+    const state: SweepState = createSweepState();
+    const waitAfter = (emptyStreak: number): number => {
+      state.set("a", { failures: 0, emptyStreak, nextDueAt: 0 });
+      const entry = state.get("a");
+      if (!entry) throw new Error("entry missing");
+      return Math.min(
+        SWEEP_DUE_MS["no-installations"] * 2 ** Math.min(entry.emptyStreak, 5),
+        60 * 60_000,
+      );
+    };
+    expect(waitAfter(1)).toBe(4 * 60_000);
+    expect(waitAfter(3)).toBe(16 * 60_000);
+    // Capped, so a long-idle App costs 24 requests a day rather than 720.
+    expect(waitAfter(9)).toBe(60 * 60_000);
   });
 });
 

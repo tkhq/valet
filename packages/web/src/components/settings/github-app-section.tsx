@@ -29,15 +29,6 @@ function setupPollInterval(data: GetGithubAppResponse | undefined): number | fal
   return livePollInterval(data, (reply) => reply.configured && reply.installations.length === 0, SETUP_POLL_MS);
 }
 
-/** When the server last read this org's installations from GitHub, in epoch
- * ms; `null` when it has none to date from. The server sends the field (see
- * `buildGetResponse` in `routes/github-app.ts`), but the shared wire type does
- * not declare it yet, so read it structurally. Delete this reader once the
- * field reaches `GetGithubAppResponse`. */
-function readInstallationsCheckedAt(data: GetGithubAppResponse): number | null {
-  const reply: { configured: boolean; installationsCheckedAt?: unknown } = data;
-  return typeof reply.installationsCheckedAt === "number" ? reply.installationsCheckedAt : null;
-}
 
 /**
  * Organization · GitHub — the App setup flow (GitHub/repo integration plan,
@@ -73,7 +64,7 @@ export function GithubAppSection() {
   if (!githubAppQ.data) return null;
 
   return githubAppQ.data.configured ? (
-    <ConfiguredCard data={githubAppQ.data} checkedAt={readInstallationsCheckedAt(githubAppQ.data)} />
+    <ConfiguredCard data={githubAppQ.data} checkedAt={githubAppQ.data.installationsCheckedAt} />
   ) : (
     <NotConfiguredCard webhookMode={githubAppQ.data.webhook.mode} />
   );

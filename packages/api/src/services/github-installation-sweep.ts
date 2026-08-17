@@ -103,6 +103,10 @@ const DEFAULT_INTERVAL_MS = 60_000;
  * per tier interval. */
 const MAX_BACKOFF_MS = 6 * 60 * 60_000;
 const MAX_BACKOFF_DOUBLINGS = 5;
+/** Ceiling for the wait after repeated empty results. An App installed
+ * nowhere only changes when a person installs it, so an hour is soon
+ * enough and costs 24 requests a day rather than 720. */
+const MAX_EMPTY_DUE_MS = 60 * 60_000;
 
 export interface InstallationSweepDeps extends GithubAppDeps {
   /** This instance's public base URL (`publicUrlFromEnv`). Absent or empty
@@ -128,6 +132,16 @@ export interface InstallationSweepHandle {
 export interface SweepEntry {
   nextDueAt: number;
   failures: number;
+  /**
+   * Successful checks in a row that found no installation at all.
+   *
+   * An org whose App is installed nowhere never gets a row, so its
+   * `lastCheckedAt` stays null and it stays in the two-minute tier for as
+   * long as the process runs — about 720 requests a day for a state only a
+   * person can change, by installing the App. The streak widens the wait so
+   * the cost falls away, and any real installation resets it.
+   */
+  emptyStreak: number;
 }
 
 export type SweepState = Map<string, SweepEntry>;
@@ -253,14 +267,24 @@ export async function runInstallationSweepTick(
   const target = selectDueOrg(candidates, now, state);
   if (!target) return null;
 
+  let found: number;
   try {
-    await discoverInstallations(deps, target.orgId);
+    found = (await discoverInstallations(deps, target.orgId)).length;
   } catch (err) {
     recordFailure(state, target.orgId, target.tier, now, random, err, "read the installations of");
     return null;
   }
 
-  state.set(target.orgId, { failures: 0, nextDueAt: now + jitterMs(SWEEP_DUE_MS[target.tier], random) });
+  // A check that found nothing succeeded, so it carries no backoff — but it
+  // also wrote no row, which leaves the org in the shortest tier forever.
+  // Widen the wait per empty result instead, and reset the moment anything
+  // is installed.
+  const emptyStreak = found === 0 ? (state.get(target.orgId)?.emptyStreak ?? 0) + 1 : 0;
+  const base =
+    emptyStreak === 0
+      ? SWEEP_DUE_MS[target.tier]
+      : Math.min(SWEEP_DUE_MS[target.tier] * 2 ** Math.min(emptyStreak, MAX_BACKOFF_DOUBLINGS), MAX_EMPTY_DUE_MS);
+  state.set(target.orgId, { failures: 0, emptyStreak, nextDueAt: now + jitterMs(base, random) });
   return target.orgId;
 }
 
@@ -277,7 +301,10 @@ function recordFailure(
   action: string,
 ): void {
   const failures = (state.get(orgId)?.failures ?? 0) + 1;
-  state.set(orgId, { failures, nextDueAt: now + backoffDelayMs(tier, failures, random) });
+  // A failure says nothing about whether an installation exists, so the
+  // empty streak is carried rather than reset.
+  const emptyStreak = state.get(orgId)?.emptyStreak ?? 0;
+  state.set(orgId, { failures, emptyStreak, nextDueAt: now + backoffDelayMs(tier, failures, random) });
   const detail = err instanceof Error ? err.message : String(err);
   const message = `github installation sweep: could not ${action} org ${orgId} (${detail}). Open Settings, Organization, GitHub. Choose Refresh installations to see the error.`;
   if (failures === 1) {
@@ -332,7 +359,11 @@ async function collectCandidates(
     // route's decision, not this sweep's. Park the org so it does not cost a
     // credential read on every tick from here on.
     if (!tier) {
-      state.set(orgId, { failures: 0, nextDueAt: now + jitterMs(SWEEP_DUE_MS["webhook-absent"], random) });
+      state.set(orgId, {
+        failures: 0,
+        emptyStreak: state.get(orgId)?.emptyStreak ?? 0,
+        nextDueAt: now + jitterMs(SWEEP_DUE_MS["webhook-absent"], random),
+      });
       continue;
     }
 

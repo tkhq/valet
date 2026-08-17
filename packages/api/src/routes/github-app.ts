@@ -126,6 +126,16 @@ async function buildGetResponse(deps: GithubAppDeps, orgId: string): Promise<Get
       : undefined,
     installations: rows.map(toInstallationSummary),
     webhook: { mode: publicUrlFromEnv(process.env) ? "public" : "manual" },
+    // The newest row's timestamp. `discoverInstallations` writes `updatedAt`
+    // on every upsert whether or not the row changed, so this dates the last
+    // successful read rather than the last change — which is what the page
+    // needs to say how fresh the list is. Reduced here rather than by a SQL
+    // `max()`, because the two drivers disagree on what a `max()` over a
+    // bigint column returns.
+    installationsCheckedAt: rows.reduce<number | null>(
+      (newest, row) => (newest === null || row.updatedAt > newest ? row.updatedAt : newest),
+      null,
+    ),
   };
 }
 
