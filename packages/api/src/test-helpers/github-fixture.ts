@@ -50,6 +50,11 @@ export interface GithubFixtureHandlers {
   listInstallationRepositories?: () => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
+  /** `GET /app/hook/config` — the App's OWN webhook config. */
+  getHookConfig?: () => GithubFixtureResponse;
+  /** `PATCH /app/hook/config`. The request body is on the recorded call, so
+   * tests assert the sent URL through `fixture.calls`. */
+  updateHookConfig?: () => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo` (prebuild orchestration, Task 3 — head-sha
    * resolution reads `default_branch` from here). */
   getRepo?: (owner: string, repo: string) => GithubFixtureResponse;
@@ -95,6 +100,15 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       html_url: "https://github.com/apps/fixture-app",
     },
   }),
+  getHookConfig: () => ({
+    body: {
+      url: "https://fixture.example.com/webhooks/github-app",
+      content_type: "json",
+      insecure_ssl: "0",
+      secret: "********",
+    },
+  }),
+  updateHookConfig: () => ({ body: { content_type: "json", insecure_ssl: "0", secret: "********" } }),
   getRepo: () => ({ body: { default_branch: "main" } }),
   getCommit: () => ({ body: { sha: "fixture-head-sha" } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),
@@ -151,6 +165,24 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     record(c, { id }, body);
     const { status, body: respBody } = handlers.createInstallationToken(id);
     return c.json(respBody as object, status ?? 201);
+  });
+
+  app.get("/app/hook/config", (c) => {
+    record(c, {});
+    const { status, body } = handlers.getHookConfig();
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.patch("/app/hook/config", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      body = undefined;
+    }
+    record(c, {}, body);
+    const { status, body: respBody } = handlers.updateHookConfig();
+    return c.json(respBody as object, status ?? 200);
   });
 
   app.get("/user", (c) => {

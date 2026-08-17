@@ -31,6 +31,8 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { syncAllAppWebhookUrls } from "./services/github-app.js";
+import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -297,6 +299,21 @@ await providers.channelHost.start().catch((err) => {
   console.error("boot restore: channelHost.start failed (continuing to serve):", err);
 });
 console.log("channel host started");
+
+// GitHub App webhook URL: point every app this instance OWNS at this
+// instance's public URL. A developer behind an ephemeral tunnel gets a new
+// hostname on every restart, and the URL baked into the app at creation goes
+// stale, so inbound deliveries stop with no error anywhere. Apps supplied
+// through `GITHUB_APP_*` belong to another instance and are never touched —
+// see `syncAppWebhookUrl`'s doc comment for that guard.
+//
+// Deliberately NOT awaited: this makes up to two GitHub round trips, and a
+// slow or unreachable GitHub must not hold up the port. The function
+// swallows every failure, so the floating promise cannot reject.
+void syncAllAppWebhookUrls(
+  { db: providers.db, credentials: providers.engineCredentials },
+  publicUrlFromEnv(process.env),
+);
 
 // Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
 // loops so pending/parked runs left over from a prior process pick back up.

@@ -455,6 +455,163 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
   return rows;
 }
 
+// ── Webhook-URL sync (`PATCH /app/hook/config`) ──────────────────────────
+// A GitHub App's webhook URL is fixed at creation. An instance behind an
+// ephemeral tunnel (`cloudflared` quick tunnel) gets a new hostname on every
+// restart, so the URL baked in at creation goes stale and inbound deliveries
+// stop with no error anywhere. These functions assert this instance's public
+// URL on the App it owns, at boot and after the manifest flow.
+
+/** Path the public webhook router is mounted at (see `app.ts`). The manifest
+ * flow and `syncAppWebhookUrl` both build the delivery URL from this
+ * constant, so the URL Valet asks for and the URL Valet serves cannot
+ * disagree. */
+export const GITHUB_APP_WEBHOOK_PATH = "/webhooks/github-app";
+
+function hookConfigUrl(deps: Pick<GithubAppDeps, "apiUrl">): string {
+  return `${githubApiUrl(deps)}/app/hook/config`;
+}
+
+function appJwtHeaders(jwt: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${jwt}`,
+    Accept: "application/vnd.github+json",
+    "User-Agent": "Valet-App",
+  };
+}
+
+/** Reads the App's own webhook URL (`GET /app/hook/config`, App JWT auth).
+ * `null` when the App has no URL set — the shape a manifest without
+ * `hook_attributes` produces. */
+async function readHookConfigUrl(
+  deps: Pick<GithubAppDeps, "apiUrl" | "fetchImpl">,
+  jwt: string,
+): Promise<string | null> {
+  const res = await githubFetch(deps)(hookConfigUrl(deps), { headers: appJwtHeaders(jwt) });
+  if (!res.ok) throw new Error(`GitHub API GET /app/hook/config returned ${res.status}`);
+  const payload: unknown = await res.json();
+  if (!isRecord(payload)) throw new Error("GitHub API GET /app/hook/config: expected an object response");
+  return typeof payload.url === "string" ? payload.url : null;
+}
+
+/** Writes the App's own webhook URL (`PATCH /app/hook/config`, App JWT
+ * auth). Sends only `url` — the App's content type and secret must stay as
+ * they were set at creation. */
+async function writeHookConfigUrl(
+  deps: Pick<GithubAppDeps, "apiUrl" | "fetchImpl">,
+  jwt: string,
+  url: string,
+): Promise<void> {
+  const res = await githubFetch(deps)(hookConfigUrl(deps), {
+    method: "PATCH",
+    headers: { ...appJwtHeaders(jwt), "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) throw new Error(`GitHub API PATCH /app/hook/config returned ${res.status}`);
+}
+
+/**
+ * Points the org's GitHub App at this instance's public webhook URL, when
+ * this instance owns that App. Call it at boot and after the manifest flow
+ * saves. NEVER throws — see the fail-soft note below.
+ *
+ * ── The shared-App guard (load-bearing — do not weaken) ──────────────────
+ * `loadAppConfigWithSource` reports where the config came from:
+ *
+ *   - `"org"` — this instance's manifest flow created the App, and its
+ *     private key lives in this instance's database. This instance owns the
+ *     App, so it can move the App's webhook URL.
+ *   - `"environment"` — the App arrived through `GITHUB_APP_*`, which is how
+ *     a deployment or a team's shared dev App is supplied. A DIFFERENT
+ *     instance owns it.
+ *
+ * Only `"org"` syncs. Without that condition, a developer who starts a local
+ * instance would silently move the team's shared App to that developer's own
+ * tunnel, and each developer's boot would take the webhook back from the
+ * last one.
+ *
+ * Two more rules hold this safe:
+ *
+ *   - Idempotent. It reads the current URL first and writes only when the
+ *     URL is different. A boot that changes nothing makes no write.
+ *   - It never clears. With no public URL (`publicUrl` empty), it does
+ *     nothing. A deployment can set the hook URL on purpose, and an empty
+ *     URL stops delivery for everyone. This function asserts a URL; it does
+ *     not remove one.
+ *
+ * Fail-soft: this runs at boot and inside the manifest-flow callback. A
+ * GitHub outage, a revoked private key, or a 4xx must not stop the API from
+ * starting or stop the manifest flow from completing. Every failure is
+ * logged and swallowed, the same as the best-effort `discoverInstallations`
+ * call in `routes/github-app.ts`.
+ *
+ * @param publicUrl This instance's public base URL — `publicUrlFromEnv`.
+ */
+export async function syncAppWebhookUrl(
+  deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl">,
+  orgId: string,
+  publicUrl: string | undefined,
+): Promise<void> {
+  try {
+    const loaded = await loadAppConfigWithSource(deps, orgId);
+    if (!loaded) return;
+    if (loaded.source !== "org") return;
+
+    if (!publicUrl) {
+      console.debug(
+        `github-app: no public URL for this instance; left the webhook URL of app ${loaded.config.appSlug} unchanged. Set VALET_PUBLIC_URL to sync it.`,
+      );
+      return;
+    }
+
+    const desired = `${publicUrl.replace(/\/+$/, "")}${GITHUB_APP_WEBHOOK_PATH}`;
+    const jwt = mintAppJwt(loaded.config);
+    if ((await readHookConfigUrl(deps, jwt)) === desired) return;
+
+    await writeHookConfigUrl(deps, jwt, desired);
+    console.log(`github-app: webhook URL of app ${loaded.config.appSlug} set to ${desired}`);
+  } catch (err) {
+    console.error(
+      `github-app: webhook URL sync failed for org ${orgId} (continuing). GitHub keeps delivering to the previous URL. Check GitHub availability and the app's private key, then restart or re-run setup:`,
+      err,
+    );
+  }
+}
+
+/**
+ * Boot-time counterpart to `syncAppWebhookUrl`: syncs every org that owns a
+ * `github_app` credential row. The scan reads the `credentials` table
+ * directly for the same reason `loadLinkedUserLoginMap` does (see the module
+ * doc comment) — the `CredentialStore` port is owner-scoped and cannot
+ * answer "which owners hold this service". Only credential-row apps can pass
+ * the `source === "org"` guard, so the scan already gives the exact
+ * candidate set, and `syncAppWebhookUrl` re-checks the source per org.
+ * NEVER throws.
+ */
+export async function syncAllAppWebhookUrls(
+  deps: Pick<GithubAppDeps, "db" | "credentials" | "env" | "apiUrl" | "fetchImpl">,
+  publicUrl: string | undefined,
+): Promise<void> {
+  if (!publicUrl) {
+    console.debug("github-app: no public URL for this instance; left every app webhook URL unchanged.");
+    return;
+  }
+  let orgIds: string[];
+  try {
+    const rows = await deps.db
+      .select({ ownerId: credentials.ownerId })
+      .from(credentials)
+      .where(and(eq(credentials.ownerType, "org"), eq(credentials.service, GITHUB_APP_SERVICE)));
+    orgIds = rows.map((row) => row.ownerId);
+  } catch (err) {
+    console.error("github-app: failed to list orgs with a github_app credential (continuing):", err);
+    return;
+  }
+  for (const orgId of orgIds) {
+    await syncAppWebhookUrl(deps, orgId, publicUrl);
+  }
+}
+
 interface ParsedAccessToken {
   token: string;
   expiresAtMs: number;

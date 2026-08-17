@@ -2,10 +2,12 @@
  * GitHub App core service tests (GitHub/repo integration plan, Task 3).
  * Covers: JWT claims + signature (verified with the keypair's own public
  * half), config round-trip through the shared `credentials` row, discovery
- * upsert/removal/linkedUserId matching, and installation-token cache
- * behavior at the 5-minute margin (incl. re-mint + suspended exclusion).
+ * upsert/removal/linkedUserId matching, installation-token cache behavior at
+ * the 5-minute margin (incl. re-mint + suspended exclusion), and
+ * webhook-URL sync (incl. the guard that leaves an environment-supplied app
+ * alone).
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, verify } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
@@ -22,6 +24,8 @@ import {
   mintInstallationToken,
   resolveGithubAppEnvConfig,
   saveAppConfig,
+  syncAllAppWebhookUrls,
+  syncAppWebhookUrl,
   type GithubAppConfig,
   type GithubAppDeps,
 } from "./github-app.js";
@@ -371,6 +375,118 @@ describe("github-app service", () => {
 
       const rows = await discoverInstallations(deps(), orgId);
       expect(rows[0].linkedUserId).toBe("user1");
+    });
+  });
+
+  describe("syncAppWebhookUrl", () => {
+    const publicUrl = "https://tunnel-abc.trycloudflare.com";
+    const expectedHookUrl = `${publicUrl}/webhooks/github-app`;
+    const deadHookUrl = "https://tunnel-dead.trycloudflare.com/webhooks/github-app";
+
+    /** A `GITHUB_APP_*` app supplied by a deployment or shared by a team —
+     * the config source this must never sync. */
+    const sharedEnvApp: NodeJS.ProcessEnv = {
+      GITHUB_APP_ID: "654321",
+      GITHUB_APP_SLUG: "valet-shared-dev",
+      GITHUB_APP_CLIENT_ID: "Iv1.env123",
+      GITHUB_APP_CLIENT_SECRET: "env-client-secret",
+      GITHUB_APP_WEBHOOK_SECRET: "env-webhook-secret",
+      GITHUB_APP_PRIVATE_KEY: privateKeyPem,
+    };
+
+    /** `deps()` with an EMPTY env, so a `GITHUB_APP_*` value in the
+     * developer's own environment cannot change the config source under
+     * test. */
+    function syncDeps(env: NodeJS.ProcessEnv = {}): GithubAppDeps {
+      return deps({ env });
+    }
+
+    function patchCalls(f: GithubFixture) {
+      return f.calls.filter((c) => c.method === "PATCH" && c.path === "/app/hook/config");
+    }
+
+    it("patches the webhook URL when GitHub holds a different one, with App JWT auth", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, publicUrl);
+
+      const patches = patchCalls(fixture);
+      expect(patches).toHaveLength(1);
+      expect(patches[0].body).toEqual({ url: expectedHookUrl });
+      // App-JWT auth, not an installation token — decode and check `iss`.
+      const jwt = patches[0].authHeader?.slice("Bearer ".length) ?? "";
+      expect(decodeJwtPart(jwt.split(".")[1]).iss).toBe(baseConfig.appId);
+    });
+
+    it("sets the URL on an app created with no webhook at all", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      // A manifest built without `hook_attributes` (no public URL at
+      // creation) leaves GitHub reporting `url: null`.
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: null } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(1);
+      expect(patchCalls(fixture)[0].body).toEqual({ url: expectedHookUrl });
+    });
+
+    it("does nothing for an app that came from the environment — another instance owns it", async () => {
+      // No credential row for the org, so the config resolves to the
+      // `GITHUB_APP_*` fallback and the source is "environment". Syncing it
+      // would steal the team's shared app on every local boot.
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(sharedEnvApp), orgId, publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(0);
+      expect(fixture.calls).toHaveLength(0); // not even the read
+    });
+
+    it("makes no write when GitHub already holds this instance's URL", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: expectedHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(0);
+      expect(fixture.calls).toHaveLength(1); // the read, and nothing else
+    });
+
+    it("does nothing, and never clears the URL, when this instance has no public URL", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, undefined);
+
+      expect(fixture.calls).toHaveLength(0);
+    });
+
+    it("logs and continues when the PATCH fails", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({
+        getHookConfig: () => ({ body: { url: deadHookUrl } }),
+        updateHookConfig: () => ({ status: 422, body: { message: "Hook url is not supported" } }),
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      try {
+        await expect(syncAppWebhookUrl(syncDeps(), orgId, publicUrl)).resolves.toBeUndefined();
+        expect(errors).toHaveBeenCalledTimes(1);
+      } finally {
+        errors.mockRestore();
+      }
+      expect(patchCalls(fixture)).toHaveLength(1);
+    });
+
+    it("syncAllAppWebhookUrls covers every org that owns an app row", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAllAppWebhookUrls(syncDeps(), publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(1);
+      expect(patchCalls(fixture)[0].body).toEqual({ url: expectedHookUrl });
     });
   });
 

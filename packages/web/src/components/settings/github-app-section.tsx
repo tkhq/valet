@@ -337,10 +337,16 @@ function ConfiguredCard({
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-amber-300 bg-amber-50/70 px-5 py-4 dark:border-amber-700/60 dark:bg-amber-950/40">
           <div className="min-w-0">
             <div className="text-sm font-medium text-ink">One step left — install the App</div>
+            {/* "Automatically" is only true with a webhook. Without one no
+                installation event ever arrives, so the reader has to ask —
+                and being told to wait for something that never happens is
+                worse than being told to press a button. */}
             <p className="mt-0.5 text-xs leading-relaxed text-muted">
               The App is created, but nothing works until it's installed on a GitHub account
-              and granted repos. After installing, come back — Valet picks it up
-              automatically.
+              and granted repos.{" "}
+              {data.webhook.mode === "public"
+                ? "After installing, come back — Valet picks it up automatically."
+                : "After installing, come back and choose Refresh installations. This App has no webhook, so Valet cannot see the install until you ask."}
             </p>
           </div>
           <Button asChild>

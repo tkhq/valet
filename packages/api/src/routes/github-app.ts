@@ -51,6 +51,7 @@ import { requireOrgAdmin } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState as verifySignedState, STATE_TTL_MS } from "../lib/oauth-state.js";
+import { resolveReturnOrigin } from "./credential-connect.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import {
   discoverInstallations,
@@ -58,6 +59,8 @@ import {
   loadAppConfigWithSource,
   resolveGithubAppEnvConfig,
   saveAppConfig,
+  syncAppWebhookUrl,
+  GITHUB_APP_WEBHOOK_PATH,
   type GithubAppConfig,
   type GithubAppDeps,
 } from "../services/github-app.js";
@@ -133,17 +136,29 @@ interface ManifestState {
   orgId: string;
   nonce: string;
   exp: number;
+  /** Origin to send the browser back to after GitHub redirects here.
+   * Captured when the state is minted, because at the callback the referer
+   * is GitHub, not this app. Empty when the caller is same-origin, which is
+   * the deployed shape — the api serves the client, so a relative redirect
+   * already lands in the right place. */
+  returnTo?: string;
 }
 
 /** Verifies signature + expiry. Returns `null` for any tampering, malformed
  * shape, or expired `exp` — never throws. */
-function verifyManifestState(state: string, key: Buffer, nowMs: number): { orgId: string } | null {
-  return verifySignedState<{ orgId: string }>(state, key, (payload) => {
+function verifyManifestState(
+  state: string,
+  key: Buffer,
+  nowMs: number,
+): { orgId: string; returnTo: string } | null {
+  return verifySignedState<{ orgId: string; returnTo: string }>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { orgId, exp } = payload;
+    const { orgId, exp, returnTo } = payload;
     if (typeof orgId !== "string" || typeof exp !== "number") return null;
     if (exp < nowMs) return null;
-    return { orgId };
+    // The origin was allow-listed before signing, so trusting it here is
+    // trusting our own signature, not GitHub's query string.
+    return { orgId, returnTo: typeof returnTo === "string" ? returnTo : "" };
   });
 }
 
@@ -270,7 +285,7 @@ githubAppRouter.post("/manifest", async (c) => {
     url: apiBase,
     redirect_url: `${apiBase}/api/org/github-app/setup`,
     callback_urls: [`${apiBase}/api/me/github/callback`],
-    ...(webhookOn ? { hook_attributes: { url: `${apiBase}/webhooks/github-app` } } : {}),
+    ...(webhookOn ? { hook_attributes: { url: `${apiBase}${GITHUB_APP_WEBHOOK_PATH}` } } : {}),
     public: false,
     // Subscribe ONLY to events an App may subscribe to. GitHub delivers
     // the App-lifecycle events (`installation`,
@@ -294,7 +309,13 @@ githubAppRouter.post("/manifest", async (c) => {
   };
 
   const key = deriveSecretKey(encryptionKey);
-  const statePayload: ManifestState = { orgId, nonce: randomBytes(16).toString("hex"), exp: Date.now() + STATE_TTL_MS };
+  const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
+  const statePayload: ManifestState = {
+    orgId,
+    nonce: randomBytes(16).toString("hex"),
+    exp: Date.now() + STATE_TTL_MS,
+    ...(returnTo ? { returnTo } : {}),
+  };
   const state = signState(statePayload, key);
 
   const responseBody: PostGithubAppManifestResponse = { url, manifest, state };
@@ -355,7 +376,14 @@ githubAppRouter.get("/setup", async (c) => {
     console.error("github-app setup: post-save discovery failed:", err);
   }
 
-  return c.redirect("/settings/organization/github?setup=ok", 302);
+  // The app was created with the public URL this instance had when the
+  // manifest was built. That URL can already be stale (an ephemeral tunnel
+  // restarts between the manifest POST and this callback), so assert the
+  // current one. `syncAppWebhookUrl` never throws — the admin must reach the
+  // success page even when GitHub refuses the update.
+  await syncAppWebhookUrl({ credentials: engineCredentials }, verified.orgId, publicUrlFromEnv(process.env));
+
+  return c.redirect(`${verified.returnTo}/settings/organization/github?setup=ok`, 302);
 });
 
 githubAppRouter.post("/refresh", async (c) => {
