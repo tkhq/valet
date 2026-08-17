@@ -2,6 +2,10 @@
 
 Date: 2026-08-15
 Status: implemented (feat/sandbox-docker)
+Superseded in part: image selection. Sandboxes now boot ONE image lineage
+(the full image, docker toolchain always present) — see
+`2026-08-16-single-image-lineage-design.md`. The capability grants, exec
+identity, and start-script behavior below are unchanged.
 
 ## Problem
 

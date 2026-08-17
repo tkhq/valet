@@ -53,20 +53,6 @@ export interface SandboxSpec {
   steps: StepSpec[];
 }
 
-/**
- * The image lineage a session REQUIRES. The headless lineage (node-slim +
- * agent tooling — the headless base bake and every repo bake) carries no
- * /start-full.sh and no docker toolchain. A full-profile session needs the
- * start scripts; a docker session needs the rootless docker toolchain; both
- * ship only in the full lineage (the stock full image and full base bakes).
- */
-export function imageLineage(
-  profile: "headless" | "full" | undefined,
-  docker: boolean | undefined,
-): "headless" | "full" {
-  return profile === "full" || docker === true ? "full" : "headless";
-}
-
 // ── Hashing helpers ───────────────────────────────────────────────────────
 
 function sha256(input: string): string {

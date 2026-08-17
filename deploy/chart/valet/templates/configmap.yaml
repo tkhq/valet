@@ -20,8 +20,8 @@ data:
   {{- if and .Values.sandbox.image .Values.sandbox.image.repository }}
   VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository (required "sandbox.image.tag is required when sandbox.image.repository is set" .Values.sandbox.image.tag) | quote }}
   {{- end }}
-  # Per-profile base image refs (used by seedDefaultBasesIfMissing at boot).
-  VALET_HEADLESS_BASE_IMAGE: {{ .Values.sandbox.headlessBaseImage | quote }}
+  # The single sandbox base image (used by seedDefaultBasesIfMissing at
+  # boot and as the stock fall-through for every session).
   VALET_FULL_BASE_IMAGE: {{ .Values.sandbox.fullBaseImage | quote }}
   VALET_WEB_DIST_DIR: "/app/web/dist"
   # Sandbox images v2 plan, Task 5: kubernetes prebuild image builder +

@@ -338,8 +338,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
+    // Single image lineage: one stock image for every session shape.
     defaultImages: {
-      headless: process.env.VALET_HEADLESS_BASE_IMAGE ?? resolveDefaultImage(process.env),
       full: process.env.VALET_FULL_BASE_IMAGE ?? resolveDefaultImage(process.env),
     },
     idleMinutes: resolveIdleMinutes(process.env),

@@ -187,7 +187,7 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     expect(provider.createCalls[0]!.image).not.toBe("ghcr.io/example/headless:fallback");
   });
 
-  it("headless-profile session with no base bake uses defaultImages.headless", async () => {
+  it("headless-profile session boots defaultImages.full — the legacy headless key is ignored (single lineage)", async () => {
     const provider = new RecordingSandboxProvider();
     api = await bootTestApi({
       sandboxProvider: provider,
@@ -222,10 +222,11 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     await session.attachment.ensureReady({ timeoutMs: 5_000 });
 
     expect(provider.createCalls.length).toBeGreaterThan(0);
-    expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/headless:stock");
+    expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/full:stock");
+    expect(provider.createCalls[0]!.image).not.toBe("ghcr.io/example/headless:stock");
   });
 
-  it("docker session (headless profile) boots the full stock image — the headless stock has no docker toolchain", async () => {
+  it("docker session (headless profile) boots the full stock image (single lineage; toolchain baked in)", async () => {
     const provider = new RecordingSandboxProvider();
     api = await bootTestApi({
       sandboxProvider: provider,

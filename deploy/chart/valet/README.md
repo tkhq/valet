@@ -127,40 +127,35 @@ Every Valet session runs under one of two profiles:
 
 ### Auto-seeded base sources
 
-On first boot (and idempotently on subsequent boots), Valet seeds three `image_sources` rows per org:
+On first boot (and idempotently on subsequent boots), Valet seeds two `image_sources` rows per org:
 
 | kind | name | profile | FROM |
 |---|---|---|---|
 | `external` | `stock-full` | — | `VALET_FULL_BASE_IMAGE` (default `ghcr.io/tkhq/valet-sandbox:latest`) |
-| `base` | `default-headless` | `headless` | `VALET_HEADLESS_BASE_IMAGE` (default `node:22-bookworm-slim`) |
 | `base` | `default-full` | `full` | parent = `stock-full` external row |
 
-The headless base's setup commands install the agent tooling layer. The full base has empty setup commands — the full image ships everything.
+There is ONE image lineage: every sandbox and every repo bake chains on the full base. The `profile` session flag only decides whether the interactive services (gateway, ttyd, code-server) start. Re-seed follows `VALET_FULL_BASE_IMAGE` pin changes, and a legacy `default-headless` base row from older deploys is disabled automatically.
 
 ### Customising base images
 
-To pin a specific CI-published full image for reproducible deploys:
+To pin a specific CI-published image for reproducible deploys:
 
 ```yaml
 sandbox:
   fullBaseImage: ghcr.io/tkhq/valet-sandbox:sha-abc1234
-  headlessBaseImage: node:22-bookworm-slim  # or your own image
 ```
 
-To layer additional tooling onto the auto-seeded headless base (e.g. python3), patch its `setupCommands` in place — do **not** POST a new `kind='base'` row with the same profile, as the unique index on `(org_id, profile) WHERE kind='base'` would 409:
+To layer additional tooling onto the auto-seeded base (e.g. python3), patch the `default-full` base's `setupCommands` in place — do **not** POST a new `kind='base'` row with the same profile, as the unique index on `(org_id, profile) WHERE kind='base'` would 409:
 
 ```sh
-# 1. Find the auto-seeded headless base's id
+# 1. Find the auto-seeded base's id
 GET /api/org/sources
-# → look for the row with name="default-headless" and profile="headless"
+# → look for the row with name="default-full" and profile="full"
 
-# 2. Append your setup commands (supply the full desired list — this replaces, not appends)
-PATCH /api/org/sources/<headless-base-id>
+# 2. Set your setup commands (supply the full desired list — this replaces, not appends)
+PATCH /api/org/sources/<full-base-id>
 {
-  "setupCommands": [
-    "apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates coreutils curl procps bash openssh-client && rm -rf /var/lib/apt/lists/*",
-    "apt-get install -y python3"
-  ]
+  "setupCommands": ["apt-get update && apt-get install -y python3"]
 }
 ```
 

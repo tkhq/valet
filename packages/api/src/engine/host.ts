@@ -50,7 +50,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
-import { computeSpec, imageLineage, specHash } from "./sandbox-spec.js";
+import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
@@ -92,12 +92,11 @@ export interface EngineHostOpts {
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
-   * Optional per-profile override for the fall-through stock image.
-   * When present, `stockImage` in `resolveSnapshot` uses
-   * `defaultImages[profile] ?? defaultImage` for the session's profile.
-   * Used to keep full-profile sessions from silently falling through to
-   * the headless base image during the boot window (before the org's
-   * default-full base bake lands).
+   * Optional stock-image override. Single image lineage (2026-08-16
+   * design): every session boots `defaultImages.full ?? defaultImage`
+   * regardless of profile/docker shape. The `headless` key is legacy and
+   * ignored — kept in the type so older callers/tests type-check and so
+   * tests can prove it is NOT consulted.
    */
   defaultImages?: Partial<Record<"headless" | "full", string>>;
   /**
@@ -569,12 +568,10 @@ export class EngineHost {
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker
-    // key. Resolved BEFORE the spec provider: the flag raises the required
-    // image lineage to "full" (docker toolchain), which drives both the
-    // create-opts stock image below and the spec provider's bake resolution.
-    // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
+    // key. `resolveRepoDockerFlag` is best-effort — any failure resolves
+    // false. Single image lineage: the flag only shapes SandboxCreateOpts
+    // (caps/mounts/exec identity), never which image is resolved.
     const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
-    const specMeta: SessionMeta = dockerFlag && meta.docker !== true ? { ...meta, docker: true } : meta;
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -599,7 +596,7 @@ export class EngineHost {
         );
       });
     };
-    const specProvider = await this.buildSpecProvider(sessionId, specMeta, onStartRef);
+    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
@@ -619,14 +616,13 @@ export class EngineHost {
       meta.repos,
       specProvider !== undefined,
     );
-    // Initial sandbox image: the per-LINEAGE stock default. Full-profile and
-    // docker sessions use `defaultImages["full"]` so the boot-window
-    // fall-through (before the org's default-full base bake lands) picks the
-    // full image — the headless stock has neither /start-full.sh nor the
-    // docker toolchain. The specProvider closure may resolve a bake image
+    // Initial sandbox image: the single-lineage stock default — every
+    // session shape boots the full sandbox image (start scripts + docker
+    // toolchain baked in; the profile only decides whether the interactive
+    // services START). The specProvider closure may resolve a bake image
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImages?.[imageLineage(profile, dockerFlag)] ?? this.opts.defaultImage;
+    const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -809,14 +805,12 @@ export class EngineHost {
 
     const host = this;
     const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
-    // Stock fall-through follows the required image LINEAGE, not the raw
-    // profile: docker sessions need the full stock image (docker toolchain)
-    // even on the headless profile. Must agree with `resolveSnapshot`'s
-    // lineage gating or the `spec.image !== stockImage` comparison below
-    // misreports the stock case as an override.
-    const lineage = imageLineage(meta.profile, meta.docker);
+    // Single image lineage: one stock image for every session shape. Must
+    // agree with the create-opts image in `buildSession`/`buildChild` or the
+    // `spec.image !== stockImage` comparison below misreports the stock
+    // case as an override.
     const stockImage =
-      this.opts.defaultImages?.[lineage] ??
+      this.opts.defaultImages?.full ??
       this.opts.defaultImage ??
       "";
 
@@ -1902,10 +1896,9 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: {
         workspace: opts.workspace,
-        // Per-LINEAGE stock default, same fall-through as a REST-created
-        // session (`sessionFor`): a docker child needs the full stock image
-        // even on the headless profile.
-        image: this.opts.defaultImages?.[imageLineage(profile, opts.docker)] ?? this.opts.defaultImage,
+        // Single-lineage stock default, same fall-through as a REST-created
+        // session (`sessionFor`).
+        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
         env: sandboxMint?.env,
         profile,
         ...(opts.docker ? { docker: true } : {}),

@@ -1,6 +1,7 @@
 # Sandbox Images v2 Design — custom images + repo prebuilds
 
 **Date:** 2026-07-15
+**Superseded in part:** the per-profile base-image split (headless vs full base sources) is replaced by ONE image lineage — see `2026-08-16-single-image-lineage-design.md`. The builder port, registry story, recipe model, and freshness semantics below still hold.
 **Status:** Implemented (`4d1c2091..HEAD`, sandbox images v2 / prebuilds plan, Tasks 1-7). Fixture/docker e2e green (`packages/api/src/integration/prebuilds.e2e.test.ts`); the live k8s dogfood (bundled registry, big-repo cold-vs-prebuilt timing, kill-Job recovery, retention 2-of-3, lockfile-change re-install, `make dev-local` docker variant) is coordinator-run and recorded separately in the plan ledger.
 **Scope:** User-facing custom sandbox images (admin catalog) and repo prebuilds — images baked with repo contents + installed dependencies so big repos don't cold-clone and reinstall every session. Covers the backend-neutral `ImageBuilder` port, docker and Kubernetes (BuildKit Job) builder implementations, the registry story (bundled + external toggle), the recipe model (auto-detect + override), and freshness semantics. Replaces the legacy Modal-era `docs/specs/sandbox-images.md` direction for the v2 stack (that spec stays as legacy documentation).
 

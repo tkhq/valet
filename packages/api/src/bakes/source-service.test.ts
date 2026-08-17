@@ -127,6 +127,7 @@ async function seedBaseSource(
     externalRef: null,
     pullSecretName: null,
     setupCommands,
+    profile: "full",
     repoHost: null,
     repoFullName: null,
     cloneUrl: null,
@@ -345,12 +346,12 @@ describe("SourceService", () => {
       );
     });
 
-    it("unparented base identity follows VALET_HEADLESS_BASE_IMAGE — the same ref its FROM resolves", async () => {
-      // `resolveBaseImage` FROMs VALET_HEADLESS_BASE_IMAGE for an unparented
-      // headless base; the identity must read the same env chain, or a
-      // headless-base pin change re-FROMs without re-identifying (stale bakes
-      // never rebake) and a VALET_SANDBOX_IMAGE change re-identifies without
-      // re-FROMing (pointless rebakes).
+    it("unparented base identity follows VALET_FULL_BASE_IMAGE — the same ref its FROM resolves", async () => {
+      // `resolveBaseImage` FROMs VALET_FULL_BASE_IMAGE for an unparented
+      // base; the identity must read the same env chain, or a stock pin
+      // change re-FROMs without re-identifying (stale bakes never rebake)
+      // and a VALET_SANDBOX_IMAGE change re-identifies without re-FROMing
+      // (pointless rebakes).
       const base: typeof imageSources.$inferSelect = {
         id: "b-env",
         orgId,
@@ -360,7 +361,7 @@ describe("SourceService", () => {
         externalRef: null,
         pullSecretName: null,
         setupCommands: [],
-        profile: "headless",
+        profile: "full",
         repoHost: null,
         repoFullName: null,
         cloneUrl: null,
@@ -370,8 +371,8 @@ describe("SourceService", () => {
         createdAt: NOW,
         updatedAt: NOW,
       };
-      const svcA = makeService({ env: { VALET_HEADLESS_BASE_IMAGE: "node:22-bookworm-slim" } });
-      const svcB = makeService({ env: { VALET_HEADLESS_BASE_IMAGE: "node:24-bookworm-slim" } });
+      const svcA = makeService({ env: { VALET_FULL_BASE_IMAGE: "ghcr.io/tkhq/valet-sandbox:sha-a" } });
+      const svcB = makeService({ env: { VALET_FULL_BASE_IMAGE: "ghcr.io/tkhq/valet-sandbox:sha-b" } });
       const a = svcA.identityHash(base, null);
       const b = svcB.identityHash(base, null);
       svcA.stop();
@@ -711,7 +712,7 @@ describe("SourceService", () => {
     });
 
     it("parents a new source to the org base source when one exists", async () => {
-      const baseId = await seedBaseSource(db, ["apt-get install -y jq"], { profile: "headless" });
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
       await service.ensureRepoSource(orgId, repo);
       const [src] = await db
         .select()
@@ -721,7 +722,7 @@ describe("SourceService", () => {
     });
 
     it("first-bake DEFERS when the org base has no pushed bake — source upserts, no dispatch", async () => {
-      await seedBaseSource(db, ["apt-get install -y jq"], { profile: "headless" });
+      await seedBaseSource(db, ["apt-get install -y jq"]);
       await service.ensureRepoSource(orgId, repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.kind, "repo"));
       expect(sources).toHaveLength(1);
@@ -731,7 +732,7 @@ describe("SourceService", () => {
     });
 
     it("after the base pushes, the cascade fires the deferred first bake", async () => {
-      const baseId = await seedBaseSource(db, ["apt-get install -y jq"], { profile: "headless" });
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
       // ensureRepoSource upserts + defers the repo.
       await service.ensureRepoSource(orgId, repo);
       expect(builder.specs.filter((s) => s.kind === "repo")).toHaveLength(0);
@@ -786,13 +787,13 @@ describe("SourceService", () => {
       expect(builder.specs).toHaveLength(1);
     });
 
-    it("re-bind backfills a null parent_id once a headless base exists — repo bakes stop FROMing stock", async () => {
-      // A repo source created BEFORE the org's headless base was seeded:
+    it("re-bind backfills a null parent_id once the default base exists — repo bakes stop FROMing stock", async () => {
+      // A repo source created BEFORE the org's default-full base was seeded:
       // parent_id null → resolveParentBase returns "none" → every bake FROMs
       // the stock node image, which has no git (the dev-v2 `git: not found`
       // bake failures). Re-binding after the base exists must adopt it.
       const srcId = await seedRepoSource(db, { id: "src_orphan", parentId: null });
-      const baseId = await seedBaseSource(db, ["apt-get install -y git"], { profile: "headless" });
+      const baseId = await seedBaseSource(db, ["apt-get install -y git"]);
 
       await service.ensureRepoSource(orgId, repo);
 
@@ -814,23 +815,37 @@ describe("SourceService", () => {
   // ── seedDefaultBasesIfMissing ──────────────────────────────────────────
 
   describe("seedDefaultBasesIfMissing", () => {
-    it("idempotency: calling twice results in exactly 3 rows (1 external, 1 headless base, 1 full base)", async () => {
+    it("idempotency: calling twice results in exactly 2 rows (1 external, 1 full base) — no headless base", async () => {
       await service.seedDefaultBasesIfMissing(orgId);
       await service.seedDefaultBasesIfMissing(orgId);
 
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
-      expect(sources).toHaveLength(3);
+      expect(sources).toHaveLength(2);
 
       const external = sources.filter((s) => s.kind === "external");
-      const headless = sources.filter((s) => s.kind === "base" && s.profile === "headless");
       const full = sources.filter((s) => s.kind === "base" && s.profile === "full");
 
       expect(external).toHaveLength(1);
       expect(external[0].name).toBe("stock-full");
-      expect(headless).toHaveLength(1);
-      expect(headless[0].name).toBe("default-headless");
       expect(full).toHaveLength(1);
       expect(full[0].name).toBe("default-full");
+      expect(sources.some((s) => s.profile === "headless")).toBe(false);
+    });
+
+    it("re-seed disables a legacy headless base row (stops its nightly bakes)", async () => {
+      // An org seeded before the single-lineage change carries a
+      // kind='base' profile='headless' row. Nothing resolves it anymore;
+      // leaving it enabled would keep baking a dead lineage every night.
+      const legacyId = await seedBaseSource(db, ["apt-get install -y git"], {
+        id: "legacy-headless",
+        profile: "headless",
+        name: "default-headless",
+      });
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const [legacy] = await db.select().from(imageSources).where(eq(imageSources.id, legacyId));
+      expect(legacy.enabled).toBe(false);
     });
 
     it("re-seed after a deploy pin change updates the stock-full external ref", async () => {
@@ -846,27 +861,27 @@ describe("SourceService", () => {
       newSvc.stop();
 
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
-      expect(sources).toHaveLength(3);
+      expect(sources).toHaveLength(2);
       const external = sources.find((s) => s.name === "stock-full")!;
       expect(external.externalRef).toBe("ghcr.io/tkhq/valet-sandbox:sha-new");
     });
 
     it("partial state self-heals: a missing full base is re-seeded on the next call", async () => {
-      // Simulate a crash between Step 2 and Step 3: external + headless rows
-      // exist, the full base does not.
+      // Simulate a crash between the external and base steps: the external
+      // row exists, the full base does not.
       await service.seedDefaultBasesIfMissing(orgId);
       await db
         .delete(imageSources)
         .where(and(eq(imageSources.orgId, orgId), eq(imageSources.profile, "full")));
 
       const before = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
-      expect(before).toHaveLength(2);
+      expect(before).toHaveLength(1);
       const externalBefore = before.find((s) => s.name === "stock-full")!;
 
       await service.seedDefaultBasesIfMissing(orgId);
 
       const after = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
-      expect(after).toHaveLength(3);
+      expect(after).toHaveLength(2);
       const full = after.find((s) => s.kind === "base" && s.profile === "full")!;
       expect(full).toBeDefined();
       // The restored full base parents at the pre-existing external row, not a
@@ -875,7 +890,7 @@ describe("SourceService", () => {
       expect(after.filter((s) => s.name === "stock-full")).toHaveLength(1);
     });
 
-    it("two orgs seeded: 6 rows total (3 per org)", async () => {
+    it("two orgs seeded: 4 rows total (2 per org)", async () => {
       const org2 = "org2";
       await db.insert(orgs).values({ id: org2, name: "Org 2", createdAt: NOW });
 
@@ -883,12 +898,12 @@ describe("SourceService", () => {
       await service.seedDefaultBasesIfMissing(org2);
 
       const allSources = await db.select().from(imageSources);
-      expect(allSources).toHaveLength(6);
+      expect(allSources).toHaveLength(4);
 
       const org1Sources = allSources.filter((s) => s.orgId === orgId);
       const org2Sources = allSources.filter((s) => s.orgId === org2);
-      expect(org1Sources).toHaveLength(3);
-      expect(org2Sources).toHaveLength(3);
+      expect(org1Sources).toHaveLength(2);
+      expect(org2Sources).toHaveLength(2);
     });
 
     it("full base parents at the stock-full external row", async () => {
@@ -902,25 +917,6 @@ describe("SourceService", () => {
       expect(fullBase.parentId).toBe(external.id);
     });
 
-    it("headless base has null parentId", async () => {
-      await service.seedDefaultBasesIfMissing(orgId);
-
-      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
-      const headlessBase = sources.find((s) => s.kind === "base" && s.profile === "headless")!;
-      expect(headlessBase.parentId).toBeNull();
-    });
-
-    it("headless base has HEADLESS_SETUP_COMMANDS seeded", async () => {
-      await service.seedDefaultBasesIfMissing(orgId);
-
-      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
-      const headlessBase = sources.find((s) => s.kind === "base" && s.profile === "headless")!;
-      const cmds = headlessBase.setupCommands as string[];
-      expect(Array.isArray(cmds)).toBe(true);
-      expect(cmds.length).toBeGreaterThan(0);
-      expect(cmds[0]).toContain("apt-get install");
-    });
-
     it("full base has empty setup_commands", async () => {
       await service.seedDefaultBasesIfMissing(orgId);
 
@@ -930,52 +926,21 @@ describe("SourceService", () => {
     });
   });
 
-  // ── ensureRepoSource parents to headless base ─────────────────────────
+  // ── ensureRepoSource parents to the default-full base ─────────────────
 
-  describe("ensureRepoSource profile-aware parent", () => {
+  describe("ensureRepoSource unified-lineage parent", () => {
     const repo = { host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
 
-    it("parents repo source at the headless base when both profiles are seeded", async () => {
-      // Seed both bases directly.
-      const headlessId = `base_headless_${Math.random().toString(36).slice(2)}`;
-      const fullId = `base_full_${Math.random().toString(36).slice(2)}`;
-      await db.insert(imageSources).values({
-        id: headlessId,
-        orgId,
-        kind: "base",
-        parentId: null,
+    it("parents a new repo source at the full base even when a legacy headless base row exists", async () => {
+      const headlessId = await seedBaseSource(db, ["apt-get install -y git"], {
+        id: `base_headless_${Math.random().toString(36).slice(2)}`,
         name: "default-headless",
-        externalRef: null,
-        pullSecretName: null,
-        setupCommands: ["apt-get install -y git"],
         profile: "headless",
-        repoHost: null,
-        repoFullName: null,
-        cloneUrl: null,
-        schedule: "nightly",
-        enabled: true,
-        lastBoundAt: null,
-        createdAt: NOW,
-        updatedAt: NOW,
       });
-      await db.insert(imageSources).values({
-        id: fullId,
-        orgId,
-        kind: "base",
-        parentId: null,
+      const fullId = await seedBaseSource(db, [], {
+        id: `base_full_${Math.random().toString(36).slice(2)}`,
         name: "default-full",
-        externalRef: null,
-        pullSecretName: null,
-        setupCommands: [],
         profile: "full",
-        repoHost: null,
-        repoFullName: null,
-        cloneUrl: null,
-        schedule: "nightly",
-        enabled: true,
-        lastBoundAt: null,
-        createdAt: NOW,
-        updatedAt: NOW,
       });
 
       await service.ensureRepoSource(orgId, repo);
@@ -984,8 +949,30 @@ describe("SourceService", () => {
         .select()
         .from(imageSources)
         .where(eq(imageSources.kind, "repo"));
-      // Must parent at headless, not full.
-      expect(src.parentId).toBe(headlessId);
+      // One lineage: repo bakes chain on the full base, never the legacy
+      // headless one.
+      expect(src.parentId).toBe(fullId);
+      expect(src.parentId).not.toBe(headlessId);
+    });
+
+    it("re-bind REPARENTS a headless-parented repo source onto the full base", async () => {
+      // Sources created before the single-lineage change chain on the
+      // legacy headless base; re-binding must move them so their next bake
+      // carries the full toolchain.
+      const headlessId = await seedBaseSource(db, ["apt-get install -y git"], {
+        id: "legacy-headless-parent",
+        profile: "headless",
+      });
+      const fullId = await seedBaseSource(db, [], { id: "unified-full", profile: "full" });
+      const srcId = await seedRepoSource(db, { id: "src_legacy", parentId: headlessId });
+      // A pushed bake so re-bind does not fire a first bake (reparent alone
+      // moves the identity; the nightly scheduler rebakes).
+      await seedBake(db, srcId, { id: "legacy_pushed" });
+
+      await service.ensureRepoSource(orgId, repo);
+
+      const [src] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
+      expect(src.parentId).toBe(fullId);
     });
   });
 
