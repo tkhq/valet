@@ -50,7 +50,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
-import { computeSpec, specHash } from "./sandbox-spec.js";
+import { computeSpec, imageLineage, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
@@ -568,6 +568,13 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
+    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker
+    // key. Resolved BEFORE the spec provider: the flag raises the required
+    // image lineage to "full" (docker toolchain), which drives both the
+    // create-opts stock image below and the spec provider's bake resolution.
+    // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
+    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
+    const specMeta: SessionMeta = dockerFlag && meta.docker !== true ? { ...meta, docker: true } : meta;
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -592,7 +599,7 @@ export class EngineHost {
         );
       });
     };
-    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
+    const specProvider = await this.buildSpecProvider(sessionId, specMeta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
@@ -612,16 +619,14 @@ export class EngineHost {
       meta.repos,
       specProvider !== undefined,
     );
-    // Initial sandbox image: the per-profile stock default. Full-profile
-    // sessions use `defaultImages["full"]` so the boot-window fall-through
-    // (before the org's default-full base bake lands) picks the full image
-    // rather than silently booting the headless base. The specProvider closure
-    // may resolve a prebuild image override at provision time — the engine
-    // applies DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImages?.[profile] ?? this.opts.defaultImage;
-    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker key.
-    // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
-    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
+    // Initial sandbox image: the per-LINEAGE stock default. Full-profile and
+    // docker sessions use `defaultImages["full"]` so the boot-window
+    // fall-through (before the org's default-full base bake lands) picks the
+    // full image — the headless stock has neither /start-full.sh nor the
+    // docker toolchain. The specProvider closure may resolve a bake image
+    // override at provision time — the engine applies
+    // DesiredSandboxSpec.image when the specProvider returns one.
+    const image = this.opts.defaultImages?.[imageLineage(profile, dockerFlag)] ?? this.opts.defaultImage;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -804,9 +809,14 @@ export class EngineHost {
 
     const host = this;
     const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
-    const profile: "headless" | "full" = meta.profile ?? "headless";
+    // Stock fall-through follows the required image LINEAGE, not the raw
+    // profile: docker sessions need the full stock image (docker toolchain)
+    // even on the headless profile. Must agree with `resolveSnapshot`'s
+    // lineage gating or the `spec.image !== stockImage` comparison below
+    // misreports the stock case as an override.
+    const lineage = imageLineage(meta.profile, meta.docker);
     const stockImage =
-      this.opts.defaultImages?.[profile] ??
+      this.opts.defaultImages?.[lineage] ??
       this.opts.defaultImage ??
       "";
 
@@ -1892,9 +1902,10 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: {
         workspace: opts.workspace,
-        // Per-profile stock default, same fall-through as a REST-created
-        // session (`sessionFor`).
-        image: this.opts.defaultImages?.[profile] ?? this.opts.defaultImage,
+        // Per-LINEAGE stock default, same fall-through as a REST-created
+        // session (`sessionFor`): a docker child needs the full stock image
+        // even on the headless profile.
+        image: this.opts.defaultImages?.[imageLineage(profile, opts.docker)] ?? this.opts.defaultImage,
         env: sandboxMint?.env,
         profile,
         ...(opts.docker ? { docker: true } : {}),

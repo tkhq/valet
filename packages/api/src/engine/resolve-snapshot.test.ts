@@ -471,6 +471,53 @@ describe("resolveSnapshot", () => {
       expect(snap.baseBakeRef).toBe("ghcr.io/valet/base:headless");
     });
 
+    // ── lineage safety: full-profile/docker sessions never take headless bakes ──
+    //
+    // Repo bakes and headless base bakes chain on the headless stock image
+    // (node-slim + agent tooling): no /start-full.sh, no docker toolchain.
+    // A session that needs the full lineage (profile "full", or docker) must
+    // skip them, or the pod runs the full-profile command on an image that
+    // cannot serve it (the dev-v2 DinD CrashLoopBackOff).
+
+    it("full-profile repo session skips the repo bake (headless lineage) and resolves the full base", async () => {
+      const repoCfg = await seedRepoBakeSource(db);
+      await seedPushedRepoBake(db, repoCfg);
+      const fullId = await seedBaseSource(db, { id: "base-full", profile: "full" });
+      await seedBake(db, fullId, { id: "bake-full", status: "pushed", imageRef: "ghcr.io/valet/base:full" });
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ profile: "full" }),
+        apiUrl: API_URL,
+        stockImage: STOCK_IMAGE,
+      });
+
+      expect(snap.repoBake).toBeNull();
+      expect(snap.baseBakeRef).toBe("ghcr.io/valet/base:full");
+      expect(computeSpec(snap).image).toBe("ghcr.io/valet/base:full");
+    });
+
+    it("docker session (headless profile) skips the repo bake and resolves the full base", async () => {
+      const repoCfg = await seedRepoBakeSource(db);
+      await seedPushedRepoBake(db, repoCfg);
+      const headlessId = await seedBaseSource(db, { id: "base-headless", profile: "headless" });
+      const fullId = await seedBaseSource(db, { id: "base-full", profile: "full" });
+      await seedBake(db, headlessId, { id: "bake-headless", status: "pushed", imageRef: "ghcr.io/valet/base:headless" });
+      await seedBake(db, fullId, { id: "bake-full", status: "pushed", imageRef: "ghcr.io/valet/base:full" });
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ profile: "headless", docker: true }),
+        apiUrl: API_URL,
+        stockImage: STOCK_IMAGE,
+      });
+
+      expect(snap.repoBake).toBeNull();
+      expect(snap.baseBakeRef).toBe("ghcr.io/valet/base:full");
+    });
+
     // ── boot-window stock-image fallthrough (per-profile defaultImages fix) ──
     //
     // These tests verify that when no base bake has been pushed yet (the

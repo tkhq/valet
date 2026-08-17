@@ -13,6 +13,7 @@ import type { SessionMeta } from "./host.js";
 import { resolvePrebuildImage } from "../prebuilds/resolve.js";
 import { prebuildImagePullable, type PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { imageSources, bakes } from "../schema/index.js";
+import { imageLineage } from "./sandbox-spec.js";
 
 export interface ResolveSnapshotDeps {
   db?: AppDb;
@@ -110,11 +111,17 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
 
   const repos = meta.repos ?? [];
 
-  const sessionProfile: "headless" | "full" = meta.profile ?? "headless";
+  // Image lineage the session REQUIRES (see `imageLineage`). Repo bakes and
+  // headless base bakes chain on the headless stock image: they carry no
+  // /start-full.sh and no docker toolchain. A full-profile or docker session
+  // must resolve only full-lineage images (the full base bake or the full
+  // stock image), so repo bakes are skipped and the base lookup uses profile
+  // "full". Headless non-docker sessions are unchanged.
+  const lineage = imageLineage(meta.profile, meta.docker);
 
   const [prebuild, baseBakeRef] = await Promise.all([
-    resolvePrebuildImage(db, meta, provider, preflight),
-    db ? resolveBaseImage(db, meta.orgId, sessionProfile, provider, preflight) : Promise.resolve(null),
+    lineage === "full" ? Promise.resolve(null) : resolvePrebuildImage(db, meta, provider, preflight),
+    db ? resolveBaseImage(db, meta.orgId, lineage, provider, preflight) : Promise.resolve(null),
   ]);
 
   return {
