@@ -281,10 +281,11 @@ async function ensureAssistantSession(
     );
   }
   const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
-  return opts.host.assistantSessionFor(assistant.id, {
-    actorUserId: actorUserIdFor(principal),
-    orgId: assistant.orgId,
-  });
+  return opts.host.assistantSessionFor(
+    assistant.id,
+    { actorUserId: actorUserIdFor(principal), orgId: assistant.orgId },
+    { sessionId: assistant.sessionId },
+  );
 }
 
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
@@ -406,10 +407,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // owned by the run, and the app row is backfilled the first time a
       // human opens the assistant (`POST /api/teams/:id/orchestrator`).
       const assistant = await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
-      const session = await opts.host.assistantSessionFor(assistant.id, {
-        actorUserId: actorUserIdFor(principal),
-        orgId: ctx.orgId,
-      });
+      const session = await opts.host.assistantSessionFor(
+        assistant.id,
+        { actorUserId: actorUserIdFor(principal), orgId: ctx.orgId },
+        { sessionId: assistant.sessionId },
+      );
       const thread = session.thread(`signal:workflow:${runId}`);
       const content: SignalContent = { kind: "signal", signalType: "workflow.request", body: promptText };
       const receipt = await thread.submitPrompt(content, {

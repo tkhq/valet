@@ -1216,8 +1216,20 @@ export class EngineHost {
    * wake" section — so a restored session gets a freshly-assembled snapshot
    * and today's journal, same as a brand-new one.
    */
-  async assistantSessionFor(assistantId: string, meta: { actorUserId: string; orgId: string }): Promise<Session> {
-    const sessionId = assistantSessionId(assistantId);
+  async assistantSessionFor(
+    assistantId: string,
+    meta: { actorUserId: string; orgId: string },
+    opts?: {
+      /** The assistant row's stored `session_id`. Callers holding the row
+       * pass it so the STORED id stays authoritative — rows migrated from
+       * `orchestrator_identities` keep their legacy `orchestrator:*`
+       * session (and its history). Fresh rows store
+       * `assistantSessionId(id)` at creation, so passing it is a no-op
+       * there; omitted, the derived id is the fallback. */
+      sessionId?: string;
+    },
+  ): Promise<Session> {
+    const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);

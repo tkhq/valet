@@ -385,6 +385,35 @@ describe("the default assistant is the machine-driven target", () => {
  * click — the feature would have looked finished and failed on use.
  */
 describe("POST /api/assistants/:id/session", () => {
+  it("honors the row's STORED session_id when it differs from the derived one (migrated rows)", async () => {
+    api = await bootTestApi();
+
+    // A row migrated from `orchestrator_identities` keeps its legacy
+    // orchestrator session id — stored != assistantSessionId(id). The
+    // ensure must return the STORED id, or the chat page marks the wrong
+    // session opened and spins forever (observed live on agents-dev after
+    // the #264 data migration).
+    const legacySessionId = "orchestrator:user:local-user";
+    const now = Date.now();
+    await api.providers.db.insert(assistants).values({
+      id: "migrated-legacy-row",
+      orgId: "local-org",
+      ownerType: "user",
+      ownerId: "local-user",
+      name: "Legacy",
+      sessionId: legacySessionId,
+      isDefault: false,
+      createdAt: now,
+    });
+
+    const opened = (await (
+      await fetch(`${api.baseUrl}/api/assistants/migrated-legacy-row/session`, {
+        method: "POST",
+      })
+    ).json()) as { sessionId: string };
+    expect(opened.sessionId).toBe(legacySessionId);
+  });
+
   it("makes a newly created assistant openable, which it is not on create alone", async () => {
     api = await bootTestApi();
 
