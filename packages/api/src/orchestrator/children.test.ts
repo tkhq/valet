@@ -80,6 +80,13 @@ function queuedItem(id: string, threadId: string, prompt: string): QueueItem {
   };
 }
 
+
+/** Narrows `SessionOptions.sandbox` to create-opts — the live `Sandbox`
+ * handle carries an `id`; plain create-opts do not. */
+function asCreateOpts(sb: Sandbox | SandboxCreateOpts | undefined): SandboxCreateOpts | undefined {
+  return sb && !("id" in sb) ? sb : undefined;
+}
+
 describe("buildChildSpawner", () => {
   it("spawns a child session with inherited owner, parent linkage, mirror row, watch row — and NO childSpawner in its toolConfig", async () => {
     api = await bootTestApi();
@@ -164,8 +171,8 @@ describe("buildChildSpawner", () => {
 
     const dockerChild = await spawner({ prompt: "test dind", profile: "full", docker: true }, ctx);
     const built = api.providers.engineHost.liveSession(dockerChild.childSessionId);
-    expect(built?.options.sandbox?.profile).toBe("full");
-    expect(built?.options.sandbox?.docker).toBe(true);
+    expect(asCreateOpts(built?.options.sandbox)?.profile).toBe("full");
+    expect(asCreateOpts(built?.options.sandbox)?.docker).toBe(true);
     const dockerRows = await api.providers.db
       .select()
       .from(agentSessions)
@@ -177,8 +184,8 @@ describe("buildChildSpawner", () => {
     // Omitted flags keep today's defaults — headless, docker off.
     const plainChild = await spawner({ prompt: "plain" }, ctx);
     const plainBuilt = api.providers.engineHost.liveSession(plainChild.childSessionId);
-    expect(plainBuilt?.options.sandbox?.profile).toBe("headless");
-    expect(plainBuilt?.options.sandbox?.docker).toBeUndefined();
+    expect(asCreateOpts(plainBuilt?.options.sandbox)?.profile).toBe("headless");
+    expect(asCreateOpts(plainBuilt?.options.sandbox)?.docker).toBeUndefined();
     const plainRows = await api.providers.db
       .select()
       .from(agentSessions)
