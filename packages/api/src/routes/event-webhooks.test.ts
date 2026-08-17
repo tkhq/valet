@@ -119,6 +119,12 @@ describe("POST /webhooks/events/:service", () => {
   describe("linear ingress", () => {
     it("ingests a signed linear webhook: event row + matched delivery row", async () => {
       api = await bootTestApi({ plugins: [linearPlugin] });
+      // This test asserts the delivery row as ingest wrote it (status
+      // "pending"). The ingest path nudges the dispatcher, which delivers
+      // the row asynchronously and flips it to "delivered" — a race this
+      // test lost on slow CI runners. Stop the dispatcher so the nudge is a
+      // no-op; dispatch itself is covered by events/dispatcher.test.ts.
+      await api.providers.eventDispatcher.stop();
       await seedLinearOrg(api);
       await seedSubscription(api, ["linear.issue.create"]);
 
