@@ -140,15 +140,38 @@ manifest builder (`packages/sandbox-kubernetes/src/manifest.ts`) adds:
   `container.apparmor.security.beta.kubernetes.io/<container>: unconfined`
 - container `securityContext`:
   `{ seccompProfile: { type: "Unconfined" }, capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] }, procMount: "Unmasked" }`
-- `/dev/fuse` hostPath device volume (same mechanism as the rootless
-  BuildKit builder in `packages/api/src/prebuilds/k8s-builder.ts`)
-- `/dev/net/tun` hostPath device volume (needed by rootlesskit)
 - an `emptyDir` volume for docker state
-- `VALET_SANDBOX_DOCKER=1` in the container env
+- `VALET_SANDBOX_DOCKER=1` and `VALET_DOCKER_USERNS=1` in the container env
 
 Note: `procMount: Unmasked` requires the ProcMountType feature gate.
 Where that gate is unavailable, the k8s DinD path does not converge.
 This is checked at acceptance.
+
+**Rootful-inside-the-userns (revision, 2026-08-17).** The first 1.33
+deployment (EKS, kernel 6.12) showed hostPath char devices cannot be
+idmap-mounted into a `hostUsers: false` pod — devtmpfs has no idmap
+support, so runc fails container init with `MOUNT_ATTR_IDMAP EINVAL`
+before a log line is written. Rather than delivering `/dev/fuse` and
+`/dev/net/tun` through a device plugin, the k8s path drops rootlesskit:
+the pod IS a user namespace, and in-container root holds the full
+capability set over pod-owned namespaces, so `start-docker.sh`
+(`VALET_DOCKER_USERNS=1` branch) runs dockerd directly as in-container
+root. Consequences:
+
+- No `/dev/net/tun`, no slirp4netns: the pod userns owns the pod netns,
+  so dockerd's bridge/veth/iptables work natively (and faster).
+- No `/dev/fuse`, no fuse-overlayfs: overlayfs mounts natively inside a
+  userns on kernel >= 5.11; the probe keeps vfs as a paranoid fallback.
+- Exec identity unchanged: the workload still runs as `dockerd` (1500);
+  it reaches the daemon through the socket, `root:docker` mode 660
+  (`--group docker`; the image adds the group, gid 1501).
+- rootlesskit remains the docker (local dev) backend path, where no
+  outer userns exists and it does real work. The sub-id ranges in the
+  image only matter on that path now.
+- A nested-userns rootlesskit cannot hold NET_ADMIN over the pod netns
+  (capabilities do not extend to ancestor-owned namespaces) — which is
+  why "rootlesskit with --net=host" was not an option and slirp existed
+  in the first place.
 
 ### Exec identity
 

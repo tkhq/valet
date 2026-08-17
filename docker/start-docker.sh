@@ -33,6 +33,45 @@ if [ -S "$SOCK" ] && su -s /bin/sh dockerd -c "DOCKER_HOST=unix://'$SOCK' docker
   exit 0
 fi
 
+# ── Rootful dockerd inside the pod user namespace (kubernetes) ──────────
+# The manifest sets VALET_DOCKER_USERNS=1 when the pod runs with
+# hostUsers: false. The pod IS a user namespace: in-container root is an
+# unprivileged host uid holding a full capability set over namespaced
+# resources, so rootlesskit would only nest a second userns inside it —
+# and the nested userns holds no NET_ADMIN over the pod netns (forcing
+# slirp4netns + /dev/net/tun) and no clean device path (hostPath char
+# devices cannot be idmap-mounted). Instead: run dockerd directly as
+# in-container root. Bridge networking and overlayfs work natively.
+# The workload keeps running as the `dockerd` user (#255); it reaches the
+# daemon through the group-owned socket (`--group docker`, mode 660).
+if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
+  ROOT_SOCK=/var/run/docker.sock
+  if [ -S "$ROOT_SOCK" ] && docker version >/dev/null 2>&1; then
+    exit 0
+  fi
+  # overlay2 on the emptyDir data-root; vfs only if the probe fails
+  # (nothing in a 6.3+ userns kernel should make it fail — belt and
+  # suspenders, not an expected path).
+  DRIVER=vfs
+  if /bin/sh -c "cd '$DATA_ROOT' && rm -rf .ovlprobe && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m && mount -t overlay overlay -olowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m && umount .ovlprobe/m" >>"$LOG" 2>&1; then
+    DRIVER=overlay2
+  fi
+  rm -rf "$DATA_ROOT/.ovlprobe" 2>/dev/null || true
+  echo "valet: starting rootful-in-userns dockerd with storage driver: $DRIVER" >> "$LOG"
+  nohup dockerd \
+    --group docker \
+    --storage-driver="$DRIVER" \
+    --host="unix://$ROOT_SOCK" \
+    --data-root="$DATA_ROOT" \
+    >> "$LOG" 2>&1 &
+  for i in $(seq 1 20); do
+    [ -S "$ROOT_SOCK" ] && break
+    sleep 0.5
+  done
+  exit 0
+fi
+
+# ── Rootless dockerd via rootlesskit (docker local-dev backend) ─────────
 # Storage driver: probe what this environment supports, best first.
 #  - overlay2: native kernel overlayfs inside the rootless user namespace
 #    (kernel >= 5.11). Needs the data-root on a non-overlay filesystem —

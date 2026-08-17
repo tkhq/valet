@@ -3,8 +3,6 @@ import type { SandboxCreateOpts } from "@valet/engine";
 import {
   CREDS_MOUNT_PATH,
   CREDS_VOLUME_NAME,
-  DEV_FUSE_VOLUME_NAME,
-  DEV_TUN_VOLUME_NAME,
   DOCKER_LABEL_KEY,
   DOCKER_STATE_MOUNT_PATH,
   DOCKER_STATE_VOLUME_NAME,
@@ -293,7 +291,7 @@ describe("buildSandboxManifest", () => {
 describe("docker flag (rootless DinD)", () => {
   const cfg = baseConfig;
 
-  it("adds the rootless securityContext, annotation, volumes, and env", () => {
+  it("adds the docker securityContext, annotation, state volume, and userns-mode env", () => {
     const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
     const pod = cr.spec.podTemplate;
     expect(pod.metadata?.annotations?.[
@@ -304,24 +302,26 @@ describe("docker flag (rootless DinD)", () => {
     expect(c.securityContext?.capabilities?.add).toEqual(["SYS_ADMIN", "NET_ADMIN"]);
     expect(c.securityContext?.procMount).toBe("Unmasked");
     expect(c.env).toContainEqual({ name: "VALET_SANDBOX_DOCKER", value: "1" });
+    // Selects the rootful-in-userns branch in start-docker.sh — the pod
+    // userns replaces rootlesskit's nested one on kubernetes.
+    expect(c.env).toContainEqual({ name: "VALET_DOCKER_USERNS", value: "1" });
     expect(c.volumeMounts).toContainEqual({
       name: DOCKER_STATE_VOLUME_NAME,
       mountPath: DOCKER_STATE_MOUNT_PATH,
     });
-    expect(c.volumeMounts).toContainEqual({
-      name: DEV_TUN_VOLUME_NAME,
-      mountPath: "/dev/net/tun",
-    });
     expect(pod.spec.volumes).toContainEqual(
       expect.objectContaining({ name: DOCKER_STATE_VOLUME_NAME }),
     );
-    expect(pod.spec.volumes).toContainEqual(
-      expect.objectContaining({ name: DEV_FUSE_VOLUME_NAME }),
-    );
-    expect(pod.spec.volumes).toContainEqual(
-      expect.objectContaining({ name: DEV_TUN_VOLUME_NAME }),
-    );
-    expect(JSON.stringify(cr)).not.toContain("privileged");
+    // No device hostPaths: a hostPath char device cannot be idmap-mounted
+    // into a hostUsers:false pod (devtmpfs has no idmap support — runc
+    // fails container init with MOUNT_ATTR_IDMAP EINVAL, observed live on
+    // EKS 1.33). Rootful-in-userns needs neither /dev/fuse (native
+    // overlayfs) nor /dev/net/tun (no slirp4netns).
+    const json = JSON.stringify(cr);
+    expect(json).not.toContain("dev-fuse");
+    expect(json).not.toContain("dev-tun");
+    expect(json).not.toContain("hostPath");
+    expect(json).not.toContain("privileged");
   });
 
   it("sets pod-level fsGroup 1500 so the workspace PVC is group-writable by dockerd", () => {
@@ -368,7 +368,7 @@ describe("docker flag (rootless DinD)", () => {
     expect(s).not.toContain(DOCKER_STATE_VOLUME_NAME);
     expect(s).not.toContain("capabilities");
     expect(s).not.toContain("procMount");
-    expect(s).not.toContain(DEV_TUN_VOLUME_NAME);
+    expect(s).not.toContain("VALET_DOCKER_USERNS");
     expect(s).not.toContain("fsGroup");
     expect(s).not.toContain(DOCKER_LABEL_KEY);
   });

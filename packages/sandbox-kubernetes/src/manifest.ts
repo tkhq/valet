@@ -48,10 +48,6 @@ export const CREDS_VOLUME_NAME = "valet-creds";
 export const DOCKER_STATE_VOLUME_NAME = "docker-state";
 /** Mount path for the rootless Docker data-root inside the container. */
 export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
-/** Volume name for the /dev/fuse hostPath device (rootless DinD). */
-export const DEV_FUSE_VOLUME_NAME = "dev-fuse";
-/** Volume name for the /dev/net/tun hostPath device (rootless DinD — needed by rootlesskit). */
-export const DEV_TUN_VOLUME_NAME = "dev-tun";
 /** CR label marking a docker-enabled sandbox. `restore()` re-derives the
  * exec-identity flag from this label (the CR is the only state that
  * survives an api restart — mirrors how `spec.service` records the
@@ -181,22 +177,31 @@ export function buildSandboxManifest(
     ];
   }
 
-  // Rootless DinD: seccomp Unconfined, VALET_SANDBOX_DOCKER env, docker-state
-  // emptyDir + /dev/fuse hostPath volumes. Mirrors the AppArmor+seccomp
-  // mechanism used by the rootless BuildKit builder in k8s-builder.ts. Never
-  // sets privileged — rootless Docker does not require it.
+  // DinD, rootful-inside-the-pod-user-namespace: seccomp Unconfined,
+  // VALET_SANDBOX_DOCKER env, docker-state emptyDir. The pod IS a user
+  // namespace (hostUsers: false below), so dockerd runs as in-container
+  // root — which holds NET_ADMIN over the pod netns (native bridge
+  // networking, no slirp4netns/tun) and mounts overlayfs natively
+  // (kernel >= 5.11 in-userns overlay, no fuse). No device hostPaths: a
+  // hostPath char device cannot be idmap-mounted into a userns pod
+  // (devtmpfs has no idmap support — runc fails with MOUNT_ATTR_IDMAP
+  // EINVAL). VALET_DOCKER_USERNS=1 selects the rootful branch in
+  // start-docker.sh; the docker (local dev) backend keeps rootlesskit.
+  // Never sets privileged.
   if (opts.docker) {
     container.securityContext = {
       seccompProfile: { type: "Unconfined" },
       capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
       procMount: "Unmasked",
     };
-    container.env = [...(container.env ?? []), { name: "VALET_SANDBOX_DOCKER", value: "1" }];
+    container.env = [
+      ...(container.env ?? []),
+      { name: "VALET_SANDBOX_DOCKER", value: "1" },
+      { name: "VALET_DOCKER_USERNS", value: "1" },
+    ];
     container.volumeMounts = [
       ...(container.volumeMounts ?? []),
       { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
-      { name: DEV_FUSE_VOLUME_NAME, mountPath: "/dev/fuse" },
-      { name: DEV_TUN_VOLUME_NAME, mountPath: "/dev/net/tun" },
     ];
     if (!isFullProfile) {
       container.command = [
@@ -241,8 +246,6 @@ export function buildSandboxManifest(
     podSpec.volumes = [
       ...(podSpec.volumes ?? []),
       { name: DOCKER_STATE_VOLUME_NAME, emptyDir: {} },
-      { name: DEV_FUSE_VOLUME_NAME, hostPath: { path: "/dev/fuse", type: "CharDevice" } },
-      { name: DEV_TUN_VOLUME_NAME, hostPath: { path: "/dev/net/tun", type: "CharDevice" } },
     ];
   }
 
