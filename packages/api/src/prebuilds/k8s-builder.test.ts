@@ -438,13 +438,14 @@ class FakeJobsApi implements SandboxBatchJobsApi {
   }
 }
 
-function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean; registryPushHost: string }> = {}) {
+function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean; registryPushHost: string; registryPullHost: string }> = {}) {
   let counter = 0;
   return new KubernetesImageBuilder({
     jobsApi,
     namespace: "valet-sandboxes",
     registryInsecure: overrides.registryInsecure ?? true,
     ...(overrides.registryPushHost ? { registryPushHost: overrides.registryPushHost } : {}),
+    ...(overrides.registryPullHost ? { registryPullHost: overrides.registryPullHost } : {}),
     newId: () => String(++counter),
   });
 }
@@ -777,6 +778,30 @@ describe("KubernetesImageBuilder", () => {
     const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
     expect(dockerfile).toContain("FROM ghcr.io/tkhq/valet-sandbox:sha-b4e24e1");
     expect(dockerfile).not.toContain("valet-registry.ns.svc:5000/tkhq/");
+  });
+
+  it("base bake: with a configured pull host, only refs ON that host are rewritten — an external ref sharing the OUTPUT ref's host stays untouched", async () => {
+    // Misconfig guard: when the output ref's host coincidentally matches an
+    // external base's host (e.g. both on ghcr.io), the imageRef-host
+    // heuristic would rewrite the external ref. The explicit pull host from
+    // VALET_PREBUILD_REGISTRY disambiguates: only bundled-registry
+    // (pull-hosted) refs are ours to rewrite.
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.ns.svc:5000",
+      registryPullHost: "localhost:30500",
+    });
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "ghcr.io/tkhq/valet-sandbox:sha-x",
+        imageRef: "ghcr.io/myorg/src-x/base:abc",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM ghcr.io/tkhq/valet-sandbox:sha-x");
   });
 
   it("base bake: Dockerfile FROM is untouched when no push host is configured", async () => {

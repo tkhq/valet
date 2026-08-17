@@ -1,5 +1,7 @@
 # Sandbox Docker Support (rootless DinD) Implementation Plan
 
+> **Superseded in part:** the per-profile base-image split this plan assumes was replaced by ONE image lineage — see `docs/specs/2026-08-16-single-image-lineage-design.md`. The capability grants and exec-identity work here still describe the shipped behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Sessions can opt into a rootless docker daemon inside their sandbox, on both the docker and kubernetes providers, with no privileged containers.

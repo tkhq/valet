@@ -256,14 +256,16 @@ selection is `VALET_SANDBOX_BACKEND` (`docker` default, `local`,
 | kubernetes | `Sandbox` CR + pod, PVC workspace | **yes** | yes | CRs served by the vendored agent-sandbox controller (`agents.x-k8s.io/v1beta1`); suspend patches `operatingMode: Suspended` (pod scales to zero, PVC survives) |
 | local | none — host fs/processes | no | no | Dev/test only |
 
-**Profiles.** `headless` (default) runs nothing but the agent's commands.
-`full` also starts, via `/start-full.sh` in the sandbox image: code-server
+**Profiles.** Every sandbox boots the SAME image (one lineage, built from
+`docker/Dockerfile.sandbox-k8s` — see
+`docs/specs/2026-08-16-single-image-lineage-design.md`); the profile only
+decides which services start. `headless` (default) runs nothing but the
+agent's commands. `full` also starts, via `/start-full.sh`: code-server
 (`:8765`), ttyd (`:7681`), and the sandbox gateway (`:9000`) — the terminal
 and VS Code tabs in the UI. The browser reaches them through the API's
 authenticated proxy (`/api/sessions/:id/gateway/*`), which checks session
 ownership and forwards a gateway JWT. The in-sandbox gateway
-independently verifies that JWT. The `full` image is built from
-`docker/Dockerfile.sandbox-k8s`.
+independently verifies that JWT.
 
 **Environment.** Every sandbox receives `VALET_SANDBOX_TOKEN` (bearer for
 calling back into the API — used by the git credential helper, so no git

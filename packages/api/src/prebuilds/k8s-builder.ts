@@ -350,6 +350,11 @@ export interface KubernetesImageBuilderOpts {
    * ref's `--output name=`). `VALET_PREBUILD_REGISTRY_PUSH`; undefined = push
    * to the pull host as-is (external registry / no split). */
   registryPushHost?: string;
+  /** The configured PULL host (`VALET_PREBUILD_REGISTRY`'s host segment).
+   * Identifies which base-image refs are OURS to rewrite to the push host —
+   * an external ref that merely shares a host with the output ref must pass
+   * through untouched. Undefined = fall back to the output ref's host. */
+  registryPullHost?: string;
   buildkitImage?: string;
   activeDeadlineSeconds?: number;
   resources?: BuildKitResources;
@@ -368,6 +373,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
   private readonly namespace: string;
   private readonly registryInsecure: boolean;
   private readonly registryPushHost?: string;
+  private readonly registryPullHost?: string;
   private readonly buildkitImage: string;
   private readonly activeDeadlineSeconds: number;
   private readonly resources?: BuildKitResources;
@@ -389,6 +395,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     this.namespace = opts.namespace;
     this.registryInsecure = opts.registryInsecure;
     this.registryPushHost = opts.registryPushHost;
+    this.registryPullHost = opts.registryPullHost;
     this.buildkitImage = opts.buildkitImage ?? BUILDKIT_IMAGE;
     this.activeDeadlineSeconds = opts.activeDeadlineSeconds ?? DEFAULT_ACTIVE_DEADLINE_SECONDS;
     this.resources = opts.resources;
@@ -568,14 +575,16 @@ export class KubernetesImageBuilder implements ImageBuilder {
       // `buildKitJobManifest`. Host-agnostic generation stays in recipe.ts —
       // the rewrite lives here at the builder boundary only.
       //
-      // ONLY bundled-registry refs qualify: a ref is pull-hosted exactly when
-      // it shares the output ref's host (imageRef is always pull-hosted).
-      // External hosts (ghcr.io stock bases, prebuild.yaml image overrides)
-      // must pass through — rewriting them points BuildKit at an image nobody
-      // pushed and the bake fails with "not found".
+      // ONLY bundled-registry (pull-hosted) refs qualify. The configured
+      // pull host identifies them exactly; without one, fall back to the
+      // output ref's host (imageRef is always pull-hosted). External hosts
+      // (ghcr.io stock bases, prebuild.yaml image overrides) must pass
+      // through — rewriting them points BuildKit at an image nobody pushed
+      // and the bake fails with "not found".
       const fromHost = refHost(rec.spec.baseImage);
+      const pullHost = this.registryPullHost ?? refHost(rec.spec.imageRef);
       const baseImage =
-        fromHost !== undefined && fromHost === refHost(rec.spec.imageRef)
+        fromHost !== undefined && fromHost === pullHost
           ? pushRefFor(rec.spec.baseImage, this.registryPushHost)
           : rec.spec.baseImage;
       const dockerfile =

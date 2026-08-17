@@ -93,6 +93,13 @@ export function resolveImageBuilder(
       // image refs + sandbox pod images. Unset = no split (push == pull host):
       // external registry, or a raw dev cluster without the chart's wiring.
       const registryPushHost = env.VALET_PREBUILD_REGISTRY_PUSH || undefined;
+      // PULL host (host segment of VALET_PREBUILD_REGISTRY) — identifies the
+      // bundled-registry refs the builder may rewrite to the push host; an
+      // external base ref must never be rewritten even if it happens to
+      // share a host with the output ref.
+      const registryPullHost = env.VALET_PREBUILD_REGISTRY
+        ? env.VALET_PREBUILD_REGISTRY.split("/")[0]
+        : undefined;
       // Explicit flag (chart-injected), not inferred from the host string —
       // see the k8s-builder task brief: insecure only when the endpoint is
       // the bundled in-cluster registry, and a raw dev cluster without the
@@ -126,6 +133,7 @@ export function resolveImageBuilder(
         namespace,
         registryInsecure,
         ...(registryPushHost ? { registryPushHost } : {}),
+        ...(registryPullHost ? { registryPullHost } : {}),
         ...(activeDeadlineSeconds !== undefined && !Number.isNaN(activeDeadlineSeconds) ? { activeDeadlineSeconds } : {}),
         ...(resources ? { resources } : {}),
       });

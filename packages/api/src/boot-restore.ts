@@ -25,6 +25,10 @@ export interface RestoreSessionMeta {
   orgId: string;
   workspace: string;
   profile: "headless" | "full";
+  /** Rootless docker-in-sandbox flag from the `agent_sessions` row — must
+   * survive restore or the rebuilt sandbox loses its docker caps/mounts
+   * (already flowed structurally at runtime; declared so the type matches). */
+  docker?: boolean;
   repos?: (RepoBinding & { targetDir: string })[];
   userName?: string;
   userEmail?: string;

@@ -955,24 +955,34 @@ describe("SourceService", () => {
       expect(src.parentId).not.toBe(headlessId);
     });
 
-    it("re-bind REPARENTS a headless-parented repo source onto the full base", async () => {
+    it("re-bind REPARENTS a headless-parented repo source onto the full base and rebakes immediately", async () => {
       // Sources created before the single-lineage change chain on the
-      // legacy headless base; re-binding must move them so their next bake
-      // carries the full toolchain.
+      // legacy headless base; re-binding must move them AND fire a rebake —
+      // waiting for the nightly pass would leave full/docker sessions on the
+      // stale headless-lineage bake (degraded services) all day.
       const headlessId = await seedBaseSource(db, ["apt-get install -y git"], {
         id: "legacy-headless-parent",
         profile: "headless",
       });
       const fullId = await seedBaseSource(db, [], { id: "unified-full", profile: "full" });
+      // The full base has a consistent pushed bake, so the repo rebake can
+      // chain on it instead of deferring.
+      await pushCurrentBake(fullId);
       const srcId = await seedRepoSource(db, { id: "src_legacy", parentId: headlessId });
-      // A pushed bake so re-bind does not fire a first bake (reparent alone
-      // moves the identity; the nightly scheduler rebakes).
+      // A pushed stale-lineage bake exists — the no-bake-yet path must not
+      // be the only trigger.
       await seedBake(db, srcId, { id: "legacy_pushed" });
+      const specsBefore = builder.specs.length;
 
       await service.ensureRepoSource(orgId, repo);
 
       const [src] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
       expect(src.parentId).toBe(fullId);
+      // The reparent fired a repo rebake chained on the full base bake.
+      const newSpecs = builder.specs.slice(specsBefore).filter((s) => s.kind === "repo");
+      expect(newSpecs).toHaveLength(1);
+      const fullBake = await service.currentBake(fullId);
+      expect(newSpecs[0]!.baseImage).toBe(fullBake?.imageRef);
     });
   });
 

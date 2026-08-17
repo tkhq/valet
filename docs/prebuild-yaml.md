@@ -60,7 +60,7 @@ Valet checks for these files at the repository root, in this order. Multiple ent
 
 Detection is root-level only. A nested `packages/foo/pnpm-lock.yaml` does not trigger a step.
 
-Repo bakes build on the org's headless base image. The default headless base provides: `git`, `gh`, `ripgrep`, `curl`, `bash`, `openssh-client`, and the Node runtime. It does not include `python3`, `jq`, or `build-essential`. Repos that need more must add it via `setup` or `image`.
+Repo bakes build on the org's base image (the single full-image lineage — see docs/specs/2026-08-16-single-image-lineage-design.md). The default headless base provides: `git`, `gh`, `ripgrep`, `curl`, `bash`, `openssh-client`, and the Node runtime. It does not include `python3`, `jq`, or `build-essential`. Repos that need more must add it via `setup` or `image`.
 
 ## Examples
 

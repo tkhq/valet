@@ -1169,9 +1169,15 @@ export class SourceService {
             ...(adoptedParentId !== source.parentId ? { parentId: adoptedParentId } : {}),
           })
           .where(eq(imageSources.id, source.id));
-        // Fire a bake when this re-bound source has no pushed bake yet.
+        // Fire a bake when this re-bound source has no pushed bake yet, or
+        // when the parent just changed — the pushed bake is then on the old
+        // lineage, and waiting for the nightly pass would leave sessions on
+        // it all day. `maybeFireFirstBake` still defers behind an unready
+        // base and skips when a bake is already in flight.
         const current = await this.currentBake(source.id);
-        if (!current) await this.maybeFireFirstBake(source.id, orgId, repo);
+        if (!current || adoptedParentId !== source.parentId) {
+          await this.maybeFireFirstBake(source.id, orgId, repo);
+        }
         return;
       }
 

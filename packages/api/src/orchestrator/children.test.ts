@@ -315,6 +315,38 @@ describe("buildChildSpawner", () => {
     expect(spec?.image).toBe("reg/cb-f/base:1");
   });
 
+  it("child_send after a cache eviction (api restart) rebuilds the child with its persisted profile/docker", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const sender = buildChildSender(deps, watcher);
+
+    const parent = await api.providers.engineHost.sessionFor("parent-rebuild", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const ctx = {
+      parentSessionId: "parent-rebuild",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+    const spawned = await spawner({ prompt: "dind work", profile: "full", docker: true }, ctx);
+
+    // Simulate an api restart: the cached session dies; the row survives.
+    api.providers.engineHost.evictAll();
+    expect(api.providers.engineHost.liveSession(spawned.childSessionId)).toBeNull();
+
+    await sender({ childSessionId: spawned.childSessionId, message: "continue" }, ctx);
+
+    const rebuilt = api.providers.engineHost.liveSession(spawned.childSessionId);
+    expect(rebuilt).not.toBeNull();
+    expect(asCreateOpts(rebuilt?.options.sandbox)?.profile).toBe("full");
+    expect(asCreateOpts(rebuilt?.options.sandbox)?.docker).toBe(true);
+  });
+
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

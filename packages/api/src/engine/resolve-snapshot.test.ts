@@ -496,22 +496,24 @@ describe("resolveSnapshot", () => {
       expect(spec.image).toBe(FULL_STOCK);
     });
 
-    it("headless-profile boot window: stockImage=headless-stock → computeSpec image = headless-stock (no base bake)", async () => {
-      const HEADLESS_STOCK = "ghcr.io/tkhq/valet-sandbox-headless:latest";
+    it("headless-profile boot window: the caller-supplied (single-lineage) stockImage passes through", async () => {
+      // Single lineage: the caller always supplies the FULL stock image; the
+      // profile does not change what resolveSnapshot returns.
+      const STOCK = "ghcr.io/tkhq/valet-sandbox:latest";
 
       const snap = await resolveSnapshot({
         db,
         provider: fakeProvider(true),
         meta: meta({ repos: undefined, profile: "headless" }),
         apiUrl: API_URL,
-        stockImage: HEADLESS_STOCK,
+        stockImage: STOCK,
       });
 
       expect(snap.baseBakeRef).toBeNull();
-      expect(snap.stockImage).toBe(HEADLESS_STOCK);
+      expect(snap.stockImage).toBe(STOCK);
 
       const spec = computeSpec(snap);
-      expect(spec.image).toBe(HEADLESS_STOCK);
+      expect(spec.image).toBe(STOCK);
     });
 
     it("full-profile with base bake pushed → uses bake ref, not stockImage", async () => {
