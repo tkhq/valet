@@ -35,7 +35,8 @@ export interface AuthConfig {
     teamAdminGroup: string;
     /**
      * Top-level group paths this instance mirrors, e.g. `["/platform"]`.
-     * Undefined means every top-level group the claim carries.
+     * Undefined means the deployment named no group, and the sync then
+     * mirrors NOTHING — see `ReconcileOptions.mirroredGroups`.
      *
      * No environment variable sets this one. It comes from
      * `auth.sso.teams.groups` in `valet.yaml`, because a list is awkward in
@@ -133,9 +134,11 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     const name = env.AUTH_OIDC_NAME ?? "SSO";
 
     // Team-sync claim names. The defaults match the mappers in
-    // `docker/keycloak/valet-realm.json`. Nothing here turns the sync on:
-    // a deployment whose provider sends neither claim never reaches a write,
-    // because an absent claim means "no information" (services/team-sync.ts).
+    // `docker/keycloak/valet-realm.json`, and `groups` is also the name
+    // Keycloak's stock group mapper uses — so these defaults DO name a claim
+    // a real provider sends. What turns the sync on is neither of them: it
+    // is the `ssoTeamSync` org feature gate, which is off until an operator
+    // sets it (`services/org.ts`, read in `auth/provisioning.ts`).
     //
     // These three reads are the FALLBACK layer. `valet.yaml` is the preferred
     // home for the mapping (`auth.sso.teams`), and `main.ts` overwrites the

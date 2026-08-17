@@ -4,7 +4,7 @@
  * Harness: shared PGlite AppDb + migrations, mirroring skill-sources.test.ts.
  */
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -107,6 +107,45 @@ describe("reconcileInstanceConfig — org pass", () => {
     const features = rows[0]!.features as Record<string, boolean>;
     expect(features["organizations"]).toBe(false);
     expect(features["legacy"]).toBe(true);
+  });
+
+  it("names the file when a declared feature overrides the stored value", async () => {
+    // The Settings page writes the same column, so an admin who turns a
+    // feature off there sees it come back at the next boot. The file wins by
+    // design; the boot line is what lets the reader work out why.
+    const org = await ensureOrg(db);
+    await db.update(orgs).set({ features: { ssoTeamSync: false } }).where(eq(orgs.id, org.id));
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg: InstanceConfig = { version: 1, org: { features: { ssoTeamSync: true } } };
+      await reconcileInstanceConfig({ db, configPath: "/etc/valet.yaml" }, cfg);
+
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      const line = lines.find((text) => text.includes("org.features.ssoTeamSync"));
+      expect(line).toContain("/etc/valet.yaml");
+      expect(line).toContain("remove the key from that file");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("says nothing when the file agrees with the stored value", async () => {
+    // A steady deployment declares the same value at every boot. A line each
+    // time would train the reader to ignore the one that matters.
+    const org = await ensureOrg(db);
+    await db.update(orgs).set({ features: { ssoTeamSync: true } }).where(eq(orgs.id, org.id));
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg: InstanceConfig = { version: 1, org: { features: { ssoTeamSync: true } } };
+      await reconcileInstanceConfig({ db, configPath: "/etc/valet.yaml" }, cfg);
+
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines.filter((text) => text.includes("org.features."))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("org.modelPreferences overwrites the array", async () => {

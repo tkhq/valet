@@ -6,7 +6,7 @@
  * that the UI stops offering controls that would 404.
  */
 import type { ReactNode } from "react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { OrgMemberWire } from "@valet/api/wire";
 
@@ -40,6 +40,9 @@ vi.mock("@tanstack/react-router", () => ({
 
 let callerRole: "admin" | "member" | null = "member";
 let orgRole: "admin" | "member" = "member";
+let origin: "local" | "config" | "idp" = "local";
+/** The org's team-sync gate. Off is the product default, so it is the default here. */
+let ssoTeamSync = false;
 
 const teamsData = () => ({
   teams: [
@@ -47,6 +50,8 @@ const teamsData = () => ({
       id: "team_1",
       orgId: "org_1",
       name: "Platform",
+      origin,
+      externalId: origin === "idp" ? "/platform" : null,
       createdAt: 1,
       memberCount: 2,
       callerRole,
@@ -81,6 +86,11 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData(), isLoading: false, error: null }),
   useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
+  useOrg: () => ({
+    data: { features: { organizations: true, ssoTeamSync } },
+    isLoading: false,
+    error: null,
+  }),
   useTeamMembers: () => ({
     data: {
       members: [
@@ -110,6 +120,43 @@ function openTeam() {
   render(<TeamsPanel orgMembers={orgMembers} />);
   fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
 }
+
+/**
+ * A mirrored team hides its controls only while the sync actually runs. The
+ * gate is the org's `ssoTeamSync` feature, so the same row reads two ways.
+ */
+describe("TeamsPanel — mirrored teams follow the team-sync gate", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "admin";
+    origin = "idp";
+  });
+
+  afterEach(() => {
+    origin = "local";
+    ssoTeamSync = false;
+  });
+
+  it("hides the controls while team sync is on", () => {
+    ssoTeamSync = true;
+    openTeam();
+    expect(screen.getByText("Identity provider")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
+  });
+
+  it("returns the controls, and says why, while team sync is off", () => {
+    // Nothing reasserts this team any more, so a hidden control would leave
+    // a team nobody can change. The badge and the note are what stop that
+    // reading as "this team was never mirrored".
+    ssoTeamSync = false;
+    openTeam();
+    expect(screen.getByText("Identity provider (paused)")).toBeTruthy();
+    expect(screen.getByText(/team sync is off/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
+  });
+});
 
 describe("TeamsPanel role gating", () => {
   it("hides mutation controls from a plain team member", () => {

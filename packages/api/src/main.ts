@@ -31,6 +31,8 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { findOrg, getOrgFeatures } from "./services/org.js";
+import { reportTeamSyncState } from "./services/team-sync.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
@@ -391,6 +393,24 @@ if (instanceConfig) {
       process.exit(1);
     }
     throw e;
+  }
+}
+
+// Team mirroring is off unless an operator asks for it, so say once what it
+// will do. This runs AFTER the reconcile above, which is what applies
+// `org.features.ssoTeamSync` from the file. It reads and prints; it never
+// creates an org and never deletes a team.
+{
+  const org = await findOrg(providers.db);
+  if (org) {
+    const features = await getOrgFeatures(providers.db, org.id);
+    await reportTeamSyncState(providers.db, {
+      orgId: org.id,
+      enabled: features.ssoTeamSync,
+      ssoConfigured: authConfig?.oidc !== undefined,
+      mirroredGroups: authConfig?.oidc?.teamGroups ?? [],
+      configPath: process.env.VALET_CONFIG,
+    });
   }
 }
 

@@ -20,7 +20,7 @@ import {
   workflowDefinitions,
   type TeamRow,
 } from "../schema/index.js";
-import { isOrgAdmin } from "./org.js";
+import { getOrgFeatures, isOrgAdmin } from "./org.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -172,7 +172,34 @@ async function countAdmins(db: AppQueryable, teamId: string): Promise<number> {
 }
 
 /**
- * Refuses the mutation when the team mirrors an identity-provider group.
+ * True when this team is a LIVE mirror: it carries `origin='idp'` AND the
+ * org's `ssoTeamSync` gate is on.
+ *
+ * The gate is part of the question because the lock exists for one reason —
+ * the login sync owns these rows, so a hand edit would survive only until
+ * the next sign-in and would read as data loss when the sync undid it. With
+ * the gate off, no sync runs, and that reason is gone. The rows are then a
+ * DORMANT mirror: Valet keeps them, keeps their members and keeps their
+ * work, and gives the team controls back so people are not left with teams
+ * nobody can rename, empty or remove.
+ *
+ * `origin` itself is not rewritten when the gate goes off. It is what
+ * `findByExternalId` matches on, so leaving it is what lets an operator turn
+ * the gate back on later and have each mirror adopted again instead of
+ * colliding with its own group by name (`services/team-sync.ts`).
+ */
+export async function isLiveIdpMirror(
+  db: AppQueryable,
+  team: { orgId: string; origin: TeamRow["origin"] },
+): Promise<boolean> {
+  if (team.origin !== "idp") return false;
+  const features = await getOrgFeatures(db, team.orgId);
+  return features.ssoTeamSync;
+}
+
+/**
+ * Refuses the mutation when the team is a live mirror of an
+ * identity-provider group.
  *
  * A missing team is not this guard's business. Each caller already reports
  * its own not-found, and inventing a second one here would change what a
@@ -184,12 +211,17 @@ async function assertNotIdpManaged(
   mutation: IdpManagedMutation,
 ): Promise<void> {
   const rows = await db
-    .select({ name: teams.name, origin: teams.origin, externalId: teams.externalId })
+    .select({
+      orgId: teams.orgId,
+      name: teams.name,
+      origin: teams.origin,
+      externalId: teams.externalId,
+    })
     .from(teams)
     .where(eq(teams.id, teamId))
     .limit(1);
   const team = rows[0];
-  if (team?.origin === "idp") throw new IdpManagedTeamError(team, mutation);
+  if (team && (await isLiveIdpMirror(db, team))) throw new IdpManagedTeamError(team, mutation);
 }
 
 async function getMember(
@@ -270,7 +302,7 @@ export async function addMember(db: AppDb, opts: AddMemberOptions): Promise<void
   const team = teamRows[0];
   if (!team) throw new NotFoundError("team", opts.teamId);
   // The row is already here, so check it directly instead of re-reading.
-  if (team.origin === "idp") throw new IdpManagedTeamError(team, "membership");
+  if (await isLiveIdpMirror(db, team)) throw new IdpManagedTeamError(team, "membership");
 
   const targetOrgMemberRows = await db
     .select()
@@ -493,13 +525,22 @@ export interface DeleteTeamOptions {
 /**
  * Deletes a team, its memberships, the skills it owns, and the skill
  * repositories it tracks. Rejects while the team owns any workflow, and
- * rejects on a team that mirrors an identity-provider group.
+ * rejects on a team that is a LIVE mirror of an identity-provider group.
  *
- * A mirrored team is refused because deletion here does not reach the source.
+ * A live mirror is refused because deletion here does not reach the source.
  * The group stays in the identity provider, so the next sign-in recreates the
  * team — but the skills and tracked repositories this function removes do not
  * come back. Deleting the group in the identity provider empties the team
  * instead, and destroys nothing the sync cannot rebuild.
+ *
+ * A DORMANT mirror — the same row with `ssoTeamSync` off — is deleted. The
+ * refusal above is about a sync that is running, and no sync is running. To
+ * refuse here as well would leave the operator a row they can neither empty
+ * nor remove for as long as the gate stays off, which is the state
+ * `isLiveIdpMirror` exists to end. The cost is real and it belongs to the
+ * person who confirms the delete: if the gate goes back on, the group builds
+ * the team again with no skills and no sources. The confirm dialog says so
+ * (`packages/web/src/components/settings/teams-panel.tsx`).
  *
  * Skills are removed rather than blocking, because a skill is a document,
  * not a running thing — there is nothing to cancel first. They must go
@@ -514,7 +555,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
   const teamRows = await db.select().from(teams).where(eq(teams.id, opts.teamId)).limit(1);
   const team = teamRows[0];
   if (!team) throw new NotFoundError("team", opts.teamId);
-  if (team.origin === "idp") throw new IdpManagedTeamError(team, "delete");
+  if (await isLiveIdpMirror(db, team)) throw new IdpManagedTeamError(team, "delete");
   if (team.origin === "config") throw new ConfigManagedTeamError(team.name);
 
   await db.transaction(async (tx) => {

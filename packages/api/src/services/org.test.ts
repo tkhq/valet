@@ -47,13 +47,33 @@ describe("org service", () => {
   });
 
   describe("getOrgFeatures / setOrgFeatures", () => {
-    it("defaults organizations to false", async () => {
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: false });
+    it("defaults every feature to false", async () => {
+      // An absent key reads as false, which is what makes a gate off for an
+      // operator who declares nothing.
+      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: false, ssoTeamSync: false });
     });
 
     it("reflects setOrgFeatures", async () => {
       await setOrgFeatures(db, orgId, { organizations: true });
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true });
+      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true, ssoTeamSync: false });
+    });
+
+    it("changes only the keys it is given", async () => {
+      await setOrgFeatures(db, orgId, { ssoTeamSync: true });
+      await setOrgFeatures(db, orgId, { organizations: true });
+      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true, ssoTeamSync: true });
+    });
+
+    it("keeps a feature key this build does not name", async () => {
+      // `valet.yaml` may declare a feature key the typed reader does not
+      // know. One write from the settings page must not delete it, so the
+      // merge runs against the raw jsonb rather than the projected shape.
+      await db.update(orgs).set({ features: { fromTheFile: true } }).where(eq(orgs.id, orgId));
+
+      await setOrgFeatures(db, orgId, { organizations: true });
+
+      const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId));
+      expect(rows[0]?.features).toEqual({ fromTheFile: true, organizations: true });
     });
   });
 

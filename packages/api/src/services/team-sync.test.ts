@@ -10,10 +10,21 @@ import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, teamMembers, teams, users, type TeamRow } from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "./teams.js";
-import { desiredTeamsFromPaths, readTeamClaim, reconcileIdpTeams } from "./team-sync.js";
+import {
+  desiredTeamsFromPaths,
+  readTeamClaim,
+  reconcileIdpTeams,
+  reportTeamSyncState,
+} from "./team-sync.js";
 
 const ORG = "org1";
 const ADMIN_GROUP = "admins";
+/**
+ * The allowlist these tests run with. Every reconcile needs one now: there is
+ * no "mirror everything" value, so a test that named no group would mirror
+ * nothing and pass for the wrong reason.
+ */
+const MIRRORED = ["/platform", "/research"];
 
 async function seedUser(db: AppDb, id: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -53,12 +64,13 @@ async function teamNamed(db: AppDb, name: string) {
 }
 
 /** Runs one sign-in's worth of sync for `userId` with the given group paths. */
-async function signInWith(db: AppDb, userId: string, paths: string[]) {
+async function signInWith(db: AppDb, userId: string, paths: string[], mirroredGroups = MIRRORED) {
   return reconcileIdpTeams(db, {
     orgId: ORG,
     userId,
     claim: { present: true, paths },
     adminGroupName: ADMIN_GROUP,
+    mirroredGroups,
   });
 }
 
@@ -167,55 +179,67 @@ describe("readTeamClaim", () => {
 
 describe("desiredTeamsFromPaths", () => {
   it("derives parent membership from a sub-group path", () => {
-    const { teams: wanted } = desiredTeamsFromPaths(["/platform/admins"], ADMIN_GROUP);
+    const { teams: wanted } = desiredTeamsFromPaths(["/platform/admins"], ADMIN_GROUP, MIRRORED);
     expect([...wanted.values()]).toEqual([{ path: "/platform", name: "platform", role: "admin" }]);
   });
 
   it("gives admin whatever the order of the claim", () => {
-    const forwards = desiredTeamsFromPaths(["/platform", "/platform/admins"], ADMIN_GROUP);
-    const backwards = desiredTeamsFromPaths(["/platform/admins", "/platform"], ADMIN_GROUP);
+    const forwards = desiredTeamsFromPaths(["/platform", "/platform/admins"], ADMIN_GROUP, MIRRORED);
+    const backwards = desiredTeamsFromPaths(["/platform/admins", "/platform"], ADMIN_GROUP, MIRRORED);
     expect(forwards.teams.get("/platform")?.role).toBe("admin");
     expect(backwards.teams.get("/platform")?.role).toBe("admin");
   });
 
   it("tolerates surrounding space and repeated slashes", () => {
-    const { teams: wanted } = desiredTeamsFromPaths(["  //platform//admins  "], ADMIN_GROUP);
+    const { teams: wanted } = desiredTeamsFromPaths(["  //platform//admins  "], ADMIN_GROUP, MIRRORED);
     expect(wanted.get("/platform")?.role).toBe("admin");
   });
 
   it("ignores a deeper path and any other sub-group", () => {
+    // Every path here names a LISTED group, so the allowlist lets it through
+    // and the shape rule is what rejects it. "/" names no group at all, so
+    // no list can answer for it and it is reported too.
     const { teams: wanted, ignored } = desiredTeamsFromPaths(
       ["/platform/leads", "/eng/platform/admins", "/"],
       ADMIN_GROUP,
+      ["/platform", "/eng"],
     );
     expect(wanted.size).toBe(0);
     expect(ignored).toEqual(["/platform/leads", "/eng/platform/admins", "/"]);
   });
 
   it("honours a configured admin sub-group name", () => {
-    const { teams: wanted } = desiredTeamsFromPaths(["/platform/owners"], "owners");
+    const { teams: wanted } = desiredTeamsFromPaths(["/platform/owners"], "owners", MIRRORED);
     expect(wanted.get("/platform")?.role).toBe("admin");
   });
 
   it("matches the admin sub-group by whole segment, never by prefix", () => {
     // Each of these reads as an admin grant under prefix matching. The rule
     // compares the whole segment, so none of them grants admin anywhere.
-    const dashed = desiredTeamsFromPaths(["/platform-admins"], ADMIN_GROUP);
+    const dashed = desiredTeamsFromPaths(["/platform-admins"], ADMIN_GROUP, ["/platform-admins"]);
     expect([...dashed.teams.values()]).toEqual([
       { path: "/platform-admins", name: "platform-admins", role: "member" },
     ]);
     expect(dashed.teams.has("/platform")).toBe(false);
 
     for (const path of ["/platform/admins-readonly", "/platform/readonly-admins", "/platform/Admins"]) {
-      const { teams: wanted, ignored } = desiredTeamsFromPaths([path], ADMIN_GROUP);
+      const { teams: wanted, ignored } = desiredTeamsFromPaths([path], ADMIN_GROUP, MIRRORED);
       expect(wanted.size).toBe(0);
       expect(ignored).toEqual([path]);
     }
   });
 
-  it("mirrors every top-level group when no allowlist is given", () => {
-    const { teams: wanted } = desiredTeamsFromPaths(["/platform", "/research"], ADMIN_GROUP);
-    expect([...wanted.keys()]).toEqual(["/platform", "/research"]);
+  it("mirrors nothing when no group is listed", () => {
+    // The fail-closed default. A deployment that names no group has not
+    // decided which of its provider's groups are Valet teams, and the
+    // provider carries plenty that are not — so none of them is mirrored.
+    const { teams: wanted, ignored } = desiredTeamsFromPaths(
+      ["/platform", "/research", "/everyone", "/vpn-users"],
+      ADMIN_GROUP,
+      [],
+    );
+    expect(wanted.size).toBe(0);
+    expect(ignored).toEqual([]);
   });
 
   it("mirrors only the listed groups when an allowlist is given", () => {
@@ -249,6 +273,44 @@ describe("desiredTeamsFromPaths", () => {
   it("mirrors nothing when the allowlist is empty", () => {
     const { teams: wanted } = desiredTeamsFromPaths(["/platform"], ADMIN_GROUP, []);
     expect(wanted.size).toBe(0);
+  });
+
+  it("refuses a bare group name, which loses the nesting", () => {
+    // A provider whose mapper sends leaf names reports a member of
+    // '/contractors/platform' as 'platform' — byte for byte what a member of
+    // '/platform' sends. Accepting it would grant a listed team's membership
+    // from a group the operator never named.
+    const { teams: wanted, notRooted, ignored } = desiredTeamsFromPaths(
+      ["platform"],
+      ADMIN_GROUP,
+      MIRRORED,
+    );
+    expect(wanted.size).toBe(0);
+    expect(notRooted).toEqual(["platform"]);
+    expect(ignored).toEqual([]);
+  });
+
+  it("says nothing about a bare name the allowlist excludes", () => {
+    // A mapper that sends bare names sends one per group, and most are
+    // excluded. Reporting those would print a line per excluded group per
+    // login, which buries the one line that matters.
+    const { notRooted, ignored } = desiredTeamsFromPaths(
+      ["everyone", "vpn-users"],
+      ADMIN_GROUP,
+      MIRRORED,
+    );
+    expect(notRooted).toEqual([]);
+    expect(ignored).toEqual([]);
+  });
+
+  it("still accepts a rooted admin sub-group path", () => {
+    const { teams: wanted, notRooted } = desiredTeamsFromPaths(
+      ["/platform/admins"],
+      ADMIN_GROUP,
+      MIRRORED,
+    );
+    expect(wanted.get("/platform")?.role).toBe("admin");
+    expect(notRooted).toEqual([]);
   });
 });
 
@@ -289,6 +351,53 @@ describe("reconcileIdpTeams", () => {
     expect((await membershipsOf(db, "u1")).map((m) => m.team)).toEqual(["research"]);
   });
 
+  it("keeps membership of a mirror whose group left the allowlist", async () => {
+    // Narrowing the list must STOP mirroring, never deprovision. The claim
+    // still puts the user in '/research', so a removal here would say the
+    // list decides who is in a team — and one edit would empty a team with
+    // its skills, sources and workflows, one login at a time.
+    await signInWith(db, "u1", ["/platform", "/research"]);
+    expect((await membershipsOf(db, "u1")).map((m) => m.team)).toEqual(["platform", "research"]);
+
+    const narrowed = await signInWith(db, "u1", ["/platform", "/research"], ["/platform"]);
+    expect(narrowed).toMatchObject({ removed: 0, added: 0, roleChanged: 0, createdTeams: 0 });
+    expect((await membershipsOf(db, "u1")).map((m) => m.team)).toEqual(["platform", "research"]);
+  });
+
+  it("keeps every membership when the allowlist becomes empty", async () => {
+    // The upgrade path for a deployment configured through environment
+    // variables: `auth.sso.teams.groups` has no variable, so such a
+    // deployment reaches the sync with an empty list. It must mirror nothing
+    // and take nothing away.
+    await signInWith(db, "u1", ["/platform", "/research"]);
+
+    const none = await signInWith(db, "u1", ["/platform", "/research"], []);
+    expect(none).toMatchObject({ removed: 0, added: 0, createdTeams: 0 });
+    expect((await membershipsOf(db, "u1")).map((m) => m.team)).toEqual(["platform", "research"]);
+  });
+
+  it("keeps a de-listed mirror even when the claim drops the group too", async () => {
+    // Both reasons to remove arrive together. The list is checked first, so
+    // the sync cannot act on a group it no longer mirrors — it holds no
+    // current information about that team.
+    await signInWith(db, "u1", ["/platform", "/research"]);
+
+    const dropped = await signInWith(db, "u1", ["/platform"], ["/platform"]);
+    expect(dropped).toMatchObject({ removed: 0 });
+    expect((await membershipsOf(db, "u1")).map((m) => m.team)).toEqual(["platform", "research"]);
+  });
+
+  it("resumes updating a mirror when its group returns to the allowlist", async () => {
+    await signInWith(db, "u1", ["/platform", "/research"]);
+    await signInWith(db, "u1", ["/platform"], ["/platform"]);
+
+    // Back on the list, and the claim no longer carries the group. The sync
+    // owns the row again, so now it removes.
+    const resumed = await signInWith(db, "u1", ["/platform"], MIRRORED);
+    expect(resumed).toMatchObject({ removed: 1 });
+    expect((await membershipsOf(db, "u1")).map((m) => m.team)).toEqual(["platform"]);
+  });
+
   it("grants admin through the sub-group and demotes on leaving it", async () => {
     await signInWith(db, "u1", ["/platform/admins"]);
     expect(await membershipsOf(db, "u1")).toEqual([
@@ -316,6 +425,7 @@ describe("reconcileIdpTeams", () => {
       userId: "u1",
       claim: { present: true, paths: [] },
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(offboarded).toMatchObject({ applied: true, removed: 1 });
@@ -334,6 +444,7 @@ describe("reconcileIdpTeams", () => {
       userId: "u1",
       claim: { present: false },
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(result).toEqual({
@@ -361,6 +472,7 @@ describe("reconcileIdpTeams", () => {
       userId: "u1",
       claim,
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(result).toMatchObject({ applied: false, removed: 0 });
@@ -379,6 +491,7 @@ describe("reconcileIdpTeams", () => {
       userId: "u1",
       claim,
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(result).toMatchObject({ applied: false, removed: 0 });
@@ -394,6 +507,7 @@ describe("reconcileIdpTeams", () => {
       userId: "u1",
       claim: { present: true, paths: [] },
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(result).toMatchObject({ applied: true, removed: 2, added: 0 });
@@ -503,6 +617,7 @@ describe("reconcileIdpTeams", () => {
       userId: "u2",
       claim: { present: true, paths: [] },
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(removed).toMatchObject({ removed: 1 });
@@ -529,11 +644,56 @@ describe("reconcileIdpTeams", () => {
       userId: "u1",
       claim: { present: true, paths: [] },
       adminGroupName: ADMIN_GROUP,
+      mirroredGroups: MIRRORED,
     });
 
     expect(result).toMatchObject({ removed: 0 });
     expect(await membershipsOf(db, "u1")).toEqual([
       { team: "platform", origin: "idp", externalId: "/platform", role: "admin" },
     ]);
+  });
+});
+
+describe("reportTeamSyncState", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: ORG, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "u1");
+  });
+
+  it("counts a mirror whose group is no longer listed", async () => {
+    // The one state nothing on screen shows: mirroring is on, so the row
+    // still reads "Identity provider" and still refuses every edit, but the
+    // sync no longer updates it.
+    await signInWith(db, "u1", ["/platform", "/research"]);
+
+    const report = await reportTeamSyncState(db, {
+      orgId: ORG,
+      enabled: true,
+      ssoConfigured: true,
+      mirroredGroups: ["/platform"],
+    });
+
+    expect(report).toEqual({
+      enabled: true,
+      mirroredGroups: 1,
+      mirroredTeams: 2,
+      unlistedTeams: 1,
+    });
+  });
+
+  it("counts no unlisted mirror when every group is listed", async () => {
+    await signInWith(db, "u1", ["/platform", "/research"]);
+
+    const report = await reportTeamSyncState(db, {
+      orgId: ORG,
+      enabled: true,
+      ssoConfigured: true,
+      mirroredGroups: MIRRORED,
+    });
+
+    expect(report).toMatchObject({ mirroredTeams: 2, unlistedTeams: 0 });
   });
 });

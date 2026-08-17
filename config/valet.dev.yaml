@@ -10,6 +10,9 @@ auth:
   # dev-keycloak` needs no further setup. They do nothing without an OIDC
   # provider, which `make dev-local` does not start by default.
   #
+  # None of these keys turns team mirroring on. The switch is
+  # org.features.ssoTeamSync below, and it is off unless you set it.
+  #
   # Do NOT set AUTH_OIDC_TEAM_CLAIM, AUTH_OIDC_TEAM_ASSERTED_CLAIM or
   # AUTH_OIDC_TEAM_ADMIN_GROUP while these keys are here. The api refuses to
   # start when a variable and its key are both set.
@@ -18,9 +21,13 @@ auth:
       claim: groups
       assertedClaim: groups_asserted
       adminSubGroup: admins
-      # The seeded realm puts alice in /platform/admins, and bob in /platform
-      # and /research. No team below may take one of these names: a declared
-      # team and a mirrored group cannot share a row.
+      # The allowlist, and it is required. Only a group named here becomes a
+      # team; every other group the claim carries is ignored. Leave it out
+      # and nothing is mirrored at all.
+      #
+      # The seeded realm puts one user in /platform/admins, and one in
+      # /platform and /research. No team below may take one of these names: a
+      # declared team and a mirrored group cannot share a row.
       groups:
         - /platform
         - /research
@@ -29,6 +36,21 @@ org:
   name: Turnkey
   features:
     organizations: true
+    # Turns identity-provider groups into teams at each single-sign-on login.
+    # Off everywhere it is not set, and it stays commented out here.
+    #
+    # `make dev-local` loads this whole file, and `make dev-keycloak` is a
+    # separate opt-in. A declared key would therefore turn the gate on for
+    # every dev, not for the ones who run Keycloak — and the boot report
+    # cannot warn about it, because it stays quiet without an OIDC provider.
+    #
+    # It is also STICKY. The boot reconciler merges declared keys into the
+    # org row and removes nothing, so a value written once survives the line
+    # being deleted from this file. Turn it off in Settings after you finish
+    # with it.
+    #
+    # Uncomment this to exercise the sync with `make dev-keycloak`:
+    # ssoTeamSync: true
   # Under VALET_LOCAL_AUTH=1 the stub identity (local@dev) is seeded
   # separately; this members entry only matters when you run dev with real
   # auth (BETTER_AUTH_SECRET set, stub rung off).

@@ -101,6 +101,9 @@ org:
   name: Turnkey
   features:
     organizations: true
+    ssoTeamSync: true                      # off unless declared; the file
+                                           #   then wins over Settings at
+                                           #   every boot
   modelPreferences:
     - anthropic/claude-opus-4
   bareSkillCommands: true
@@ -206,23 +209,41 @@ auth:
       claim: groups                   # AUTH_OIDC_TEAM_CLAIM
       assertedClaim: groups_asserted  # AUTH_OIDC_TEAM_ASSERTED_CLAIM
       adminSubGroup: admins           # AUTH_OIDC_TEAM_ADMIN_GROUP
-      groups: [/platform, /research]  # optional; no env equivalent
+      groups: [/platform, /research]  # the allowlist; no env equivalent
 ```
 
-`groups` is new, and optional. Omitted, the sync mirrors every top-level
-group the claim carries, which is what a deployment with no file does today.
-Declared, it is an allowlist, and it gives the validator the one thing a
-runtime check cannot have: the set of team names the identity provider will
-ask for, before any row exists. Making it required would silently stop
-mirroring groups an existing deployment relies on, so it stays optional; a
-future `version: 2` could reconsider.
+`groups` is the allowlist. It names every group that may become a team, and
+it gives the validator the one thing a runtime check cannot have: the set of
+team names the identity provider will ask for, before any row exists.
+
+It is optional in the YAML and fail-closed at run time. Omit it and the sync
+mirrors NOTHING — not every group, which was the earlier behaviour. The two
+readings differ only for a deployment that named no group, and that
+deployment cannot have decided which of its provider's groups are Valet
+teams. An identity provider carries `/everyone`, `/vpn-users` and groups from
+projects that ended years ago, and no rule can separate those from the ones
+an operator wants; the claim-name defaults match Keycloak's stock mapper, so
+"mirror everything" was reachable with no file at all. Nothing is silently
+stopped by the change, because team mirroring itself is now off unless
+`org.features.ssoTeamSync` is set (`docs/specs/2026-07-14-auth-v2-design.md`);
+an operator who turns that on lists the groups in the same edit. The api
+prints one boot line when the gate is on and the list is empty.
+
+Taking a group OFF the list stops mirroring that group; it deprovisions
+nobody. The sync filters its removal set by the list as well as its desired
+set, so a de-listed team keeps its members and everything it owns, and one
+boot line names it. See `docs/specs/2026-07-14-auth-v2-design.md`, "The list
+gates writes, not removals".
 
 The validator rejects four shapes that would otherwise be inert or unsafe at
 run time, none of which produces a visible symptom: a `claim` equal to
 `assertedClaim` (which collapses the absent-versus-empty test the sync's
 whole safety property rests on), a `/` inside `adminSubGroup` (ambiguous
 paths — see `docs/environment-variables.md`), a `groups` entry that is not a
-top-level path (the sync mirrors nothing deeper), and a blank value.
+top-level path (the sync mirrors nothing deeper), and a blank value. The
+run-time side now demands the same rooted shape of the claim: a group name
+with no leading `/` is ignored, because it cannot be told from a nested group
+of the same name.
 
 Values that stay in env vars: everything with a secret sibling (OIDC
 issuer/client/secret, `BETTER_AUTH_SECRET`) and everything genuinely
@@ -283,7 +304,24 @@ reconciler calls `ensureOrg`, then:
   overwritten from the file on every boot. The file is the source of truth
   for the fields it declares; a UI edit to a declared field lasts until the
   next boot. Feature keys merge through `setOrgFeatures` (partial update),
-  so flags the file does not name keep their DB value.
+  so flags the file does not name keep their DB value — the merge is against
+  the raw jsonb, so a key this build does not name survives a write from the
+  settings page too.
+
+  Two feature keys are typed today: `organizations` and `ssoTeamSync`. Each
+  reads as false when absent, which is what makes a gate default to off for
+  an operator who declares nothing. `ssoTeamSync` turns identity-provider
+  groups into teams — see `docs/specs/2026-07-14-auth-v2-design.md`.
+
+  A declared flag is also STICKY in two ways the settings page does not show.
+  The file wins at every boot, so a flag an admin turns off in Settings comes
+  back at the next api restart; and the merge only adds, so a value written
+  once survives the key being deleted from the file. `reconcileOrgPass`
+  therefore prints one line naming the file for each declared flag whose value
+  it changes, and prints nothing when the file and the database agree. A
+  deployment that wants a flag controlled from Settings must not declare it.
+  `config/valet.dev.yaml` keeps `ssoTeamSync` commented out for the same
+  reason: `make dev-local` loads that file for every dev.
 - **`members`** — desired memberships, keyed by email:
   - Email matches an existing user → upsert the `org_members` row to the
     declared role. A demotion that would leave the org with zero admins
@@ -558,5 +596,8 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
    for a `config` team — the file identifies a team by `teams[].name`, which
    `teams_org_name` already keeps unique, and a second column holding a copy
    of the first would buy no constraint.
-4. Should `auth.sso.teams.groups` become required? Not in v1 — see
-   "Migrated env vars". A `version: 2` could revisit it.
+4. Should `auth.sso.teams.groups` become required in the YAML? Not in v1. It
+   is already required in effect: an absent list mirrors nothing, so the
+   failure is a no-op rather than a surprise, and `org.features.ssoTeamSync`
+   is the gate an operator sets deliberately. A `version: 2` could make the
+   pair — gate on, list empty — a boot error instead of a boot warning.

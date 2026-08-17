@@ -205,7 +205,7 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     id: "o1",
     name: "Acme",
     createdAt: 0,
-    features: { organizations },
+    features: { organizations, ssoTeamSync: false },
     callerRole,
   };
 }

@@ -23,8 +23,11 @@
  * authz, not just org membership.
  *
  * Origin-gated: those same four routes refuse a team whose `origin` is
- * `idp`. Such a team mirrors an identity-provider group, and the login-time
- * sync owns it.
+ * `idp` WHILE the org's `ssoTeamSync` feature gate is on. Such a team
+ * mirrors an identity-provider group, and the login-time sync owns it. With
+ * the gate off no sync runs, so the same team is a dormant mirror and the
+ * four routes work on it again — see `isLiveIdpMirror`
+ * (`services/teams.ts`).
  *
  * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
  * file asserts its declared members at each boot but never removes anybody,
@@ -53,6 +56,7 @@ import {
   deleteTeam,
   IdpManagedTeamError,
   type IdpManagedMutation,
+  isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -116,9 +120,19 @@ function isTeamRole(v: unknown): v is TeamRole {
  *
  * The message comes from `IdpManagedTeamError`, the same class the service
  * throws, so the route and the service never word the fix differently.
+ *
+ * `isLiveIdpMirror` is what decides, not `origin` alone. A mirror whose org
+ * has `ssoTeamSync` off is dormant: nothing reasserts it, so refusing the
+ * mutation would leave a team nobody can change. Asking the service keeps
+ * the route and the service on ONE rule — a route that tested `origin` here
+ * would refuse writes the service is willing to make.
  */
-function idpManagedRefusal(row: TeamRow, mutation: IdpManagedMutation): { error: string; code: string } | null {
-  if (row.origin !== "idp") return null;
+async function idpManagedRefusal(
+  db: AppEnv["Variables"]["providers"]["db"],
+  row: TeamRow,
+  mutation: IdpManagedMutation,
+): Promise<{ error: string; code: string } | null> {
+  if (!(await isLiveIdpMirror(db, row))) return null;
   const err = new IdpManagedTeamError(row, mutation);
   return { error: err.message, code: err.code };
 }
@@ -300,7 +314,7 @@ teamsRouter.delete("/:id", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
-  const refusal = idpManagedRefusal(team, "delete") ?? configManagedDeleteRefusal(team);
+  const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
 
   try {
@@ -324,7 +338,7 @@ teamsRouter.post("/:id/members", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
-  const refusal = idpManagedRefusal(team, "membership");
+  const refusal = await idpManagedRefusal(db, team, "membership");
   if (refusal) return c.json(refusal, 409);
 
   let body: AddTeamMemberRequest;
@@ -362,7 +376,7 @@ teamsRouter.patch("/:id/members/:userId", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
-  const refusal = idpManagedRefusal(team, "membership");
+  const refusal = await idpManagedRefusal(db, team, "membership");
   if (refusal) return c.json(refusal, 409);
 
   let body: SetTeamMemberRoleRequest;
@@ -397,7 +411,7 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
-  const refusal = idpManagedRefusal(team, "membership");
+  const refusal = await idpManagedRefusal(db, team, "membership");
   if (refusal) return c.json(refusal, 409);
 
   try {
