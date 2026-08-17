@@ -46,7 +46,9 @@ fi
 # daemon through the group-owned socket (`--group docker`, mode 660).
 if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
   ROOT_SOCK=/var/run/docker.sock
-  if [ -S "$ROOT_SOCK" ] && docker version >/dev/null 2>&1; then
+  # Probe as the workload user through the group socket — validates the
+  # root:docker 660 access path (#255), not just daemon liveness.
+  if [ -S "$ROOT_SOCK" ] && su -s /bin/sh dockerd -c 'docker version' >/dev/null 2>&1; then
     exit 0
   fi
   # overlay2 on the emptyDir data-root; vfs only if the probe fails
@@ -64,10 +66,18 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
     --host="unix://$ROOT_SOCK" \
     --data-root="$DATA_ROOT" \
     >> "$LOG" 2>&1 &
-  for i in $(seq 1 20); do
-    [ -S "$ROOT_SOCK" ] && break
+  # Wait for daemon-READY, not socket-exists: dockerd creates the socket
+  # file before it accepts connections. Probe as the workload user so
+  # readiness also proves the group-660 access path. Per the header
+  # contract this script never fails the caller — on timeout it logs and
+  # still exits 0; the sandbox must start even with a broken daemon.
+  for i in $(seq 1 40); do
+    [ -S "$ROOT_SOCK" ] && su -s /bin/sh dockerd -c 'docker version' >/dev/null 2>&1 && break
     sleep 0.5
   done
+  if ! su -s /bin/sh dockerd -c 'docker version' >/dev/null 2>&1; then
+    echo "valet: rootful dockerd not ready after 20s — daemon output above; docker commands will fail until it recovers" >> "$LOG"
+  fi
   exit 0
 fi
 
