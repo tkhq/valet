@@ -84,7 +84,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 - Webhook: the raw JSON POST body.
 - Schedule: `{ scheduleName, cron, input }` → static input at `{{trigger.data.input...}}`.
 
-**Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array`:
+**Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array` (`integer` is an accepted alias for `number` and adds no integer-only check, so a non-integer value like `7.5` is accepted):
 
 ```json
 { "id": "start", "type": "trigger", "dataSchema": {

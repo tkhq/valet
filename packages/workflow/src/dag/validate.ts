@@ -134,9 +134,13 @@ const KEY_ALIASES: Partial<Record<DagNodeType, Record<string, string>>> = {
   },
 };
 
+/** `integer` is a documented alias for `number` (`normalizeInputType` in
+ * `trigger-input.ts` collapses it) — JSON Schema habits make authors write
+ * it, so the linter accepts it. */
 const INPUT_DEFINITION_TYPES: ReadonlySet<string> = new Set([
   'string',
   'number',
+  'integer',
   'boolean',
   'object',
   'array',

@@ -32,7 +32,7 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildValidateEnvironment } from "./validation-env.js";
-import { applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
+import { appendRemovedEdgeHint, applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
 import {
   createWorkflowTrigger,
   deleteWorkflowTrigger,
@@ -559,9 +559,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           // Validate the stored definition too, so the reply can say which
           // errors the patch introduced and which the workflow already held.
           const before = validateDefinitionInput(stored, env);
+          // When the patch removed edges and the lint reports unreachable
+          // nodes, the removal is the likely cause — say so in one line.
+          const withHint = appendRemovedEdgeHint(
+            validation.errors,
+            remove_edges as WorkflowEdgeRef[] | undefined,
+          );
           return {
             success: false,
-            error: formatEditLintErrors(validation.errors, before.ok ? [] : before.errors),
+            error: formatEditLintErrors(withHint, before.ok ? [] : before.errors),
           };
         }
       }

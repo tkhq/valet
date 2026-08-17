@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { resolveTriggerInput } from './trigger-input.js';
+import { normalizeInputType, resolveTriggerInput } from './trigger-input.js';
 import type { WorkflowInputDefinition } from './shape.js';
 
 /** Deliberately-malformed input definition. `dataSchema` is unchecked stored
@@ -17,6 +17,15 @@ const schema: Record<string, WorkflowInputDefinition> = {
   dryRun: { type: 'boolean', default: false },
   mode: { type: 'string', enum: ['fast', 'safe'], default: 'safe' },
 };
+
+describe('normalizeInputType', () => {
+  it('collapses "integer" to "number" and keeps every canonical type', () => {
+    expect(normalizeInputType('integer')).toBe('number');
+    for (const type of ['string', 'number', 'boolean', 'object', 'array'] as const) {
+      expect(normalizeInputType(type)).toBe(type);
+    }
+  });
+});
 
 describe('resolveTriggerInput', () => {
   it('merges defaults for omitted fields', () => {
@@ -89,6 +98,19 @@ describe('resolveTriggerInput', () => {
     const result = resolveTriggerInput({ weird: rawDef({ type: 'uuid' }) }, { weird: 'x' });
     expect(result.errors).toEqual([]);
     expect(result.input.weird).toBe('x');
+  });
+
+  it('"integer" behaves identically to "number"', () => {
+    const withInteger: Record<string, WorkflowInputDefinition> = {
+      count: { type: 'integer', required: true },
+    };
+    const ok = resolveTriggerInput(withInteger, { count: 7 });
+    expect(ok.errors).toEqual([]);
+    // Identical to number on purpose: 7.5 passes, "seven" fails as a number.
+    expect(resolveTriggerInput(withInteger, { count: 7.5 }).errors).toEqual([]);
+    const bad = resolveTriggerInput(withInteger, { count: 'seven' });
+    expect(bad.errors).toHaveLength(1);
+    expect(bad.errors[0].message).toContain('must be a number');
   });
 
   it('null is not a valid value for a typed field', () => {

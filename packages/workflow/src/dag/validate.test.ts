@@ -283,19 +283,32 @@ describe('validateWorkflowDefinition', () => {
       }
     });
 
+    it('accepts "integer" as an alias for "number"', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({
+          id: 'trigger',
+          type: 'trigger',
+          dataSchema: { count: { type: 'integer', required: true } },
+        }),
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
     it('rejects an unknown input type and names the accepted ones', () => {
       const result = validateWorkflowDefinition(
         triggerDefinition({
           id: 'trigger',
           type: 'trigger',
-          dataSchema: { count: { type: 'integer' } },
+          dataSchema: { count: { type: 'int' } },
         }),
       );
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(
           result.errors.some((e) =>
-            e.includes('trigger.dataSchema.count.type must be one of: "string", "number", "boolean", "object", "array"'),
+            e.includes(
+              'trigger.dataSchema.count.type must be one of: "string", "number", "integer", "boolean", "object", "array"',
+            ),
           ),
         ).toBe(true);
       }
