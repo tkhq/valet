@@ -237,12 +237,13 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
     expect(lastSkillsQuery()).toEqual({});
   });
 
-  it("asks for the workspace the switcher names, not for everything reachable", () => {
-    // Unscoped, the catalog answers with the caller's own skills PLUS every
-    // team's — a union that does not change when the switcher does, which is
-    // the bug this addresses.
+  it("pins no owner in the personal workspace, so ORG skills still appear", () => {
+    // A pin selects exactly ONE owner. Pinning the caller's own id hid every
+    // org-owned skill — which is most of a catalog imported from an org-wide
+    // repository, and the page then said "No skills yet" beside a source
+    // reporting 14. The personal workspace takes the default union instead.
     render(<SkillsIndexPage />);
-    expect(lastSkillsOwner()).toEqual({ ownerType: "user", ownerId: "u-1" });
+    expect(lastSkillsOwner()).toEqual({ ownerType: undefined, ownerId: undefined });
   });
 
   it("writes the Prompts chip to the URL as the kind it means", () => {

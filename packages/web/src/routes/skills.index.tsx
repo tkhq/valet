@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { useListOwner } from "~/lib/use-list-owner";
+import { useCatalogOwner } from "~/lib/use-list-owner";
 import { useSkills } from "~/api/skills";
 import { Button, Spinner } from "~/components/primitives";
 import { Pager } from "~/components/pager";
@@ -96,12 +96,11 @@ export function SkillsIndexPage() {
   const sourceCursors = parseCursorStack(search.sourcePage);
 
   const cursor = currentCursor(skillCursors);
-  // The nav's switcher decides which workspace this catalog is FOR. Without
-  // it the list answers with the caller's own skills plus every team's — a
-  // union that does not change when the switcher does. `SkillListQuery`
-  // already carries the owner and `qkSkills.list` keys on the whole query,
-  // so the cache splits per workspace for free.
-  const owner = useListOwner();
+  // The nav's switcher decides which workspace this catalog is FOR — for a
+  // TEAM. The personal workspace sends no pin, because a pin selects one
+  // owner and would hide every ORG-owned skill, which is most of a catalog
+  // built from an org-wide repository. See `useCatalogOwner`.
+  const owner = useCatalogOwner();
   const { data, isLoading, error } = useSkills({
     ...skillFilterQuery(filters),
     ...(owner ? { ownerType: owner.ownerType, ownerId: owner.ownerId } : {}),
