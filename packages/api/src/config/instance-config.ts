@@ -52,6 +52,32 @@ export interface SsoTeamMapping {
   groups?: string[];
 }
 
+/**
+ * A custom MCP server the instance exposes as an action service. The file
+ * never holds secrets, so `auth: bearer` names an env var (`tokenEnv`)
+ * instead of a token. `auth: oauth` uses MCP OAuth discovery + dynamic
+ * registration against `url`; `auth: api_key` asks each user for a token in
+ * the connect UI.
+ */
+export interface McpServerDecl {
+  /** Service name; actions surface as `<name>.<tool>`. Lowercase slug. */
+  name: string;
+  /** The remote MCP server endpoint (http/https). */
+  url: string;
+  auth: "none" | "oauth" | "api_key" | "bearer";
+  /** Env var holding the instance-wide token. Required iff auth is "bearer". */
+  tokenEnv?: string;
+  /** Send the credential as this URL query param instead of an Authorization header. */
+  authQueryParam?: string;
+  /** Connect-UI copy for api_key entry, e.g. "Acme API key". */
+  connectLabel?: string;
+  description?: string;
+  /** Risk for tools without read-only/destructive annotations. Default "medium". */
+  riskLevel?: "low" | "medium" | "high" | "critical";
+  /** Set false to keep the entry but skip loading it. Default true. */
+  enabled?: boolean;
+}
+
 export interface InstanceConfig {
   version: 1;
   auth?: { allowedEmailDomains?: string[]; sso?: { teams?: SsoTeamMapping } };
@@ -73,6 +99,7 @@ export interface InstanceConfig {
     models?: { id: string; name?: string }[];
   }[];
   skillSources?: { repo: string; ref?: string; subpath?: string }[];
+  mcpServers?: McpServerDecl[];
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +126,10 @@ const KNOWN_TOP_LEVEL_KEYS = new Set<string>([
   "teams",
   "llmProviders",
   "skillSources",
+  "mcpServers",
 ]);
+
+const MCP_SERVER_AUTH_MODES = new Set<string>(["none", "oauth", "api_key", "bearer"]);
 
 const TOOL_POLICY_MODES = new Set<string>(["allow", "require_approval", "deny"]);
 
@@ -570,6 +600,123 @@ function validateSkillSources(
   return entries;
 }
 
+function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
+  const arr = assertArray(value, "mcpServers", path);
+  const entries = arr.map((item, i) => {
+    const obj = assertRecord(item, `mcpServers[${i}]`, path);
+    const entry: Partial<McpServerDecl> = {};
+
+    for (const [key, v] of Object.entries(obj)) {
+      if (key === "name") {
+        const name = assertNonEmptyString(v, `mcpServers[${i}].name`, path);
+        // The name becomes the action service, so it must survive as the
+        // `<service>.<tool>` id prefix the policy engine and catalog use.
+        if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) {
+          err(
+            `${path}: mcpServers[${i}].name must be a lowercase slug (letters, digits, "-", "_"), got ${JSON.stringify(name)}.`,
+          );
+        }
+        entry.name = name;
+      } else if (key === "url") {
+        const raw = assertNonEmptyString(v, `mcpServers[${i}].url`, path);
+        let parsed: URL;
+        try {
+          parsed = new URL(raw);
+        } catch {
+          err(`${path}: mcpServers[${i}].url must be a valid URL, got ${JSON.stringify(raw)}.`);
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          err(
+            `${path}: mcpServers[${i}].url must use http or https, got ${JSON.stringify(raw)}.`,
+          );
+        }
+        entry.url = raw;
+      } else if (key === "auth") {
+        const authVal = assertString(v, `mcpServers[${i}].auth`, path);
+        if (!MCP_SERVER_AUTH_MODES.has(authVal)) {
+          err(
+            `${path}: mcpServers[${i}].auth got "${authVal}", allowed values are none, oauth, api_key, bearer.`,
+          );
+        }
+        entry.auth = authVal as McpServerDecl["auth"];
+      } else if (key === "tokenEnv") {
+        entry.tokenEnv = assertNonEmptyString(v, `mcpServers[${i}].tokenEnv`, path);
+      } else if (key === "authQueryParam") {
+        entry.authQueryParam = assertNonEmptyString(v, `mcpServers[${i}].authQueryParam`, path);
+      } else if (key === "connectLabel") {
+        entry.connectLabel = assertString(v, `mcpServers[${i}].connectLabel`, path);
+      } else if (key === "description") {
+        entry.description = assertString(v, `mcpServers[${i}].description`, path);
+      } else if (key === "riskLevel") {
+        const riskVal = assertString(v, `mcpServers[${i}].riskLevel`, path);
+        if (!TOOL_POLICY_RISK_LEVELS.has(riskVal)) {
+          err(
+            `${path}: mcpServers[${i}].riskLevel got "${riskVal}", allowed values are low, medium, high, critical.`,
+          );
+        }
+        entry.riskLevel = riskVal as McpServerDecl["riskLevel"];
+      } else if (key === "enabled") {
+        entry.enabled = assertBoolean(v, `mcpServers[${i}].enabled`, path);
+      } else {
+        err(`${path}: unknown key "mcpServers[${i}].${key}". Remove it or check for a typo.`);
+      }
+    }
+
+    if (entry.name === undefined) err(`${path}: mcpServers[${i}].name is required.`);
+    if (entry.url === undefined) err(`${path}: mcpServers[${i}].url is required.`);
+    if (entry.auth === undefined) {
+      err(
+        `${path}: mcpServers[${i}].auth is required. Set one of none, oauth, api_key, bearer.`,
+      );
+    }
+
+    // The file never holds secrets: `bearer` points at an env var, and only
+    // `bearer` reads one — a tokenEnv on any other mode would be silently
+    // inert, so it refuses.
+    if (entry.auth === "bearer" && entry.tokenEnv === undefined) {
+      err(
+        `${path}: mcpServers[${i}].tokenEnv is required when auth is "bearer". Name the env var that holds the token.`,
+      );
+    }
+    if (entry.auth !== "bearer" && entry.tokenEnv !== undefined) {
+      err(
+        `${path}: mcpServers[${i}].tokenEnv is only valid when auth is "bearer". Remove it, or set auth: bearer.`,
+      );
+    }
+    // authQueryParam rewrites how a credential is SENT, so it needs a
+    // credential to send: none has no credential, and oauth tokens are
+    // Authorization-header bearer tokens by contract.
+    if (entry.authQueryParam !== undefined && entry.auth !== "api_key" && entry.auth !== "bearer") {
+      err(
+        `${path}: mcpServers[${i}].authQueryParam is only valid when auth is "api_key" or "bearer". Remove it.`,
+      );
+    }
+    if (entry.connectLabel !== undefined && entry.auth !== "api_key") {
+      err(
+        `${path}: mcpServers[${i}].connectLabel is only valid when auth is "api_key" (the manual connect UI). Remove it.`,
+      );
+    }
+
+    return entry as McpServerDecl;
+  });
+
+  // A repeated name would collide on the action service (assemblePlugins
+  // throws at boot) — report it here with both indices instead.
+  const seen = new Map<string, number>();
+  for (let i = 0; i < entries.length; i++) {
+    const name = entries[i]!.name;
+    const prior = seen.get(name);
+    if (prior !== undefined) {
+      err(
+        `${path}: mcpServers[${prior}] and mcpServers[${i}] both use the name ${JSON.stringify(name)}. Rename one.`,
+      );
+    }
+    seen.set(name, i);
+  }
+
+  return entries;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -614,6 +761,7 @@ export function parseInstanceConfig(yamlText: string, path: string): InstanceCon
   if ("teams" in raw) cfg.teams = validateTeams(raw["teams"], path);
   if ("llmProviders" in raw) cfg.llmProviders = validateLlmProviders(raw["llmProviders"], path);
   if ("skillSources" in raw) cfg.skillSources = validateSkillSources(raw["skillSources"], path);
+  if ("mcpServers" in raw) cfg.mcpServers = validateMcpServers(raw["mcpServers"], path);
 
   assertNoTeamGroupOverlap(cfg, path);
 
