@@ -34,10 +34,11 @@ import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
+import { resolveReturnOrigin } from "./credential-connect.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import { loadAppConfig, relinkInstallations, type GithubAppDeps } from "../services/github-app.js";
 import { githubInstallations } from "../schema/index.js";
-import type { PostGithubConnectResponse } from "../wire/types.js";
+import type { GetGithubOrgStatusResponse, PostGithubConnectResponse } from "../wire/types.js";
 
 export const githubConnectRouter = new Hono<AppEnv>();
 
@@ -48,16 +49,23 @@ interface ConnectState {
   orgId: string;
   nonce: string;
   exp: number;
+  /** Origin to return the browser to. Captured when the state is minted,
+   * because at the callback the referer is GitHub. Empty when the caller is
+   * same-origin, which is the deployed shape — there the api serves the
+   * client and a relative redirect already lands in the right place. */
+  returnTo?: string;
 }
 
 function verifyConnectState(state: string, key: Buffer, nowMs: number): ConnectState | null {
   return verifyState<ConnectState>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, orgId, nonce, exp } = payload;
+    const { userId, orgId, nonce, exp, returnTo } = payload;
     if (typeof userId !== "string" || typeof orgId !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (exp < nowMs) return null;
-    return { userId, orgId, nonce, exp };
+    // Allow-listed before signing, so trusting it here trusts our own
+    // signature rather than anything GitHub sent back.
+    return { userId, orgId, nonce, exp, returnTo: typeof returnTo === "string" ? returnTo : "" };
   });
 }
 
@@ -95,11 +103,13 @@ githubConnectRouter.post("/connect", async (c) => {
   }
 
   const key = deriveSecretKey(encryptionKey);
+  const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
   const statePayload: ConnectState = {
     userId: user.id,
     orgId: user.orgId,
     nonce: randomBytes(16).toString("hex"),
     exp: Date.now() + STATE_TTL_MS,
+    ...(returnTo ? { returnTo } : {}),
   };
   const state = signState(statePayload, key);
 
@@ -108,6 +118,38 @@ githubConnectRouter.post("/connect", async (c) => {
 
   const resp: PostGithubConnectResponse = { url };
   return c.json(resp);
+});
+
+/**
+ * The org App's state, for any member.
+ *
+ * `POST /connect` above hard-fails with a 409 when the org has no App,
+ * because the authorize URL is built from the App's own OAuth client. A
+ * member could not see that coming: the detailed read
+ * (`GET /api/org/github-app`) is admin-gated, so the connect surface had to
+ * guess. This answers the two questions that surface asks — does an App
+ * exist, and does it reach anything — from the same `loadAppConfig` read
+ * `/connect` uses, so the two never disagree.
+ *
+ * Deliberately no `requireOrgAdmin`: the body carries no app id, no slug,
+ * no installation logins and no secret material. Counts only.
+ */
+githubConnectRouter.get("/org-status", async (c) => {
+  const user = c.var.user;
+  const { db } = c.var.providers;
+
+  const config = await loadAppConfig(appDeps(c), user.orgId);
+  const rows = await db
+    .select({ suspended: githubInstallations.suspended })
+    .from(githubInstallations)
+    .where(eq(githubInstallations.orgId, user.orgId));
+
+  const body: GetGithubOrgStatusResponse = {
+    configured: config !== null,
+    installationCount: rows.length,
+    suspendedCount: rows.filter((row) => row.suspended).length,
+  };
+  return c.json(body);
 });
 
 githubConnectRouter.get("/callback", async (c) => {
@@ -211,7 +253,7 @@ githubConnectRouter.get("/callback", async (c) => {
     console.error("github connect callback: post-save relink failed:", err);
   }
 
-  return c.redirect("/settings/connected-accounts?github=connected", 302);
+  return c.redirect(`${verified.returnTo ?? ""}/settings/connected-accounts?github=connected`, 302);
 });
 
 githubConnectRouter.delete("/", async (c) => {

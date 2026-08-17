@@ -1,21 +1,28 @@
 import { useRef, useState } from "react";
 import type { GithubAppInstallationSummary, PostGithubAppManifestResponse } from "@valet/api/wire";
-import { Badge, Button, Input, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, Input, Spinner, Switch, Textarea } from "~/components/primitives";
+import { errorText } from "~/lib/error-text";
 import {
   useCreateGithubAppManifest,
   useDeleteGithubApp,
   useGithubApp,
   useRefreshGithubApp,
+  useSaveGithubAppCredential,
 } from "~/api/settings";
 
 /**
- * Organization · GitHub — the App-manifest setup flow (GitHub/repo
- * integration plan, Task 5/11), rendered inside `/settings/organization`'s
- * `OrgRouteGuard`. Two states: not-configured (a "Create GitHub App" button
- * that mints a manifest and hands the browser off to GitHub via a POSTed
- * form — GitHub's manifest flow only accepts a browser form submission, not
- * a fetch/XHR) and configured (app card + installations table + refresh +
- * webhook-mode badge + destructive removal).
+ * Organization · GitHub — the App setup flow (GitHub/repo integration plan,
+ * Task 5/11), rendered inside `/settings/organization`'s `OrgRouteGuard`.
+ * Two states: not-configured and configured (app card + installations table
+ * + refresh + webhook-mode badge + destructive removal).
+ *
+ * The not-configured state offers two paths. Creating an App is the default:
+ * a "Create GitHub App" button mints a manifest and hands the browser off to
+ * GitHub via a POSTed form, because GitHub's manifest flow only accepts a
+ * browser form submission, not a fetch/XHR. Below it, `ExistingAppCard`
+ * connects an App that already exists — the path for anyone whose App name
+ * is taken, since App names are global on GitHub and the second creation
+ * attempt is refused on GitHub's own page, where this app never sees it.
  */
 export function GithubAppSection() {
   const githubAppQ = useGithubApp();
@@ -313,6 +320,206 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
             Continue to GitHub
           </Button>
         </div>
+      )}
+
+      <ExistingAppCard />
+    </div>
+  );
+}
+
+/**
+ * The second path: connect a GitHub App that already exists.
+ *
+ * Two people need it. Someone who already made an App cannot make a second
+ * one with the same name — App names are global on GitHub, so that attempt
+ * is refused on GitHub's page, which this app never sees and cannot explain.
+ * Someone whose database was reset still has the App, but no longer has the
+ * credential row that points at it.
+ *
+ * Only the App ID and the private key are asked for. The server reads the
+ * slug, the page URL and the OAuth client id from GitHub while it checks the
+ * credential, so a wrong paste is refused here instead of at the first tool
+ * call. The two secrets below them cannot be read from GitHub, and each one
+ * only turns on the feature named beside it.
+ */
+function ExistingAppCard() {
+  const save = useSaveGithubAppCredential();
+  const [open, setOpen] = useState(false);
+  const [appId, setAppId] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [appSlug, setAppSlug] = useState("");
+  const [oauthClientId, setOauthClientId] = useState("");
+  const [oauthClientSecret, setOauthClientSecret] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
+
+  const incomplete = appId.trim().length === 0 || privateKey.trim().length === 0;
+
+  async function connect() {
+    try {
+      await save.mutateAsync({
+        appId: appId.trim(),
+        privateKey,
+        ...(appSlug.trim() ? { appSlug: appSlug.trim() } : {}),
+        ...(oauthClientId.trim() ? { oauthClientId: oauthClientId.trim() } : {}),
+        ...(oauthClientSecret ? { oauthClientSecret } : {}),
+        ...(webhookSecret ? { webhookSecret } : {}),
+      });
+      // On success the section re-renders as the configured card, because the
+      // mutation invalidates the App query.
+    } catch {
+      // useMutation surfaces the error via `save.error`.
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="rounded-lg border border-line bg-paper px-6 py-4">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-sm font-medium text-ink underline-offset-2 hover:underline"
+        >
+          I already have a GitHub App
+        </button>
+        <p className="mt-1 text-xs leading-relaxed text-muted">
+          App names are global on GitHub, so creating a second App with the same name fails.
+          Connect the one you have instead.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-line bg-paper">
+      <div className="border-b border-line px-6 py-5">
+        <div className="font-display text-base text-ink">Connect an App you already have</div>
+        <p className="mt-0.5 text-sm leading-relaxed text-muted">
+          Open the App's settings page on GitHub, copy the App ID, and generate a private key.
+          The App ID and the key are all that is needed — the rest is read from GitHub.
+        </p>
+      </div>
+
+      <div className="space-y-4 px-6 py-5">
+        <div className="max-w-xs space-y-1.5">
+          <label htmlFor="gh-app-id" className="text-sm font-medium text-ink">
+            App ID
+          </label>
+          <Input
+            id="gh-app-id"
+            value={appId}
+            onChange={(e) => setAppId(e.target.value)}
+            placeholder="123456"
+            aria-label="App ID"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="gh-private-key" className="text-sm font-medium text-ink">
+            Private key
+          </label>
+          <Textarea
+            id="gh-private-key"
+            rows={5}
+            value={privateKey}
+            onChange={(e) => setPrivateKey(e.target.value)}
+            placeholder="-----BEGIN RSA PRIVATE KEY-----"
+            aria-label="Private key"
+            className="font-mono text-xs"
+          />
+          <p className="text-xs text-muted">
+            Paste the whole .pem file GitHub downloaded, including the BEGIN and END lines.
+            A base64 copy of it also works.
+          </p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="gh-client-secret" className="text-sm font-medium text-ink">
+              Client secret <span className="font-normal text-muted">— optional</span>
+            </label>
+            <Input
+              id="gh-client-secret"
+              type="password"
+              value={oauthClientSecret}
+              onChange={(e) => setOauthClientSecret(e.target.value)}
+              aria-label="Client secret"
+            />
+            <p className="text-xs leading-relaxed text-muted">
+              Needed only so people can sign in to GitHub with their own account.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="gh-webhook-secret" className="text-sm font-medium text-ink">
+              Webhook secret <span className="font-normal text-muted">— optional</span>
+            </label>
+            <Input
+              id="gh-webhook-secret"
+              type="password"
+              value={webhookSecret}
+              onChange={(e) => setWebhookSecret(e.target.value)}
+              aria-label="Webhook secret"
+            />
+            <p className="text-xs leading-relaxed text-muted">
+              Needed only to receive repo events. Without it every delivery is refused.
+            </p>
+          </div>
+        </div>
+
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted hover:text-ink">
+            GitHub did not report the slug or client ID
+          </summary>
+          <div className="mt-3 grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <label htmlFor="gh-app-slug" className="text-sm font-medium text-ink">
+                App slug
+              </label>
+              <Input
+                id="gh-app-slug"
+                value={appSlug}
+                onChange={(e) => setAppSlug(e.target.value)}
+                placeholder="my-app"
+                aria-label="App slug"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="gh-client-id" className="text-sm font-medium text-ink">
+                Client ID
+              </label>
+              <Input
+                id="gh-client-id"
+                value={oauthClientId}
+                onChange={(e) => setOauthClientId(e.target.value)}
+                placeholder="Iv1.0123456789abcdef"
+                aria-label="Client ID"
+              />
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-4 border-t border-line px-6 py-4">
+        {/* Storing the key makes this server the App's owner, and it moves the
+            App's webhook URL here on save and at every restart. Anyone
+            connecting an App that another server already uses has to know
+            that before they paste, not after deliveries stop arriving. */}
+        <p className="max-w-md text-xs leading-relaxed text-muted">
+          This server takes over the App's webhook URL. Do not connect an App another Valet
+          server uses.
+        </p>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="secondary" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={() => void connect()} disabled={save.isPending || incomplete}>
+            {save.isPending ? "Checking with GitHub…" : "Connect App"}
+          </Button>
+        </div>
+      </div>
+
+      {save.error && (
+        <p className="border-t border-line px-6 py-3 text-sm text-danger-500">{errorText(save.error)}</p>
       )}
     </div>
   );

@@ -1,5 +1,7 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { canvasHeight, previewMode, summarizeDefinition } from "./preview";
+import { render, screen, waitFor } from "@testing-library/react";
+import { WorkflowPreview, canvasHeight, previewMode, summarizeDefinition } from "./preview";
 import type { WorkflowDefinition, WorkflowNode } from "./editor-model";
 
 describe("previewMode", () => {
@@ -64,5 +66,41 @@ describe("summarizeDefinition", () => {
         ]),
       ),
     ).toBe("6 nodes · trigger → set → … → stop");
+  });
+});
+
+describe("WorkflowPreview", () => {
+  const branching: WorkflowDefinition = {
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "check", type: "if", conditions: [] },
+      { id: "yes", type: "stop", outcome: "success" },
+      { id: "no", type: "stop", outcome: "failure" },
+    ],
+    edges: [
+      { from: "trigger", to: "check" },
+      { from: "check", to: "yes", fromOutput: "true" },
+      { from: "check", to: "no", fromOutput: "false" },
+    ],
+    ui: {
+      nodes: {
+        trigger: { position: { x: 0, y: 0 } },
+        check: { position: { x: 260, y: 0 } },
+        yes: { position: { x: 520, y: 0 } },
+        no: { position: { x: 520, y: 120 } },
+      },
+    },
+  };
+
+  it("draws every branch out of an if node", async () => {
+    // An edge attaches to a handle by id. Stripping `sourceOutputs` here
+    // used to remove the `true`/`false` handles, and xyflow then dropped
+    // both branch edges — a run page showed a graph that had lost the
+    // shape of its own decision.
+    const { container } = render(<WorkflowPreview definition={branching} />);
+    await waitFor(() => expect(container.querySelectorAll(".react-flow__edge").length).toBe(3));
+    expect(screen.getByTestId("handle-source-true")).toBeTruthy();
+    expect(screen.getByTestId("handle-source-false")).toBeTruthy();
   });
 });

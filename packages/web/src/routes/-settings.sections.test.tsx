@@ -13,7 +13,7 @@
  * — the create flow's one-time secret reveal and the revoke confirm-gate.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const patchMeMutate = vi.fn();
@@ -116,39 +116,12 @@ vi.mock("~/api/api-keys", () => ({
   useRevokeApiKey: () => ({ mutate: revokeApiKeyMutate, isPending: false, error: null }),
 }));
 
-const addSourceMutate = vi.fn();
-const syncSourceMutate = vi.fn();
-const removeSourceMutate = vi.fn();
-let sourcesData: {
-  sources: Array<{
-    id: string;
-    repo: string;
-    ref: string;
-    subpath: string;
-    ownerType: "user" | "team" | "org";
-    ownerId: string;
-    enabled: boolean;
-    status: "pending" | "ok" | "warning" | "error";
-    skillCount: number;
-    lastSyncedAt: number | null;
-    lastSha: string | null;
-    lastMessage: string | null;
-  }>;
-} = { sources: [] };
-
-vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: sourcesData, isLoading: false, error: null }),
-  useAddSkillSource: () => ({ mutate: addSourceMutate, isPending: false, error: null }),
-  useSyncSkillSource: () => ({ mutate: syncSourceMutate, isPending: false }),
-  useRemoveSkillSource: () => ({ mutate: removeSourceMutate, isPending: false }),
-}));
-
 import { ProfilePage } from "./settings.profile";
 import { AssistantPage } from "./settings.assistant";
 import { AppearancePage } from "./settings.appearance";
+import { PALETTE_CHOICES } from "~/lib/theme";
 import { NotificationsPage } from "./settings.notifications";
 import { ApiKeysPage } from "./settings.api-keys";
-import { LibrarySourcesPage } from "./settings.library-sources";
 
 describe("ProfilePage", () => {
   beforeEach(() => {
@@ -288,6 +261,7 @@ describe("AssistantPage", () => {
 describe("AppearancePage", () => {
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
+    document.documentElement.removeAttribute("data-palette");
     try {
       window.localStorage.clear();
     } catch {
@@ -307,6 +281,82 @@ describe("AppearancePage", () => {
     render(<AppearancePage />);
     fireEvent.click(screen.getByRole("radio", { name: /Light/ }));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("offers a card for every palette", () => {
+    render(<AppearancePage />);
+    const group = screen.getByRole("radiogroup", { name: "Color palette" });
+    const cards = within(group).getAllByRole("radio");
+    // Derived from the canonical list, not a copy of it: adding a palette to
+    // `PALETTE_CHOICES` without adding a card fails here rather than shipping
+    // a palette nobody can reach.
+    expect(cards).toHaveLength(PALETTE_CHOICES.length);
+    for (const palette of PALETTE_CHOICES) {
+      const label = palette[0].toUpperCase() + palette.slice(1);
+      expect(cards.some((card) => card.textContent?.startsWith(label))).toBe(true);
+    }
+  });
+
+  it("previews each palette in its own colors, not the active one", () => {
+    render(<AppearancePage />);
+    // The swatch carries the attributes theme.css selects on, which is what
+    // makes the preview show a palette nobody has chosen yet.
+    const swatches = document.querySelectorAll(".palette-swatch");
+    expect([...swatches].map((el) => el.getAttribute("data-palette"))).toEqual([
+      ...PALETTE_CHOICES,
+    ]);
+  });
+
+  it("mirrors the chosen polarity onto the previews", () => {
+    render(<AppearancePage />);
+    // With "System" selected there is no attribute, so each preview follows
+    // the OS through the same media query the page uses.
+    expect(document.querySelector(".palette-swatch")?.hasAttribute("data-theme")).toBe(false);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Dark/ }));
+    expect(document.querySelector(".palette-swatch")?.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("selecting a palette sets data-palette and persists it", () => {
+    render(<AppearancePage />);
+    fireEvent.click(screen.getByRole("radio", { name: /Ember/ }));
+    expect(document.documentElement.getAttribute("data-palette")).toBe("ember");
+    expect(window.localStorage.getItem("valet-palette")).toBe("ember");
+  });
+
+  it("selecting a palette leaves the light/dark choice alone", () => {
+    render(<AppearancePage />);
+    fireEvent.click(screen.getByRole("radio", { name: /Dark/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Tide/ }));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(document.documentElement.getAttribute("data-palette")).toBe("tide");
+  });
+
+  it("going back to Default removes the attribute entirely", () => {
+    render(<AppearancePage />);
+    fireEvent.click(screen.getByRole("radio", { name: /Orchid/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Default/ }));
+    // An absent attribute — not `data-palette="default"` — is what keeps an
+    // untouched install on the brand palette.
+    expect(document.documentElement.hasAttribute("data-palette")).toBe(false);
+  });
+
+  it("starts on the default palette when nothing was ever chosen", () => {
+    render(<AppearancePage />);
+    // No `@testing-library/jest-dom` in this package, so assertions read
+    // raw attributes (see editor.test.tsx for the same note).
+    expect(document.documentElement.hasAttribute("data-palette")).toBe(false);
+    expect(screen.getByRole("radio", { name: /Default/ }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: /System/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("restores the stored palette on mount", () => {
+    window.localStorage.setItem("valet-palette", "tide");
+    render(<AppearancePage />);
+    expect(screen.getByRole("radio", { name: /Tide/ }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: /Default/ }).getAttribute("aria-checked")).toBe(
+      "false",
+    );
   });
 });
 
@@ -393,50 +443,5 @@ describe("ApiKeysPage", () => {
       "key_1",
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
-  });
-});
-
-describe("LibrarySourcesPage", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    sourcesData = { sources: [] };
-  });
-
-  it("renders the Library sources section title", () => {
-    render(<LibrarySourcesPage />);
-    expect(screen.getByText("Library sources")).toBeTruthy();
-  });
-
-  it("adds a personal source with no org scope", () => {
-    render(<LibrarySourcesPage />);
-    fireEvent.click(screen.getByRole("button", { name: /import/i }));
-    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
-      target: { value: "tkhq/skills" },
-    });
-    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
-    expect(addSourceMutate).toHaveBeenCalledWith({ repo: "tkhq/skills" });
-  });
-
-  it("hides org sources from the personal panel", () => {
-    sourcesData = {
-      sources: [
-        {
-          id: "s_org",
-          repo: "tkhq/org-skills",
-          ref: "",
-          subpath: "",
-          ownerType: "org",
-          ownerId: "org_1",
-          enabled: true,
-          status: "ok",
-          skillCount: 1,
-          lastSyncedAt: null,
-          lastSha: null,
-          lastMessage: null,
-        },
-      ],
-    };
-    render(<LibrarySourcesPage />);
-    expect(screen.queryByText("tkhq/org-skills")).toBeNull();
   });
 });

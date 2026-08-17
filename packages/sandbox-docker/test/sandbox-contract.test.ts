@@ -1,10 +1,8 @@
 import { describe } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { runSandboxContract } from "@valet/engine/test-helpers";
-import { DockerSandboxProvider } from "../src/index.js";
+import { DockerSandboxProvider, createSandboxWorkspace } from "../src/index.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /**
@@ -42,7 +40,7 @@ const fullProfileImage = dockerOk ? await buildFullProfileTestImage() : "alpine:
 describe.skipIf(!dockerOk)("docker sandbox contract", () => {
   runSandboxContract("docker", {
     factory: async () => {
-      workspace = await mkdtemp(join(tmpdir(), "valet-docker-contract-"));
+      workspace = await createSandboxWorkspace("valet-docker-contract-");
       // profile: "full" so the gatewayEndpoint case below has a mapped port
       // to observe. `fullProfileImage` carries the /bin/bash + /start-full.sh
       // that buildDockerRunArgs now requires for profile:"full" containers.

@@ -133,6 +133,19 @@ export function Composer({
   useEffect(() => {
     if (focusNonce > 0) inputRef.current?.focus();
   }, [focusNonce]);
+  // Prefill for a Composer that is ALREADY mounted (the workflow editor's
+  // assistant panel sits open beside the canvas, so its suggestions never
+  // get a fresh mount to seed). The initializer above still covers the
+  // navigate-then-mount handoff: it consumes first, which leaves nothing
+  // here to read, so this effect no-ops on mount instead of double-seeding.
+  const prefillNonce = useComposerPrefillStore((s) => s.prefillNonce);
+  useEffect(() => {
+    if (prefillNonce === 0) return;
+    const pending = useComposerPrefillStore.getState().consume();
+    if (pending === null) return;
+    setText(pending);
+    inputRef.current?.focus();
+  }, [prefillNonce]);
   const send = useSendPrompt(sessionId);
   const abort = useAbortThread(sessionId);
   // The textarea disables while a send is in flight, which drops focus to

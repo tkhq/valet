@@ -17,15 +17,18 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
+  buildAppConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
   mintAppJwt,
   mintInstallationToken,
+  parsePrivateKeyPem,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAllAppWebhookUrls,
   syncAppWebhookUrl,
+  verifyAppCredential,
   type GithubAppConfig,
   type GithubAppDeps,
 } from "./github-app.js";
@@ -205,6 +208,111 @@ describe("github-app service", () => {
     it("throws with a corrective message when the private key is neither PEM nor base64 PEM", () => {
       const env = { ...fullEnv, GITHUB_APP_PRIVATE_KEY: "not-a-key" };
       expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_PRIVATE_KEY/);
+    });
+
+    it("builds the same config as buildAppConfig does from the same parts", () => {
+      // One assembler serves both config paths. If they ever diverge, an app
+      // connected through the admin route stores a shape the env path cannot
+      // read, and only production finds out.
+      expect(resolveGithubAppEnvConfig(fullEnv)).toEqual(
+        buildAppConfig(
+          {
+            appId: "654321",
+            appSlug: "valet-env-app",
+            oauthClientId: "Iv1.env123",
+            oauthClientSecret: "env-client-secret",
+            webhookSecret: "env-webhook-secret",
+            privateKeyPem,
+          },
+          {},
+        ),
+      );
+    });
+  });
+
+  describe("parsePrivateKeyPem", () => {
+    it("passes a raw PEM through and decodes a base64 one", () => {
+      expect(parsePrivateKeyPem(privateKeyPem)).toBe(privateKeyPem);
+      expect(parsePrivateKeyPem(Buffer.from(privateKeyPem, "utf8").toString("base64"))).toBe(privateKeyPem);
+    });
+
+    it("returns null for anything that is neither", () => {
+      expect(parsePrivateKeyPem("not-a-key")).toBeNull();
+      expect(parsePrivateKeyPem("")).toBeNull();
+      // Valid base64 that decodes to something which is not a PEM.
+      expect(parsePrivateKeyPem(Buffer.from("hello there", "utf8").toString("base64"))).toBeNull();
+    });
+  });
+
+  describe("verifyAppCredential", () => {
+    const credential = { appId: "4242", privateKeyPem };
+
+    it("reports the app GitHub answers for, authenticating with the App JWT", async () => {
+      fixture = startGithubFixture({
+        getApp: () => ({
+          body: { id: 4242, slug: "existing-app", client_id: "Iv1.existing", html_url: "https://github.com/apps/existing-app", installations_count: 2 },
+        }),
+      });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check).toEqual({
+        ok: true,
+        app: {
+          appId: "4242",
+          appSlug: "existing-app",
+          htmlUrl: "https://github.com/apps/existing-app",
+          oauthClientId: "Iv1.existing",
+          installationsCount: 2,
+        },
+      });
+      expect(fixture.calls.find((c) => c.path === "/app")?.authHeader).toMatch(/^Bearer /);
+    });
+
+    it("names the fix when GitHub refuses the credential", async () => {
+      fixture = startGithubFixture({ getApp: () => ({ status: 401, body: { message: "Bad credentials" } }) });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("GitHub rejected this App ID and private key");
+    });
+
+    it("reports a server-side GitHub failure as retryable, not as a bad credential", async () => {
+      fixture = startGithubFixture({ getApp: () => ({ status: 503, body: { message: "unavailable" } }) });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("503");
+      expect(check.error).toContain("try again");
+    });
+
+    it("never throws when GitHub is unreachable", async () => {
+      const check = await verifyAppCredential(
+        { apiUrl: "http://127.0.0.1:1", fetchImpl: () => Promise.reject(new Error("connect ECONNREFUSED")) },
+        credential,
+      );
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("Could not reach GitHub");
+    });
+
+    it("never throws on a private key that is a PEM but not an RSA key", async () => {
+      fixture = startGithubFixture();
+      const check = await verifyAppCredential(
+        { apiUrl: fixture.url },
+        { appId: "4242", privateKeyPem: "-----BEGIN PRIVATE KEY-----\nnonsense\n-----END PRIVATE KEY-----\n" },
+      );
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("Generate a new private key");
+      // Refused locally — GitHub was never asked.
+      expect(fixture.calls).toHaveLength(0);
+    });
+
+    it("refuses an app record with no app id", async () => {
+      fixture = startGithubFixture({ getApp: () => ({ body: { slug: "no-id-here" } }) });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("no app id");
     });
   });
 

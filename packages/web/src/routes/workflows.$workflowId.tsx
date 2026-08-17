@@ -15,8 +15,11 @@ import {
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Editor } from "~/components/workflows/editor/editor";
+import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
+import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
+import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import {
   Button,
   ConfirmDialog,
@@ -119,6 +122,15 @@ function WorkflowEditorPane({
   // buttons toggle it — the old bottom collapsible was invisible under a
   // full-height canvas ("no way to view the list of runs").
   const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
+  // The assistant is the editor's right-hand column, not one of the overlay
+  // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
+  // its own: describing a change is the primary way to edit a workflow, so
+  // the conversation is on screen from the moment the editor is.
+  const assistant = useWorkflowAssistant(workflowId, initialName);
+  // The one thing that makes a live edit visible: a completed patch in the
+  // panel's conversation refetches the workflow, and `Editor` adopts it.
+  useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
+
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether
   // the name is dirty (`externalDirty`) so a rename rides the same
@@ -236,15 +248,29 @@ function WorkflowEditorPane({
         />
       )}
 
-      <div className="relative min-h-0 flex-1">
-        <Editor
-          initialDefinition={initialDefinition}
-          onSave={handleSave}
-          saving={update.isPending}
-          externalDirty={nameDirty}
-          onCancelExternal={handleCancelName}
-          onDirtyChange={setDefinitionDirty}
-        />
+      {/* The assistant is the editor's own right-hand column, so a
+          conversation about changing the diagram never covers the diagram.
+          The three drawers stay overlays, and they dock beside that column
+          (`right-[--editor-aside]`) rather than over it — a runs list is a
+          lookup, and the conversation has to survive one. */}
+      <div className="relative flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Editor
+            initialDefinition={initialDefinition}
+            onSave={handleSave}
+            saving={update.isPending}
+            assistant={
+              <WorkflowAssistantPanel
+                assistant={assistant}
+                definition={initialDefinition}
+                workflowId={workflowId}
+              />
+            }
+            externalDirty={nameDirty}
+            onCancelExternal={handleCancelName}
+            onDirtyChange={setDefinitionDirty}
+          />
+        </div>
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
           <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
@@ -287,7 +313,7 @@ function DrawerShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="absolute inset-y-0 right-0 z-10 flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
+    <div className="absolute inset-y-0 right-[--editor-aside] z-10 flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <span className="text-sm font-medium text-ink">{title}</span>
         <button type="button" onClick={onClose} aria-label={`Close ${title.toLowerCase()}`} className="text-muted hover:text-ink">

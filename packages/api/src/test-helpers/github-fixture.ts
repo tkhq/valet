@@ -35,6 +35,10 @@ export interface GithubFixtureResponse {
 }
 
 export interface GithubFixtureHandlers {
+  /** `GET /app` — the App-JWT identity endpoint. Answer with a 401 to play
+   * GitHub refusing an app id that does not match the private key, which is
+   * what `verifyAppCredential` exists to catch. */
+  getApp?: () => GithubFixtureResponse;
   /** `GET /app/installations`. Receives the request's parsed query string so
    * multi-page fixtures can branch on `page`/`per_page`. */
   listInstallations?: (query: Record<string, string>) => GithubFixtureResponse;
@@ -80,6 +84,19 @@ function listenAddress(server: ServerType): number {
 }
 
 const DEFAULTS: Required<GithubFixtureHandlers> = {
+  getApp: () => ({
+    body: {
+      id: 1,
+      slug: "fixture-app",
+      node_id: "MDM6QXBwMQ==",
+      client_id: "fixture-client-id",
+      name: "Fixture App",
+      html_url: "https://github.com/apps/fixture-app",
+      permissions: {},
+      events: [],
+      installations_count: 0,
+    },
+  }),
   listInstallations: () => ({ body: [] }),
   createInstallationToken: () => ({
     body: { token: "fixture-installation-token", expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -143,6 +160,12 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
       body,
     });
   }
+
+  app.get("/app", (c) => {
+    record(c, {});
+    const { status, body } = handlers.getApp();
+    return c.json(body as object, status ?? 200);
+  });
 
   app.get("/app/installations", (c) => {
     const query = c.req.query();

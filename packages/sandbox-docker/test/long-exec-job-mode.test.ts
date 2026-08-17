@@ -19,12 +19,10 @@
  */
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
 import { Engine, InMemoryEventStream, InMemorySessionStore, type BusEvent } from "@valet/engine";
-import { DockerSandboxProvider } from "../src/index.js";
+import { DockerSandboxProvider, createSandboxWorkspace } from "../src/index.js";
 
 let cached: Promise<boolean> | undefined;
 function dockerAvailable(): Promise<boolean> {
@@ -96,7 +94,7 @@ describe.skipIf(!longTestsEnabled || !(await dockerAvailable()))(
           fauxAssistantMessage("finished the long run"),
         ]);
 
-        const workspace = await mkdtemp(join(tmpdir(), "valet-long-exec-3min-"));
+        const workspace = await createSandboxWorkspace("valet-long-exec-3min-");
         const provider = new DockerSandboxProvider();
         const store = new InMemorySessionStore();
         const bus = new InMemoryEventStream();

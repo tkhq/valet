@@ -48,6 +48,7 @@ const data: ListSkillsResponse = {
       updatedAt: 1_700_000_000_000,
     },
   ],
+  nextCursor: null,
 };
 
 const stored: SkillResponse = {
@@ -79,6 +80,9 @@ vi.mock("@tanstack/react-router", () => ({
     <a {...rest}>{children}</a>
   ),
   createFileRoute: () => (config: object) => config,
+  // The page keeps its filters and both cursor stacks in the search params.
+  useSearch: () => ({}),
+  useNavigate: () => vi.fn(),
 }));
 
 vi.mock("~/api/skills", () => ({
@@ -123,7 +127,7 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 
 // The repositories panel has its own suite; here it only has to render.
 vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: { sources: [] }, isLoading: false, error: null }),
+  useSkillSources: () => ({ data: { sources: [], nextCursor: null }, isLoading: false, error: null }),
   useAddSkillSource: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
@@ -194,6 +198,7 @@ describe("SkillsIndexPage with stored skills", () => {
           updatedAt: 1_700_000_000_000,
         },
       ],
+      nextCursor: null,
     };
     const { container } = render(
       <TooltipProvider>
@@ -213,7 +218,7 @@ describe("SkillsIndexPage with stored skills", () => {
   });
 
   it("points at both ways to write one when the catalog is empty", () => {
-    currentData = { skills: [] };
+    currentData = { skills: [], nextCursor: null };
     render(<SkillsIndexPage />);
     expect(screen.getByText(/No skills yet/)).toBeTruthy();
     expect(screen.getByText("New skill")).toBeTruthy();

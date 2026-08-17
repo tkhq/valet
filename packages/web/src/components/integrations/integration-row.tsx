@@ -13,6 +13,10 @@
  * carries identity only — a badge, the fix, and a Reconnect control. See
  * `service-health.ts` for the states and `ServiceIcon` for the marks.
  *
+ * GitHub carries a second line for the half its organisation owns — the
+ * GitHub App, which the personal credential depends on to sign in and which
+ * reaches repositories on its own. See `github-org-app.ts`.
+ *
  * Connect opens the pre-connect screen (`connect-dialog.tsx`) — for OAuth
  * services and manual-token services alike. The tile no longer runs any
  * connect path itself; it names the service and hands off. The submit action
@@ -26,6 +30,7 @@ import { useDisconnectCredential } from "~/api/integrations";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { displayName } from "./display-name";
+import { GithubOrgAppLine } from "./github-org-app-line";
 import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
 
 
@@ -58,6 +63,13 @@ function iconSlug(plugin: PluginSummary): string {
   return plugin.services[0]?.iconSlug ?? plugin.name;
 }
 
+/** GitHub is the only service whose organisation owns a second, separate
+ * way in. Keyed on the credential service, the same key `connectPath` reads
+ * to route GitHub through the org App's OAuth client. */
+function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
+  return service.service === "github" ? <GithubOrgAppLine /> : undefined;
+}
+
 // ── Tiles ────────────────────────────────────────────────────────────────
 
 export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
@@ -73,6 +85,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
           slug={single.iconSlug ?? plugin.name}
           description={plugin.description}
           meta={meta}
+          orgNote={orgNoteFor(single)}
         />
       ) : (
         <>
@@ -92,6 +105,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
                     service={service}
                     title={displayName(service.service)}
                     slug={service.iconSlug ?? service.service}
+                    orgNote={orgNoteFor(service)}
                   />
                 </li>
               ))}
@@ -165,12 +179,16 @@ function ServiceBlock({
   slug,
   description,
   meta,
+  orgNote,
 }: {
   service: PluginServiceSummary;
   title: string;
   slug: string;
   description?: string;
   meta?: string | null;
+  /** A second connection the organisation owns, stated beside this one
+   * rather than merged into it. Only GitHub has one — see `orgNoteFor`. */
+  orgNote?: React.ReactNode;
 }) {
   const [connecting, setConnecting] = useState(false);
   const disconnect = useDisconnectCredential();
@@ -231,12 +249,15 @@ function ServiceBlock({
         description={description}
         state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
       />
-      {service.connected && (service.health?.login || note) && (
+      {/* The org note reads on a disconnected card too — "your organisation
+          has no GitHub App" is the reason Connect is about to fail — so the
+          stack no longer hangs off `service.connected` alone. */}
+      {(orgNote || (service.connected && (service.health?.login || note))) && (
         <div className="mt-1.5 space-y-1 pl-12">
-          {service.health?.login && (
+          {service.connected && service.health?.login && (
             <p className="truncate text-xs text-muted">Account: {service.health.login}</p>
           )}
-          {note && (
+          {service.connected && note && (
             <p
               className={
                 health === "identity-only"
@@ -247,6 +268,7 @@ function ServiceBlock({
               {note}
             </p>
           )}
+          {orgNote}
         </div>
       )}
       <CardFooter meta={meta} right={controls} />

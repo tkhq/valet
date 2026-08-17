@@ -40,18 +40,19 @@ import {
   Textarea,
 } from "~/components/primitives";
 import { useConnectCredential } from "~/api/integrations";
-import { useConnectGithub } from "~/api/repos";
+import { useConnectGithub, useGithubOrgStatus } from "~/api/repos";
 import { useMe, useTeams } from "~/api/settings";
 import { ServiceIcon } from "~/components/service-icon";
 import { cn } from "~/lib/cn";
+import { errorText } from "~/lib/error-text";
 import {
   capabilityLines,
-  orgReachLine,
   reachLines,
   summaryLines,
   toolDisclosure,
   type ReachableTeam,
 } from "./connect-disclosure";
+import { githubOrgReachLines } from "./github-org-app";
 
 const TOKEN_FIELD_LABEL: Record<PluginServiceSummary["type"], string> = {
   api_key: "API key",
@@ -97,7 +98,13 @@ export function ConnectDialog({ service, title, slug, open, onOpenChange }: Conn
         className="max-w-3xl gap-0 overflow-hidden p-0"
         aria-describedby={undefined}
       >
-        <div className="grid max-h-[85vh] grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_18rem] lg:overflow-visible">
+        {/* One scroller on narrow screens, where the panes stack. From `lg`
+            the panes sit side by side and each scrolls on its own, so a long
+            tool list cannot push the decision pane's Continue button out of
+            reach. `lg:overflow-hidden` on the grid is what makes the child
+            scrollers the ones that move; `overflow-visible` here left the
+            taller pane clipped with nowhere to scroll. */}
+        <div className="grid max-h-[85vh] grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_18rem] lg:overflow-hidden">
           <DecisionPane
             service={service}
             title={title}
@@ -139,6 +146,10 @@ function DecisionPane({
   const me = useMe();
   const teamsQuery = useTeams();
   const connectGithub = useConnectGithub();
+  // GitHub is the only service with an organisation-owned second half, and
+  // the only one whose Continue can fail because that half is missing. The
+  // card states both; every other service skips the request.
+  const orgStatus = useGithubOrgStatus(path === "github");
 
   // Org admins see every team in the org, but `callerRole` is null unless
   // they are actually on it. Only real memberships create the exposure the
@@ -178,7 +189,7 @@ function DecisionPane({
   }
 
   return (
-    <div className="flex flex-col gap-5 p-6">
+    <div className="flex min-h-0 flex-col gap-5 overflow-y-auto p-6">
       <header className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <DialogTitle className="font-display text-xl text-ink">
@@ -212,7 +223,7 @@ function DecisionPane({
         />
         <FactCard
           heading="Who can reach it"
-          lines={[...reachLines(teams, title), orgReachLine(service.service) ?? []].flat()}
+          lines={[...reachLines(teams, title), ...githubOrgReachLines(service.service, orgStatus.data)]}
           illustration={<ReachMock teams={teams} slug={slug} />}
         />
       </div>
@@ -231,9 +242,13 @@ function DecisionPane({
             Enter a token instead
           </button>
         )}
+        {/* `Error.message` here is the request line ("POST /me/github/connect
+            → 409"), which tells a reader nothing. The server's own sentence
+            names the fix — an admin must set up the App — and rides in the
+            payload, so read it out with the house helper. */}
         {connectGithub.error && (
           <p role="alert" className="text-xs text-danger-500">
-            {connectGithub.error.message}
+            {errorText(connectGithub.error)}
           </p>
         )}
       </div>
@@ -400,7 +415,7 @@ function PreviewPane({
   disclosure: ReturnType<typeof toolDisclosure>;
 }) {
   return (
-    <aside className="flex min-w-0 flex-col border-t border-line bg-ink-wash p-5 lg:border-l lg:border-t-0">
+    <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto border-t border-line bg-ink-wash p-5 lg:border-l lg:border-t-0">
       <div className="flex items-center gap-2">
         <ServiceIcon slug={slug} label={title} />
         <div className="min-w-0">

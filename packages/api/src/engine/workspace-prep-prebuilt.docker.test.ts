@@ -14,10 +14,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DockerSandboxProvider } from "@valet/sandbox-docker";
+import { rm } from "node:fs/promises";
+import { createSandboxWorkspace, DockerSandboxProvider } from "@valet/sandbox-docker";
 import type { Sandbox } from "@valet/engine";
 import { installCredentialHelper, configureGitIdentity, prepBinding, prepPrebuiltBinding, computeTargetDirs } from "./workspace-prep.js";
 import { DockerImageBuilder } from "../prebuilds/docker-builder.js";
@@ -100,7 +98,7 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
   });
 
   beforeEach(async () => {
-    tmp = await mkdtemp(join(tmpdir(), "valet-t4-prep-"));
+    tmp = await createSandboxWorkspace("valet-t4-prep-");
     provider = new DockerSandboxProvider();
     sandbox = undefined;
   });

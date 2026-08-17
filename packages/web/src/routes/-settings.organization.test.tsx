@@ -118,6 +118,9 @@ let invitesData: {
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
+  // The Library page keeps its filters and both cursor stacks in the search
+  // params, so it reads them even on its first page.
+  useSearch: () => ({}),
   // `RouterLinkStub` over a bare anchor: it renders a real `href` from `to`
   // and `search`, which the link assertions below need.
   Link: RouterLinkStub,
@@ -198,7 +201,7 @@ let orgSourcesData: {
 } = { sources: [] };
 
 vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: orgSourcesData, isLoading: false, error: null }),
+  useSkillSources: () => ({ data: { ...orgSourcesData, nextCursor: null }, isLoading: false, error: null }),
   useAddSkillSource: () => ({ mutate: addSourceMutate, isPending: false, error: null }),
   useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
@@ -206,7 +209,7 @@ vi.mock("~/api/skill-sources", () => ({
 
 // The Library page's org skills panel reads the shared skills catalog.
 vi.mock("~/api/skills", () => ({
-  useSkills: () => ({ data: { skills: [] }, isLoading: false, error: null }),
+  useSkills: () => ({ data: { skills: [], nextCursor: null }, isLoading: false, error: null }),
 }));
 
 import { OrganizationGeneralPage } from "./settings.organization.index";
@@ -522,18 +525,13 @@ describe("OrganizationTeamsPage", () => {
 });
 
 describe("OrganizationLibraryPage", () => {
-  it("shows only org sources with a scope badge", () => {
-    orgSourcesData = {
-      sources: [
-        orgSource(),
-        {
-          ...orgSource({ id: "s_personal", repo: "me/mine", ownerType: "user", ownerId: "u1" }),
-        },
-      ],
-    };
+  it("badges an org source with its scope", () => {
+    // The page pins the org server-side, so the fixture is what an org-pinned
+    // read returns. `-settings.organization.library.test.tsx` holds the pin
+    // itself; this asserts what the row shows.
+    orgSourcesData = { sources: [orgSource()] };
     render(<OrganizationLibraryPage />);
     expect(screen.getByText("tkhq/org-skills")).toBeTruthy();
-    expect(screen.queryByText("me/mine")).toBeNull();
     expect(screen.getByText("Org")).toBeTruthy();
   });
 

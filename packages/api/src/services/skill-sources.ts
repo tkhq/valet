@@ -14,11 +14,12 @@
  * forbidden.
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
+import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
 import { skills, skillSources, type SkillSourceRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 import { isAuthorizedFor, type SkillOwner } from "./skills.js";
@@ -243,6 +244,42 @@ export async function ownedSkillSourceRow(
   return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
 }
 
+export const SKILL_SOURCE_DEFAULT_LIMIT = 20;
+export const SKILL_SOURCE_MAX_LIMIT = 100;
+
+/**
+ * The sort key of the last row of a page: repository name, then subdirectory,
+ * then row id. The first two are the order a reader sees; `id` breaks the tie
+ * two owners tracking the same repository and subdirectory would otherwise
+ * leave, and the unique index permits exactly that pair across owners.
+ */
+export interface SkillSourceCursor {
+  repo: string;
+  sub: string;
+  id: string;
+}
+
+export function encodeSkillSourceCursor(cursor: SkillSourceCursor): string {
+  return encodePageCursor({ ...cursor });
+}
+
+/** `undefined` for a cursor this listing did not issue. The route answers
+ * that with 400 rather than silently restarting at page one. */
+export function decodeSkillSourceCursor(raw: string): SkillSourceCursor | undefined {
+  const fields = decodePageCursor(raw);
+  if (!fields) return undefined;
+  const { repo, sub, id } = fields;
+  if (typeof repo !== "string" || typeof sub !== "string" || typeof id !== "string") {
+    return undefined;
+  }
+  return { repo, sub, id };
+}
+
+export interface SkillSourcePage {
+  rows: SkillSourceRow[];
+  nextCursor: string | undefined;
+}
+
 /**
  * Every source the caller can reach: their own rows, the rows of every team
  * they belong to, and the org-library rows, sorted by repository name.
@@ -256,12 +293,20 @@ export async function ownedSkillSourceRow(
  * than adding to it — the same rule, and the same reason, as `listSkills`.
  * Reaching `scope` is the caller's question to answer first: `routes/skills.ts`
  * runs the query string through `readOwnerScope` before it gets here.
+ *
+ * Keyset-paginated on `(repo_full_name, subpath, id)`, the same shape the
+ * action log uses (`policies/admin.ts`). Keyset, not `OFFSET`, so a source
+ * added while somebody reads page two never shifts a row onto a page that
+ * was already read or off one that was not. `limit + 1` rows are fetched to
+ * learn whether a further page exists without a second COUNT.
  */
 export async function listSkillSources(
   db: AppDb,
   owner: SkillOwner,
-  scope?: Principal,
-): Promise<SkillSourceRow[]> {
+  scope: Principal | undefined,
+  limit: number,
+  cursor: SkillSourceCursor | undefined,
+): Promise<SkillSourcePage> {
   const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
   const ownerMatch = and(eq(skillSources.ownerType, "user"), eq(skillSources.ownerId, owner.userId));
   const teamMatch =
@@ -277,11 +322,27 @@ export async function listSkillSources(
       ? or(ownerMatch, teamMatch, orgMatch)
       : or(ownerMatch, orgMatch);
 
-  return db
+  const after = cursor
+    ? sql`(${skillSources.repoFullName}, ${skillSources.subpath}, ${skillSources.id}) > (${cursor.repo}, ${cursor.sub}, ${cursor.id})`
+    : undefined;
+
+  const rows = await db
     .select()
     .from(skillSources)
-    .where(and(eq(skillSources.orgId, owner.orgId), reach))
-    .orderBy(asc(skillSources.repoFullName), asc(skillSources.subpath));
+    .where(and(eq(skillSources.orgId, owner.orgId), reach, after))
+    .orderBy(asc(skillSources.repoFullName), asc(skillSources.subpath), asc(skillSources.id))
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  return {
+    rows: page,
+    nextCursor:
+      hasMore && last
+        ? encodeSkillSourceCursor({ repo: last.repoFullName, sub: last.subpath, id: last.id })
+        : undefined,
+  };
 }
 
 /**

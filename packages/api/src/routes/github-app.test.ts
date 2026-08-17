@@ -351,6 +351,229 @@ describe("GET /api/org/github-app/setup", () => {
   });
 });
 
+describe("POST /api/org/github-app/credential", () => {
+  /** What GitHub's `GET /app` answers for the app behind `TEST_PEM`. */
+  const APP_RECORD = {
+    id: 4242,
+    slug: "existing-app",
+    node_id: "MDM6QXBwMQ==",
+    client_id: "Iv1.existing",
+    name: "Existing App",
+    html_url: "https://github.com/apps/existing-app",
+    permissions: {},
+    events: [],
+    installations_count: 1,
+  };
+
+  async function postCredential(baseUrl: string, body: unknown, headers = HEADERS) {
+    return fetch(`${baseUrl}/api/org/github-app/credential`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM }, MEMBER_HEADERS);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "org admin required" });
+  });
+
+  it("saves a pasted credential, fills the app fields from GitHub, and reports it configured", async () => {
+    api = await bootTestApi();
+    const f = useFixture({
+      getApp: () => ({ body: APP_RECORD }),
+      listInstallations: () => ({
+        body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+      }),
+    });
+
+    const res = await postCredential(api.baseUrl, {
+      appId: "4242",
+      privateKey: TEST_PEM,
+      oauthClientSecret: "pasted-oauth-secret",
+      webhookSecret: "pasted-webhook-secret",
+    });
+    expect(res.status).toBe(200);
+
+    // Verified before it was stored — and with the App JWT, not a token.
+    const verifyCall = f.calls.find((c) => c.path === "/app");
+    expect(verifyCall).toBeDefined();
+    expect(verifyCall?.authHeader?.startsWith("Bearer ")).toBe(true);
+
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.configured).toBe(true);
+    expect(body.source).toBe("org");
+    // Slug, page URL and app id all come from GitHub, so the admin never
+    // typed them.
+    expect(body.app).toEqual({
+      appId: "4242",
+      appSlug: "existing-app",
+      htmlUrl: "https://github.com/apps/existing-app",
+      installUrl: "https://github.com/apps/existing-app/installations/new",
+    });
+    // The save ran discovery, so the installation is already listed.
+    expect(body.installations).toHaveLength(1);
+    expect(body.installations[0].accountLogin).toBe("acme");
+
+    const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    const fetched = (await getRes.json()) as GetGithubAppResponse;
+    expect(fetched.configured).toBe(true);
+    expect(fetched.app?.appId).toBe("4242");
+  });
+
+  it("never echoes the pasted secrets back, on the save reply or on a later read", async () => {
+    api = await bootTestApi();
+    useFixture({ getApp: () => ({ body: APP_RECORD }) });
+
+    const res = await postCredential(api.baseUrl, {
+      appId: "4242",
+      privateKey: TEST_PEM,
+      oauthClientSecret: "pasted-oauth-secret",
+      webhookSecret: "pasted-webhook-secret",
+    });
+    expect(res.status).toBe(200);
+
+    const saveBody = await res.text();
+    const getBody = await (await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS })).text();
+    for (const raw of [saveBody, getBody]) {
+      expect(raw).not.toContain("pasted-oauth-secret");
+      expect(raw).not.toContain("pasted-webhook-secret");
+      expect(raw).not.toContain(TEST_PEM);
+      expect(raw).not.toContain("PRIVATE KEY");
+    }
+  });
+
+  it("accepts a base64-encoded private key, the same as the environment fallback", async () => {
+    api = await bootTestApi();
+    useFixture({ getApp: () => ({ body: APP_RECORD }) });
+
+    const res = await postCredential(api.baseUrl, {
+      appId: "4242",
+      privateKey: Buffer.from(TEST_PEM, "utf8").toString("base64"),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.configured).toBe(true);
+  });
+
+  it("refuses a key GitHub rejects, and stores nothing", async () => {
+    api = await bootTestApi();
+    useFixture({ getApp: () => ({ status: 401, body: { message: "A JSON web token could not be decoded" } }) });
+
+    const res = await postCredential(api.baseUrl, { appId: "999", privateKey: TEST_PEM });
+    expect(res.status).toBe(400);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("GitHub rejected this App ID and private key");
+    // The message names what to do about it, not just what went wrong.
+    expect(error).toContain("generate a new private key");
+
+    const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    expect((await getRes.json()) as GetGithubAppResponse).toEqual({
+      configured: false,
+      installations: [],
+      webhook: { mode: "manual" },
+    });
+  });
+
+  it("refuses a private key that is not a PEM without calling GitHub", async () => {
+    api = await bootTestApi();
+    const f = useFixture({ getApp: () => ({ body: APP_RECORD }) });
+
+    const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: "not a key at all" });
+    expect(res.status).toBe(400);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("not a PEM");
+    expect(f.calls.some((c) => c.path === "/app")).toBe(false);
+  });
+
+  it("refuses a missing app id or private key, naming both fields", async () => {
+    api = await bootTestApi();
+    const res = await postCredential(api.baseUrl, {});
+    expect(res.status).toBe(400);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("the app id");
+    expect(error).toContain("the private key");
+
+    const noKey = await postCredential(api.baseUrl, { appId: "4242" });
+    expect(noKey.status).toBe(400);
+    expect(((await noKey.json()) as { error: string }).error).toContain("the private key");
+  });
+
+  it("falls back to the supplied slug and client id when GitHub reports neither", async () => {
+    api = await bootTestApi();
+    useFixture({ getApp: () => ({ body: { id: 4242, name: "Existing App", permissions: {}, events: [] } }) });
+
+    const res = await postCredential(api.baseUrl, {
+      appId: "4242",
+      privateKey: TEST_PEM,
+      appSlug: "typed-slug",
+      oauthClientId: "Iv1.typed",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetGithubAppResponse;
+    expect(body.app?.appSlug).toBe("typed-slug");
+    // No html_url from GitHub either, so it is derived from the slug.
+    expect(body.app?.htmlUrl).toBe("https://github.com/apps/typed-slug");
+  });
+
+  it("refuses when GitHub reports no slug and none was supplied", async () => {
+    api = await bootTestApi();
+    useFixture({ getApp: () => ({ body: { id: 4242, name: "Existing App", permissions: {}, events: [] } }) });
+
+    const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("Enter it yourself");
+  });
+
+  it("a pasted credential shadows the environment fallback, the same as the manifest flow", async () => {
+    api = await bootTestApi();
+    setEnvApp();
+    useFixture({ getApp: () => ({ body: APP_RECORD }) });
+
+    const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM });
+    expect(res.status).toBe(200);
+
+    const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    const body = (await getRes.json()) as GetGithubAppResponse;
+    expect(body.source).toBe("org");
+    expect(body.app?.appId).toBe("4242");
+  });
+
+  it("the stored credential works: the webhook verifies against the pasted secret", async () => {
+    api = await bootTestApi();
+    useFixture({ getApp: () => ({ body: APP_RECORD }) });
+    expect(
+      (await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM, webhookSecret: "pasted-webhook-secret" }))
+        .status,
+    ).toBe(200);
+
+    const now = Date.now();
+    await api.providers.db.insert(githubInstallations).values({
+      id: "ghi_pasted",
+      orgId: "local-org",
+      installationId: 999,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const payload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const wrong = signWebhookBody(JSON.stringify(payload), "some-other-secret");
+    expect((await postWebhook(api.baseUrl, "installation", payload, wrong)).status).toBe(403);
+
+    const sig = signWebhookBody(JSON.stringify(payload), "pasted-webhook-secret");
+    expect((await postWebhook(api.baseUrl, "installation", payload, sig)).status).toBe(204);
+
+    const [row] = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_pasted"));
+    expect(row.suspended).toBe(true);
+  });
+});
+
 describe("POST /api/org/github-app/refresh", () => {
   it("403s for a non-admin org member", async () => {
     api = await bootTestApi();

@@ -3,14 +3,15 @@ import { createFileRoute } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { IntegrationRow, BuiltInRow, isService } from "~/components/integrations/integration-row";
+import { IntegrationRow, isService } from "~/components/integrations/integration-row";
 import { displayName } from "~/components/integrations/display-name";
 
 /**
- * `/integrations` — two groups in the settings visual idiom (open hairline
- * stacks, no card boxes): Services (plugins with tools and/or credentials,
- * so they are connectable) and Built in (content-only plugins, nothing to
- * connect). OAuth connect for services declaring `oauth` metadata redirects
+ * `/integrations` — the services a person can connect, in the settings
+ * visual idiom (open hairline stacks, no card boxes). Content-only plugins
+ * are not listed: they need no credential and offer no action, so a row for
+ * one was a row nobody could use. OAuth connect for services declaring
+ * `oauth` metadata redirects
  * to `/api/credentials/:service/connect` and lands back here with
  * `?connected=` or `?error=`; manual token entry remains the fallback for
  * everything else.
@@ -57,9 +58,6 @@ export function IntegrationsPage() {
   const services = plugins
     .filter(isService)
     .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
-  const builtIn = plugins
-    .filter((p) => !isService(p))
-    .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -103,16 +101,6 @@ export function IntegrationsPage() {
               <div className="grid gap-3 pt-4 sm:grid-cols-2">
                 {services.map((plugin) => (
                   <IntegrationRow key={plugin.name} plugin={plugin} />
-                ))}
-              </div>
-            </Section>
-          )}
-
-          {!isLoading && !error && builtIn.length > 0 && (
-            <Section title="Built in">
-              <div className="grid gap-3 pt-4 sm:grid-cols-2">
-                {builtIn.map((plugin) => (
-                  <BuiltInRow key={plugin.name} plugin={plugin} />
                 ))}
               </div>
             </Section>

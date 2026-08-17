@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, rm, readFile, writeFile, symlink } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { access, mkdtemp, readdir, rm, readFile, writeFile, symlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { DockerSandboxProvider, type DockerSandboxCreateOpts } from "../src/index.js";
+import { DockerSandboxProvider, type DockerSandboxCreateOpts, createSandboxWorkspace } from "../src/index.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /** Skip the whole suite when Docker isn't available locally. */
@@ -29,7 +29,7 @@ describeDocker("DockerSandbox", () => {
   });
 
   beforeEach(async () => {
-    tmp = await mkdtemp(join(tmpdir(), "valet-docker-"));
+    tmp = await createSandboxWorkspace("valet-docker-");
     provider = new DockerSandboxProvider();
   });
 
@@ -55,6 +55,24 @@ describeDocker("DockerSandbox", () => {
     await provider.destroy(sb.id);
     const stopped = await provider.status(sb.id);
     expect(stopped.state).toBe("released");
+  });
+
+  it("proves the bind mount before returning, and leaves no probe file behind", async () => {
+    // create() confirms the container reads the directory the host writes
+    // to. A daemon in a VM mounts an empty directory when it does not share
+    // the path, which used to surface much later as a "cp: can't stat" from
+    // workspace prep. The probe must also clean up after itself — the agent
+    // sees this directory.
+    const sb = await makeSandbox();
+    try {
+      expect(await readdir(tmp)).toEqual([]);
+      await sb.writeFile("staged.txt", "from host");
+      const inside = await sb.exec("cat /workspace/staged.txt");
+      expect(inside.exitCode).toBe(0);
+      expect(inside.stdout).toBe("from host");
+    } finally {
+      await provider.destroy(sb.id);
+    }
   });
 
   it("filesystem ops execute against the host bind-mount", async () => {

@@ -167,13 +167,6 @@ export function reachLines(teams: ReachableTeam[], title: string): string[] {
   ];
 }
 
-/**
- * GitHub resolves a token through the org's App installation and shared PAT
- * before it gives up, so an org can reach GitHub without this connection.
- * No other service has an org-wide read path.
- */
-export function orgReachLine(service: string): string | null {
-  return service === "github"
-    ? `Your organisation can also reach GitHub through its own App installation or a shared token.`
-    : null;
-}
+// GitHub's org-wide reach used to be one fixed sentence here. It now comes
+// from `github-org-app.ts`, which reads the organisation's actual App state
+// — a claim about an App installation has to be checked before it is made.

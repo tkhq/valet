@@ -144,6 +144,107 @@ const CONTAINER_WORKSPACE = "/workspace";
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
 
+/** Sentinel file the mount probe writes on the host and reads inside the
+ * container. Removed again as soon as the probe ends. */
+const MOUNT_PROBE_FILE = ".valet-mount-probe";
+
+/** Bounds the mount probe. macOS file sharing (VirtioFS, gRPC-FUSE) caches
+ * directory entries, so a host write can need a moment to appear inside the
+ * container — the same delay `awaitCredsPropagation` waits out. */
+const MOUNT_PROBE_TIMEOUT_MS = 5000;
+const MOUNT_PROBE_POLL_MS = 100;
+
+/**
+ * Parent directory for sandbox workspaces that a VM-backed docker daemon can
+ * always bind-mount.
+ *
+ * Docker Desktop, Colima and Rancher Desktop share the user's home directory
+ * by default, and share little else. A workspace under this root is therefore
+ * visible to the host and to the container on every common macOS setup, and
+ * on Linux, where the daemon shares the whole filesystem. `os.tmpdir()` is
+ * NOT such a place: on macOS it resolves to `/var/folders/...`, which Colima
+ * does not share — see `verifyWorkspaceMount` for what that costs.
+ */
+export function sandboxWorkspaceRoot(): string {
+  return join(homedir(), ".valet", "workspaces");
+}
+
+/**
+ * Creates an empty sandbox workspace under `sandboxWorkspaceRoot()` and
+ * returns its absolute path. `prefix` names the caller. The caller owns the
+ * cleanup.
+ */
+export async function createSandboxWorkspace(prefix: string): Promise<string> {
+  const root = sandboxWorkspaceRoot();
+  await fs.mkdir(root, { recursive: true });
+  return fs.mkdtemp(join(root, prefix));
+}
+
+/**
+ * Confirms the container reads the same directory the host writes to.
+ *
+ * A docker daemon inside a virtual machine shares only a subset of the host
+ * filesystem. `docker run -v` with a host path outside that subset does not
+ * fail: the daemon creates an empty directory inside the VM and mounts that
+ * instead. The container then reads a different directory than `readFile` and
+ * `writeFile` write to (both run on the host — see the `DockerSandbox`
+ * docblock), so every file staged from the host disappears.
+ *
+ * The probe exists because the mismatch is otherwise silent, and surfaces far
+ * from its cause. Workspace prep, for example, stages the git credential
+ * helper with `writeFile` and then installs it with `exec`; all the operator
+ * sees is `cp: can't stat '.valet-prep/git-credential-valet'`.
+ */
+async function verifyWorkspaceMount(
+  containerId: string,
+  hostWorkspace: string,
+  image: string,
+): Promise<void> {
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const probeHostPath = join(hostWorkspace, MOUNT_PROBE_FILE);
+  const probeContainerPath = posix.join(CONTAINER_WORKSPACE, MOUNT_PROBE_FILE);
+  try {
+    await fs.writeFile(probeHostPath, token, "utf8");
+    const deadline = Date.now() + MOUNT_PROBE_TIMEOUT_MS;
+    for (;;) {
+      const read = await execProcess(
+        "docker",
+        ["exec", containerId, "sh", "-c", `cat ${probeContainerPath} 2>/dev/null`],
+        {},
+      );
+      if (read.stdout.trim() === token) return;
+      if (Date.now() >= deadline) {
+        // A container whose PID 1 already exited cannot read anything. Say
+        // so, rather than blame a bind mount that may be correct.
+        if (!(await isContainerAlive(containerId))) {
+          // The container is removed right after this throw, so quote its
+          // last output now — `docker logs` is useless to the operator later.
+          const logs = await execProcess("docker", ["logs", "--tail", "20", containerId], {});
+          const tail = (logs.stderr.trim() || logs.stdout.trim()).slice(0, 2000);
+          throw new Error(
+            `DockerSandboxProvider.create: the container from image "${image}" exited before the sandbox could use it. ` +
+              `Correct the entrypoint of the image, then create the session again.` +
+              (tail ? ` Last container output: ${tail}` : ""),
+          );
+        }
+        throw new Error(
+          `DockerSandboxProvider.create: the container cannot read the workspace bind mount at ${hostWorkspace}. ` +
+            `This docker daemon runs in a virtual machine that does not share the path. ` +
+            `The host and the container therefore read different directories, and staged files never arrive. ` +
+            `Put the workspace under ${homedir()}, which every docker distribution shares by default. ` +
+            `To keep this path, add it to the shared paths of the virtual machine. ` +
+            `For Colima, add the path to "mounts" in ~/.colima/default/colima.yaml, then run "colima restart". ` +
+            `For Docker Desktop, add the path in Settings > Resources > File sharing.`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, MOUNT_PROBE_POLL_MS));
+    }
+  } finally {
+    // Never leave the sentinel in a workspace the agent will see.
+    await fs.rm(probeHostPath, { force: true }).catch(() => undefined);
+  }
+}
+
 export interface BuildDockerRunArgsOpts {
   containerName: string;
   image: string;
@@ -908,6 +1009,16 @@ export class DockerSandboxProvider implements SandboxProvider {
       );
     }
     const containerId = startResult.stdout.trim();
+
+    // A workspace the container cannot read is unusable, and fails much later
+    // with an unrelated message. Remove the container first, so a bad path
+    // does not leak one per attempt.
+    try {
+      await verifyWorkspaceMount(containerId, abs, image);
+    } catch (err) {
+      await execProcess("docker", ["rm", "-f", containerId], {});
+      throw err;
+    }
 
     const sb = new DockerSandbox(id, {
       containerId,

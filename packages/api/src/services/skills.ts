@@ -17,11 +17,12 @@
  * starting ANY session.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import { validateSkillFrontmatter, BUILTIN_COMMAND_NAMES, type Principal, type SkillSource } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
+import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
 import { skills, teamMembers, type SkillRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 
@@ -210,21 +211,7 @@ export async function listSkills(
   owner: SkillOwner,
   scope?: Principal,
 ): Promise<SkillRow[]> {
-  // No team read when `scope` already names the one owner to list.
-  const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
-  const ownerMatch = and(eq(skills.ownerType, "user"), eq(skills.ownerId, owner.userId));
-  const teamMatch =
-    teamIds.length > 0
-      ? and(eq(skills.ownerType, "team"), inArray(skills.ownerId, teamIds))
-      : undefined;
-  // Every org row in the caller's own org, because the org library is
-  // readable by every member. The `orgId` predicate below is what bounds it.
-  const orgMatch = eq(skills.ownerType, "org");
-  const reach = scope
-    ? and(eq(skills.ownerType, scope.type), eq(skills.ownerId, scope.id))
-    : teamMatch
-      ? or(ownerMatch, teamMatch, orgMatch)
-      : or(ownerMatch, orgMatch);
+  const reach = await reachOfSkills(db, owner, scope);
 
   const rows = await db
     .select()
@@ -242,6 +229,188 @@ export async function listSkills(
     ...rows.filter((r) => r.ownerType === "team"),
     ...rows.filter((r) => r.ownerType === "org"),
   ];
+}
+
+/**
+ * The rows the caller may read, as one predicate: their own, the rows of
+ * every team they belong to, and the org library. `scope` replaces that union
+ * with the one owner it names — see `listSkills` for why it replaces rather
+ * than adds. Shared by the full read and the paginated one so the two can
+ * never disagree about reach.
+ */
+async function reachOfSkills(
+  db: AppDb,
+  owner: SkillOwner,
+  scope: Principal | undefined,
+): Promise<SQL | undefined> {
+  // No team read when `scope` already names the one owner to list.
+  const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
+  const ownerMatch = and(eq(skills.ownerType, "user"), eq(skills.ownerId, owner.userId));
+  const teamMatch =
+    teamIds.length > 0
+      ? and(eq(skills.ownerType, "team"), inArray(skills.ownerId, teamIds))
+      : undefined;
+  // Every org row in the caller's own org, because the org library is
+  // readable by every member. The `orgId` predicate at the call site bounds it.
+  const orgMatch = eq(skills.ownerType, "org");
+  if (scope) return and(eq(skills.ownerType, scope.type), eq(skills.ownerId, scope.id));
+  return teamMatch ? or(ownerMatch, teamMatch, orgMatch) : or(ownerMatch, orgMatch);
+}
+
+// ── The paginated catalog read ────────────────────────────────────────────
+
+export const SKILL_DEFAULT_LIMIT = 24;
+export const SKILL_MAX_LIMIT = 100;
+
+/**
+ * `user` before `team` before `org` — the delivery precedence `listSkills`
+ * documents, written as a sort key so a page boundary cannot break it.
+ * Plugin skills rank 0 and are merged in by `routes/skills.ts`, because they
+ * live in memory and win every name clash.
+ */
+export const PLUGIN_SKILL_RANK = 0;
+const OWNER_RANK = sql<number>`case ${skills.ownerType} when 'user' then 1 when 'team' then 2 else 3 end`;
+
+/** What the Library's filter controls narrow the catalog by. Every one is
+ * applied HERE and not in the client, because a filter applied to a page
+ * alone would answer about that page while claiming to answer about the
+ * catalog. */
+export interface SkillCatalogFilter {
+  /** `prompt` keeps the prompt-invocation skills; `skill` keeps the rest. */
+  kind?: "skill" | "prompt";
+  /** One library scope. `plugin` holds no stored row, so the route skips
+   * this read entirely for it. */
+  scope?: "personal" | "team" | "org";
+  /** Case-insensitive substring over name and description. */
+  query?: string;
+}
+
+/** The sort key of the last row of a page. `r` is the owner rank above, `n`
+ * the name, `id` the tiebreaker for one name held in two owner scopes. */
+export interface SkillCursor {
+  r: number;
+  n: string;
+  id: string;
+}
+
+export function encodeSkillCursor(cursor: SkillCursor): string {
+  return encodePageCursor({ ...cursor });
+}
+
+/** `undefined` for a cursor this listing did not issue. The route answers
+ * that with 400 rather than silently restarting at page one. */
+export function decodeSkillCursor(raw: string): SkillCursor | undefined {
+  const fields = decodePageCursor(raw);
+  if (!fields) return undefined;
+  const { r, n, id } = fields;
+  if (typeof r !== "number" || typeof n !== "string" || typeof id !== "string") return undefined;
+  return { r, n, id };
+}
+
+export interface SkillPage {
+  rows: SkillRow[];
+  nextCursor: string | undefined;
+}
+
+/** Escapes the LIKE wildcards so a person searching for `100%` searches for
+ * that text and not for "anything". Backslash is Postgres's default LIKE
+ * escape character, so no ESCAPE clause is needed. */
+function containsPattern(query: string): string {
+  return `%${query.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
+
+/**
+ * One page of the caller's reachable stored skills, ordered
+ * `(owner rank, name, id)` and filtered by `filter`.
+ *
+ * Keyset-paginated, the same shape the action log uses
+ * (`policies/admin.ts`): the cursor holds the last row's sort key, so a skill
+ * written while somebody reads page two never shifts a row onto a page
+ * already read or off one not yet read, which `OFFSET` would. `limit + 1`
+ * rows are fetched to learn whether a further page exists without a second
+ * COUNT.
+ *
+ * This read answers "what is on this page". It cannot answer which rows are
+ * shadowed — that is a property of the caller's WHOLE reach — so the route
+ * asks `listSkillNamesInReach` for that separately.
+ */
+export async function listSkillsPage(
+  db: AppDb,
+  owner: SkillOwner,
+  scope: Principal | undefined,
+  filter: SkillCatalogFilter,
+  limit: number,
+  cursor: SkillCursor | undefined,
+): Promise<SkillPage> {
+  const conditions = [eq(skills.orgId, owner.orgId), await reachOfSkills(db, owner, scope)];
+
+  if (filter.scope !== undefined) {
+    conditions.push(eq(skills.ownerType, filter.scope === "personal" ? "user" : filter.scope));
+  }
+  if (filter.kind !== undefined) {
+    // `invocation` rides in the frontmatter document, not in a column of its
+    // own. An absent value means the `context` default, so "not a prompt" has
+    // to hold for NULL as well — `is distinct from` does, `<>` does not.
+    const invocation = sql`${skills.frontmatter}->>'invocation'`;
+    conditions.push(
+      filter.kind === "prompt"
+        ? sql`${invocation} = 'prompt'`
+        : sql`${invocation} is distinct from 'prompt'`,
+    );
+  }
+  if (filter.query !== undefined && filter.query.length > 0) {
+    const pattern = containsPattern(filter.query);
+    conditions.push(or(ilike(skills.name, pattern), ilike(skills.description, pattern)));
+  }
+  if (cursor) {
+    conditions.push(
+      sql`(${OWNER_RANK}, ${skills.name}, ${skills.id}) > (${cursor.r}, ${cursor.n}, ${cursor.id})`,
+    );
+  }
+
+  const rows = await db
+    .select()
+    .from(skills)
+    .where(and(...conditions))
+    .orderBy(OWNER_RANK, asc(skills.name), asc(skills.id))
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  return {
+    rows: page,
+    nextCursor:
+      hasMore && last
+        ? encodeSkillCursor({ r: rankOf(last.ownerType), n: last.name, id: last.id })
+        : undefined,
+  };
+}
+
+/** The rank `OWNER_RANK` computes, for building a cursor out of a row. */
+export function rankOf(ownerType: "user" | "team" | "org"): number {
+  return ownerType === "user" ? 1 : ownerType === "team" ? 2 : 3;
+}
+
+/** Name and owner of every stored skill the caller can reach, in delivery
+ * precedence, with no body. This is what decides the `shadowed` flag: the
+ * flag is a property of the whole reach, so it cannot be read off one page,
+ * and reading full rows to answer it would pull every skill body on every
+ * page request. */
+export interface SkillNameRow {
+  id: string;
+  name: string;
+}
+
+export async function listSkillNamesInReach(
+  db: AppDb,
+  owner: SkillOwner,
+): Promise<SkillNameRow[]> {
+  return db
+    .select({ id: skills.id, name: skills.name })
+    .from(skills)
+    .where(and(eq(skills.orgId, owner.orgId), await reachOfSkills(db, owner, undefined)))
+    .orderBy(OWNER_RANK, asc(skills.name), asc(skills.id));
 }
 
 export interface CreateSkillInput {

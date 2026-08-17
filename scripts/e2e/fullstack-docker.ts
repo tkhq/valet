@@ -7,14 +7,20 @@
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runScenario } from "./fullstack-scenario.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const PORT = 18790 + Math.floor(Math.random() * 1000);
 const BASE = `http://localhost:${PORT}`;
-const SCRATCH = "/tmp/valet-e2e-fullstack";
+// The workspace below is bind-mounted into a docker sandbox. A VM-backed
+// daemon (Docker Desktop, Colima, Rancher Desktop) shares the home directory
+// but not `/tmp`, and mounts an empty directory instead of failing. This
+// mirrors `sandboxWorkspaceRoot()` in @valet/sandbox-docker, which this
+// script cannot import — the repo root declares no workspace dependencies.
+const SCRATCH = join(homedir(), ".valet", "workspaces", "e2e-fullstack");
 const DATA_DIR = `${SCRATCH}/data`;
 const WORKSPACE = `${SCRATCH}/ws`;
 

@@ -13,6 +13,7 @@ import {
 } from "~/api/workflows";
 import { OwnerBadge } from "~/components/owner-badge";
 import { runCountLabel } from "~/lib/run-count";
+import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TemplateGallery } from "~/components/workflows/template-gallery";
@@ -66,15 +67,21 @@ export function WorkflowsIndexPage() {
   const navigate = useNavigate();
   const tab: HubTab = search.tab ?? "workflows";
   const [newOpen, setNewOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="border-b border-line px-6 pt-4">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold tracking-tight text-ink font-display">Workflows</h1>
-          <Button size="sm" onClick={() => setNewOpen(true)}>
-            New workflow
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setImportOpen(true)}>
+              Import
+            </Button>
+            <Button size="sm" onClick={() => setNewOpen(true)}>
+              New workflow
+            </Button>
+          </div>
         </div>
         <div role="tablist" className="mt-3 flex gap-1">
           {TABS.map((t) => (
@@ -101,9 +108,12 @@ export function WorkflowsIndexPage() {
       </div>
 
       <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
+      <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
 
       <div className="flex-1 overflow-y-auto p-6">
-        {tab === "workflows" && <WorkflowsTab onNew={() => setNewOpen(true)} />}
+        {tab === "workflows" && (
+          <WorkflowsTab onNew={() => setNewOpen(true)} onImport={() => setImportOpen(true)} />
+        )}
         {tab === "runs" && <RunsTab />}
         {tab === "triggers" && <TriggerList />}
         {tab === "templates" && <TemplateGallery />}
@@ -112,7 +122,7 @@ export function WorkflowsIndexPage() {
   );
 }
 
-function WorkflowsTab({ onNew }: { onNew: () => void }) {
+function WorkflowsTab({ onNew, onImport }: { onNew: () => void; onImport: () => void }) {
   const { data, isLoading, error } = useWorkflows();
   const triggersQ = useWorkflowTriggers();
   const workflows = data?.workflows ?? [];
@@ -143,13 +153,21 @@ function WorkflowsTab({ onNew }: { onNew: () => void }) {
     return (
       <div className="space-y-4">
         <p className="text-sm text-muted">
-          No workflows yet. Start from a template, or build one from scratch with{" "}
+          No workflows yet. Start from a template, build one from scratch with{" "}
           <button
             type="button"
             onClick={onNew}
             className="text-ink underline underline-offset-2 hover:text-moss"
           >
             New workflow
+          </button>
+          , or{" "}
+          <button
+            type="button"
+            onClick={onImport}
+            className="text-ink underline underline-offset-2 hover:text-moss"
+          >
+            import one you already have
           </button>
           .
         </p>
@@ -232,18 +250,25 @@ function DefinitionRow({
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3">
+    // `relative` anchors the name link's stretched hit area below. The whole
+    // row opens the workflow, because a row that looks like one target should
+    // be one: clicking the empty space beside the name did nothing before.
+    <li className="group relative flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
       {/* The owner badge is a link of its own, so it sits beside the name
-          link, not inside it. */}
+          link, not inside it. Anything interactive here must sit ABOVE the
+          stretched area — nesting it inside the anchor would be invalid and
+          would swallow its own click. */}
       <div className="flex min-w-0 items-center gap-2">
         <Link
           to="/workflows/$workflowId"
           params={{ workflowId: workflow.id }}
-          className="min-w-0 truncate text-sm font-medium text-ink hover:underline"
+          className="min-w-0 truncate text-sm font-medium text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
         >
           {workflow.name}
         </Link>
-        <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
+        <span className="relative z-10">
+          <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
+        </span>
         {countLabel !== undefined && (
           <span className="shrink-0 text-xs font-normal text-muted">
             {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
@@ -260,7 +285,7 @@ function DefinitionRow({
           onStarted={goToRun}
         />
       )}
-      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+      <div className="relative z-10 flex items-center gap-2 shrink-0 flex-wrap">
         {scheduleCount > 0 && (
           <span
             aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}

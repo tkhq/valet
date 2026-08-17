@@ -14,6 +14,11 @@ export default {
   // dark applies unless data-theme="light"; data-theme="dark" always applies.
   // Without this, Tailwind defaults to media-only and the /settings theme
   // toggle flips the tokens but not `dark:` classes (invisible-text bugs).
+  //
+  // The palette axis (`data-palette`, see theme.css) does NOT belong in this
+  // list. A palette changes color, never polarity, so it composes with both
+  // of these selectors as they stand. Adding a palette name here would make
+  // `dark:` fire on a light palette.
   darkMode: [
     "variant",
     [

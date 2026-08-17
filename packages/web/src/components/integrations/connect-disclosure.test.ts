@@ -12,13 +12,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PluginActionSummary, PluginServiceSummary } from "@valet/api/wire";
-import {
-  capabilityLines,
-  orgReachLine,
-  reachLines,
-  summaryLines,
-  toolDisclosure,
-} from "./connect-disclosure";
+import { capabilityLines, reachLines, summaryLines, toolDisclosure } from "./connect-disclosure";
 
 function action(name: string, requiresApproval = false): PluginActionSummary {
   return {
@@ -172,10 +166,5 @@ describe("reachLines", () => {
   });
 });
 
-describe("orgReachLine", () => {
-  it("adds GitHub's org-wide path, which no other service has", () => {
-    expect(orgReachLine("github")).toContain("App installation");
-    expect(orgReachLine("gmail")).toBeNull();
-    expect(orgReachLine("slack")).toBeNull();
-  });
-});
+// GitHub's org-wide reach moved to `github-org-app.test.ts` when the fixed
+// sentence became a claim derived from the organisation's real App state.

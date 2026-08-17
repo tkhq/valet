@@ -1,6 +1,7 @@
 /**
- * The avatar a service, plugin, or skill card shows — a brand mark when the
- * service has one, and the initial-letter monogram when it does not.
+ * The avatar a service, plugin, or skill card shows — a vendor's brand mark
+ * when one exists, a lucide glyph for a plugin Valet ships itself, and the
+ * initial-letter monogram when neither applies.
  *
  * Why a mark at all: the monogram alone printed one grey letter per card,
  * and Gmail, Google Calendar, and Google Workspace all print "G". Six cards
@@ -16,11 +17,19 @@
  * paper. `currentColor` follows the theme token instead, so a mark keeps
  * its contrast in both.
  *
+ * FIRST-PARTY PLUGINS take a lucide glyph instead of a mark. Workflows,
+ * skills, the browser, personas, and sandbox tunnels are capabilities Valet
+ * writes itself, so no vendor mark for them exists or ever will, and a
+ * letter tile teaches the reader nothing about what the plugin does.
+ *
  * The MONOGRAM fallback keeps the brand hue as a tile BACKGROUND with white
  * text, which holds contrast in both themes for the same reason a badge
- * does. Services with no upstream mark (Slack, Typefully, DeepWiki at time
- * of writing) land here and stay distinguishable by colour and letter.
+ * does. It is the exception now: only a vendor the upstream set carries no
+ * mark for lands here — Slack, DeepWiki, and Typefully at time of writing.
+ * Do not reach for `siSlack`. `simple-icons` has no Slack mark, only
+ * `siSlackware`, so Slack's letter tile is deliberate and not an oversight.
  */
+import { Cable, Drama, Globe, GraduationCap, Workflow, type LucideIcon } from "lucide-react";
 import {
   siCloudflare,
   siFigma,
@@ -79,10 +88,48 @@ export function brandMark(slug: string | undefined): BrandMark | undefined {
   return BRAND_MARKS[slug];
 }
 
+/**
+ * Slug → lucide glyph, for the plugins Valet ships itself. These name no
+ * vendor, so `simple-icons` will never carry a mark for one, and the glyph
+ * is what tells a reader that the row is a capability and which capability
+ * it is.
+ *
+ * Each plugin holds TWO keys, because the id reaching this file depends on
+ * the caller. `/integrations` falls back to the plugin name the wire ships
+ * (`workflows-actions`, `skills-actions`) for a plugin that declares no
+ * credential; a workflow template card names the action service it needs
+ * (`workflows`, `skills`); `/skills` names the plugin a skill came from
+ * (`browser`, `personas`, `sandbox-tunnels`).
+ */
+const PLUGIN_GLYPHS: Record<string, LucideIcon> = {
+  // A real Chromium the agent drives.
+  browser: Globe,
+  // Who the assistant is being; the manifest picks theatre masks too.
+  personas: Drama,
+  // A wire out of the sandbox to a public hostname.
+  "sandbox-tunnels": Cable,
+  skills: GraduationCap,
+  "skills-actions": GraduationCap,
+  workflows: Workflow,
+  "workflows-actions": Workflow,
+};
+
+/** The glyph for a first-party slug, or `undefined` when the slug names a
+ * vendor or a plugin nobody here wrote. */
+export function pluginGlyph(slug: string | undefined): LucideIcon | undefined {
+  if (!slug) return undefined;
+  return PLUGIN_GLYPHS[slug];
+}
+
 /** Recognizable brand hues for the monogram tile; unknown services hash
  * into a small default palette so third-party plugins still get a stable
  * color. Full-strength hexes on purpose — the CSS-var tokens can't take
- * opacity modifiers (theme.css trap). */
+ * opacity modifiers (theme.css trap).
+ *
+ * A service that already draws a mark keeps its hue listed. A brand can
+ * leave the upstream set — Slack did — and its import has to leave this
+ * file with it; the hue is what the card falls back to that day. First-party
+ * plugins hold no hue, because `PLUGIN_GLYPHS` always answers for them. */
 const BRAND_HEX: Record<string, string> = {
   github: "#24292f",
   gmail: "#ea4335",
@@ -100,10 +147,6 @@ const BRAND_HEX: Record<string, string> = {
   typefully: "#1d9bf0",
   telegram: "#229ed9",
   figma: "#a259ff",
-  browser: "#64748b",
-  workflows: "#5f7a5a",
-  personas: "#b98a2f",
-  "sandbox-tunnels": "#64748b",
 };
 
 const FALLBACK_HEX = ["#0ea5e9", "#f97316", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1"];
@@ -163,15 +206,30 @@ export function ServiceIcon({
   size = "md",
   className,
 }: ServiceIconProps) {
+  // A stored skill answers to its author, not to a vendor or a plugin, so
+  // the accent tone skips both registries and keeps its own tile.
   const mark = tone === "accent" ? undefined : brandMark(slug);
+  const Glyph = tone === "accent" || mark ? undefined : pluginGlyph(slug);
+
+  // A mark is a filled outline the vendor drew; a glyph is a lucide stroke
+  // drawing. Both sit in the same wash tile, so a row of them reads as one
+  // set rather than two.
+  const icon = mark ? (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={MARK_SIZE[size]} focusable="false">
+      <path d={mark.path} />
+    </svg>
+  ) : Glyph ? (
+    <Glyph className={MARK_SIZE[size]} focusable="false" />
+  ) : null;
 
   // Decorative: the service name is always beside it in text, so a screen
   // reader that read the icon too would say the name twice.
-  if (mark) {
+  if (icon) {
     return (
       <span
         aria-hidden="true"
-        data-brand-mark={slug}
+        data-brand-mark={mark ? slug : undefined}
+        data-plugin-glyph={Glyph ? slug : undefined}
         className={cn(
           TILE,
           TILE_SIZE[size],
@@ -180,9 +238,7 @@ export function ServiceIcon({
           className,
         )}
       >
-        <svg viewBox="0 0 24 24" fill="currentColor" className={MARK_SIZE[size]} focusable="false">
-          <path d={mark.path} />
-        </svg>
+        {icon}
       </span>
     );
   }
