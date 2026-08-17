@@ -108,6 +108,28 @@ trigger arg types" and gave up.
   malformed schema saved silently and surfaced only as a skipped check
   at run time.
 
+### 2026-08-17 follow-up: lint tool params against the action schema
+
+`isKnownAction` checked a tool node's service/action names and stopped
+there. A workflow saved with `params.pull_number` instead of
+`pullNumber` for `github.get_pull_request` passed the linter, and the
+run failed at the node's runtime schema check ("must have required
+properties pullNumber") — a full wasted run for a typo the save could
+have named. Observed in production agent use.
+
+- `ValidateEnvironment` gains `getActionParams(service, action)`: the
+  action's JSON param schema, or undefined when the host has no static
+  schema (unknown action, dynamic MCP-style plugin). The api's
+  `buildValidateEnvironment` returns each static action's own
+  `parameters` schema.
+- With a schema in hand the linter rejects: missing required parameters
+  (`params is missing required parameter "pullNumber"`), unknown
+  parameter names with a did-you-mean hint against the schema's property
+  names, and a plain value whose type contradicts a primitive-typed
+  property. A value containing `{{...}}` is never type-checked — its
+  type only exists at run time. Without a schema, params pass unchecked,
+  exactly as before.
+
 ## 2026-08-10 addendum: triggers + team-owner surface in the web UI
 
 The editor page gains a Triggers drawer (`packages/web/src/components/

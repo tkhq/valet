@@ -52,16 +52,25 @@ export type ValidationResult = { ok: true } | { ok: false; errors: string[] };
 
 /**
  * Optional environment hooks. When provided, the validator also rejects
- * references the RUNTIME would reject: unknown model specs and unknown
- * tool service/action pairs. Return values:
+ * references the RUNTIME would reject: unknown model specs, unknown
+ * tool service/action pairs, and tool params that cannot satisfy the
+ * action's own parameter schema. Return values:
  *   - `isKnownModel(spec)`: false → error.
  *   - `isKnownAction(service, action)`: "unknown-service" / "unknown-action"
  *     → error; "ok" or "dynamic" (MCP-style plugins whose action list only
  *     resolves at runtime) → pass.
+ *   - `getActionParams(service, action)`: the action's JSON param schema
+ *     (an object with `properties`/`required`), or undefined when the host
+ *     has no static schema (unknown action, dynamic plugin). With a schema
+ *     in hand the linter rejects missing required keys and unknown keys at
+ *     save time — the `pull_number` vs `pullNumber` typo used to pass the
+ *     linter and burn a whole run before the runtime schema check caught it.
+ *     Undefined → params pass unchecked, exactly as without the hook.
  */
 export interface ValidateEnvironment {
   isKnownModel?: (spec: string) => boolean;
   isKnownAction?: (service: string, action: string) => 'ok' | 'dynamic' | 'unknown-service' | 'unknown-action';
+  getActionParams?: (service: string, action: string) => Record<string, unknown> | undefined;
 }
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
@@ -560,6 +569,12 @@ function validateNodeFields(
           );
         }
       }
+      if (isNonEmptyString(node.service) && isNonEmptyString(node.action) && isPlainObject(node.params) && env.getActionParams) {
+        const schema = env.getActionParams(node.service, node.action);
+        if (schema !== undefined) {
+          lintToolParams(label, `${node.service}.${node.action}`, node.params, schema, errors);
+        }
+      }
       if (node.summary !== undefined && typeof node.summary === 'string') {
         checkTemplate(label, 'summary', node.summary, refCtx, errors);
       }
@@ -882,6 +897,82 @@ function hyphenHint(source: string): string {
   const match = source.match(/\bnodes\.([A-Za-z_][A-Za-z0-9_]*-[A-Za-z0-9_-]*)/);
   if (!match) return '';
   return `. Node ids containing "-" must use bracket notation, e.g. nodes["${match[1]}"].result`;
+}
+
+// ─── tool params hook ───────────────────────────────────────────────────────
+
+/**
+ * Lint a tool node's params against the action's JSON param schema
+ * (`env.getActionParams`). Three checks, in order of observed cost:
+ *
+ *   1. missing required keys — the runtime rejects these with an ajv
+ *      message after the run has already started, so catch them at save;
+ *   2. unknown keys, with the same did-you-mean hint the field lint uses
+ *      (`pull_number` for `pullNumber` is THE observed production miss);
+ *   3. a plain-value type check on primitive-typed properties. A value
+ *      containing `{{...}}` is skipped — its type only exists at run time.
+ *
+ * The schema is host-supplied but structurally unverified (MCP servers
+ * write their own), so every level is guarded before dereferencing.
+ */
+function lintToolParams(
+  label: string,
+  actionRef: string,
+  params: Record<string, unknown>,
+  schema: Record<string, unknown>,
+  errors: string[],
+): void {
+  const properties = isPlainObject(schema.properties) ? schema.properties : undefined;
+
+  if (Array.isArray(schema.required)) {
+    for (const name of schema.required) {
+      if (typeof name !== 'string' || name in params) continue;
+      errors.push(
+        `${label}: params is missing required parameter ${JSON.stringify(name)} — add it (${actionRef} requires it)`,
+      );
+    }
+  }
+
+  if (properties === undefined) return;
+  const propertyNames = Object.keys(properties);
+
+  // Unknown-key lint — skipped when the schema declares it takes extras.
+  if (schema.additionalProperties !== true && !isPlainObject(schema.additionalProperties)) {
+    for (const key of Object.keys(params)) {
+      if (key in properties) continue;
+      const hint =
+        didYouMean(key, propertyNames) ||
+        (propertyNames.length > 0
+          ? ` — its parameters are: ${propertyNames.join(', ')}`
+          : ` — it takes no parameters; remove the key`);
+      errors.push(`${label}: params.${key} is not a parameter of ${actionRef}${hint}`);
+    }
+  }
+
+  for (const [key, value] of Object.entries(params)) {
+    const property = properties[key];
+    if (!isPlainObject(property) || typeof property.type !== 'string') continue;
+    if (typeof value === 'string' && value.includes('{{')) continue; // template — resolves at run time
+    const actual = jsonTypeOf(value);
+    if (actual === null) continue;
+    const expected = property.type;
+    if (expected === actual) continue;
+    if (expected === 'integer' && actual === 'number' && Number.isInteger(value)) continue;
+    errors.push(
+      `${label}: params.${key} has the wrong type — ${actionRef} declares it as ${expected}, got ${actual} ${JSON.stringify(value)}`,
+    );
+  }
+}
+
+/** The JSON Schema type name of a plain value, or null for shapes the
+ * cheap check stays out of (null/undefined). */
+function jsonTypeOf(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) return 'array';
+  const t = typeof value;
+  if (t === 'string' || t === 'number' || t === 'boolean') return t;
+  if (t === 'object') return 'object';
+  return null;
 }
 
 // ─── model hook ─────────────────────────────────────────────────────────────
