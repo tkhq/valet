@@ -608,6 +608,74 @@ describe("DB-backed actions", () => {
     });
   });
 
+  describe("patch_workflow removed-edge hint", () => {
+    /** Valid workflow: trigger -> build -> done, so nothing pre-existing
+     * drowns the reachability lint (it only runs on an otherwise-clean
+     * graph). */
+    async function seedCleanChain(): Promise<string> {
+      const created = await createWorkflowDefinition(
+        deps,
+        { userId: "user1", orgId: "org1" },
+        {
+          name: "clean-chain",
+          definition: {
+            version: "dag/v1",
+            nodes: [
+              { id: "trigger", type: "trigger" },
+              { id: "build", type: "set", values: { n: "1" } },
+              { id: "done", type: "stop" },
+            ],
+            edges: [
+              { from: "trigger", to: "build" },
+              { from: "build", to: "done" },
+            ],
+          },
+        },
+      );
+      return created.id;
+    }
+
+    const findWorkflowAction = (id: string) => {
+      const found = workflowsActionPlugin(() => deps).actions.find((a) => a.id === id);
+      if (!found) throw new Error(`action missing: ${id}`);
+      return found;
+    };
+
+    it("names the removed edges when the lint reports unreachable nodes", async () => {
+      const workflowId = await seedCleanChain();
+
+      const result = await findWorkflowAction("workflows.patch_workflow").execute(
+        { workflow_id: workflowId, remove_edges: [{ from: "trigger", to: "build" }] },
+        ctx(),
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error).toContain("is unreachable");
+      expect(result.error).toContain("hint: this patch removed edge(s) trigger->build");
+      expect(result.error).toContain("add a replacement edge in the same patch");
+    });
+
+    it("appends no hint when the failing patch removed no edges", async () => {
+      const workflowId = await seedCleanChain();
+
+      // Upserting a broken node fails the lint, but no edge was removed —
+      // the hint would only mislead.
+      const result = await findWorkflowAction("workflows.patch_workflow").execute(
+        {
+          workflow_id: workflowId,
+          upsert_nodes: [{ id: "bad", type: "llm", prompt: "hi" }],
+          add_edges: [{ from: "build", to: "bad" }],
+        },
+        ctx(),
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error).not.toContain("hint: this patch removed edge(s)");
+    });
+  });
+
   // The agent's batch tracker (batch-fanout design decision 5). An
   // orchestrator watching a 250-item fan-out reads it through this action,
   // so the reach and the guards need their own coverage.

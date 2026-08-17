@@ -82,3 +82,21 @@ export function applyWorkflowPatch(definition: WorkflowDefinition, patch: Workfl
 
   return errors.length > 0 ? { ok: false, errors } : { ok: true, definition: next };
 }
+
+/**
+ * Causal hint for patch-induced unreachability. The post-patch lint says
+ * "node X is unreachable" but never says WHY — and when the patch removed
+ * edges, the removal is the likely cause. Append one line that links the
+ * two, so the agent repairs the patch instead of re-deriving the graph.
+ * Presence-based on purpose: computing exact edge-to-node causality is
+ * not worth it when naming the removed edges already points at the fix.
+ */
+export function appendRemovedEdgeHint(lintErrors: string[], removedEdges: WorkflowEdgeRef[] | undefined): string[] {
+  if (!removedEdges || removedEdges.length === 0) return lintErrors;
+  if (!lintErrors.some((e) => e.includes("is unreachable"))) return lintErrors;
+  const removed = removedEdges.map((e) => `${e.from}->${e.to}`).join(", ");
+  return [
+    ...lintErrors,
+    `hint: this patch removed edge(s) ${removed}; if a removed edge was the only path to the unreachable nodes, add a replacement edge in the same patch`,
+  ];
+}

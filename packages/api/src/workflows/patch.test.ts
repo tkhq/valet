@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowDefinition } from "@valet/workflow";
-import { applyWorkflowPatch } from "./patch.js";
+import { appendRemovedEdgeHint, applyWorkflowPatch } from "./patch.js";
 
 function base(): WorkflowDefinition {
   return {
@@ -86,5 +86,36 @@ describe("applyWorkflowPatch", () => {
     const snapshot = JSON.parse(JSON.stringify(original));
     applyWorkflowPatch(original, { removeNodeIds: ["greet"], upsertNodes: [{ id: "x", type: "stop" }] });
     expect(original).toEqual(snapshot);
+  });
+});
+
+describe("appendRemovedEdgeHint", () => {
+  const unreachable = ['node "done" is unreachable — add an edge path from the trigger ("trigger") to it'];
+
+  it("appends one hint naming the removed edges when the lint reports unreachable nodes", () => {
+    const result = appendRemovedEdgeHint(unreachable, [{ from: "greet", to: "done" }]);
+    expect(result).toHaveLength(2);
+    expect(result[1]).toBe(
+      "hint: this patch removed edge(s) greet->done; if a removed edge was the only path " +
+        "to the unreachable nodes, add a replacement edge in the same patch",
+    );
+  });
+
+  it("lists every removed edge in the hint", () => {
+    const result = appendRemovedEdgeHint(unreachable, [
+      { from: "a", to: "b" },
+      { from: "b", to: "c", fromOutput: "true" },
+    ]);
+    expect(result[1]).toContain("a->b, b->c");
+  });
+
+  it("leaves the errors alone when the patch removed no edges", () => {
+    expect(appendRemovedEdgeHint(unreachable, undefined)).toEqual(unreachable);
+    expect(appendRemovedEdgeHint(unreachable, [])).toEqual(unreachable);
+  });
+
+  it("leaves the errors alone when nothing is unreachable", () => {
+    const other = ['node "x": llm.prompt must be a non-empty string'];
+    expect(appendRemovedEdgeHint(other, [{ from: "a", to: "b" }])).toEqual(other);
   });
 });
