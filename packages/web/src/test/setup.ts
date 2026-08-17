@@ -86,9 +86,13 @@ if (typeof document !== "undefined") {
       const ls = globalThis.localStorage;
       if (typeof ls === "undefined" || typeof ls.clear !== "function") return false;
       ls.setItem("__vitest_probe__", "1");
-      const ok = ls.getItem("__vitest_probe__") === "1";
-      ls.removeItem("__vitest_probe__");
-      return ok;
+      try {
+        return ls.getItem("__vitest_probe__") === "1";
+      } finally {
+        // Unconditional: if `getItem` throws, the key must not survive in
+        // a store that turns out to be real and persisted.
+        ls.removeItem("__vitest_probe__");
+      }
     } catch {
       return false;
     }
