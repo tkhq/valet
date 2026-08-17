@@ -116,6 +116,8 @@ export {
   invokeAction,
   prepareActionArgs,
   approvalModeForAction,
+  pinnedToolName,
+  MAX_PINNED_ACTIONS,
   RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,
@@ -124,6 +126,8 @@ export {
   type PluginActionResult,
   type PluginCatalog,
   type PluginCatalogOptions,
+  type PinnedActionSpec,
+  type PinRejectedHandler,
   type InvokeActionResult,
 } from "./plugin-catalog.js";
 export {

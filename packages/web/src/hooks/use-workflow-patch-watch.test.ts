@@ -56,6 +56,35 @@ describe("definitionWriteCallIds", () => {
     expect(definitionWriteCallIds(messages, "th_1", "wf_1")).toEqual(["call_save"]);
   });
 
+  it("reports a patch made through the pinned direct tool", () => {
+    // The pinned route carries no `tool_id` and nests no `params`. If the
+    // watch followed only the call_tool shape, the agent would save and the
+    // canvas would keep showing the old definition.
+    const messages = [
+      message([
+        toolCall({
+          callId: "call_pinned",
+          toolName: "workflows__patch_workflow",
+          args: { workflow_id: "wf_1", upsert_nodes: [] },
+        }),
+      ]),
+    ];
+    expect(definitionWriteCallIds(messages, "th_1", "wf_1")).toEqual(["call_pinned"]);
+  });
+
+  it("ignores a pinned READ, which returns the same workflowId as a write", () => {
+    const messages = [
+      message([
+        toolCall({
+          callId: "call_pinned_read",
+          toolName: "workflows__get_workflow",
+          args: { workflow_id: "wf_1" },
+        }),
+      ]),
+    ];
+    expect(definitionWriteCallIds(messages, "th_1", "wf_1")).toEqual([]);
+  });
+
   it("ignores reads, which return the same workflowId as a write", () => {
     const messages = [
       message([

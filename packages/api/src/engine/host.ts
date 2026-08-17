@@ -31,6 +31,7 @@ import {
   type ActionPlugin,
   type CommandContext,
   type CommandDef,
+  type PinnedActionSpec,
   type PluginCatalog,
   type RepoInstructions,
   type Sandbox,
@@ -74,6 +75,7 @@ import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
+import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
 /** Personality is capped at injection time (assistant-centered web UI
  * decision 5), independent of any cap the memory service itself applies. */
@@ -707,13 +709,27 @@ export class EngineHost {
    * shadowed inside `pluginSessionExtras`, never thrown: none of the four
    * callers has a try/catch, and a throw here would stop this owner from
    * starting any session.
+   *
+   * `pins` defaults to none, and each caller decides. This method is the one
+   * funnel for FOUR session builders — `buildSession`, `buildAssistantSession`,
+   * `buildChildSession` and `buildWorkflowSession` — so a pin list hard-coded
+   * here would reach unattended, trigger-driven sessions. A pinned tool is
+   * high-salience: it sits in the tool list with host guidance that tells the
+   * model to call it in the same turn. Text that a webhook or an email put in
+   * a workflow run's prompt must not meet that. Only the caller knows whether
+   * a human is watching, so only the caller passes pins.
    */
-  private async sessionExtras(owner: Principal, orgId: string): Promise<PluginSessionExtras> {
+  private async sessionExtras(
+    owner: Principal,
+    orgId: string,
+    pins: readonly PinnedActionSpec[] = [],
+  ): Promise<PluginSessionExtras> {
     const plugins = this.opts.plugins ?? [];
-    if (!this.opts.db) return pluginSessionExtras(plugins, []);
+    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
     return pluginSessionExtras(
       plugins,
       await listSkillSourcesFor(this.opts.db, owner, orgId),
+      pins,
     );
   }
 
@@ -1272,7 +1288,17 @@ export class EngineHost {
     // the memory snapshot this method assembles from `scope.owner`. Scoping
     // to the actor instead would put whoever woke a team assistant's
     // personal skills in front of every other member of that team.
-    const extras = await this.sessionExtras(principal, meta.orgId);
+    //
+    // Pins go to a USER-owned assistant only. A team assistant's session is
+    // cached on the assistant id, and `sessionOptions.userId` below freezes
+    // to the FIRST person who woke it. `workflows.patch_workflow` authorizes
+    // on that frozen `userId`, which reaches that person's own workflows and
+    // every team they belong to. So a pinned save tool in a team assistant
+    // would let the second member drive the first member's principal. The
+    // workflow editor panel always opens the caller's OWN default assistant
+    // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
+    const pins = principal.type === "user" ? PINNED_ACTIONS : [];
+    const extras = await this.sessionExtras(principal, meta.orgId, pins);
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);

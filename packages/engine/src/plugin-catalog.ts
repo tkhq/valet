@@ -1,6 +1,7 @@
-import { Type } from "typebox";
+import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
+import { builtinTools } from "./builtin-tools/index.js";
 import type {
   CredentialProvider,
   DecisionAction,
@@ -32,6 +33,19 @@ import type {
  * accept the legacy @valet/sdk Zod-based ActionSource — plugins must emit
  * the engine-native shape (TypeBox parameters, ToolContext-derived
  * ActionContext, ToolAttachment-typed result attachments).
+ *
+ * PINNED ACTIONS. The indirection has one cost: an action the agent must
+ * use on almost every turn is not in the tool list, so the agent can
+ * describe the change and never make it. `PluginCatalogOptions.pins` lets
+ * the HOST promote a small, fixed set of action ids to direct tools. A
+ * pinned tool is a thin wrapper — it calls the same {@link invokeAction}
+ * that `call_tool` calls — so the approval gate, the argument validation
+ * and the audit record stay identical on both routes. A pinned tool
+ * publishes the action's own schema plus one optional `summary` argument,
+ * which is the sentence `call_tool` also asks for; the summary is stripped
+ * before validation, so the two routes agree about what the action accepts.
+ * Pinning is opt-in: with no pins the tool list is exactly
+ * `[list_tools, call_tool]`.
  */
 
 // ── Plugin shapes ─────────────────────────────────────────────────
@@ -123,10 +137,100 @@ export interface ActionPlugin {
   resolveActions?: (ctx: { credentials: CredentialProvider }) => Promise<PluginAction[]>;
 }
 
+/**
+ * One host request to expose a plugin action as a direct, Anthropic-visible
+ * tool, in addition to reaching it through `call_tool`.
+ */
+export interface PinnedActionSpec {
+  /**
+   * Fully-qualified action id, e.g. "workflows.patch_workflow". It must be
+   * lowercase `service.action_name` — see {@link pinnedToolName} for the
+   * accepted shape and why it is restricted.
+   */
+  actionId: string;
+  /**
+   * Host text appended to the action's own description on the PINNED tool
+   * only. Use it for the rule the agent must not forget, e.g. that a change
+   * it described but did not apply is not a change. The tool catalog is
+   * rebuilt and re-sent on every turn, so text here cannot decay the way a
+   * first-turn user message does.
+   */
+  guidance?: string;
+}
+
+/** Why one pin was refused. The host logs this text, so it names the fix. */
+export type PinRejectedHandler = (actionId: string, reason: string) => void;
+
 export interface PluginCatalogOptions {
   plugins: ActionPlugin[];
   /** Clock used for the dynamic-action-resolution TTL cache. Default: Date.now. */
   clock?: () => number;
+  /**
+   * Actions to also expose as direct tools. Omit for the default behavior:
+   * the tool list stays exactly `[list_tools, call_tool]`.
+   */
+  pins?: readonly PinnedActionSpec[];
+  /**
+   * Tool names the CALLER adds after this function returns (the api appends
+   * a `skill` tool). A pin whose mapped name hits one of these is refused —
+   * nothing dedupes tool names further down, so a collision would ship two
+   * same-named tools to the provider.
+   */
+  reservedToolNames?: readonly string[];
+  /**
+   * Called once for each refused pin. A refused pin is never fatal: the
+   * action stays reachable through `list_tools`/`call_tool`, exactly as it
+   * was before the pin was asked for.
+   */
+  onPinRejected?: PinRejectedHandler;
+}
+
+/**
+ * Ceiling on how many actions one catalog may pin.
+ *
+ * A pinned action publishes its full parameter schema on every request.
+ * That is the budget the list_tools/call_tool indirection exists to
+ * protect, so the budget is bounded by code rather than by convention —
+ * a host list that grows past this refuses the extra entries instead of
+ * quietly spending the prompt.
+ */
+export const MAX_PINNED_ACTIONS = 8;
+
+/**
+ * The accepted shape of a pinnable action id: lowercase alphanumeric
+ * segments, joined by single underscores, in exactly two dot-separated
+ * halves.
+ */
+const PIN_ID_PATTERN = /^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
+/**
+ * Longest pinnable id. The transform adds one character, and Anthropic
+ * caps a tool name at 128.
+ */
+const PIN_ID_MAX_LENGTH = 126;
+
+/**
+ * Maps a fully-qualified action id to an Anthropic-legal tool name, or
+ * returns undefined when the id cannot be mapped.
+ *
+ * Anthropic enforces ^[a-zA-Z0-9_-]{1,128}$ on a tool name, so the dot must
+ * go. The replacement is a double underscore, and the id shape above makes
+ * that mapping reversible: no segment contains `__` (segments are joined by
+ * SINGLE underscores) and no segment starts or ends with `_`, so the
+ * inserted `__` is the only `__` in the result. Two different ids therefore
+ * cannot map to one name.
+ *
+ * The shape is deliberately narrower than what a plugin may declare. An
+ * MCP-proxy plugin builds its ids from an upstream server's tool names, so
+ * `linear.create-issue` or an uppercase name is possible; those ids are
+ * refused rather than mangled into a name that could collide.
+ */
+export function pinnedToolName(actionId: string): string | undefined {
+  if (actionId.length > PIN_ID_MAX_LENGTH) return undefined;
+  if (!PIN_ID_PATTERN.test(actionId)) return undefined;
+  // The pattern permits exactly one dot, so a first-occurrence replace is
+  // the whole transform.
+  return actionId.replace(".", "__");
 }
 
 /** TTL for the dynamic `resolveActions` cache, keyed per plugin service. */
@@ -183,12 +287,16 @@ export function buildPluginCatalog(
 
 /**
  * Build the [list_tools, call_tool] pair backed by an in-memory catalog
- * assembled from every ActionPlugin in `opts.plugins`.
+ * assembled from every ActionPlugin in `opts.plugins`, plus one direct tool
+ * for each accepted entry of `opts.pins`.
+ *
+ * With no pins the result is exactly the two catalog tools, in that order.
  */
 export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
   const catalog = buildCatalog(opts.plugins, now);
-  return [makeListTool(catalog), makeCallTool(catalog)];
+  const pinned = resolvePins(catalog, opts);
+  return [makeListTool(catalog, pinned.nameByActionId), makeCallTool(catalog), ...pinned.tools];
 }
 
 /**
@@ -521,7 +629,14 @@ async function resolveDynamic(
 const LIST_LIMIT_DEFAULT = 50;
 const LIST_LIMIT_MAX = 200;
 
-function makeListTool(catalog: Catalog): ToolDef {
+/**
+ * `pinnedNames` maps a fully-qualified action id to the direct tool that
+ * also invokes it. A pinned action stays listed here: `list_tools` is the
+ * only complete inventory, and `call_tool` keeps accepting the id whatever
+ * the host pins, so hiding the row would make the same catalog answer
+ * differently in two deployments. The row names its direct tool instead.
+ */
+function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>): ToolDef {
   return {
     name: "list_tools",
     description:
@@ -625,14 +740,19 @@ function makeListTool(catalog: Catalog): ToolDef {
         }
       }
 
-      const tools = entries.slice(0, limit).map((e) => ({
-        service: e.service,
-        tool_id: qualifiedId(e),
-        name: e.action.name,
-        description: e.action.description,
-        riskLevel: e.action.riskLevel,
-        params: e.action.parameters,
-      }));
+      const tools = entries.slice(0, limit).map((e) => {
+        const toolId = qualifiedId(e);
+        return {
+          service: e.service,
+          tool_id: toolId,
+          name: e.action.name,
+          description: e.action.description,
+          riskLevel: e.action.riskLevel,
+          params: e.action.parameters,
+          // Absent for every unpinned action — JSON.stringify drops it.
+          direct_tool: pinnedNames.get(toolId),
+        };
+      });
 
       const total = entries.length;
       return {
@@ -680,40 +800,266 @@ function makeCallTool(catalog: Catalog): ToolDef {
         summary: string;
       };
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
-      switch (outcome.kind) {
-        case "ok":
-          return actionResultToToolResult(outcome.result, a.tool_id);
-        case "unknown":
-          return {
-            text: `unknown tool_id: "${a.tool_id}". Use list_tools to find available actions.`,
-          };
-        case "resolve-failed":
-          return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
-        case "denied-policy":
-          return { text: `denied: ${a.tool_id} is blocked by org policy` };
-        // The LLM tool path has no distinct "pending" state — requestDecision
-        // blocks until the gate resolves — so both approval outcomes collapse
-        // to the same "did not approve" text.
-        case "denied-approval":
-          return {
-            text:
-              outcome.reason === "approval-processing-failed"
-                ? `denied: approval processing failed, so ${a.tool_id} did not approve`
-                : `denied: user did not approve ${a.tool_id}`,
-          };
-        case "pending-approval":
-          return { text: `denied: user did not approve ${a.tool_id}` };
-        case "invalid-args":
-          return { text: `invalid params for ${a.tool_id}: ${outcome.error}` };
-        case "missing-credential":
-          return {
-            text: `${a.tool_id} failed: credential ${outcome.service} not connected`,
-          };
-        case "error":
-          return { text: `error: ${outcome.message}` };
-      }
+      return renderInvokeOutcome(outcome, a.tool_id);
     },
   };
+}
+
+/**
+ * Renders one {@link InvokeActionResult} into the `ToolResult` the LLM
+ * reads. `call_tool` and every pinned tool share this function, so the
+ * denial, validation and credential wording cannot drift apart between the
+ * two routes.
+ */
+function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
+  switch (outcome.kind) {
+    case "ok":
+      return actionResultToToolResult(outcome.result, toolId);
+    case "unknown":
+      return {
+        text: `unknown tool_id: "${toolId}". Use list_tools to find available actions.`,
+      };
+    case "resolve-failed":
+      return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
+    case "denied-policy":
+      return { text: `denied: ${toolId} is blocked by org policy` };
+    // The LLM tool path has no distinct "pending" state — requestDecision
+    // blocks until the gate resolves — so both approval outcomes collapse
+    // to the same "did not approve" text.
+    case "denied-approval":
+      return {
+        text:
+          outcome.reason === "approval-processing-failed"
+            ? `denied: approval processing failed, so ${toolId} did not approve`
+            : `denied: user did not approve ${toolId}`,
+      };
+    case "pending-approval":
+      return { text: `denied: user did not approve ${toolId}` };
+    case "invalid-args":
+      return { text: `invalid params for ${toolId}: ${outcome.error}` };
+    case "missing-credential":
+      return {
+        text: `${toolId} failed: credential ${outcome.service} not connected`,
+      };
+    case "error":
+      return { text: `error: ${outcome.message}` };
+  }
+}
+
+// ── pinned tools ─────────────────────────────────────────────────
+
+interface ResolvedPins {
+  tools: ToolDef[];
+  /** Fully-qualified action id → the direct tool name that also invokes it. */
+  nameByActionId: Map<string, string>;
+}
+
+/**
+ * Turns the host's pin list into direct tools, and refuses every entry it
+ * cannot map safely.
+ *
+ * A refusal is never a throw. `pluginCatalogTools` runs on every session
+ * build with no try/catch above it, so a throw here would stop a person
+ * starting any session because of a host config mistake. A refused pin
+ * costs nothing: the action stays reachable through `list_tools` and
+ * `call_tool`.
+ */
+function resolvePins(catalog: Catalog, opts: PluginCatalogOptions): ResolvedPins {
+  const tools: ToolDef[] = [];
+  const nameByActionId = new Map<string, string>();
+  const pins = opts.pins ?? [];
+  if (pins.length === 0) return { tools, nameByActionId };
+
+  const reject = opts.onPinRejected;
+  // Every name that must stay unique in the final tool array: the engine's
+  // own builtins, the two catalog tools, and the names the caller appends
+  // after this function returns. `Thread.buildTools` concatenates the
+  // builtins with the session tools and does NOT dedupe, so a repeat would
+  // ship two same-named tools to the provider.
+  //
+  // No builtin name contains `__` today, so no mapped name can equal one.
+  // The builtins are listed anyway: the uniqueness rule then holds from the
+  // set itself, and a future builtin cannot break it in silence.
+  const taken = new Set<string>([
+    ...builtinTools.map((t) => t.name),
+    "list_tools",
+    "call_tool",
+    ...(opts.reservedToolNames ?? []),
+  ]);
+
+  for (const pin of pins) {
+    const { actionId } = pin;
+    if (tools.length >= MAX_PINNED_ACTIONS) {
+      reject?.(
+        actionId,
+        `the pin list is over the ceiling of ${MAX_PINNED_ACTIONS} actions. ` +
+          `Remove a pin before you add this one; the action still works through call_tool.`,
+      );
+      continue;
+    }
+
+    const name = pinnedToolName(actionId);
+    if (!name) {
+      reject?.(
+        actionId,
+        `the id cannot become a tool name. Pin an id of the form ` +
+          `"service.action_name" — lowercase letters, digits and single ` +
+          `underscores only, at most ${PIN_ID_MAX_LENGTH} characters.`,
+      );
+      continue;
+    }
+
+    if (taken.has(name)) {
+      reject?.(
+        actionId,
+        `the tool name "${name}" is already in use. Rename the action, or ` +
+          `drop this pin and reach the action through call_tool.`,
+      );
+      continue;
+    }
+
+    // `catalog.byId` holds only statically declared actions. A plugin whose
+    // actions come from `resolveActions` has none at build time, so its
+    // actions are unpinnable and land here.
+    const entry = catalog.byId.get(actionId);
+    if (!entry) {
+      reject?.(
+        actionId,
+        `no plugin declares this action. Check the id against list_tools, ` +
+          `and note that a dynamically resolved action cannot be pinned.`,
+      );
+      continue;
+    }
+
+    taken.add(name);
+    nameByActionId.set(qualifiedId(entry), name);
+    tools.push(makePinnedTool(catalog, entry, actionId, name, pin.guidance));
+  }
+
+  return { tools, nameByActionId };
+}
+
+/**
+ * The argument a pinned tool adds so the model can write its own summary.
+ * Same name and same meaning as `call_tool`'s own `summary` argument.
+ */
+const PINNED_SUMMARY_ARG = "summary";
+
+/** Published on the added argument. Matches `call_tool`'s wording. */
+const PINNED_SUMMARY_DESCRIPTION =
+  "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.";
+
+/**
+ * Publishes the action's schema with a `summary` argument added.
+ *
+ * WHY. The summary is the first line of an approval gate body and the
+ * `summary` field of every audit record. `call_tool` takes it from the
+ * model. A pinned tool that derived a constant instead would ask a person
+ * to approve an action with no statement of intent, and would write the
+ * same constant on every audit row for that action. An action can move to
+ * `require_approval` at any time through an org policy, so a pinned tool
+ * must carry the model's own sentence.
+ *
+ * The added argument is optional and it is stripped before validation, so
+ * the two routes still agree about what the ACTION accepts. `carriesSummary`
+ * is false in two cases, and the caller then falls back to a derived
+ * constant: the schema is not an object, or the action already declares its
+ * own `summary` property. The second case is what stops a collision with a
+ * real parameter of the same name.
+ */
+function withSummaryArg(schema: TSchema): { schema: TSchema; carriesSummary: boolean } {
+  if (!IsObject(schema)) return { schema, carriesSummary: false };
+  if (Object.hasOwn(schema.properties, PINNED_SUMMARY_ARG)) {
+    return { schema, carriesSummary: false };
+  }
+  const published = Type.Object(
+    {
+      ...schema.properties,
+      [PINNED_SUMMARY_ARG]: Type.Optional(
+        Type.String({ description: PINNED_SUMMARY_DESCRIPTION }),
+      ),
+    },
+    // Keeps `description`, `additionalProperties` and every other keyword
+    // the action set on its own object schema. `ObjectOptions` discards the
+    // four keywords `Type.Object` recomputes.
+    ObjectOptions(schema),
+  );
+  return { schema: published, carriesSummary: true };
+}
+
+/**
+ * Splits the model's `summary` argument off the action's own parameters.
+ *
+ * The summary never reaches `prepareActionArgs` or the plugin's `execute`,
+ * and it never lands in the audit record's `params`. A blank or non-string
+ * value becomes undefined, so the caller's fallback applies.
+ */
+function splitSummaryArg(args: Record<string, unknown> | undefined): {
+  params: Record<string, unknown> | undefined;
+  summary: string | undefined;
+} {
+  if (!args) return { params: undefined, summary: undefined };
+  const raw = args[PINNED_SUMMARY_ARG];
+  const params = { ...args };
+  delete params[PINNED_SUMMARY_ARG];
+  const summary = typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
+  return { params, summary };
+}
+
+/**
+ * One direct tool for one catalog action.
+ *
+ * The body holds no execution logic of its own — it calls
+ * {@link invokeAction}, the same core `call_tool` and the slash-command
+ * path call. That is what keeps the approval gate, `prepareActionArgs`
+ * validation, credential scoping and the audit record identical on both
+ * routes. `requiresApproval` is deliberately NOT set: nothing in the engine
+ * reads that field, so setting it would look like a gate and do nothing.
+ */
+function makePinnedTool(
+  catalog: Catalog,
+  entry: CatalogEntry,
+  actionId: string,
+  name: string,
+  guidance: string | undefined,
+): ToolDef {
+  const parts = [entry.action.description];
+  if (guidance) parts.push(guidance);
+  parts.push(`Same action as \`${actionId}\` through call_tool.`);
+  const published = withSummaryArg(entry.action.parameters);
+  // The constant the gate body and the audit record fall back to. It names
+  // the action and the tool, so a record is still readable when the model
+  // sends no summary or the schema cannot carry one.
+  const derivedSummary = `${entry.action.name} (${name})`;
+  return {
+    name,
+    description: parts.join(" "),
+    parameters: published.schema,
+    riskLevel: entry.action.riskLevel,
+    execute: async (args, ctx): Promise<ToolResult> => {
+      const record = isParamRecord(args) ? args : undefined;
+      const split = published.carriesSummary
+        ? splitSummaryArg(record)
+        : { params: record, summary: undefined };
+      const outcome = await invokeAction(
+        catalog,
+        actionId,
+        split.params,
+        ctx,
+        split.summary ?? derivedSummary,
+      );
+      return renderInvokeOutcome(outcome, actionId);
+    },
+  };
+}
+
+/**
+ * True when tool args are the plain object `invokeAction` expects.
+ * Anything else becomes undefined at the call site, which
+ * `prepareActionArgs` then defaults and validates like an empty call.
+ */
+function isParamRecord(args: unknown): args is Record<string, unknown> {
+  return typeof args === "object" && args !== null && !Array.isArray(args);
 }
 
 // ── helpers ──────────────────────────────────────────────────────
