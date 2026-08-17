@@ -142,6 +142,14 @@ function addSource(
   enforceable = true,
 ): void {
   if (typeof value !== 'string' || value === '') return;
+  // A `template` string is only a source when it actually holds a template.
+  // A plain literal — `"bug"` in a list of labels — resolves to itself, so
+  // reporting it as a source would make the diagnostics answer about strings
+  // that can never fail.
+  //
+  // An `expression` is exempt: an `if` node's `left` is a bare expression
+  // with no delimiters, so the whole string is the source.
+  if (syntax === 'template' && !value.includes('{{')) return;
   out.push({ field, source: value, syntax, enforceable });
 }
 
@@ -149,7 +157,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Walk arbitrary JSON and take every string leaf as a template. */
+/** Walk arbitrary JSON. Every string leaf is offered to `addSource`, which
+ * keeps only the ones that actually hold a template. */
 function addJson(out: NodeTemplateSource[], field: string, value: unknown): void {
   if (typeof value === 'string') {
     addSource(out, field, value);

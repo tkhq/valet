@@ -23,10 +23,11 @@ function ctx(overrides?: Partial<PluginActionContext>): PluginActionContext {
 }
 
 describe("workflowsActionPlugin", () => {
-  it("exposes the five workflow actions with workflows.* ids", () => {
+  it("exposes every workflow action under a workflows.* id", () => {
     const plugin = workflowsActionPlugin(noDeps);
     expect(plugin.service).toBe("workflows");
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
+      "workflows.add_aggregate",
       "workflows.cancel_run",
       "workflows.create_schedule",
       "workflows.create_trigger",
