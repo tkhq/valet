@@ -44,6 +44,11 @@ export interface GithubFixtureHandlers {
   getRepo?: (owner: string, repo: string) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/pulls/:pull_number` */
   getPull?: (ref: PullRef) => GithubFixtureResponse;
+  /** `PATCH /repos/:owner/:repo/pulls/:pull_number` */
+  updatePull?: (ref: PullRef, body: unknown) => GithubFixtureResponse;
+  /** `PATCH /repos/:owner/:repo/issues/:issue_number` — a pull request's
+   * assignees travel through this route. */
+  updateIssue?: (owner: string, repo: string, issueNumber: string, body: unknown) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/pulls/:pull_number/files` — receives the parsed
    * query so a fixture can serve real pages. */
   listPullFiles?: (ref: PullRef, query: Record<string, string>) => GithubFixtureResponse;
@@ -94,6 +99,22 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       additions: 0,
       deletions: 0,
       changed_files: 0,
+    },
+  }),
+  updatePull: (ref) => ({
+    body: {
+      number: Number(ref.pullNumber),
+      title: "fixture pull request",
+      state: "open",
+      html_url: `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.pullNumber}`,
+    },
+  }),
+  updateIssue: (owner, repo, issueNumber) => ({
+    body: {
+      number: Number(issueNumber),
+      title: "fixture pull request",
+      state: "open",
+      html_url: `https://github.com/${owner}/${repo}/pull/${issueNumber}`,
     },
   }),
   listPullFiles: () => ({ body: [] }),
@@ -204,6 +225,24 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     record(c, asParams(ref));
     const { status, body } = handlers.listReviewComments(ref);
     return c.json(body as object, status ?? 200);
+  });
+
+  app.patch("/repos/:owner/:repo/pulls/:pull_number", async (c) => {
+    const ref = pullRef(c);
+    const body = await readJson(c);
+    record(c, asParams(ref), body);
+    const { status, body: respBody } = handlers.updatePull(ref, body);
+    return c.json(respBody as object, status ?? 200);
+  });
+
+  app.patch("/repos/:owner/:repo/issues/:issue_number", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const issueNumber = c.req.param("issue_number");
+    const body = await readJson(c);
+    record(c, { owner, repo, issue_number: issueNumber }, body);
+    const { status, body: respBody } = handlers.updateIssue(owner, repo, issueNumber, body);
+    return c.json(respBody as object, status ?? 200);
   });
 
   app.get("/repos/:owner/:repo/pulls/:pull_number", (c) => {
