@@ -567,6 +567,21 @@ export function setViewport(definition: WorkflowDefinition, viewport: FlowViewpo
 export const LAYOUT_COLUMN_GAP = 260;
 export const LAYOUT_ROW_GAP = 120;
 
+/** The widest a node card renders (flow-node's `max-w-[240px]`). */
+const LAYOUT_NODE_WIDTH = 240;
+/** Average glyph width of the 11px edge-label font. */
+const LABEL_CHAR_WIDTH = 6.5;
+/** Label background padding plus breathing room on both sides. */
+const LABEL_MARGIN = 32;
+/** Ceiling on how far one label can push a column — a pathological
+ * expression must not stretch the canvas without bound. */
+const LABEL_MAX_WIDTH = 420;
+
+/** Estimated rendered width of an edge's `when` badge, in canvas px. */
+export function estimateEdgeLabelWidth(when: string): number {
+  return Math.min(LABEL_MAX_WIDTH, when.length * LABEL_CHAR_WIDTH + LABEL_MARGIN);
+}
+
 /**
  * Column = BFS depth from the roots (nodes with no incoming edges — in
  * practice just the trigger); row = index within that depth, in
@@ -575,6 +590,13 @@ export const LAYOUT_ROW_GAP = 120;
  * edges, or genuinely disconnected) fall back to their index in
  * `definition.nodes` as their depth, so they still get a placed, distinct
  * position instead of colliding at the origin.
+ *
+ * Columns are not a fixed pitch: xyflow draws an edge's `when` badge at the
+ * midpoint of the path, so a labeled edge between columns needs the gap
+ * between them to fit the badge or the neighboring nodes cover it. Each
+ * column boundary widens to the largest label estimate that crosses it; an
+ * edge that spans several columns splits its width evenly across them,
+ * since its midpoint gets the combined space.
  */
 export function autoLayout(definition: WorkflowDefinition): Record<string, FlowPosition> {
   const nodeIds = new Set(definition.nodes.map((node) => node.id));
@@ -595,10 +617,37 @@ export function autoLayout(definition: WorkflowDefinition): Record<string, FlowP
     nodesByDepth.set(depth, [...(nodesByDepth.get(depth) ?? []), node.id]);
   }
 
+  // Free space between node borders under the base pitch; a labeled edge
+  // crossing boundary d (between column d and d+1) widens it when the
+  // label estimate does not fit.
+  const baseFree = LAYOUT_COLUMN_GAP - LAYOUT_NODE_WIDTH;
+  const extraByBoundary = new Map<number, number>();
+  for (const edge of definition.edges) {
+    if (!edge.when) continue;
+    const fromDepth = depths.get(edge.from);
+    const toDepth = depths.get(edge.to);
+    if (fromDepth === undefined || toDepth === undefined) continue;
+    const lo = Math.min(fromDepth, toDepth);
+    const hi = Math.max(fromDepth, toDepth);
+    if (hi === lo) continue; // same column — the badge sits in row space
+    const span = hi - lo;
+    const perBoundary = Math.max(0, estimateEdgeLabelWidth(edge.when) / span - baseFree);
+    if (perBoundary === 0) continue;
+    for (let boundary = lo; boundary < hi; boundary += 1) {
+      extraByBoundary.set(boundary, Math.max(extraByBoundary.get(boundary) ?? 0, perBoundary));
+    }
+  }
+
+  const maxDepth = Math.max(0, ...nodesByDepth.keys());
+  const columnX: number[] = [0];
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    columnX.push(columnX[depth]! + LAYOUT_COLUMN_GAP + (extraByBoundary.get(depth) ?? 0));
+  }
+
   const positions: Record<string, FlowPosition> = {};
   for (const [depth, ids] of nodesByDepth) {
     ids.forEach((id, row) => {
-      positions[id] = { x: depth * LAYOUT_COLUMN_GAP, y: row * LAYOUT_ROW_GAP };
+      positions[id] = { x: columnX[depth] ?? depth * LAYOUT_COLUMN_GAP, y: row * LAYOUT_ROW_GAP };
     });
   }
   return positions;

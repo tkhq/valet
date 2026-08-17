@@ -11,6 +11,7 @@ import {
   createEdgeId,
   createNodeId,
   duplicateNode,
+  estimateEdgeLabelWidth,
   flowEdgeToWorkflowEdge,
   fromFlow,
   graphSignature,
@@ -475,6 +476,70 @@ describe('autoLayout (BFS depth layering)', () => {
     const first = autoLayout(definition);
     const second = autoLayout(structuredClone(definition));
     expect(first).toEqual(second);
+  });
+
+  it('widens a column boundary so a when-labeled edge has room for its badge', () => {
+    const when = '!nodes.confirm_assignment.result.approved';
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'b', type: 'set', values: {} },
+      ],
+      edges: [
+        { from: 'trigger', to: 'a', when },
+        { from: 'a', to: 'b' },
+      ],
+    };
+    const positions = autoLayout(definition);
+    // The labeled boundary must leave at least the estimated badge width
+    // of free space between the node borders (nodes render up to 240 wide).
+    const free = positions.a!.x - positions.trigger!.x - 240;
+    expect(free).toBeGreaterThanOrEqual(estimateEdgeLabelWidth(when));
+    // The unlabeled boundary keeps the base pitch.
+    expect(positions.b!.x - positions.a!.x).toBe(LAYOUT_COLUMN_GAP);
+  });
+
+  it('splits a multi-column label across the boundaries it spans', () => {
+    const when = 'nodes.check.result.ok && nodes.other.result.ok';
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'b', type: 'set', values: {} },
+      ],
+      edges: [
+        { from: 'trigger', to: 'a' },
+        { from: 'a', to: 'b' },
+        // Skip-level edge: trigger (depth 0) → b (depth 2).
+        { from: 'trigger', to: 'b', when },
+      ],
+    };
+    const positions = autoLayout(definition);
+    // Combined free space across the span fits the badge estimate.
+    const free = positions.b!.x - positions.trigger!.x - 2 * 240;
+    expect(free).toBeGreaterThanOrEqual(estimateEdgeLabelWidth(when) - 240);
+    // Both boundaries widen by the same amount — the split is even.
+    expect(positions.a!.x - positions.trigger!.x).toBe(positions.b!.x - positions.a!.x);
+  });
+
+  it('returns an empty layout for a zero-node definition', () => {
+    expect(autoLayout({ version: 'dag/v1', nodes: [], edges: [] })).toEqual({});
+  });
+
+  it('caps how far a single pathological label can stretch a column', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+      ],
+      edges: [{ from: 'trigger', to: 'a', when: 'x'.repeat(500) }],
+    };
+    const positions = autoLayout(definition);
+    expect(positions.a!.x - positions.trigger!.x).toBeLessThanOrEqual(240 + 420 + LAYOUT_COLUMN_GAP);
   });
 
 });
