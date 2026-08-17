@@ -191,8 +191,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # file uids >= 63536 lose those mappings (rare). (The rootless path only
 # matters on the docker local-dev backend now — the k8s branch runs
 # rootful inside the pod userns and never touches sub-ids.)
-RUN getent group docker >/dev/null || groupadd docker; \
-    useradd -m -u 1500 -G docker dockerd \
+RUN (getent group docker >/dev/null || groupadd docker) \
+    && useradd -m -u 1500 -G docker dockerd \
     && grep -v '^dockerd:' /etc/subuid > /tmp/subuid.tmp && mv /tmp/subuid.tmp /etc/subuid \
     && grep -v '^dockerd:' /etc/subgid > /tmp/subgid.tmp && mv /tmp/subgid.tmp /etc/subgid \
     && echo "dockerd:2000:63536" >> /etc/subuid \
