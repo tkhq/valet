@@ -34,10 +34,14 @@ import type {
   WorkflowEventTriggerResponse,
   WorkflowScheduleResponse,
 } from "@valet/api/wire";
-import { api, ApiError, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
+import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
-  list: () => ["workflows"] as const,
+  /** The owner is a trailing element, so `["workflows"]` stays the prefix
+   * that invalidates every workspace's list at once — a workflow created in
+   * one workspace still refreshes the others. */
+  list: (owner?: OwnerFilter) =>
+    ["workflows", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   detail: (id: string) => ["workflows", id] as const,
   // The page/filter is a trailing key element, so two pages of one list are
   // two cache entries while the page-less form stays the prefix that
@@ -57,10 +61,20 @@ export const qkWorkflows = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useWorkflows(opts?: Partial<UseQueryOptions<ListWorkflowsResponse>>) {
+/**
+ * The workflows of one workspace, or of everything the caller can reach.
+ *
+ * `owner` MUST be part of the query key, not only the request. Without it
+ * React Query answers a switched workspace from the previous workspace's
+ * cache: the list looks right on the first switch and wrong on the way back.
+ */
+export function useWorkflows(
+  owner?: OwnerFilter,
+  opts?: Partial<UseQueryOptions<ListWorkflowsResponse>>,
+) {
   return useQuery<ListWorkflowsResponse>({
-    queryKey: qkWorkflows.list(),
-    queryFn: () => api.listWorkflows(),
+    queryKey: qkWorkflows.list(owner),
+    queryFn: () => api.listWorkflows(owner),
     ...opts,
   });
 }

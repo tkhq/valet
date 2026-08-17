@@ -180,6 +180,27 @@ import type {
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
+/**
+ * One workspace, as the list endpoints take it.
+ *
+ * `undefined` means "do not narrow", which is not the same as the personal
+ * workspace: unnarrowed lists return the caller's own rows AND every team's
+ * they belong to. The personal workspace is `{ ownerType: "user", ownerId:
+ * <the caller's id> }`.
+ */
+export interface OwnerFilter {
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+}
+
+/** `?ownerType=&ownerId=`, or empty. The server rejects a half-specified
+ * pair, so both are written or neither is. */
+function ownerQuery(owner: OwnerFilter | undefined): string {
+  if (!owner) return "";
+  const qs = new URLSearchParams({ ownerType: owner.ownerType, ownerId: owner.ownerId });
+  return `?${qs.toString()}`;
+}
+
 class ApiError extends Error {
   constructor(public status: number, message: string, public payload?: unknown) {
     super(message);
@@ -506,7 +527,12 @@ export const api = {
     request<{ ok: true }>("PUT", "/notifications/preferences", body),
 
   // workflows (engine v2 Phase 5 decision 19)
-  listWorkflows: () => request<ListWorkflowsResponse>("GET", "/workflows"),
+  /** Unscoped lists the caller's own workflows PLUS every team's they belong
+   * to. `owner` narrows it to one workspace, which is what the workspace
+   * switcher means. Both parts go together or neither: the server rejects a
+   * half-specified pair rather than guessing. */
+  listWorkflows: (owner?: OwnerFilter) =>
+    request<ListWorkflowsResponse>("GET", `/workflows${ownerQuery(owner)}`),
   getWorkflow: (id: string) =>
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
