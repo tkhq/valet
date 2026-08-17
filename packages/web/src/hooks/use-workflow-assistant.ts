@@ -206,11 +206,28 @@ export function useWorkflowAssistant(
   // Neither the assistants list nor `GET /info` creates an engine session,
   // so mounting the conversation on the id they report would 404 with no
   // retry path. Every call here is idempotent.
+  /**
+   * The session id this mount last called ensure for.
+   *
+   * It is not cleared on success, because success sets `openedSessionId` and
+   * the first guard below then stops the effect before this one is read.
+   *
+   * It IS re-armed when identity changes — the assistants list settling on a
+   * different default after a reconnect. A second ensure is correct there,
+   * since the new assistant needs its own session. What is not correct is
+   * letting the FIRST call's answer land afterwards: it would write the old
+   * assistant's session id over the new one, and the panel would open a
+   * conversation belonging to an assistant the user has moved off. The
+   * handlers below therefore check that this ref still names the call they
+   * belong to before they write anything.
+   */
   const ensuringRef = useRef<string | null>(null);
   useEffect(() => {
     if (!sessionId || openedSessionId === sessionId) return;
     if (ensuringRef.current === sessionId) return;
     ensuringRef.current = sessionId;
+    /** The identity this call is for; compared against the ref on settle. */
+    const requested = sessionId;
     // `mutateAsync`, not `mutate` with per-call callbacks. React Query only
     // delivers those callbacks while the observer still has listeners, so an
     // editor page that unmounts while the call is in flight loses the one
@@ -220,10 +237,19 @@ export function useWorkflowAssistant(
       ? ensureAssistantSession.mutateAsync(own.id)
       : ensureOrchestrator.mutateAsync(undefined);
     ensure.then(
-      // The server's own answer, not the id this render guessed from the
-      // assistants list.
-      (res) => setOpenedSessionId(res.sessionId),
+      (res) => {
+        // A late answer for an assistant this hook has moved off must not
+        // write its session id over the current one.
+        if (ensuringRef.current !== requested) return;
+        // The server's own answer, not the id this render guessed from the
+        // assistants list.
+        setOpenedSessionId(res.sessionId);
+      },
       () => {
+        // Same staleness check: a superseded call's failure is not this
+        // assistant's failure, and clearing the latch here would re-arm the
+        // effect for an identity that is no longer current.
+        if (ensuringRef.current !== requested) return;
         // Release the latch. It is set before the call and was cleared on no
         // path, so one failed ensure stopped this mount from ever opening a
         // session again.
