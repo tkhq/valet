@@ -51,7 +51,10 @@ export const DialogContent = forwardRef<ElementRef<typeof RDialog.Content>, Dial
           className={cn(
             "fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2",
             "bg-[--bg] border border-[--border] rounded-lg shadow-xl",
-            "p-5 grid gap-4",
+            "max-h-[85vh] overflow-y-auto",
+            // minmax(0,1fr): wide intrinsic children (long <option> text, long
+            // links) must not stretch the track past the panel width.
+            "p-5 grid grid-cols-[minmax(0,1fr)] gap-4",
             "focus:outline-none",
             className,
           )}

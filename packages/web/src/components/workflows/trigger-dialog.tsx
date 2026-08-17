@@ -33,6 +33,7 @@ import {
   DialogFooter,
   Input,
   Label,
+  Textarea,
 } from "~/components/primitives";
 
 type TriggerKind = "schedule" | "event";
@@ -291,7 +292,7 @@ export function TriggerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={title}>
+      <DialogContent title={title} className="max-w-2xl">
         <div className="grid gap-4">
           {/* Kind picker — only shown when creating */}
           {!isEditing && (
@@ -393,7 +394,7 @@ export function TriggerDialog({
                     value={selectedWorkflowId}
                     onChange={(e) => setSelectedWorkflowId(e.target.value)}
                     disabled={isEditing}
-                    className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                    className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
                   >
                     <option value="">— select workflow —</option>
                     {workflows.map((w) => (
@@ -413,13 +414,12 @@ export function TriggerDialog({
                     .targetKind === "orchestrator")) && (
                 <div className="grid gap-1">
                   <Label htmlFor="trigger-prompt">Prompt</Label>
-                  <textarea
+                  <Textarea
                     id="trigger-prompt"
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
-                    rows={3}
+                    rows={4}
                     placeholder="Summarize overnight changes"
-                    className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink resize-none"
                   />
                 </div>
               )}
@@ -432,13 +432,13 @@ export function TriggerDialog({
                     .targetKind === "workflow")) && (
                 <div className="grid gap-1">
                   <Label htmlFor="trigger-input">Input (JSON)</Label>
-                  <textarea
+                  <Textarea
                     id="trigger-input"
                     value={inputJson}
                     onChange={(e) => setInputJson(e.target.value)}
-                    rows={3}
+                    rows={8}
                     placeholder='{"env": "prod"}'
-                    className="rounded border border-line bg-paper px-2 py-1.5 text-sm font-mono text-ink resize-none"
+                    className="font-mono"
                   />
                   {inputJsonError && (
                     <div className="text-xs text-danger-500">{inputJsonError}</div>
@@ -459,7 +459,7 @@ export function TriggerDialog({
                     value={selectedWorkflowId}
                     onChange={(e) => setSelectedWorkflowId(e.target.value)}
                     disabled={isEditing}
-                    className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                    className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
                   >
                     <option value="">— select workflow —</option>
                     {workflows.map((w) => (
@@ -478,7 +478,7 @@ export function TriggerDialog({
                   id="trigger-event-key"
                   value={eventKey}
                   onChange={(e) => setEventKey(e.target.value)}
-                  className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                  className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
                 >
                   <option value="">— select event —</option>
                   {catalogEntries.map((entry) => (
@@ -492,13 +492,13 @@ export function TriggerDialog({
               {/* Filters as raw JSON textarea */}
               <div className="grid gap-1">
                 <Label htmlFor="trigger-filters">Filters (JSON)</Label>
-                <textarea
+                <Textarea
                   id="trigger-filters"
                   value={filtersJson}
                   onChange={(e) => setFiltersJson(e.target.value)}
-                  rows={3}
+                  rows={8}
                   placeholder='[{"field": "branch", "value": "main"}]'
-                  className="rounded border border-line bg-paper px-2 py-1.5 text-sm font-mono text-ink resize-none"
+                  className="font-mono"
                 />
                 {filtersJsonError && (
                   <div className="text-xs text-danger-500">{filtersJsonError}</div>
