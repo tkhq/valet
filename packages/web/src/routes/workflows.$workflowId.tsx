@@ -230,10 +230,14 @@ function WorkflowEditorPane({
     goToRun(result.runId);
   }
 
-  function closePreapprove(open: boolean) {
+  function setPreapproveDialog(open: boolean) {
     setPreapproveOpen(open);
     // A closed dialog must not reopen showing the previous attempt's error.
     if (!open) allowPermissions.reset();
+    // Reopening starts a fresh attempt: drop the previous attempt's blocked
+    // notice, or it reads as this attempt's result. Clearing on CLOSE would
+    // never show the notice at all — a confirm sets it and then closes.
+    if (open) setBlockedActions([]);
   }
 
   async function handlePreapprove() {
@@ -245,7 +249,7 @@ function WorkflowEditorPane({
       return;
     }
     setBlockedActions(result.blocked);
-    closePreapprove(false);
+    setPreapproveDialog(false);
   }
 
   return (
@@ -282,7 +286,7 @@ function WorkflowEditorPane({
             <button
               type="button"
               data-testid="workflow-gate-badge"
-              onClick={() => setPreapproveOpen(true)}
+              onClick={() => setPreapproveDialog(true)}
               title="Some actions pause a run for approval. Pre-approve them to run this workflow unattended."
               className="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning-wash px-2.5 py-1 text-xs font-medium text-warning-fg hover:opacity-80 focus-visible:ring-2 focus-visible:ring-accent-500/40"
             >
@@ -336,7 +340,7 @@ function WorkflowEditorPane({
         />
       )}
 
-      <Dialog open={preapproveOpen} onOpenChange={closePreapprove}>
+      <Dialog open={preapproveOpen} onOpenChange={setPreapproveDialog}>
         <DialogContent
           title="Pre-approve actions"
           description={
@@ -355,7 +359,7 @@ function WorkflowEditorPane({
             ))}
           </ul>
           <DialogFooter>
-            <Button type="button" variant="secondary" onClick={() => closePreapprove(false)}>
+            <Button type="button" variant="secondary" onClick={() => setPreapproveDialog(false)}>
               Cancel
             </Button>
             <Button

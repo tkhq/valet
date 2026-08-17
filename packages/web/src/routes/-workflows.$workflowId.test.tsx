@@ -472,4 +472,20 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     expect(notice.textContent).toContain("widgets.deploy");
     expect(notice.textContent).toContain("org admin");
   });
+
+  it("reopening the dialog clears the previous attempt's blocked notice", async () => {
+    allowMutateAsync.mockResolvedValue({
+      allowed: [],
+      blocked: [{ actionId: "widgets.deploy", reason: "an org policy requires approval" }],
+    });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    fireEvent.click(await screen.findByTestId("preapprove-confirm"));
+    await screen.findByTestId("preapprove-blocked");
+
+    // A reopen is a fresh attempt: the stale notice must not read as its
+    // result.
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(screen.queryByTestId("preapprove-blocked")).toBeNull();
+  });
 });

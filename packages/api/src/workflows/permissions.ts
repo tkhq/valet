@@ -95,18 +95,20 @@ export async function analyzeWorkflowPermissions(
   if (!summary) return null;
 
   const refs = toolNodeRefs(summary.definition);
+  if (refs.length === 0) return [];
+
   const now = Date.now();
   // One row load for the whole definition: the scope has no per-node
   // component (no session/execution id — a run that has not started has no
   // grants), so a per-node `resolveActionPolicy` would re-read the same two
   // row sets N times. The pure core then decides per node from one
   // consistent snapshot.
-  const rows = refs.length > 0 ? await loadPolicyRows(deps.db, { orgId: owner.orgId, userId: owner.userId }) : null;
+  const rows = await loadPolicyRows(deps.db, { orgId: owner.orgId, userId: owner.userId });
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
-    if (!entry || !action || rows === null) {
+    if (!entry || !action) {
       nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown" });
       continue;
     }
