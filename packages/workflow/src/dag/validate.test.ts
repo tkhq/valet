@@ -1257,6 +1257,23 @@ describe('validateWorkflowDefinition — linter checks', () => {
       }
     });
 
+    it('rejects an explicit null against a primitive-typed property', () => {
+      const result = validateWorkflowDefinition(
+        toolWithParams({ owner: 'acme', repo: 'widgets', pullNumber: null }),
+        env,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some(
+            (e) =>
+              e.includes('params.pullNumber is null') &&
+              e.includes('declares it as number; set a number value or remove the key'),
+          ),
+        ).toBe(true);
+      }
+    });
+
     it('leaves params unchecked when the hook returns no schema', () => {
       const result = validateWorkflowDefinition(
         linear([

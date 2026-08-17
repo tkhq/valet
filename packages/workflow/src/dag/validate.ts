@@ -937,6 +937,11 @@ function lintToolParams(
   const propertyNames = Object.keys(properties);
 
   // Unknown-key lint — skipped when the schema declares it takes extras.
+  // Both `additionalProperties: true` and a schema-valued
+  // `additionalProperties` permit extra keys per JSON Schema, so erroring
+  // on unknown keys under either would be a false positive. Absent and
+  // `false` both mean "lint unknown keys" — TypeBox's `Type.Object` omits
+  // the field entirely, so the lint must stay active when it is absent.
   if (schema.additionalProperties !== true && !isPlainObject(schema.additionalProperties)) {
     for (const key of Object.keys(params)) {
       if (key in properties) continue;
@@ -954,25 +959,33 @@ function lintToolParams(
     if (!isPlainObject(property) || typeof property.type !== 'string') continue;
     if (typeof value === 'string' && value.includes('{{')) continue; // template — resolves at run time
     const actual = jsonTypeOf(value);
-    if (actual === null) continue;
+    if (actual === undefined) continue; // absent value — nothing to check
     const expected = property.type;
     if (expected === actual) continue;
     if (expected === 'integer' && actual === 'number' && Number.isInteger(value)) continue;
+    if (actual === 'null') {
+      errors.push(
+        `${label}: params.${key} is null — ${actionRef} declares it as ${expected}; set a ${expected} value or remove the key`,
+      );
+      continue;
+    }
     errors.push(
       `${label}: params.${key} has the wrong type — ${actionRef} declares it as ${expected}, got ${actual} ${JSON.stringify(value)}`,
     );
   }
 }
 
-/** The JSON Schema type name of a plain value, or null for shapes the
- * cheap check stays out of (null/undefined). */
-function jsonTypeOf(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
+/** The JSON Schema type name of a plain value. An explicit JSON `null` is
+ * type "null" (it must fail against a primitive-typed property); undefined
+ * means the value is absent and the check skips it. */
+function jsonTypeOf(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return 'null';
   if (Array.isArray(value)) return 'array';
   const t = typeof value;
   if (t === 'string' || t === 'number' || t === 'boolean') return t;
   if (t === 'object') return 'object';
-  return null;
+  return undefined;
 }
 
 // ─── model hook ─────────────────────────────────────────────────────────────
