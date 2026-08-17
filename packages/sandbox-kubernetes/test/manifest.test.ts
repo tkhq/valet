@@ -213,11 +213,18 @@ describe("buildSandboxManifest", () => {
       expect(manifest.spec.service).toBe(true);
     });
 
-    it("replaces the container command with the full-profile service entrypoint (not the bare tail placeholder)", () => {
+    it("replaces the container command with the GUARDED full-profile entrypoint (probe-and-degrade, matching sandbox-docker)", () => {
+      // An image without /start-full.sh (stale pre-unification bake, or any
+      // override image) must degrade to the tail placeholder — the agent
+      // still works over exec; the service tabs 502 — instead of PID 1
+      // exiting 127 forever (CrashLoopBackOff, the dev-v2 DinD outage).
       const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "full" });
       const container = manifest.spec.podTemplate.spec.containers[0];
-      expect(container?.command).toEqual(["/bin/bash", "/start-full.sh"]);
-      expect(container?.command?.join(" ")).not.toContain("tail -f /dev/null");
+      expect(container?.command).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+      ]);
     });
   });
 

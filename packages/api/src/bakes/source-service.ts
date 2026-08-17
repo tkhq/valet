@@ -44,7 +44,7 @@ import {
 } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
-import { resolveDefaultImage } from "../providers/sandbox-backend.js";
+import { DEFAULT_FULL_BASE_IMAGE, resolveDefaultImage } from "../providers/sandbox-backend.js";
 import { resolveRecipe, loadPrebuildOverride, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
 import type { SpawnFn } from "../prebuilds/docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
@@ -363,28 +363,6 @@ const DEFAULT_SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
 /** Decay window (spec decision 13): a repo source with no live binding and a
  * `last_bound_at` older than this is auto-disabled by the nightly pass. */
 const DECAY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-/** Last-resort fallback base image when neither the config nor
- * `resolveDefaultImage(env)` resolve one. Updated from node:20-bookworm for
- * consistency with the seeded headless base. */
-const FALLBACK_BASE_IMAGE = "node:22-bookworm-slim";
-
-/** Default public base image for the seeded headless base source.
- * Overridden by VALET_HEADLESS_BASE_IMAGE env var. */
-const DEFAULT_HEADLESS_BASE_IMAGE = "node:22-bookworm-slim";
-
-/** Default CI-published full-profile base image (ships gateway + ttyd +
- * code-server). Overridden by VALET_FULL_BASE_IMAGE env var. */
-const DEFAULT_FULL_BASE_IMAGE = "ghcr.io/tkhq/valet-sandbox:latest";
-
-/** Setup commands for the seeded headless base. Mirrors the base-tooling
- * section of docker/Dockerfile.sandbox-k8s (lines 45-59, 108-119). Node is
- * present in node:22-bookworm-slim by default. */
-const HEADLESS_SETUP_COMMANDS: string[] = [
-  "apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates coreutils curl procps bash openssh-client && rm -rf /var/lib/apt/lists/*",
-  `GH_VERSION=2.63.2 && curl -fsSL -o /tmp/gh.deb "https://github.com/cli/cli/releases/download/v\${GH_VERSION}/gh_\${GH_VERSION}_linux_$(dpkg --print-architecture).deb" && dpkg -i /tmp/gh.deb && rm /tmp/gh.deb`,
-  "mkdir -p /workspace",
-];
-
 /** Canonical recipe JSON — mirrors `recipe.ts`'s private helper so the
  * identity hash covers full step content (id + lockfile + command) plus the
  * setup list, deterministic regardless of key order. */
@@ -571,15 +549,24 @@ export class SourceService {
    *  2. The parent source: external → its `external_ref`; base → its current
    *     CONSISTENT pushed bake's `image_ref` (chained bake). A non-ready base
    *     parent falls through to stock (callers must have already deferred).
-   *  3. `VALET_HEADLESS_BASE_IMAGE` env var (for unparented headless base sources).
-   *  4. `resolveDefaultImage(env)` (`VALET_SANDBOX_IMAGE`, deprecated fallback).
-   *  5. `FALLBACK_BASE_IMAGE`. */
+   *  3. `stockBaseRef()` — the shared stock chain (`VALET_FULL_BASE_IMAGE`
+   *     → deprecated `VALET_SANDBOX_IMAGE` → `DEFAULT_FULL_BASE_IMAGE`),
+   *     also used by `identityHash` so FROM and identity always agree. */
   private async resolveBaseImage(source: ImageSourceRow, override: string | undefined): Promise<string> {
     if (override) return override;
     const parentBase = await this.resolveParentBase(source);
     if (parentBase.status === "external" && parentBase.ref) return parentBase.ref;
     if (parentBase.status === "ready") return parentBase.bake.imageRef;
-    return this.env.VALET_HEADLESS_BASE_IMAGE ?? resolveDefaultImage(this.env) ?? DEFAULT_HEADLESS_BASE_IMAGE;
+    return this.stockBaseRef();
+  }
+
+  /** The stock ref an unparented source falls back to. ONE chain for both
+   * the FROM (`resolveBaseImage`) and the identity (`identityHash` /
+   * `baseIdentity`): a divergent identity re-FROMs without re-identifying
+   * (stale bakes never rebake on a pin change) or re-identifies without
+   * re-FROMing (pointless rebakes). */
+  private stockBaseRef(): string {
+    return this.env.VALET_FULL_BASE_IMAGE ?? resolveDefaultImage(this.env) ?? DEFAULT_FULL_BASE_IMAGE;
   }
 
   /** The identity that a PARENT source contributes to its child's identity
@@ -597,7 +584,7 @@ export class SourceService {
 
   /** Content-addressed identity for a `base` source. */
   private baseIdentity(source: ImageSourceRow, parentIdentity: string | null): string {
-    const stock = resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
+    const stock = this.stockBaseRef();
     const parent = parentIdentity ?? stock;
     return sha256Hex(`${parent}|${canonicalRecipeJson([], readSetupCommands(source))}`);
   }
@@ -614,7 +601,7 @@ export class SourceService {
    *                    where recipeHash covers the RESOLVED recipe snapshot.
    */
   identityHash(source: ImageSourceRow, parentIdentity: string | null, recipe?: RecipeSnapshot): string {
-    const stock = resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
+    const stock = this.stockBaseRef();
     if (source.kind === "external") return source.externalRef ?? stock;
     if (source.kind === "base") return this.baseIdentity(source, parentIdentity);
     // repo
@@ -677,6 +664,36 @@ export class SourceService {
       imageRef,
     };
     return this.dispatch(builder, row, spec);
+  }
+
+  /** The org's kind='base' profile='full' source id — the ONE base every
+   * repo source parents at (single lineage) — or null when the org has not
+   * been seeded yet. */
+  private async defaultBaseId(orgId: string): Promise<string | null> {
+    const baseSource = await this.db
+      .select({ id: imageSources.id })
+      .from(imageSources)
+      .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base"), eq(imageSources.profile, "full")))
+      .limit(1);
+    return baseSource[0]?.id ?? null;
+  }
+
+  /** The parent a re-bound repo source should have. Heals a null parent and
+   * a legacy headless-base parent onto the default-full base; any other
+   * parent (external, custom base) is kept as-is. Falls back to the current
+   * parent when the full base is not seeded yet. */
+  private async adoptedParentIdFor(orgId: string, currentParentId: string | null): Promise<string | null> {
+    if (currentParentId === null) return this.defaultBaseId(orgId);
+    const parentRows = await this.db
+      .select({ kind: imageSources.kind, profile: imageSources.profile })
+      .from(imageSources)
+      .where(eq(imageSources.id, currentParentId))
+      .limit(1);
+    const parent = parentRows[0];
+    if (parent && parent.kind === "base" && parent.profile === "headless") {
+      return (await this.defaultBaseId(orgId)) ?? currentParentId;
+    }
+    return currentParentId;
   }
 
   /** True when a repo source must DEFER its bake because its parent is a base
@@ -1134,26 +1151,41 @@ export class SourceService {
 
       if (existing[0]) {
         const source = existing[0];
+        // Re-bind heals two legacy parent shapes onto the org's default-full
+        // base (single lineage):
+        //  - parent_id null (source predates base seeding) → bakes FROM the
+        //    raw stock image and the clone step fails (no git).
+        //  - parent = a retired headless base → bakes miss the toolchain and
+        //    the start scripts.
+        // The parent change moves the identity; the nightly scheduler then
+        // rebakes on the proper lineage.
+        const adoptedParentId = await this.adoptedParentIdFor(orgId, source.parentId);
         await this.db
           .update(imageSources)
-          .set({ lastBoundAt: now, enabled: true, updatedAt: now })
+          .set({
+            lastBoundAt: now,
+            enabled: true,
+            updatedAt: now,
+            ...(adoptedParentId !== source.parentId ? { parentId: adoptedParentId } : {}),
+          })
           .where(eq(imageSources.id, source.id));
-        // Fire a bake when this re-bound source has no pushed bake yet.
+        // Fire a bake when this re-bound source has no pushed bake yet, or
+        // when the parent just changed — the pushed bake is then on the old
+        // lineage, and waiting for the nightly pass would leave sessions on
+        // it all day. `maybeFireFirstBake` still defers behind an unready
+        // base and skips when a bake is already in flight.
         const current = await this.currentBake(source.id);
-        if (!current) await this.maybeFireFirstBake(source.id, orgId, repo);
+        if (!current || adoptedParentId !== source.parentId) {
+          await this.maybeFireFirstBake(source.id, orgId, repo);
+        }
         return;
       }
 
-      // Repo sources are always agent (headless) workspaces; parent at the
-      // headless base so the agent tooling layer is included.
-      const baseSource = await this.db
-        .select({ id: imageSources.id })
-        .from(imageSources)
-        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base"), eq(imageSources.profile, "headless")))
-        .limit(1);
-      // Fall back to null (no parent) if no headless base exists yet —
-      // defensive; post-seed this should not happen.
-      const parentId = baseSource[0]?.id ?? null;
+      // Parent at the default-full base so the bake inherits the whole
+      // sandbox toolchain (single lineage). Fall back to null (no parent)
+      // if the base is not seeded yet — defensive; post-seed this should
+      // not happen.
+      const parentId = await this.defaultBaseId(orgId);
 
       const id = `src_${this.newId()}`;
       await this.db.insert(imageSources).values({
@@ -1239,21 +1271,26 @@ export class SourceService {
   }
 
   /**
-   * Idempotent seeding of the three default base rows every org needs:
+   * Idempotent seeding of the two default base rows every org needs
+   * (single image lineage — see docs/specs/2026-08-16-single-image-lineage-design.md):
    *
-   *   1. `kind='external'`, `name='stock-full'` — the CI-published full-profile
-   *      image (ghcr.io/tkhq/valet-sandbox or VALET_FULL_BASE_IMAGE).
-   *   2. `kind='base'`, `profile='headless'` — no parent; resolves its FROM via
-   *      VALET_HEADLESS_BASE_IMAGE → VALET_SANDBOX_IMAGE → DEFAULT_HEADLESS_BASE_IMAGE.
-   *   3. `kind='base'`, `profile='full'` — parent = the stock-full external row;
+   *   1. `kind='external'`, `name='stock-full'` — the CI-published sandbox
+   *      image (ghcr.io/tkhq/valet-sandbox or VALET_FULL_BASE_IMAGE). Re-seed
+   *      follows deploy pin changes.
+   *   2. `kind='base'`, `profile='full'` — parent = the stock-full external row;
    *      empty setup_commands (the full image ships everything already).
+   *
+   * A legacy `profile='headless'` base row from before the single-lineage
+   * change is disabled (nothing resolves it; an enabled row keeps burning a
+   * nightly bake).
    *
    * Never throws — errors are logged and swallowed so org creation is not
    * blocked by a seed failure. Safe to call repeatedly.
    */
   async seedDefaultBasesIfMissing(orgId: string): Promise<void> {
-    const headlessBaseImage = this.env.VALET_HEADLESS_BASE_IMAGE ?? DEFAULT_HEADLESS_BASE_IMAGE;
-    const fullBaseImage = this.env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE;
+    // Same chain as `stockBaseRef()` — the external ref and the stock
+    // fall-through must always name the same image.
+    const fullBaseImage = this.stockBaseRef();
     const now = this.now();
 
     // Step 1 — ensure the stock-full external row exists.
@@ -1272,6 +1309,24 @@ export class SourceService {
     let stockFullId: string;
     if (existingExternal[0]) {
       stockFullId = existingExternal[0].id;
+      // Follow deploy pin changes: when VALET_FULL_BASE_IMAGE moves to a new
+      // tag, the external row must move with it or every org keeps baking
+      // its full base FROM the stale CI image. The ref change moves the full
+      // base's identity, so the nightly scheduler rebakes it on the new pin.
+      const currentRef = await this.db
+        .select({ externalRef: imageSources.externalRef })
+        .from(imageSources)
+        .where(eq(imageSources.id, stockFullId))
+        .limit(1);
+      if (currentRef[0] && currentRef[0].externalRef !== fullBaseImage) {
+        await this.db
+          .update(imageSources)
+          .set({ externalRef: fullBaseImage, updatedAt: now })
+          .where(eq(imageSources.id, stockFullId));
+        console.log(
+          `seedDefaultBasesIfMissing(${orgId}): stock-full ref ${currentRef[0].externalRef} → ${fullBaseImage}`,
+        );
+      }
     } else {
       stockFullId = `src_${this.newId()}`;
       await this.db.insert(imageSources).values({
@@ -1296,48 +1351,23 @@ export class SourceService {
       console.log(`seedDefaultBasesIfMissing(${orgId}): seeded stock-full external row ${stockFullId}`);
     }
 
-    // Step 2 — ensure the headless base row exists.
-    const existingHeadless = await this.db
-      .select({ id: imageSources.id })
-      .from(imageSources)
+    // Step 2 — retire the legacy headless base (single-lineage change):
+    // nothing resolves it anymore, and an enabled row keeps burning a
+    // nightly bake on a dead lineage.
+    const retired = await this.db
+      .update(imageSources)
+      .set({ enabled: false, updatedAt: now })
       .where(
         and(
           eq(imageSources.orgId, orgId),
           eq(imageSources.kind, "base"),
           eq(imageSources.profile, "headless"),
+          eq(imageSources.enabled, true),
         ),
       )
-      .limit(1);
-
-    let headlessId: string;
-    if (existingHeadless[0]) {
-      headlessId = existingHeadless[0].id;
-    } else {
-      headlessId = `src_${this.newId()}`;
-      await this.db.insert(imageSources).values({
-        id: headlessId,
-        orgId,
-        kind: "base",
-        parentId: null,
-        name: "default-headless",
-        externalRef: null,
-        pullSecretName: null,
-        setupCommands: HEADLESS_SETUP_COMMANDS,
-        profile: "headless",
-        repoHost: null,
-        repoFullName: null,
-        cloneUrl: null,
-        schedule: "nightly",
-        enabled: true,
-        lastBoundAt: null,
-        createdAt: now,
-        updatedAt: now,
-      });
-      console.log(
-        `seedDefaultBasesIfMissing(${orgId}): seeded headless base ${headlessId} FROM ${headlessBaseImage}`,
-      );
-      // Fire a background bake so the headless base is ready for repo children.
-      await this.maybeFireBaseBake(headlessId, orgId);
+      .returning({ id: imageSources.id });
+    if (retired.length > 0) {
+      console.log(`seedDefaultBasesIfMissing(${orgId}): disabled legacy headless base ${retired[0]!.id}`);
     }
 
     // Step 3 — ensure the full base row exists.

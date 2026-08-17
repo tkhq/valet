@@ -92,12 +92,11 @@ export interface EngineHostOpts {
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
-   * Optional per-profile override for the fall-through stock image.
-   * When present, `stockImage` in `resolveSnapshot` uses
-   * `defaultImages[profile] ?? defaultImage` for the session's profile.
-   * Used to keep full-profile sessions from silently falling through to
-   * the headless base image during the boot window (before the org's
-   * default-full base bake lands).
+   * Optional stock-image override. Single image lineage (2026-08-16
+   * design): every session boots `defaultImages.full ?? defaultImage`
+   * regardless of profile/docker shape. The `headless` key is legacy and
+   * ignored — kept in the type so older callers/tests type-check and so
+   * tests can prove it is NOT consulted.
    */
   defaultImages?: Partial<Record<"headless" | "full", string>>;
   /**
@@ -568,6 +567,11 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
+    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker
+    // key. `resolveRepoDockerFlag` is best-effort — any failure resolves
+    // false. Single image lineage: the flag only shapes SandboxCreateOpts
+    // (caps/mounts/exec identity), never which image is resolved.
+    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -612,16 +616,13 @@ export class EngineHost {
       meta.repos,
       specProvider !== undefined,
     );
-    // Initial sandbox image: the per-profile stock default. Full-profile
-    // sessions use `defaultImages["full"]` so the boot-window fall-through
-    // (before the org's default-full base bake lands) picks the full image
-    // rather than silently booting the headless base. The specProvider closure
-    // may resolve a prebuild image override at provision time — the engine
-    // applies DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImages?.[profile] ?? this.opts.defaultImage;
-    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker key.
-    // `resolveRepoDockerFlag` is best-effort — any failure resolves false.
-    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
+    // Initial sandbox image: the single-lineage stock default — every
+    // session shape boots the full sandbox image (start scripts + docker
+    // toolchain baked in; the profile only decides whether the interactive
+    // services START). The specProvider closure may resolve a bake image
+    // override at provision time — the engine applies
+    // DesiredSandboxSpec.image when the specProvider returns one.
+    const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -804,9 +805,12 @@ export class EngineHost {
 
     const host = this;
     const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
-    const profile: "headless" | "full" = meta.profile ?? "headless";
+    // Single image lineage: one stock image for every session shape. Must
+    // agree with the create-opts image in `buildSession`/`buildChild` or the
+    // `spec.image !== stockImage` comparison below misreports the stock
+    // case as an override.
     const stockImage =
-      this.opts.defaultImages?.[profile] ??
+      this.opts.defaultImages?.full ??
       this.opts.defaultImage ??
       "";
 
@@ -1848,14 +1852,27 @@ export class EngineHost {
     // start-ref sink: a child session records no start-ref today. An absent
     // `opts.db` (tests that wire no db) degrades to empty bindings, same as
     // `sessionExtras`/`mintSandboxEnv`.
+    // `profile`/`docker` MUST reach the meta: `buildSpecProvider` resolves
+    // the sandbox image per-profile from it. Dropping them here resolved a
+    // full/docker child against the HEADLESS base bake — an image without
+    // /start-full.sh or the docker toolchain — while the manifest ran the
+    // full-profile command, so the pod crash-looped (dev-v2 DinD outage).
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,
           userId: opts.actorUserId,
           orgId: opts.orgId,
           workspace: opts.workspace,
+          profile,
+          ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         })
-      : { userId: opts.actorUserId, orgId: opts.orgId, workspace: opts.workspace };
+      : {
+          userId: opts.actorUserId,
+          orgId: opts.orgId,
+          workspace: opts.workspace,
+          profile,
+          ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+        };
     const specProvider = await this.buildSpecProvider(childSessionId, meta);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
@@ -1879,9 +1896,9 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: {
         workspace: opts.workspace,
-        // Per-profile stock default, same fall-through as a REST-created
+        // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
-        image: this.opts.defaultImages?.[profile] ?? this.opts.defaultImage,
+        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
         env: sandboxMint?.env,
         profile,
         ...(opts.docker ? { docker: true } : {}),

@@ -458,10 +458,17 @@ export class ChildWatcher {
     const childData = await this.deps.engineStore.getSession(watch.childSessionId);
     if (!childData) throw new Error(`child session not found: ${watch.childSessionId}`);
 
-    // Centralized meta assembly (repo bindings + git identity). A child that
-    // was spawned with repo bindings gets them prepped here too; one without
-    // returns empty bindings, and `profile` stays unset (headless) exactly as
-    // this watcher path did before — see `loadSessionMeta`.
+    // Centralized meta assembly (repo bindings + git identity). The app row
+    // supplies the persisted profile/docker: if this watcher wins the
+    // post-restart first-touch race for a full/docker child, the rebuild
+    // must keep the child's sandbox shape (services + docker caps) — a
+    // partial meta here would cache a headless, docker-less session.
+    const shapeRows = await this.deps.db
+      .select({ profile: agentSessions.profile, docker: agentSessions.docker })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, watch.childSessionId))
+      .limit(1);
+    const shapeRow = shapeRows[0];
     const childSession = await this.deps.engineHost.sessionFor(
       watch.childSessionId,
       await loadSessionMeta(this.deps.db, {
@@ -469,6 +476,7 @@ export class ChildWatcher {
         userId: childData.userId,
         orgId: childData.orgId,
         workspace: childData.workspace,
+        ...(shapeRow ? { profile: shapeRow.profile, docker: shapeRow.docker } : {}),
       }),
     );
     // The spawner always prompts the child's default thread — see
@@ -861,7 +869,15 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     if (!watchRow) return null;
 
     const childRows = await deps.db
-      .select({ status: agentSessions.status })
+      .select({
+        id: agentSessions.id,
+        userId: agentSessions.userId,
+        orgId: agentSessions.orgId,
+        workspace: agentSessions.workspace,
+        profile: agentSessions.profile,
+        docker: agentSessions.docker,
+        status: agentSessions.status,
+      })
       .from(agentSessions)
       .where(eq(agentSessions.id, req.childSessionId))
       .limit(1);
@@ -878,14 +894,12 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     const childData = await deps.engineStore.getSession(req.childSessionId);
     if (!childData) return null;
 
+    // Pass the app row as the meta source: it carries the persisted
+    // profile/docker, so a post-restart rebuild keeps the child's sandbox
+    // shape (services + docker caps) instead of silently going headless.
     const childSession = await deps.engineHost.sessionFor(
       req.childSessionId,
-      await loadSessionMeta(deps.db, {
-        id: req.childSessionId,
-        userId: childData.userId,
-        orgId: childData.orgId,
-        workspace: childData.workspace,
-      }),
+      await loadSessionMeta(deps.db, child),
     );
 
     const receipt = await childSession.prompt(req.message, {

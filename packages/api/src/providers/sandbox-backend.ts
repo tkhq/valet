@@ -41,6 +41,12 @@ function isSandboxBackend(value: string): value is SandboxBackend {
   return (SANDBOX_BACKENDS as readonly string[]).includes(value);
 }
 
+/** Default CI-published sandbox base image — the SINGLE image lineage every
+ * sandbox and bake chains on (agent tooling, gateway, ttyd, code-server,
+ * rootless docker toolchain, start scripts). Overridden by
+ * VALET_FULL_BASE_IMAGE env var. */
+export const DEFAULT_FULL_BASE_IMAGE = "ghcr.io/tkhq/valet-sandbox:latest";
+
 /** Parses `VALET_SANDBOX_BACKEND`. Unset → `"docker"` (today's only
  * behavior, unchanged). Throws a clear error on anything else unrecognized. */
 export function parseSandboxBackend(value: string | undefined): SandboxBackend {
@@ -175,7 +181,7 @@ export function buildSandboxProvider(
       if (!image) {
         console.warn(
           "VALET_SANDBOX_IMAGE unset; falling back to seeded base sources. " +
-          "Set VALET_HEADLESS_BASE_IMAGE / VALET_FULL_BASE_IMAGE via chart values if you need to override.",
+          "Set VALET_FULL_BASE_IMAGE via chart values if you need to override.",
         );
       }
       const kc = deps.kubeConfig ?? resolveKubeConfig(env);
@@ -189,7 +195,7 @@ export function buildSandboxProvider(
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const cfg: K8sProviderConfig = {
         namespace,
-        defaultImage: image ?? env.VALET_HEADLESS_BASE_IMAGE ?? "node:22-bookworm-slim",
+        defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         apiVersion: SANDBOX_CR_API_VERSION,
         // Sandbox images v2 plan, Task 5: threaded when an external prebuild
         // registry requires authenticated pulls (`externalRegistry.pullSecret`

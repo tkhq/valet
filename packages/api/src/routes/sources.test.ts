@@ -78,7 +78,7 @@ async function createBase(baseUrl: string, overrides: Record<string, unknown> = 
   const res = await fetch(`${baseUrl}/api/org/sources`, {
     method: "POST",
     headers: HEADERS,
-    body: JSON.stringify({ kind: "base", name: "Org Base", setupCommands: [], profile: "headless", ...overrides }),
+    body: JSON.stringify({ kind: "base", name: "Org Base", setupCommands: [], profile: "full", ...overrides }),
   });
   expect(res.status).toBe(201);
   const body = (await res.json()) as { source: SourceJson };
@@ -241,26 +241,30 @@ describe("POST /api/org/sources (kind=base)", () => {
 
   it("409s on a second base source for the same (org, profile)", async () => {
     api = await bootTestApi();
-    await createBase(api.baseUrl, { profile: "headless" });
+    await createBase(api.baseUrl, { profile: "full" });
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Second Base", profile: "headless" }),
+      body: JSON.stringify({ kind: "base", name: "Second Base", profile: "full" }),
     });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("already exists for this org and profile");
   });
 
-  it("allows two base sources for different profiles", async () => {
+  it("400s a new headless base source — single image lineage seeds only full bases", async () => {
+    // A fresh headless base would be inert (nothing resolves it) but would
+    // burn a nightly bake until the next boot disables it. Reject with the
+    // corrective action.
     api = await bootTestApi();
-    await createBase(api.baseUrl, { profile: "headless" });
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Full Base", profile: "full" }),
+      body: JSON.stringify({ kind: "base", name: "Legacy Base", profile: "headless" }),
     });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("full");
   });
 
   it("400s when profile is missing", async () => {
@@ -292,7 +296,7 @@ describe("POST /api/org/sources (kind=base)", () => {
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", profile: "headless", setupCommands: ["apt-get install\ngit"] }),
+      body: JSON.stringify({ kind: "base", name: "Base", profile: "full", setupCommands: ["apt-get install\ngit"] }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
@@ -304,7 +308,7 @@ describe("POST /api/org/sources (kind=base)", () => {
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", profile: "headless", setupCommands: ["apt-get install\rgit"] }),
+      body: JSON.stringify({ kind: "base", name: "Base", profile: "full", setupCommands: ["apt-get install\rgit"] }),
     });
     expect(res.status).toBe(400);
   });
@@ -465,15 +469,17 @@ describe("PATCH /api/org/sources/:id", () => {
     });
     // parentId is repo-only — rejects with 400 regardless of id being valid
     expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("parentId");
   });
 
   it("400s when attempting to change profile (profile is immutable)", async () => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl, { profile: "headless" });
+    const source = await createBase(api.baseUrl, { profile: "full" });
     const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
       method: "PATCH",
       headers: HEADERS,
-      body: JSON.stringify({ profile: "full" }),
+      body: JSON.stringify({ profile: "headless" }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };

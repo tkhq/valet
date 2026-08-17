@@ -96,6 +96,19 @@ export function pushRefFor(pullRef: string, pushHost: string | undefined): strin
   return `${pushHost}${pullRef.slice(slash)}`;
 }
 
+/** The registry host segment of an image ref, or undefined when the ref has
+ * no registry host. Follows the docker reference grammar (distribution's
+ * `splitDockerDomain`): the first path segment is a HOST only when it
+ * contains a `.` or a `:` or is exactly `localhost` — otherwise it is a
+ * Docker Hub namespace (`myuser/myimage:tag` pulls from docker.io) and must
+ * never be compared against the pull host. Exported for its unit tests. */
+export function refHost(ref: string): string | undefined {
+  const slash = ref.indexOf("/");
+  if (slash < 0) return undefined;
+  const first = ref.slice(0, slash);
+  return first === "localhost" || first.includes(".") || first.includes(":") ? first : undefined;
+}
+
 function jobName(id: string): string {
   return `valet-prebuild-${id}`;
 }
@@ -343,6 +356,11 @@ export interface KubernetesImageBuilderOpts {
    * ref's `--output name=`). `VALET_PREBUILD_REGISTRY_PUSH`; undefined = push
    * to the pull host as-is (external registry / no split). */
   registryPushHost?: string;
+  /** The configured PULL host (`VALET_PREBUILD_REGISTRY`'s host segment).
+   * Identifies which base-image refs are OURS to rewrite to the push host —
+   * an external ref that merely shares a host with the output ref must pass
+   * through untouched. Undefined = fall back to the output ref's host. */
+  registryPullHost?: string;
   buildkitImage?: string;
   activeDeadlineSeconds?: number;
   resources?: BuildKitResources;
@@ -361,6 +379,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
   private readonly namespace: string;
   private readonly registryInsecure: boolean;
   private readonly registryPushHost?: string;
+  private readonly registryPullHost?: string;
   private readonly buildkitImage: string;
   private readonly activeDeadlineSeconds: number;
   private readonly resources?: BuildKitResources;
@@ -382,6 +401,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     this.namespace = opts.namespace;
     this.registryInsecure = opts.registryInsecure;
     this.registryPushHost = opts.registryPushHost;
+    this.registryPullHost = opts.registryPullHost;
     this.buildkitImage = opts.buildkitImage ?? BUILDKIT_IMAGE;
     this.activeDeadlineSeconds = opts.activeDeadlineSeconds ?? DEFAULT_ACTIVE_DEADLINE_SECONDS;
     this.resources = opts.resources;
@@ -560,7 +580,21 @@ export class KubernetesImageBuilder implements ImageBuilder {
       // (`pushRefFor` on `imageRef` → `--output name=`) applied below in
       // `buildKitJobManifest`. Host-agnostic generation stays in recipe.ts —
       // the rewrite lives here at the builder boundary only.
-      const baseImage = pushRefFor(rec.spec.baseImage, this.registryPushHost);
+      //
+      // ONLY bundled-registry (pull-hosted) refs qualify. The configured
+      // pull host identifies them; without one, fall back to the output
+      // ref's host (imageRef is always pull-hosted). Everything else must
+      // pass through: external hosts (ghcr.io stock bases, prebuild.yaml
+      // image overrides) and hostless refs — bare names and Docker Hub
+      // namespaces, for which `refHost` returns undefined per the docker
+      // reference grammar. Rewriting a ref that is not ours points BuildKit
+      // at an image nobody pushed and the bake fails with "not found".
+      const fromHost = refHost(rec.spec.baseImage);
+      const pullHost = this.registryPullHost ?? refHost(rec.spec.imageRef);
+      const baseImage =
+        fromHost !== undefined && fromHost === pullHost
+          ? pushRefFor(rec.spec.baseImage, this.registryPushHost)
+          : rec.spec.baseImage;
       const dockerfile =
         rec.spec.kind === "base"
           ? generateBaseDockerfile({ baseImage, setup: rec.spec.setup ?? [] })

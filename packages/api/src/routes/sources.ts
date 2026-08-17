@@ -152,9 +152,17 @@ sourcesRouter.post("/", async (c) => {
     if (typeof body.name !== "string" || body.name.trim() === "") {
       return c.json({ error: "name is required" }, 400);
     }
-    // profile is required for base sources and must be 'headless' or 'full'.
-    if (body.profile !== "headless" && body.profile !== "full") {
-      return c.json({ error: "profile must be 'headless' or 'full' for kind='base' sources" }, 400);
+    // Single image lineage (2026-08-16 design): only 'full' bases exist. A
+    // new headless base would be inert — nothing resolves it — but would
+    // burn a nightly bake until the next boot disables it.
+    if (body.profile !== "full") {
+      return c.json(
+        {
+          error:
+            "profile must be 'full' for kind='base' sources. Sandboxes use one image lineage; the profile session flag only switches interactive services.",
+        },
+        400,
+      );
     }
     const setupCommands = body.setupCommands ?? [];
     const cmdErr = validateSetupCommands(setupCommands);

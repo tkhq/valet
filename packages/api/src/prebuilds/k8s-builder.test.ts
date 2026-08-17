@@ -13,7 +13,7 @@ import type {
   SandboxBatchJobsApi,
 } from "@valet/sandbox-kubernetes";
 import type { PrebuildSpec } from "./builder.js";
-import { BUILDKIT_IMAGE, buildkitdToml, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor } from "./k8s-builder.js";
+import { BUILDKIT_IMAGE, buildkitdToml, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor, refHost } from "./k8s-builder.js";
 
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
@@ -61,6 +61,31 @@ describe("pushRefFor", () => {
     // `valet-prebuild/foo:sha` DOES have a slash — a truly hostless ref is one
     // with no slash at all; defensive, never reached for k8s refs.
     expect(pushRefFor("no-slash-ref:tag", "push-host:5000")).toBe("no-slash-ref:tag");
+  });
+});
+
+// ── refHost (pure) ──────────────────────────────────────────────────────
+
+describe("refHost", () => {
+  it("recognizes dotted, ported, and localhost first segments as registry hosts", () => {
+    expect(refHost("ghcr.io/tkhq/valet-sandbox:sha-x")).toBe("ghcr.io");
+    expect(refHost("localhost:30500/src-x/base:abc")).toBe("localhost:30500");
+    expect(refHost("valet-registry:5000/foo:bar")).toBe("valet-registry:5000");
+    expect(refHost("localhost/foo:bar")).toBe("localhost");
+  });
+
+  it("treats a Docker Hub namespace as NOT a host (docker reference grammar)", () => {
+    // "myuser/myimage:tag" pulls from docker.io — the first segment is a
+    // namespace, not a registry host, so the FROM rewrite gate must never
+    // compare it against the pull host.
+    expect(refHost("myuser/myimage:tag")).toBeUndefined();
+    expect(refHost("library/ubuntu:24.04")).toBeUndefined();
+    expect(refHost("valet-prebuild/foo:sha")).toBeUndefined();
+  });
+
+  it("returns undefined for a bare image name", () => {
+    expect(refHost("ubuntu")).toBeUndefined();
+    expect(refHost("node:22-bookworm-slim")).toBeUndefined();
   });
 });
 
@@ -438,13 +463,14 @@ class FakeJobsApi implements SandboxBatchJobsApi {
   }
 }
 
-function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean; registryPushHost: string }> = {}) {
+function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean; registryPushHost: string; registryPullHost: string }> = {}) {
   let counter = 0;
   return new KubernetesImageBuilder({
     jobsApi,
     namespace: "valet-sandboxes",
     registryInsecure: overrides.registryInsecure ?? true,
     ...(overrides.registryPushHost ? { registryPushHost: overrides.registryPushHost } : {}),
+    ...(overrides.registryPullHost ? { registryPullHost: overrides.registryPullHost } : {}),
     newId: () => String(++counter),
   });
 }
@@ -752,6 +778,55 @@ describe("KubernetesImageBuilder", () => {
 
     const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
     expect(dockerfile).toContain("FROM node:20-bookworm");
+  });
+
+  it("base bake: Dockerfile FROM is untouched for an EXTERNAL registry-hosted base image (ghcr.io)", async () => {
+    // The full-profile stock base is an external ref like
+    // `ghcr.io/tkhq/valet-sandbox:sha-x`. Rewriting its host to the bundled
+    // push host produced `valet-registry…:5000/tkhq/valet-sandbox:sha-x`,
+    // which nobody ever pushed — every full-base bake failed with
+    // "not found" (dev-v2). Only bundled-registry (pull-hosted) refs may be
+    // rewritten; any other host must pass through untouched.
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.ns.svc:5000",
+    });
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "ghcr.io/tkhq/valet-sandbox:sha-b4e24e1",
+        imageRef: "localhost:30500/src-x/base:abc",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM ghcr.io/tkhq/valet-sandbox:sha-b4e24e1");
+    expect(dockerfile).not.toContain("valet-registry.ns.svc:5000/tkhq/");
+  });
+
+  it("base bake: with a configured pull host, only refs ON that host are rewritten — an external ref sharing the OUTPUT ref's host stays untouched", async () => {
+    // Misconfig guard: when the output ref's host coincidentally matches an
+    // external base's host (e.g. both on ghcr.io), the imageRef-host
+    // heuristic would rewrite the external ref. The explicit pull host from
+    // VALET_PREBUILD_REGISTRY disambiguates: only bundled-registry
+    // (pull-hosted) refs are ours to rewrite.
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.ns.svc:5000",
+      registryPullHost: "localhost:30500",
+    });
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "ghcr.io/tkhq/valet-sandbox:sha-x",
+        imageRef: "ghcr.io/myorg/src-x/base:abc",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM ghcr.io/tkhq/valet-sandbox:sha-x");
   });
 
   it("base bake: Dockerfile FROM is untouched when no push host is configured", async () => {

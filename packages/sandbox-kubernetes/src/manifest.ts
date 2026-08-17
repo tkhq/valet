@@ -21,10 +21,18 @@ const DEFAULT_STORAGE = "2Gi";
 
 /** `full`-profile container command — starts the interactive services (ttyd,
  * code-server, auth gateway) instead of the bare `tail -f /dev/null`
- * placeholder. The image ENTRYPOINT is bypassed by this explicit `command`.
- * `/start-full.sh` is added to the image in Task 4; referenced here ahead of
- * that landing per the Task 3 brief. */
-const FULL_PROFILE_COMMAND = ["/bin/bash", "/start-full.sh"];
+ * placeholder. The image ENTRYPOINT is bypassed by this explicit `command`. */
+// Probe-and-degrade, matching sandbox-docker's full-profile command
+// (packages/sandbox-docker/src/sandbox.ts): an image without /start-full.sh
+// (stale pre-unification bake, custom override) degrades to the tail
+// placeholder instead of PID 1 exiting 127 forever (CrashLoopBackOff). The
+// agent still works over the exec surface; the gateway-fronted tabs 502
+// until a full-capable image lands.
+const FULL_PROFILE_COMMAND = [
+  "sh",
+  "-c",
+  "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+];
 
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";

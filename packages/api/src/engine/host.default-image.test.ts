@@ -187,7 +187,7 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     expect(provider.createCalls[0]!.image).not.toBe("ghcr.io/example/headless:fallback");
   });
 
-  it("headless-profile session with no base bake uses defaultImages.headless", async () => {
+  it("headless-profile session boots defaultImages.full — the legacy headless key is ignored (single lineage)", async () => {
     const provider = new RecordingSandboxProvider();
     api = await bootTestApi({
       sandboxProvider: provider,
@@ -222,7 +222,51 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     await session.attachment.ensureReady({ timeoutMs: 5_000 });
 
     expect(provider.createCalls.length).toBeGreaterThan(0);
-    expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/headless:stock");
+    expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/full:stock");
+    expect(provider.createCalls[0]!.image).not.toBe("ghcr.io/example/headless:stock");
+  });
+
+  it("docker session (headless profile) boots the full stock image (single lineage; toolchain baked in)", async () => {
+    const provider = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: provider,
+      defaultImage: "ghcr.io/example/headless:fallback",
+      defaultImages: {
+        headless: "ghcr.io/example/headless:stock",
+        full: "ghcr.io/example/full:stock",
+      },
+    });
+
+    const sessionId = "default-images-docker-headless";
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({
+      id: sessionId,
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/default-images-docker-headless",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      docker: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const session = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/default-images-docker-headless",
+      docker: true,
+    });
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    expect(provider.createCalls.length).toBeGreaterThan(0);
+    expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/full:stock");
+    // The docker flag itself still reaches the provider.
+    expect(provider.createCalls[0]!.docker).toBe(true);
+    // And the profile stays headless — only the image lineage changes.
+    expect(provider.createCalls[0]!.profile).toBe("headless");
   });
 
   it("falls through to defaultImage when defaultImages is not set (backwards compat)", async () => {

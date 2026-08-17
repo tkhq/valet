@@ -114,13 +114,10 @@ sandbox:
   # pod itself.
   namespace: valet-sandboxes
 
-  # Public base image the seeded headless base source FROMs. Layered with
-  # agent tooling (git, ripgrep, gh, node) via seed setup_commands.
-  headlessBaseImage: node:22-bookworm-slim
-
-  # Image the seeded full-profile base source FROMs (via an auto-seeded
-  # kind='external' source). Ships gateway + ttyd + code-server. Pin to
-  # sha-<shortsha> for reproducible deploys.
+  # The SINGLE sandbox base image (via an auto-seeded kind='external'
+  # source). Every sandbox and every bake chains on it: agent tooling,
+  # gateway, ttyd, code-server, rootless docker toolchain, start scripts.
+  # Pin to sha-<shortsha> for reproducible deploys.
   fullBaseImage: ghcr.io/tkhq/valet-sandbox:latest
 
   # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
