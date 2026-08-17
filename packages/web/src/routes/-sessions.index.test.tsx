@@ -28,6 +28,16 @@ vi.mock("~/components/new-session-dialog", () => ({
 
 // importOriginal: a bare replacement drops every other export this module
 // tree imports. See -new-session-dialog.test.tsx for the full reason.
+// The page reads the workspace it is listing for, and `useListOwner` needs
+// the caller's own id: the switcher holds a routing key, not a principal.
+// Mocked rather than wrapped in a provider, matching how this file already
+// isolates the page from the network.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
+  useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: false } }, isLoading: false, error: null }),
+}));
+
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return { ...actual, useSessions: () => sessionsQuery() };

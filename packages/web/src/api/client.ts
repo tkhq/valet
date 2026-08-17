@@ -353,7 +353,10 @@ export const api = {
   getAuthConfig: () => fetchAuthConfig(),
 
   // sessions
-  listSessions: () => request<ListSessionsResponse>("GET", "/sessions"),
+  /** Unscoped lists the caller's own sessions plus every team's they can
+   * reach. `owner` narrows it to one workspace. */
+  listSessions: (owner?: OwnerFilter) =>
+    request<ListSessionsResponse>("GET", `/sessions${ownerQuery(owner)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   createSession: (body: CreateSessionRequest) =>

@@ -3,6 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import type { SessionRunState, SessionSummary } from "@valet/api/wire";
 import { useSessions } from "~/api/queries";
+import { useListOwner } from "~/lib/use-list-owner";
 import { Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { NewSessionDialog } from "~/components/new-session-dialog";
 import { RunStateBadge } from "~/components/run-state-badge";
@@ -55,7 +56,9 @@ export function sortByAttention(sessions: readonly SessionSummary[]): SessionSum
 
 export function SessionsPage() {
   const [newOpen, setNewOpen] = useState(false);
-  const { data, isLoading, error, refetch } = useSessions();
+  // Scoped by the nav's workspace switcher, like every other list.
+  const owner = useListOwner();
+  const { data, isLoading, error, refetch } = useSessions(owner);
   const sessions = sortByAttention(data?.sessions ?? []);
 
   return (

@@ -92,14 +92,32 @@ vi.mock("~/api/skill-sources", () => ({
 // below is team-owned, so the badge never mounts — the mock is here so that
 // adding a team-owned fixture does not need a query client as well.
 vi.mock("~/api/settings", () => ({
+  // `useListOwner` reads the caller's own id: the workspace switcher
+  // holds a routing key, not a principal.
+  useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
 }));
 
 import { SkillsIndexPage } from "./skills.index";
 
-/** The last query the page sent to `GET /api/skills`. */
+/** The last query the page sent to `GET /api/skills`, WITHOUT the workspace.
+ *
+ * Every request carries the workspace now, so leaving it in would make each
+ * filter assertion below restate it. `lastSkillsOwner` is the one that reads
+ * it, and the test named for it is the one that asserts it. */
 function lastSkillsQuery(): Record<string, unknown> {
+  const { ownerType: _t, ownerId: _i, ...filters } = lastSkillsRequest();
+  return filters;
+}
+
+/** The workspace on the last request, or undefined when it carried none. */
+function lastSkillsOwner(): { ownerType?: unknown; ownerId?: unknown } {
+  const { ownerType, ownerId } = lastSkillsRequest();
+  return { ownerType, ownerId };
+}
+
+function lastSkillsRequest(): Record<string, unknown> {
   const call = skillsQuery.mock.calls[skillsQuery.mock.calls.length - 1];
   const [query] = (call ?? [{}]) as [Record<string, unknown>];
   return query;
@@ -217,6 +235,14 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
   it("asks the plainest question with no filter set", () => {
     render(<SkillsIndexPage />);
     expect(lastSkillsQuery()).toEqual({});
+  });
+
+  it("asks for the workspace the switcher names, not for everything reachable", () => {
+    // Unscoped, the catalog answers with the caller's own skills PLUS every
+    // team's — a union that does not change when the switcher does, which is
+    // the bug this addresses.
+    render(<SkillsIndexPage />);
+    expect(lastSkillsOwner()).toEqual({ ownerType: "user", ownerId: "u-1" });
   });
 
   it("writes the Prompts chip to the URL as the kind it means", () => {
