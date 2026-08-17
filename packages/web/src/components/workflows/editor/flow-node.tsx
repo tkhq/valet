@@ -33,7 +33,7 @@
  *     `stop` renders one unlabeled source handle; `stop` renders none.
  */
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { GitBranch, GitFork, Merge, type LucideIcon } from "lucide-react";
+import { GitBranch, GitFork, Merge, ShieldAlert, ShieldX, type LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
 import type { DagNodeType } from "../editor-model";
 import { NODE_ICON } from "./node-icon";
@@ -141,6 +141,13 @@ export interface FlowNodeData extends Record<string, unknown> {
    * draws no concurrency row.
    */
   parallel?: NodeParallelism;
+  /**
+   * The policy prediction for a tool node's action, from
+   * `GET /api/workflows/:id/permissions`. `require_approval` marks a node
+   * that would park a run on a policy gate; `deny` marks one an org policy
+   * blocks outright. Absent on allowed, non-tool, and unpredictable nodes.
+   */
+  gate?: "require_approval" | "deny";
 }
 
 /**
@@ -212,7 +219,7 @@ export const RUN_STATUS_GLYPH: Record<NodeRunStatus, string> = {
 export type FlowXyNode = Node<FlowNodeData, "workflow">;
 
 export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
-  const { label, summary, hasError, sourceOutputs, nodeType, runStatus, runBadge, entering, parallel } =
+  const { label, summary, hasError, sourceOutputs, nodeType, runStatus, runBadge, entering, parallel, gate } =
     data;
   const Icon = NODE_ICON[nodeType];
   const cues = concurrencyCues(parallel);
@@ -271,6 +278,30 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
               title="This node has a validation error"
             >
               !
+            </span>
+          )}
+          {/* Amber is the app's "the machine is waiting on you" signal
+              (approval-UX spec §5); a predicted gate earns it before the
+              run exists. `deny` is not a wait — it is a hard stop — so it
+              takes the danger wash and its own glyph. */}
+          {gate === "require_approval" && (
+            <span
+              data-testid="node-gate-badge"
+              className="inline-flex h-4 items-center rounded-full bg-warning-wash px-1.5 text-warning-fg"
+              title="This action pauses a run for approval. Pre-approve it to run unattended."
+            >
+              <ShieldAlert className="h-2.5 w-2.5" aria-hidden />
+              <span className="sr-only">needs approval</span>
+            </span>
+          )}
+          {gate === "deny" && (
+            <span
+              data-testid="node-deny-badge"
+              className="inline-flex h-4 items-center rounded-full bg-danger-wash px-1.5 text-danger-600 dark:text-danger-500"
+              title="An org policy blocks this action. Ask an org admin to change the policy."
+            >
+              <ShieldX className="h-2.5 w-2.5" aria-hidden />
+              <span className="sr-only">blocked by org policy</span>
             </span>
           )}
         </span>

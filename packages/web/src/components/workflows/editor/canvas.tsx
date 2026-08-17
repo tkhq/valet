@@ -80,6 +80,10 @@ const ARROW_END: EdgeMarker = { type: MarkerType.ArrowClosed };
 export interface CanvasProps {
   flow: WorkflowFlowState;
   errorNodeIds?: ReadonlySet<string>;
+  /** Per-node policy predictions (`gate` on `FlowNodeData`), keyed by node
+   * id. Absent while the permissions query is loading — cards draw no gate
+   * badge until it lands. */
+  gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
   onNodePositionChange: (nodeId: string, position: FlowPosition) => void;
   onConnect: (params: ConnectParams) => void;
   onSelectNode: (nodeId: string | null) => void;
@@ -141,9 +145,11 @@ function toXyNodes(
   errorNodeIds: ReadonlySet<string>,
   entering: ReadonlySet<string>,
   concurrency: ConcurrencyModel,
+  gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">,
 ): FlowXyNode[] {
   return flow.nodes.map((node) => {
     const counts = concurrency.byNode[node.id];
+    const gate = gateByNodeId?.get(node.id);
     return {
       id: node.id,
       type: "workflow",
@@ -155,6 +161,7 @@ function toXyNodes(
         nodeType: node.data.nodeType,
         hasError: errorNodeIds.has(node.id),
         sourceOutputs: node.data.sourceOutputs,
+        ...(gate ? { gate } : {}),
         ...(entering.has(node.id) ? { entering: true } : {}),
         ...(counts
           ? {
@@ -248,6 +255,7 @@ function toXyEdges(flow: WorkflowFlowState): Edge[] {
 export function Canvas({
   flow,
   errorNodeIds,
+  gateByNodeId,
   onNodePositionChange,
   onConnect,
   onSelectNode,
@@ -266,7 +274,7 @@ export function Canvas({
   const concurrency = useMemo(() => analyzeConcurrency(flow), [flow]);
   const bands = useMemo(() => waveBands(flow, concurrency), [flow, concurrency]);
   const [nodes, setNodes] = useState<FlowXyNode[]>(() =>
-    toXyNodes(flow, errors, EMPTY_IDS, concurrency),
+    toXyNodes(flow, errors, EMPTY_IDS, concurrency, gateByNodeId),
   );
   const [edges, setEdges] = useState<Edge[]>(() => toXyEdges(flow));
 
@@ -274,13 +282,16 @@ export function Canvas({
   // snapshot (add/remove/duplicate/connect/patch), re-derive local state
   // from it. Position changes during an in-progress drag are local-only
   // until drag-end, so this doesn't fight the user's cursor.
+  // `gateByNodeId` is a dependency because it arrives from its own query,
+  // usually AFTER the first snapshot renders — without it the badges would
+  // wait for the next edit to appear.
   useEffect(() => {
     const drawn = new Set(flow.nodes.map((node) => node.id));
     const entering = enteringNodeIds(flow, drawnIds.current ?? drawn);
     drawnIds.current = drawn;
-    setNodes(toXyNodes(flow, errors, entering, concurrency));
+    setNodes(toXyNodes(flow, errors, entering, concurrency, gateByNodeId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flow]);
+  }, [flow, gateByNodeId]);
 
   useEffect(() => {
     setEdges(toXyEdges(flow));

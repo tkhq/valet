@@ -39,6 +39,20 @@ let blocker: BlockerResolver = IDLE_BLOCKER;
 let blockerDisabled: boolean | undefined;
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
+const allowMutateAsync = vi.fn().mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
+/** Per-test permissions payload. Default: nothing gates, so the header
+ * badge stays absent everywhere it is not the subject. */
+let permissionsData: {
+  nodes: Array<{
+    nodeId: string;
+    service: string;
+    action: string;
+    actionId: string | null;
+    riskLevel?: string;
+    mode: "allow" | "require_approval" | "deny" | "unknown";
+    provenance?: string;
+  }>;
+} = { nodes: [] };
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
   isLoading: false,
@@ -76,6 +90,12 @@ vi.mock("~/api/workflows", () => ({
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  useWorkflowPermissions: () => ({ data: permissionsData, isLoading: false, error: null }),
+  useAllowWorkflowPermissions: () => ({
+    mutateAsync: allowMutateAsync,
+    isPending: false,
+    error: null,
+  }),
   // A page with `nextCursor` set: the workflow has more runs than this page
   // holds, which is what the count and the drawer notice must say.
   useWorkflowRuns: () => ({
@@ -157,6 +177,8 @@ describe("WorkflowEditorPage", () => {
     blockerReset.mockClear();
     blocker = IDLE_BLOCKER;
     blockerDisabled = undefined;
+    allowMutateAsync.mockClear();
+    permissionsData = { nodes: [] };
   });
 
   it("loads the fetched definition into the editor and the name field", () => {
@@ -368,5 +390,85 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Leave without saving" }));
     expect(blockerProceed).toHaveBeenCalledTimes(1);
     expect(blockerReset).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
+  beforeEach(() => {
+    allowMutateAsync.mockClear();
+    allowMutateAsync.mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
+    permissionsData = {
+      nodes: [
+        {
+          nodeId: "ship",
+          service: "widgets",
+          action: "deploy",
+          actionId: "widgets.deploy",
+          riskLevel: "high",
+          mode: "require_approval",
+          provenance: "risk_default",
+        },
+        // A second node calling the SAME action: the badge counts actions,
+        // not nodes, so these two are one approval.
+        {
+          nodeId: "ship-again",
+          service: "widgets",
+          action: "deploy",
+          actionId: "widgets.deploy",
+          riskLevel: "high",
+          mode: "require_approval",
+          provenance: "risk_default",
+        },
+        {
+          nodeId: "inventory",
+          service: "widgets",
+          action: "list",
+          actionId: "widgets.list",
+          riskLevel: "low",
+          mode: "allow",
+          provenance: "risk_default",
+        },
+      ],
+    };
+  });
+
+  it("shows the header badge with the count of unique gating actions", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    const badge = screen.getByTestId("workflow-gate-badge");
+    expect(badge.textContent).toContain("1 action needs approval");
+  });
+
+  it("hides the badge when nothing gates", () => {
+    permissionsData = { nodes: [] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.queryByTestId("workflow-gate-badge")).toBeNull();
+  });
+
+  it("pre-approves through the dialog: lists the actions, confirms, closes", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+
+    const list = await screen.findByTestId("preapprove-actions");
+    expect(within(list).getByText("widgets.deploy")).toBeTruthy();
+    expect(within(list).queryByText("widgets.list")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("preapprove-confirm"));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByTestId("preapprove-actions")).toBeNull());
+    expect(screen.queryByTestId("preapprove-blocked")).toBeNull();
+  });
+
+  it("surfaces org-blocked actions after a pre-approval attempt", async () => {
+    allowMutateAsync.mockResolvedValue({
+      allowed: [],
+      blocked: [{ actionId: "widgets.deploy", reason: "an org policy requires approval" }],
+    });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    fireEvent.click(await screen.findByTestId("preapprove-confirm"));
+
+    const notice = await screen.findByTestId("preapprove-blocked");
+    expect(notice.textContent).toContain("widgets.deploy");
+    expect(notice.textContent).toContain("org admin");
   });
 });

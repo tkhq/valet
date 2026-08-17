@@ -11,9 +11,11 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  AllowWorkflowPermissionsResponse,
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  GetWorkflowPermissionsResponse,
   CreateWorkflowScheduleRequest,
   WorkflowWebhookResponse,
   GetWorkflowRunResponse,
@@ -35,6 +37,7 @@ import type {
   WorkflowScheduleResponse,
 } from "@valet/api/wire";
 import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
+import { qkPolicies } from "./policies";
 
 export const qkWorkflows = {
   /** The owner is a trailing element, so `["workflows"]` stays the prefix
@@ -57,6 +60,9 @@ export const qkWorkflows = {
   triggers: (workflowId?: string) => ["workflows", "triggers", workflowId ?? "all"] as const,
   allRuns: () => ["workflows", "all-runs"] as const,
   triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
+  // Sits under the `detail(id)` prefix on purpose: saving the definition
+  // invalidates the detail, and the predictions must follow the definition.
+  permissions: (id: string) => ["workflows", id, "permissions"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -227,6 +233,34 @@ export function useDeleteWorkflow() {
     mutationFn: (id) => api.deleteWorkflow(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.list() });
+    },
+  });
+}
+
+/** Per-node policy predictions: which tool nodes would park a run on a
+ * policy gate for the calling user. */
+export function useWorkflowPermissions(
+  id: string,
+  opts?: Partial<UseQueryOptions<GetWorkflowPermissionsResponse>>,
+) {
+  return useQuery<GetWorkflowPermissionsResponse>({
+    queryKey: qkWorkflows.permissions(id),
+    queryFn: () => api.getWorkflowPermissions(id),
+    enabled: !!id,
+    ...opts,
+  });
+}
+
+/** Pre-approves every gating action of the workflow: the server derives the
+ * set from the stored definition and writes one per-user allow override per
+ * action. Refreshes the predictions and the settings overrides list. */
+export function useAllowWorkflowPermissions(id: string) {
+  const qc = useQueryClient();
+  return useMutation<AllowWorkflowPermissionsResponse, Error, void>({
+    mutationFn: () => api.allowWorkflowPermissions(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
+      qc.invalidateQueries({ queryKey: qkPolicies.myOverrides() });
     },
   });
 }

@@ -54,6 +54,39 @@ describe("FlowNode", () => {
     expect(screen.queryByTestId("node-error-badge")).toBeNull();
   });
 
+  it("shows the amber gate badge when the action needs approval", () => {
+    renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "Tool", summary: "widgets.deploy", nodeType: "tool", gate: "require_approval" },
+    });
+    expect(screen.getByTestId("node-gate-badge")).toBeTruthy();
+    expect(screen.queryByTestId("node-deny-badge")).toBeNull();
+  });
+
+  it("shows the danger deny badge when an org policy blocks the action", () => {
+    renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "Tool", summary: "widgets.deploy", nodeType: "tool", gate: "deny" },
+    });
+    expect(screen.getByTestId("node-deny-badge")).toBeTruthy();
+    expect(screen.queryByTestId("node-gate-badge")).toBeNull();
+  });
+
+  it("draws no gate badge without a prediction", () => {
+    renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "Tool", summary: "widgets.list", nodeType: "tool" },
+    });
+    expect(screen.queryByTestId("node-gate-badge")).toBeNull();
+    expect(screen.queryByTestId("node-deny-badge")).toBeNull();
+  });
+
   it("renders two labeled true/false source handles for an if node", () => {
     renderNode({
       id: "n1",
