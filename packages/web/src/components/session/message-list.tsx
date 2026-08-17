@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
 import { MessageItem } from "./message-item";
 import { SignalCard } from "./signal-card";
@@ -45,6 +46,10 @@ export function MessageList({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  // The ref above drives the auto-scroll effect and must stay a ref: the
+  // effect reads it in the same tick a message lands. This mirror exists
+  // only so the button can render, and it flips at the same threshold.
+  const [scrolledAway, setScrolledAway] = useState(false);
 
   const visible = useMemo(() => {
     if (!threadId) return messages;
@@ -63,7 +68,22 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-    stickToBottomRef.current = distanceFromBottom < 80; // "near bottom"
+    const nearBottom = distanceFromBottom < 80; // "near bottom"
+    stickToBottomRef.current = nearBottom;
+    // Return `prev` unchanged when the side did not flip. Scroll fires on
+    // every wheel tick, and React skips the re-render on an equal value.
+    setScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));
+  }
+
+  function scrollToBottom() {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    // Set both here rather than waiting for the scroll event. A programmatic
+    // scroll to an already-bottom list fires no event, which would leave the
+    // button on screen with nothing left to do.
+    stickToBottomRef.current = true;
+    setScrolledAway(false);
   }
 
   if (visible.length === 0) {
@@ -75,23 +95,38 @@ export function MessageList({
   }
 
   return (
-    <div
-      ref={containerRef}
-      onScroll={onScroll}
-      className="flex-1 overflow-y-auto divide-y divide-[--border]"
-    >
-      {visible.map((m, i) =>
-        m.signal ? (
-          <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
-        ) : m.command ? (
-          <CommandResult key={m.id} message={m} />
-        ) : (
-          <MessageItem
-            key={m.id}
-            message={m}
-            suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
-          />
-        ),
+    <div className="flex-1 relative min-h-0">
+      <div
+        ref={containerRef}
+        onScroll={onScroll}
+        className="h-full overflow-y-auto divide-y divide-[--border]"
+      >
+        {visible.map((m, i) =>
+          m.signal ? (
+            <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
+          ) : m.command ? (
+            <CommandResult key={m.id} message={m} />
+          ) : (
+            <MessageItem
+              key={m.id}
+              message={m}
+              suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+            />
+          ),
+        )}
+      </div>
+      {/* Only while the reader is away from the bottom. At the bottom the
+          list already follows the agent, so the control has no job. */}
+      {scrolledAway && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          aria-label="Jump to latest message"
+          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper/90 px-3 py-1 text-xs text-muted shadow-sm backdrop-blur transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+        >
+          <ArrowDown className="h-3 w-3" aria-hidden />
+          Latest
+        </button>
       )}
     </div>
   );

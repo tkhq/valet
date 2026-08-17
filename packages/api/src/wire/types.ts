@@ -320,11 +320,27 @@ export interface PatchThreadRequest {
 export type PatchThreadResponse = ThreadSummary;
 
 /**
- * Patch a session's settings. Currently only `model` is mutable; this is
- * the session default that threads inherit when they have no override.
+ * Patch a session's settings. Send one field or both.
+ *
+ * `model` is the session default that threads inherit when they have no
+ * override. `title` is the session name shown in the header and the lists;
+ * a person sets it to correct what the auto-titler chose. A body with
+ * neither field is rejected.
  */
 export interface PatchSessionRequest {
   model?: string;
+  /** New session name. Trimmed server-side. Must not be empty. */
+  title?: string;
+  /**
+   * Raise the session to `"full"` to run the terminal and the VS Code
+   * server in its sandbox, or drop it back to `"headless"`.
+   *
+   * The profile is baked into the sandbox at create time (the container
+   * command and, on kubernetes, the Service), so a change recreates the
+   * sandbox. The workspace survives; an open terminal does not. The request
+   * is refused while a turn is unsettled.
+   */
+  profile?: SandboxProfile;
 }
 
 export type PatchSessionResponse = SessionDetail;

@@ -18,6 +18,8 @@ const setModelMutate = vi.fn();
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+let renameMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+let setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 /** The header resolves a team assistant's title and its admin controls from
  * these two lists: the assistant says who owns the session, the team says
  * what that owner is called and what the caller may do. Both empty by
@@ -41,6 +43,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
+    useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
+    useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
   };
 });
 
@@ -100,6 +104,8 @@ beforeEach(() => {
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
   replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+  renameMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+  setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   assistantsData = { assistants: [] };
 });
@@ -214,6 +220,123 @@ describe("SessionHeader — overflow menu", () => {
 });
 
 /**
+ * V1 port #2 — Terminal and VS Code on any session. `SandboxTabs` shows the
+ * tab strip only for a `full` profile, and the profile was frozen at
+ * creation, so an assistant session could never reach it. The switch lives
+ * in the ⋯ menu rather than as a silent default, because raising the
+ * profile restarts the sandbox and starts two more services in it.
+ */
+describe("SessionHeader — Terminal and VS Code switch", () => {
+  function renderWithProfile(profile: "headless" | "full") {
+    return render(
+      <TooltipProvider>
+        <SessionHeader
+          session={{ ...baseSession(), profile }}
+          agentStatus="idle"
+          conn="open"
+          sandbox={{ state: "ready", epoch: 1 }}
+        />
+      </TooltipProvider>,
+    );
+  }
+
+  it("offers to turn the services on for a headless session", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    renderWithProfile("headless");
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
+
+    expect(setProfileMutateAsync).toHaveBeenCalledWith("full");
+    confirmSpy.mockRestore();
+  });
+
+  it("offers to turn them off again for a full session", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    renderWithProfile("full");
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /turn off terminal and vs code/i }));
+
+    expect(setProfileMutateAsync).toHaveBeenCalledWith("headless");
+    confirmSpy.mockRestore();
+  });
+
+  it("names the cost before restarting the sandbox", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup();
+    renderWithProfile("headless");
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
+
+    const message = String(confirmSpy.mock.calls[0]?.[0] ?? "");
+    expect(message).toMatch(/restarts/i);
+    expect(message).toMatch(/files are kept/i);
+    // A declined confirm changes nothing.
+    expect(setProfileMutateAsync).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("surfaces the server's error text", async () => {
+    setProfileMutateAsync = vi
+      .fn()
+      .mockRejectedValue(new Error("a turn is running. Wait for it to finish, then change the profile."));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    renderWithProfile("headless");
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
+
+    await waitFor(() => expect(screen.getByText(/a turn is running/i)).toBeTruthy());
+    confirmSpy.mockRestore();
+  });
+
+  it("hides the switch from a plain team member", () => {
+    // Same rule as pause and delete: the switch restarts a sandbox the
+    // whole team shares, so it follows `canAdminister`.
+    teamsData = {
+      teams: [
+        {
+          id: "team_1",
+          orgId: "org_1",
+          name: "Platform",
+          origin: "local",
+          externalId: null,
+          createdAt: 1,
+          memberCount: 3,
+          callerRole: "member",
+        },
+      ],
+    };
+    assistantsData = {
+      assistants: [
+        {
+          id: "asst_team",
+          owner: { type: "team", id: "team_1" },
+          sessionId: "assistant:asst_team",
+          isDefault: true,
+          createdAt: 1,
+        },
+      ],
+    };
+    render(
+      <TooltipProvider>
+        <SessionHeader
+          session={{ ...baseSession(), id: "assistant:asst_team" }}
+          agentStatus="idle"
+          conn="open"
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByRole("button", { name: "Session menu" })).toBeNull();
+  });
+});
+
+/**
  * A team's assistant is a shared session. Two things must hold that did not
  * before: it is titled with its own name, or failing that the TEAM's (the
  * header used to fall through to `useOrchestratorInfo`, i.e. the VIEWER's
@@ -225,6 +348,93 @@ describe("SessionHeader — overflow menu", () => {
  * The id used to carry the owning principal, which addressed exactly one
  * assistant per team and could not survive the second one.
  */
+/**
+ * V1 port #10 — the inline-editable title. The auto-titler is the only
+ * writer of `session.title` otherwise, and it is often wrong, so the header
+ * has to offer a correction. Renaming follows the same `canAdminister` rule
+ * as the model picker, pause, and delete.
+ */
+describe("SessionHeader — rename", () => {
+  it("opens an edit box seeded with the current title", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    const box = screen.getByLabelText("Session title");
+    expect(box).toBeInstanceOf(HTMLInputElement);
+    expect((box as HTMLInputElement).value).toBe("Fix the bug");
+  });
+
+  it("saves the trimmed title once on Enter", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "  Ship the parser  {Enter}");
+
+    await waitFor(() => expect(renameMutateAsync).toHaveBeenCalledTimes(1));
+    // Enter unmounts the input, which fires blur straight after. One edit
+    // must still send one PATCH.
+    expect(renameMutateAsync).toHaveBeenCalledWith("Ship the parser");
+  });
+
+  it("saves on blur", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Renamed by blur");
+    await user.tab();
+
+    await waitFor(() => expect(renameMutateAsync).toHaveBeenCalledWith("Renamed by blur"));
+  });
+
+  it("discards the edit on Escape", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Never saved{Escape}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Rename session: Fix the bug" })).toBeTruthy();
+  });
+
+  it("sends nothing when the title is unchanged or emptied", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.type(screen.getByLabelText("Session title"), "{Enter}");
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "{Enter}");
+    // The server rejects an empty title, so an emptied box means "cancel".
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed rename with the server's message", async () => {
+    renameMutateAsync = vi
+      .fn()
+      .mockRejectedValue(new Error("title is too long. Use 200 characters or fewer."));
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Too long{Enter}");
+
+    await waitFor(() =>
+      expect(screen.getByText("title is too long. Use 200 characters or fewer.")).toBeTruthy(),
+    );
+  });
+});
+
 describe("SessionHeader — team assistant", () => {
   function teamSession(): SessionDetail {
     return { ...baseSession(), id: "assistant:asst_team", title: "Assistant" };
@@ -356,5 +566,14 @@ describe("SessionHeader — team assistant", () => {
     renderHeader({ state: "ready", epoch: 1 });
     expect(screen.getByRole("button", { name: /pause/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Session menu" })).toBeTruthy();
+  });
+
+  // An assistant's header shows the ASSISTANT's name, not `session.title`.
+  // An edit box here would store a string the header never reads back.
+  it("offers no rename on an assistant session, even to a team admin", () => {
+    withTeam("admin", "Triage");
+    renderTeamHeader();
+    expect(screen.getByText("Triage")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Rename session/ })).toBeNull();
   });
 });

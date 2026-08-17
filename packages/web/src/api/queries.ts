@@ -29,6 +29,7 @@ import type {
   PauseSessionResponse,
   ResolveDecisionRequest,
   SandboxJwtResponse,
+  SandboxProfile,
   SessionRunState,
   SetNotificationPreferenceRequest,
   StartIdentityLinkResponse,
@@ -212,6 +213,33 @@ export function useSetSessionModel(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchSessionResponse, Error, string>({
     mutationFn: (model) => api.patchSession(sessionId, { model }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
+/** PATCH /:id with a `title` — rename the session. The session row and the
+ * session lists both render the title, so both caches are invalidated. */
+export function useRenameSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchSessionResponse, Error, string>({
+    mutationFn: (title) => api.patchSession(sessionId, { title }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
+/** PATCH /:id with a `profile` — turn the sandbox's terminal and VS Code
+ * server on or off. The server replaces a running sandbox, so the session
+ * row and the live `sandbox.status` both change. */
+export function useSetSessionProfile(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchSessionResponse, Error, SandboxProfile>({
+    mutationFn: (profile) => api.patchSession(sessionId, { profile }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });

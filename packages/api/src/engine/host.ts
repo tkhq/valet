@@ -1197,6 +1197,22 @@ export class EngineHost {
   }
 
   /**
+   * The sandbox profile stored on the app session row. Answers `"headless"`
+   * when the host has no db handle (tests that wire none) and when no row
+   * exists yet, which is the column's own default.
+   */
+  private async storedProfile(sessionId: string): Promise<"headless" | "full"> {
+    const db = this.opts.db;
+    if (!db) return "headless";
+    const rows = await db
+      .select({ profile: agentSessions.profile })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    return rows[0]?.profile ?? "headless";
+  }
+
+  /**
    * Fire-and-forget prune of durable events belonging to submissions that
    * settled before the retention cutoff. Errors are logged, never thrown.
    */
@@ -1312,7 +1328,16 @@ export class EngineHost {
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
     const extras = await this.sessionExtras(principal, meta.orgId, pins);
 
-    const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
+    // The profile comes from the app row, not from the caller's meta. An
+    // assistant session is woken by many callers — the web, a channel
+    // message, a workflow — and the first one to touch it decides the
+    // cached build. Only one of them holds the app row, so reading the row
+    // here is what makes "Terminal and VS Code are on for this assistant"
+    // survive a wake from Slack. No row (an assistant woken before its
+    // first web visit) means headless, the same value the column defaults
+    // to. See `PATCH /api/sessions/:id`.
+    const profile = await this.storedProfile(sessionId);
+    const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
@@ -1340,9 +1365,13 @@ export class EngineHost {
       queueMode,
       sandbox: {
         workspace,
-        image: this.opts.defaultImage,
+        // Single-lineage stock default, the same fall-through a REST-created
+        // session and a child both use. This path pinned `defaultImage`,
+        // which is the wrong image for a `full` assistant: `/start-full.sh`
+        // is baked into the full lineage only.
+        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
         env: sandboxMint?.env,
-        profile: "headless" as const,
+        profile,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
       },
       model,
