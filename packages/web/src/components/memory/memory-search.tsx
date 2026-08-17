@@ -2,6 +2,7 @@ import { useState, type KeyboardEvent } from "react";
 import { Search, X } from "lucide-react";
 import type { MemoryTreeEntry } from "@valet/api/wire";
 import { useMemorySearch, useMemoryTree } from "~/api/memory";
+import { useListOwner } from "~/lib/use-list-owner";
 import type { SearchMemorySnippetSegment } from "~/api/memory-types";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { Badge, Input, Spinner } from "~/components/primitives";
@@ -44,8 +45,9 @@ export function MemorySearchPane({ activePath, onSelect }: MemorySearchPaneProps
   const debounced = useDebouncedValue(query, DEBOUNCE_MS);
   const active = debounced.trim().length > 0;
 
-  const treeQ = useMemoryTree({ enabled: !active });
-  const searchQ = useMemorySearch(debounced);
+  const owner = useListOwner();
+  const treeQ = useMemoryTree(owner, { enabled: !active });
+  const searchQ = useMemorySearch(debounced, owner);
 
   function clear() {
     setQuery("");

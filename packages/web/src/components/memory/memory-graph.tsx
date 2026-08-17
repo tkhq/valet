@@ -41,7 +41,8 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { api } from "~/api/client";
-import { useMemoryDoc, useMemoryTree } from "~/api/memory";
+import { qkMemory, useMemoryDoc, useMemoryTree } from "~/api/memory";
+import { useListOwner } from "~/lib/use-list-owner";
 import type { MemoryGraphEdge, MemoryGraphNode, MemoryGraphResponse } from "~/api/memory-types";
 import { Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -354,7 +355,11 @@ function MemoryHoverCard({
   meta?: { updatedAt: number; pinned: boolean; type: string };
   inLinks: number;
 }) {
-  const docQ = useMemoryDoc(node.path ?? "", { enabled: node.path !== undefined, staleTime: 60_000 });
+  const docOwner = useListOwner();
+  const docQ = useMemoryDoc(node.path ?? "", docOwner, {
+    enabled: node.path !== undefined,
+    staleTime: 60_000,
+  });
   const preview =
     docQ.data?.file?.content !== undefined
       ? stripMarkdown(docQ.data.file.content).slice(0, 280)
@@ -416,7 +421,11 @@ const SPOTLIGHT_CSS = `
 
 export function MemoryGraphCanvas() {
   const navigate = useNavigate();
-  const graphQ = useQuery({ queryKey: ["memory", "graph"], queryFn: () => api.getMemoryGraph() });
+  const graphOwner = useListOwner();
+  const graphQ = useQuery({
+    queryKey: qkMemory.graph(graphOwner),
+    queryFn: () => api.getMemoryGraph(graphOwner),
+  });
   const [filters, setFilters] = useState<GraphFilters>({ journal: false, folders: true });
   // Timestamp of the last viewport move, not a boolean: programmatic moves
   // (the initial fitView) can fire onMoveStart without a matching
@@ -430,7 +439,7 @@ export function MemoryGraphCanvas() {
   // memoized node/edge arrays don't depend on it, so showing/hiding it
   // never re-renders the canvas contents.
   const [hoverCard, setHoverCard] = useState<{ node: MemoryGraphNode; x: number; y: number } | null>(null);
-  const treeQ = useMemoryTree();
+  const treeQ = useMemoryTree(graphOwner);
 
   const filtered = useMemo(
     () => (graphQ.data ? filterGraph(graphQ.data, filters) : { nodes: [], edges: [] }),

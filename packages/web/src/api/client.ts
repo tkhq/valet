@@ -419,12 +419,22 @@ export const api = {
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
-  getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
-  getMemoryDoc: (path: string) =>
-    request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
-  searchMemory: (q: string) =>
-    request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
-  getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
+  /** Unscoped reads the caller's own memory. `owner` reads one workspace's
+   * — a team's memory is the team's, not a view of yours. */
+  getMemoryTree: (owner?: OwnerFilter) =>
+    request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+  getMemoryDoc: (path: string, owner?: OwnerFilter) =>
+    request<GetMemoryDocResponse>(
+      "GET",
+      `/memory?path=${encodeURIComponent(path)}${owner ? `&ownerType=${owner.ownerType}&ownerId=${owner.ownerId}` : ""}`,
+    ),
+  searchMemory: (q: string, owner?: OwnerFilter) =>
+    request<SearchMemoryResponse>(
+      "GET",
+      `/memory/search?q=${encodeURIComponent(q)}${owner ? `&ownerType=${owner.ownerType}&ownerId=${owner.ownerId}` : ""}`,
+    ),
+  getMemoryGraph: (owner?: OwnerFilter) =>
+    request<MemoryGraphResponse>("GET", `/memory/graph${ownerQuery(owner)}`),
   // `content` and `pinned` are both optional: the route leaves the body
   // alone when `content` is absent, which is how the doc view pins a file
   // without rewriting it.

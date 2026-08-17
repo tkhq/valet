@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemoryTree } from "~/api/memory";
+import { useListOwner } from "~/lib/use-list-owner";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 
 /**
@@ -13,7 +14,10 @@ export const Route = createFileRoute("/memory/")({
 });
 
 function MemoryIndexPage() {
-  const treeQ = useMemoryTree();
+  // Memory belongs to a workspace: a team's notes are the team's, not a
+  // view of yours. The switcher says which one is being read.
+  const owner = useListOwner();
+  const treeQ = useMemoryTree(owner);
   const info = useOrchestratorInfo();
   const name = info.data?.name ?? "your assistant";
 
