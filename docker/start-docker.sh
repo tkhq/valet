@@ -60,14 +60,24 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
   # the v2 "no internal processes" rule: controllers cannot be delegated
   # to child groups while the root group has member processes, so move
   # every process into an /init leaf before writing subtree_control.
-  # cgroup.procs accepts one pid per write — hence xargs -n1.
   if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     mount -o remount,rw /sys/fs/cgroup 2>>"$LOG" \
       || mount -t cgroup2 -o rw,nosuid,nodev,noexec cgroup2 /sys/fs/cgroup 2>>"$LOG" \
       || echo "valet: cgroup2 remount failed — docker run will fail on read-only cgroupfs" >>"$LOG"
     if mkdir -p /sys/fs/cgroup/init 2>>"$LOG"; then
-      xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>>"$LOG" || true
-      sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>>"$LOG" || true
+      # The xargs form is verbatim moby hack/dind. The single > redirect is
+      # safe on cgroupfs: cgroup.procs is not a regular file — O_TRUNC is a
+      # no-op and each write(2) is an independent one-pid migration, so
+      # every echo that xargs -n1 spawns moves one pid. Retry the pair:
+      # a process spawned into the root group between the move and the
+      # subtree_control write makes the write fail with EBUSY.
+      for i in $(seq 1 10); do
+        xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>>"$LOG" || true
+        sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>>"$LOG" && break
+        sleep 0.1
+      done
+      grep -q . /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null \
+        || echo "valet: cgroup2 controller delegation failed — docker run may lack resource controllers" >>"$LOG"
     fi
   fi
   # overlay2 on the emptyDir data-root; vfs only if the probe fails
