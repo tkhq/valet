@@ -83,11 +83,16 @@ export function WorkspaceSwitcher({
   onSelect,
   /** True on `/chat`, where the open conversation must follow the scope. */
   navigateOnSelect,
+  /** Called from `/chat` when the chosen workspace owns no assistant yet.
+   * The host creates one and opens it; without that the selection cannot
+   * take effect, because the open assistant re-derives the scope. */
+  onCreateAssistant,
 }: {
   options: WorkspaceOption[];
   activeKey: string;
   onSelect: (key: string) => void;
   navigateOnSelect: boolean;
+  onCreateAssistant: (workspace: WorkspaceOption) => void;
 }) {
   const navigate = useNavigate();
 
@@ -128,11 +133,21 @@ export function WorkspaceSwitcher({
               // anywhere else the page simply re-reads the new scope, and
               // navigating would take the reader somewhere they did not ask
               // to go.
-              if (!navigateOnSelect || !o.defaultAssistantId) return;
-              void navigate({
-                to: "/chat",
-                search: { assistant: o.defaultAssistantId, thread: undefined, child: undefined },
-              });
+              if (!navigateOnSelect) return;
+              if (o.defaultAssistantId) {
+                void navigate({
+                  to: "/chat",
+                  search: { assistant: o.defaultAssistantId, thread: undefined, child: undefined },
+                });
+                return;
+              }
+              // The workspace owns no assistant yet. Returning here used to
+              // leave `/chat` showing the PREVIOUS workspace's conversation,
+              // which then re-derived the scope and wrote the selection back
+              // out — so choosing a team did nothing at all and said nothing
+              // about why. Create the workspace's assistant and open it, so
+              // the selection means what it says.
+              onCreateAssistant(o);
             }}
           >
             <span className={cn("flex w-full items-center gap-2", o.key === activeKey && "font-medium")}>

@@ -113,6 +113,9 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+  // `useListOwner` reads the caller's own id to address the personal
+  // workspace: the workspace switcher holds a routing key, not a principal.
+  useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
 }));
 
 // The badge links by assistant id, so it reads the assistants list to find

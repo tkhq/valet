@@ -1,11 +1,16 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { useCallback } from "react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Menu, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 import { useSidebarControls } from "./app-shell";
 import { useOrchestratorInfo } from "~/api/orchestrator";
-import { useAssistants } from "~/api/assistants";
+import { useAssistants, useCreateAssistant } from "~/api/assistants";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
-import { WorkspaceSwitcher, workspaceOptions } from "~/components/layout/workspace-switcher";
+import {
+  WorkspaceSwitcher,
+  workspaceOptions,
+  type WorkspaceOption,
+} from "~/components/layout/workspace-switcher";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { PresenceMark } from "~/components/assistant/presence-mark";
 import { NotificationsBell } from "./notifications-bell";
@@ -113,6 +118,39 @@ export function TopNav() {
   // still lets the open assistant win — see `workspace-scope.tsx`.
   const scope = useWorkspaceScope();
   const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
+  const navigate = useNavigate();
+  const createAssistant = useCreateAssistant();
+
+  /**
+   * Opens a workspace on `/chat` that owns no assistant yet, by creating one.
+   *
+   * On `/chat` the open assistant defines the workspace, so a selection the
+   * conversation cannot follow is a selection that does not happen: the scope
+   * is re-derived from the assistant still on screen and written back over
+   * the choice. A team a person belongs to should have an assistant, so this
+   * creates it rather than refusing.
+   *
+   * Failure is silent by design here. The mutation surfaces its own error
+   * state, and the workspace list still shows the selection; a dropdown is
+   * the wrong place to report a failed write.
+   */
+  const createWorkspaceAssistant = useCallback(
+    (workspace: WorkspaceOption) => {
+      if (!workspace.isTeam) return;
+      createAssistant.mutate(
+        { owner: { type: "team", id: workspace.key } },
+        {
+          onSuccess: (assistant) => {
+            void navigate({
+              to: "/chat",
+              search: { assistant: assistant.id, thread: undefined, child: undefined },
+            });
+          },
+        },
+      );
+    },
+    [createAssistant, navigate],
+  );
 
   // The logo is the PRODUCT (Valet), not the orchestrator — the
   // orchestrator's chosen name shows up in its own title card (session
@@ -140,6 +178,7 @@ export function TopNav() {
         activeKey={scope.key}
         onSelect={scope.setKey}
         navigateOnSelect={onChat}
+        onCreateAssistant={createWorkspaceAssistant}
       />
 
       {/*
