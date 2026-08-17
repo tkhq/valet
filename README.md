@@ -23,9 +23,20 @@ Give your AI coding agent its own sandbox — complete with VS Code, a terminal,
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/)
+- [Node.js](https://nodejs.org/) 22+
 - [Docker](https://www.docker.com/) (session sandboxes in local dev)
 - An Anthropic API key
+
+pnpm is the package manager. Its version is pinned in `package.json`
+(`packageManager`), so the simplest way to get the matching version is
+[Corepack](https://nodejs.org/api/corepack.html), which ships with Node:
+
+```bash
+corepack enable    # provisions the pinned pnpm on first use
+```
+
+If you prefer not to use Corepack, install pnpm any way you like (for example
+`npm install -g pnpm`); the pinned version stays the source of truth for CI.
 
 ### Run locally
 
@@ -44,8 +55,14 @@ By default dev runs with a stubbed local user (`VALET_LOCAL_AUTH=1`) and an embe
 make e2e                          # unified e2e scorecard — runs every suite your creds/daemons allow
 make e2e E2E_ARGS="--doctor"      # environment readiness checklist
 pnpm typecheck                    # TypeScript across all packages
-pnpm test                         # root vitest sweep
+pnpm --filter @valet/engine test  # one package's unit suite (fast — the usual inner loop)
+pnpm test                         # root vitest sweep across every package (slow; boots Docker suites)
 ```
+
+`make e2e` is the canonical validation. For the inner loop, run one package's
+suite with `pnpm --filter <pkg> test`. The bare `pnpm test` runs every package
+in one vitest process, including Docker-backed suites, so it is slow and needs a
+running Docker daemon — reach for the filtered form first.
 
 ### Deploy (Kubernetes)
 
