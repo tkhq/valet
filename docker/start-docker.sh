@@ -65,7 +65,11 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
     # all kubelet sets (the cgroup2 superblock itself is rw on the host),
     # and it is the only variant in-userns root may perform — a plain
     # remount acts on the superblock and fails with EPERM from a user
-    # namespace. Plain remount kept as the fallback for non-userns
+    # namespace. `remount,bind` is the documented util-linux spelling for
+    # MS_REMOUNT|MS_BIND (mount(8), "Bind mount operation": the classic
+    # way to change VFS entry flags is `mount -o remount,bind,ro ...`);
+    # verified live on an EKS 1.33 userns pod — /proc/self/mountinfo
+    # flips ro -> rw. Plain remount kept as the fallback for non-userns
     # environments. NOTE: rw mount flags are necessary, not sufficient —
     # the pod cgroup dir is owned by unmapped host root unless the node
     # runtime delegates it (containerd `cgroup_writable = true` via the
