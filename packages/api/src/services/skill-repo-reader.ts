@@ -1,5 +1,5 @@
 /**
- * Reads a public GitHub repository for skill sync. Three operations, all
+ * Reads a GitHub repository for skill sync. Three operations, all
  * over endpoints the GitHub plugin's own actions already use:
  *
  *   1. `headSha`      — `GET /repos/{owner}/{repo}/commits/{ref}`
@@ -10,20 +10,23 @@
  * `@valet/plugin-github/repo-contents`, the module behind
  * `github.list_repo_directory`. Only the transport differs: the plugin action
  * builds an Octokit from the caller's stored credential, and this reader
- * sends no credential at all.
+ * sends either no credential or one injected installation token.
  *
- * PUBLIC REPOSITORIES ONLY. Nothing here resolves a GitHub token, and that is
- * deliberate rather than unfinished. Reading a private repository would go
- * through the org's GitHub App installation, which can reach every repository
- * the org installed it on — so an authenticated importer needs a check that
- * the person adding the source may read that repository, and no such check
- * exists anywhere in this codebase yet. Until it does, the App's reach must
- * not sit behind an "add a repository" box. See
+ * Without a `token`, the reader sends no credential and can read public
+ * repositories only. With a `token` (an installation token from the org's
+ * GitHub App), it reads private repositories too. The App's installation
+ * token can reach every repository the org installed it on, so a token is
+ * used ONLY for org-scoped sources: creating one requires an org admin, and
+ * the skills it imports are org-visible anyway, so the App's reach never
+ * sits behind the general "add a repository" box. Personal and team sources
+ * stay unauthenticated. The wiring that enforces this split is
+ * `skillSourceReaderProvider` in `services/skill-source-reader.ts`; see
  * docs/specs/2026-08-05-agent-skills-design.md.
  *
  * Unauthenticated GitHub allows 60 requests per hour per IP. That budget is
  * why `services/skill-sync.ts` polls on a long interval and stops after one
- * call when the head commit has not moved.
+ * call when the head commit has not moved. An installation token raises the
+ * budget, but the poll cadence stays the same for both.
  */
 import {
   collectDirectoryEntries,
@@ -38,9 +41,11 @@ import { resolveGithubApiUrl } from "./github-env.js";
 export class SkillRepoNotFoundError extends Error {
   readonly code = "skill_repo_not_found";
   readonly statusCode = 404;
-  constructor(repoFullName: string) {
+  constructor(repoFullName: string, authenticated = false) {
     super(
-      `${repoFullName} was not found on GitHub. Valet reads public repositories only, so a private repository and a misspelled name look the same here. Check the name for a spelling mistake. If the repository is private, make it public.`,
+      authenticated
+        ? `${repoFullName} was not found on GitHub. Valet read it as the organization's GitHub App, so a repository the App cannot reach and a misspelled name look the same here. Check the name for a spelling mistake. If the repository is private, grant the GitHub App access to it in the GitHub organization's settings.`
+        : `${repoFullName} was not found on GitHub. Valet reads public repositories only, so a private repository and a misspelled name look the same here. Check the name for a spelling mistake. If the repository is private, make it public.`,
     );
     this.name = "SkillRepoNotFoundError";
   }
@@ -111,6 +116,9 @@ export interface PublicSkillRepoReaderOptions {
   fetchImpl?: typeof fetch;
   /** Deadline for one request. Defaults to `REQUEST_TIMEOUT_MS`. */
   timeoutMs?: number;
+  /** GitHub token sent as `authorization: Bearer`. Absent means the reader
+   * stays unauthenticated and can read public repositories only. */
+  token?: string;
 }
 
 /**
@@ -132,11 +140,13 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   private readonly apiUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly token: string | undefined;
 
   constructor(opts: PublicSkillRepoReaderOptions = {}) {
     this.apiUrl = (opts.apiUrl ?? resolveGithubApiUrl(process.env)).replace(/\/+$/, "");
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.token = opts.token;
   }
 
   async headSha(repoFullName: string, ref: string): Promise<string> {
@@ -228,7 +238,7 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   private async get(url: string, what: string): Promise<Response> {
     try {
       return await this.fetchImpl(url, {
-        headers: HEADERS,
+        headers: this.token ? { ...HEADERS, authorization: `Bearer ${this.token}` } : HEADERS,
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
@@ -240,7 +250,7 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   }
 
   private async readBody(res: Response, repoFullName: string, what: string): Promise<unknown> {
-    if (res.status === 404) throw new SkillRepoNotFoundError(repoFullName);
+    if (res.status === 404) throw new SkillRepoNotFoundError(repoFullName, this.token !== undefined);
     if (!res.ok) {
       throw new SkillRepoReadError(what, res.status, await githubMessage(res));
     }

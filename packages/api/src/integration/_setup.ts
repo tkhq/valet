@@ -32,7 +32,7 @@ import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { SkillSyncService } from "../services/skill-sync.js";
-import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
+import { skillSourceReaderProvider } from "../services/skill-source-reader.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -429,7 +429,16 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
   const skillSync = new SkillSyncService({
     db,
-    reader: new PublicSkillRepoReader({ apiUrl: opts.githubApiUrl }),
+    readerFor: skillSourceReaderProvider(
+      {
+        db,
+        credentials: engineCredentials,
+        key: deriveSecretKey("test-key"),
+        apiUrl: opts.githubApiUrl,
+        githubUrl: opts.githubApiUrl,
+      },
+      { apiUrl: opts.githubApiUrl },
+    ),
   });
 
   const providers: Providers = {

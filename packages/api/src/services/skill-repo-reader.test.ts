@@ -60,6 +60,25 @@ describe("PublicSkillRepoReader", () => {
     expect((err as Error).message).toMatch(/spelling|private/);
   });
 
+  it("sends the installation token when one is configured", async () => {
+    fixture = startGithubFixture({ getCommit: () => ({ body: { sha: "commit-3" } }) });
+    const reader = new PublicSkillRepoReader({ apiUrl: fixture.url, token: "ghs_inst" });
+
+    expect(await reader.headSha("tkhq/private-skills", "")).toBe("commit-3");
+    expect(fixture.calls[0]?.authHeader).toBe("Bearer ghs_inst");
+  });
+
+  it("names the App-access fix when an authenticated read 404s", async () => {
+    fixture = startGithubFixture({ getCommit: () => ({ status: 404, body: { message: "Not Found" } }) });
+    const reader = new PublicSkillRepoReader({ apiUrl: fixture.url, token: "ghs_inst" });
+
+    const err = await reader.headSha("tkhq/private-skills", "").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SkillRepoNotFoundError);
+    expect((err as Error).message).toContain("tkhq/private-skills");
+    expect((err as Error).message).toContain("GitHub App");
+    expect((err as Error).message).not.toContain("make it public");
+  });
+
   it("reports a server fault as a read failure, not as a missing repository", async () => {
     fixture = startGithubFixture({ getCommit: () => ({ status: 500, body: { message: "boom" } }) });
     const reader = new PublicSkillRepoReader({ apiUrl: fixture.url });

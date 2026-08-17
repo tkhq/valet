@@ -119,7 +119,15 @@ export interface SkillSyncOutcome {
 
 export interface SkillSyncDeps {
   db: AppDb;
-  reader: SkillRepoReader;
+  /**
+   * Resolves the reader one sync run uses, from the source row it is about
+   * to read. This is the seam that gives an org-scoped source an
+   * authenticated reader (the org's GitHub App installation token) while a
+   * personal or team source keeps the unauthenticated public reader — see
+   * `services/skill-source-reader.ts`. A resolution failure is recorded as
+   * a normal sync failure on the row, with the same backoff.
+   */
+  readerFor: (source: SkillSourceRow) => Promise<SkillRepoReader>;
   /** Injected clock, for tests that need a deterministic schedule. */
   now?: () => number;
 }
@@ -265,7 +273,7 @@ export class SkillSyncService {
   }
 
   private async run(source: SkillSourceRow): Promise<SkillSyncOutcome> {
-    const { reader } = this.deps;
+    const reader = await this.deps.readerFor(source);
 
     // Compare 1 — the head commit.
     const headSha = await reader.headSha(source.repoFullName, source.ref);
@@ -274,7 +282,7 @@ export class SkillSyncService {
     }
 
     // Everything below reads at `headSha`, never at the moving ref.
-    const manifest = await this.readManifest(source, headSha);
+    const manifest = await this.readManifest(reader, source, headSha);
 
     // Compare 2 — the skills that commit holds.
     const manifestHash = skillManifestHash({
@@ -297,6 +305,7 @@ export class SkillSyncService {
 
   /** Lists skill directories and the `prompts/` directory at `headSha`. */
   private async readManifest(
+    reader: SkillRepoReader,
     source: SkillSourceRow,
     headSha: string,
   ): Promise<{
@@ -308,7 +317,7 @@ export class SkillSyncService {
      * skill directory and a same-named `prompts/<name>.md` file. */
     text: Map<string, string>;
   }> {
-    const listing = await this.deps.reader.listDirectory(
+    const listing = await reader.listDirectory(
       source.repoFullName,
       source.subpath,
       headSha,
@@ -329,7 +338,7 @@ export class SkillSyncService {
       // A read fault here propagates and fails the whole sync. Only "the
       // file is not there" (null) is a normal answer, and it means the
       // directory is not a skill.
-      const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
+      const content = await reader.readFile(source.repoFullName, path, headSha);
       if (content === null) continue;
       skillEntries.push({ name: dir.name, path, contentSha: fileSha(content) });
       text.set(path, content);
@@ -343,7 +352,7 @@ export class SkillSyncService {
     const promptsDir = joinPath(source.subpath, "prompts");
     let promptListing;
     try {
-      promptListing = await this.deps.reader.listDirectory(
+      promptListing = await reader.listDirectory(
         source.repoFullName,
         promptsDir,
         headSha,
@@ -364,7 +373,7 @@ export class SkillSyncService {
         if (file.type !== "file" || !file.name.endsWith(".md")) continue;
         const name = file.name.slice(0, -3); // strip .md
         const path = joinPath(promptsDir, file.name);
-        const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
+        const content = await reader.readFile(source.repoFullName, path, headSha);
         if (content === null) continue;
         promptEntries.push({ name, path, contentSha: fileSha(content) });
         promptNames.add(name);

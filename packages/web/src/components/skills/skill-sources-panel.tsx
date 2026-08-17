@@ -8,9 +8,11 @@
  * the repository on a schedule. This panel is where a repository is added,
  * re-read on demand, and removed.
  *
- * PUBLIC repositories only, and the panel says so where the box is: nothing
- * here sends a GitHub credential, so a private repository fails with the same
- * 404 a typo gives.
+ * A personal or team source reads PUBLIC repositories only: nothing sends a
+ * GitHub credential, so a private repository fails with the same 404 a typo
+ * gives. An ORG source also reads private repositories the org's GitHub App
+ * installation can reach. The helper text under the box states the limit for
+ * the scope the form files under.
  *
  * A mirrored skill is not editable, so the rows carry no edit action. Removing
  * a source removes the skills it brought in, which is why the button is
@@ -126,7 +128,11 @@ export function SkillSourcesPanel({
               {add.isPending ? <Spinner size={14} /> : "Import"}
             </Button>
           </div>
-          <p className="mt-2 text-xs text-muted">Public repositories only.</p>
+          <p className="mt-2 text-xs text-muted">
+            {owner?.type === "org"
+              ? "Public repositories, and private repositories the organization's GitHub App can read."
+              : "Public repositories only."}
+          </p>
           {add.error && <p className="mt-1 text-xs text-danger-500">{errorText(add.error)}</p>}
         </form>
       )}

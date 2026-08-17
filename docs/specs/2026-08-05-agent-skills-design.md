@@ -1,7 +1,7 @@
 # Agent Skills Design — the skill format V2 targets
 
 **Date:** 2026-08-05
-**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync from public repositories.
+**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync — public repositories for every scope, plus private repositories through the org's GitHub App for org sources.
 **Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, how a repository's skills are mirrored and kept in step, and which parts of the format are not implemented yet.
 
 ## Context
@@ -121,6 +121,10 @@ A person writes a skill on the web Skills tab. `/skills/new` opens an empty edit
 
 The repositories panel sits on `/skills`, over the skills it produces, and lists every source the caller reaches — personal, team, and org — with the scope on each row's badge. A new source goes to the workspace the nav switcher names. Settings keeps one more repositories panel, on `/settings/organization/library`: it pins the org, so an admin reads and changes the library every member gets. There is no third page for personal sources; a row's scope is a badge, so a page per scope bought nothing but a question about which page to open.
 
+What a source may read depends on its scope. A personal or team source reads public repositories only: sync sends no GitHub credential, so a private repository and a misspelled name answer with the same 404. An org source also reads private repositories through the org's GitHub App installation. `services/skill-source-reader.ts` resolves the token through `resolveGitHubToken` with `auth: "app"` — the canonical resolution path — and an org source whose repository owner has no installation falls back to the unauthenticated reader, so a public repository works with no App configured.
+
+The scope split is the authority check. GitHub repository permissions are per-user, so "the App can read it" says nothing about whether the person adding the source can. An org source closes that gap without a per-user check: creating one requires an org admin, and the skills it imports are org-visible, so the App's reach — every repository the org installed it on — sits behind an admin action, never behind the general import box.
+
 The tab addresses a stored skill by row id rather than by name, because a shadowed skill shares its name with the skill that shadows it — only the id reaches it. `/skills/$skillName` reads a skill by name, which is how a plugin skill is opened.
 
 A `repo` skill is read-only on that page: no Edit, no Delete. The next sync would overwrite an edit made here, so the page says where to change it instead. That is the same rule `SkillNotLocalError` enforces in the service, so the page and the API never disagree.
@@ -165,7 +169,7 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 - **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
 - **Directories of 500 entries or more.** Sync reads one level of the tracked directory through GitHub's contents endpoint and keeps 500 entries. A listing that reaches that cut fails the sync and reconciles nothing, because the entries past it cannot be told apart from skills the repository no longer holds. Track a subdirectory that fits under the cut.
-- **Private and authenticated repositories.** See the scope line in Repository sync above. The missing piece is a repo-authority check, not the transport.
+- **Private repositories for personal and team sources.** Only an org source reads through the GitHub App (see Authoring above). No per-user repo-authority check exists, so a personal or team source must not get the App's reach.
 - **Write-back.** Sync reads. Nothing pushes a locally written skill into a repository.
 - **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.
 - **`argsSchema` on a stored skill.** Only a plugin can supply one, because it is code, not frontmatter. A stored skill takes no arguments.

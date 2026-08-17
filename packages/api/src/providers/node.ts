@@ -30,7 +30,7 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { SkillSyncService } from "../services/skill-sync.js";
-import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
+import { skillSourceReaderProvider } from "../services/skill-source-reader.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -571,12 +571,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     deliverToOrchestrator,
   });
 
-  // Skill-repository sync (agent-skills design). Reads PUBLIC repositories
-  // only, so the reader takes no credential deps — see
-  // `services/skill-repo-reader.ts` for why an authenticated importer is
-  // deliberately not wired in yet. `start()`/`stop()` are called from
-  // `main.ts` alongside the other loops.
-  const skillSync = new SkillSyncService({ db, reader: new PublicSkillRepoReader() });
+  // Skill-repository sync (agent-skills design). An org-scoped source reads
+  // through the org's GitHub App installation; every other source reads
+  // unauthenticated, public repositories only — the split is
+  // `skillSourceReaderProvider` (services/skill-source-reader.ts).
+  // `start()`/`stop()` are called from `main.ts` alongside the other loops.
+  const skillSync = new SkillSyncService({
+    db,
+    readerFor: skillSourceReaderProvider({
+      db,
+      credentials: engineCredentials,
+      key: deriveSecretKey(opts.encryptionKey),
+    }),
+  });
 
   return {
     db,

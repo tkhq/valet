@@ -131,7 +131,8 @@ describe("skill sync", () => {
   });
 
   function serviceFor(f: GithubFixture): SkillSyncService {
-    return new SkillSyncService({ db, reader: new PublicSkillRepoReader({ apiUrl: f.url }) });
+    const reader = new PublicSkillRepoReader({ apiUrl: f.url });
+    return new SkillSyncService({ db, readerFor: async () => reader });
   }
 
   it("imports every skill directory on the first sync", async () => {
@@ -693,6 +694,44 @@ Read the reference.
       expect(row?.status).toBe("ok");
       // The sync's own schedule replaces the claim lease.
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + SYNC_INTERVAL_MS);
+    });
+  });
+
+  describe("per-source reader", () => {
+    it("resolves the reader per source, handing it the source row", async () => {
+      const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
+      const seen: Array<{ id: string; ownerType: string }> = [];
+      const service = new SkillSyncService({
+        db,
+        readerFor: async (source) => {
+          seen.push({ id: source.id, ownerType: source.ownerType });
+          return new PublicSkillRepoReader({ apiUrl: f.url });
+        },
+      });
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+      const outcome = await service.syncOnce(source.id);
+
+      expect(outcome?.status).toBe("ok");
+      expect(seen).toEqual([{ id: source.id, ownerType: "user" }]);
+    });
+
+    it("records a reader resolution failure as a sync failure", async () => {
+      const service = new SkillSyncService({
+        db,
+        readerFor: async () => {
+          throw new Error("the GitHub App is not installed on tkhq");
+        },
+      });
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+      const outcome = await service.syncOnce(source.id);
+
+      expect(outcome?.status).toBe("error");
+      expect(outcome?.error).toContain("not installed on tkhq");
+      const [after] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      expect(after?.status).toBe("error");
+      expect(after?.attempts).toBe(1);
     });
   });
 });
