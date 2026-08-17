@@ -46,7 +46,12 @@ describe("streaming tool-call rendering (pure logic)", () => {
   it("write suppresses its line-count summary while args are streaming", () => {
     // Partial args mid-stream must not surface a churning "+N lines" count.
     expect(
-      writeRenderer.formatSummary?.({ path: "/tmp/x", content: "a\nb" }, undefined, "streaming"),
+      writeRenderer.formatSummary?.(
+        { path: "/tmp/x", content: "a\nb" },
+        undefined,
+        "streaming",
+        "write",
+      ),
     ).toBeUndefined();
   });
 });

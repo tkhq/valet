@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { Type } from "typebox";
+import { ObjectOptions, Type } from "typebox";
+import type { TObject } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
 import {
   pluginCatalogTools,
+  pinnedToolName,
   prepareActionArgs,
+  MAX_PINNED_ACTIONS,
   RESOLVE_TTL_MS,
   Engine,
   InMemoryCredentialStore,
@@ -15,9 +18,13 @@ import {
   type Credential,
   type CredentialProvider,
   type DecisionResolution,
+  type PinnedActionSpec,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type PolicyDecision,
+  type PolicyInvocationRecord,
+  type PolicyResolver,
   type Sandbox,
   type SessionEntry,
   type ToolContext,
@@ -775,5 +782,581 @@ describe("prepareActionArgs", () => {
     const result = prepareActionArgs(schema, params);
     expect(result.ok).toBe(true);
     expect(params).toEqual({});
+  });
+});
+
+// ── pinned actions ───────────────────────────────────────────────
+
+describe("pinnedToolName", () => {
+  it("replaces the dot with a double underscore", () => {
+    expect(pinnedToolName("workflows.patch_workflow")).toBe("workflows__patch_workflow");
+    expect(pinnedToolName("github.create_issue")).toBe("github__create_issue");
+    expect(pinnedToolName("a.b")).toBe("a__b");
+  });
+
+  it("produces names Anthropic accepts", () => {
+    const anthropicToolName = /^[a-zA-Z0-9_-]{1,128}$/;
+    for (const id of ["workflows.patch_workflow", "gmail.send_message", "a1.b2_c3"]) {
+      const name = pinnedToolName(id);
+      expect(name).toBeDefined();
+      expect(name).toMatch(anthropicToolName);
+    }
+  });
+
+  it("is injective: no two accepted ids map to one name", () => {
+    // Every pairing that could collide under a naive transform: the dot
+    // moving across the boundary, and underscores next to it.
+    const ids = [
+      "a.b_c",
+      "a_b.c",
+      "ab.c",
+      "a.bc",
+      "workflows.patch_workflow",
+      "workflows_patch.workflow",
+    ];
+    const names = ids.map((id) => pinnedToolName(id));
+    expect(names.every((n) => n !== undefined)).toBe(true);
+    expect(new Set(names).size).toBe(ids.length);
+  });
+
+  it("refuses an id that cannot map to a unique legal name", () => {
+    // A dash and an uppercase letter are legal in an MCP-proxied action id
+    // but not in this transform's domain; a double underscore or an edge
+    // underscore would put a second `__` in the result and break the
+    // inverse; no dot and two dots are not `service.action` at all.
+    expect(pinnedToolName("linear.create-issue")).toBeUndefined();
+    expect(pinnedToolName("Linear.createIssue")).toBeUndefined();
+    expect(pinnedToolName("a.b__c")).toBeUndefined();
+    expect(pinnedToolName("a__b.c")).toBeUndefined();
+    expect(pinnedToolName("a._b")).toBeUndefined();
+    expect(pinnedToolName("a_.b")).toBeUndefined();
+    expect(pinnedToolName("nodot")).toBeUndefined();
+    expect(pinnedToolName("a.b.c")).toBeUndefined();
+    expect(pinnedToolName("")).toBeUndefined();
+    expect(pinnedToolName(`${"a".repeat(120)}.${"b".repeat(10)}`)).toBeUndefined();
+  });
+});
+
+/** A plugin whose one action records every call, for pin/call parity checks. */
+function makePinnablePlugin(): {
+  plugin: ActionPlugin;
+  calls: Array<Record<string, unknown>>;
+} {
+  const calls: Array<Record<string, unknown>> = [];
+  const plugin: ActionPlugin = {
+    service: "workflows",
+    actions: [
+      {
+        id: "workflows.patch_workflow",
+        name: "Patch workflow",
+        description: "Edit a workflow without re-sending the whole definition.",
+        riskLevel: "medium",
+        parameters: Type.Object({
+          workflow_id: Type.String(),
+          name: Type.Optional(Type.String({ default: "untitled" })),
+        }),
+        execute: async (args): Promise<PluginActionResult> => {
+          calls.push(args);
+          return { success: true, data: { workflowId: args.workflow_id } };
+        },
+      },
+    ],
+  };
+  return { plugin, calls };
+}
+
+const PATCH_PIN: PinnedActionSpec = { actionId: "workflows.patch_workflow" };
+
+describe("pluginCatalogTools: pinning", () => {
+  it("leaves the default tool list untouched when nothing is pinned", () => {
+    const { plugin } = makePinnablePlugin();
+    expect(pluginCatalogTools({ plugins: [plugin] }).map((t) => t.name)).toEqual([
+      "list_tools",
+      "call_tool",
+    ]);
+    expect(pluginCatalogTools({ plugins: [plugin], pins: [] }).map((t) => t.name)).toEqual([
+      "list_tools",
+      "call_tool",
+    ]);
+  });
+
+  it("appends one direct tool per accepted pin, after the catalog pair", () => {
+    const { plugin } = makePinnablePlugin();
+    const tools = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    expect(tools.map((t) => t.name)).toEqual([
+      "list_tools",
+      "call_tool",
+      "workflows__patch_workflow",
+    ]);
+  });
+
+  it("publishes every property of the action's own schema, plus a summary argument", () => {
+    const { plugin } = makePinnablePlugin();
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    const own = plugin.actions[0]?.parameters as TObject;
+    const published = pinned?.parameters as TObject;
+    for (const key of Object.keys(own.properties)) {
+      expect(published.properties[key]).toBe(own.properties[key]);
+    }
+    // The model needs a place to write the sentence the approval gate and
+    // the audit record show. `call_tool` takes one; so does this route.
+    expect(published.properties.summary).toBeDefined();
+    expect(published.required ?? []).not.toContain("summary");
+    expect(pinned?.riskLevel).toBe("medium");
+  });
+
+  it("leaves the action's own schema object untouched", () => {
+    // `list_tools` publishes the same object, and the slash-command path
+    // validates against it. A mutation here would reach both.
+    const { plugin } = makePinnablePlugin();
+    const own = plugin.actions[0]?.parameters as TObject;
+    pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    expect(Object.keys(own.properties)).toEqual(["workflow_id", "name"]);
+  });
+
+  it("keeps an action's own summary parameter and adds nothing", () => {
+    // The action already owns the name, so adding an argument would shadow
+    // a real parameter and drop it from the call.
+    const plugin: ActionPlugin = {
+      service: "workflows",
+      actions: [
+        {
+          id: "workflows.patch_workflow",
+          name: "Patch workflow",
+          description: "Edit a workflow.",
+          riskLevel: "medium",
+          parameters: Type.Object({ summary: Type.String() }),
+          execute: async (): Promise<PluginActionResult> => ({ success: true }),
+        },
+      ],
+    };
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    expect(pinned?.parameters).toBe(plugin.actions[0]?.parameters);
+  });
+
+  it("keeps the object schema's own keywords when it adds the summary argument", () => {
+    const plugin: ActionPlugin = {
+      service: "workflows",
+      actions: [
+        {
+          id: "workflows.patch_workflow",
+          name: "Patch workflow",
+          description: "Edit a workflow.",
+          riskLevel: "medium",
+          parameters: Type.Object(
+            { workflow_id: Type.String() },
+            { additionalProperties: false, description: "Patch arguments." },
+          ),
+          execute: async (): Promise<PluginActionResult> => ({ success: true }),
+        },
+      ],
+    };
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    // `ToolDef.parameters` is a `TSchema`; this action declares an object, so
+    // narrowing to `TObject` is what lets the test read its keywords.
+    const published = pinned?.parameters as TObject;
+    const options = ObjectOptions(published);
+    expect(options.additionalProperties).toBe(false);
+    expect(options.description).toBe("Patch arguments.");
+    expect(published.required).toEqual(["workflow_id"]);
+  });
+
+  it("does not set requiresApproval — the gate belongs to the policy path", () => {
+    const { plugin } = makePinnablePlugin();
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    expect(pinned?.requiresApproval).toBeUndefined();
+  });
+
+  it("carries the host guidance and names the call_tool equivalent", () => {
+    const { plugin } = makePinnablePlugin();
+    const [, , pinned] = pluginCatalogTools({
+      plugins: [plugin],
+      pins: [
+        {
+          actionId: "workflows.patch_workflow",
+          guidance: "Apply the edit with this tool BEFORE you describe it.",
+        },
+      ],
+    });
+    expect(pinned?.description).toContain("Edit a workflow without re-sending");
+    expect(pinned?.description).toContain("Apply the edit with this tool BEFORE you describe it.");
+    expect(pinned?.description).toContain("`workflows.patch_workflow` through call_tool");
+  });
+
+  it("keeps a pinned action listed in list_tools and names its direct tool", async () => {
+    const { plugin } = makePinnablePlugin();
+    const [listTool] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    const result = await listTool.execute({}, makeCtx());
+    const payload = JSON.parse(result.text) as {
+      tools: Array<{ tool_id: string; direct_tool?: string }>;
+    };
+    const row = payload.tools.find((t) => t.tool_id === "workflows.patch_workflow");
+    expect(row?.direct_tool).toBe("workflows__patch_workflow");
+  });
+
+  it("omits direct_tool for actions that are not pinned", async () => {
+    const { plugin } = makeMockPlugin();
+    const [listTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await listTool.execute(
+      { service: "github" },
+      makeCtx({
+        credentials: {
+          get: async (): Promise<Credential | null> => ({ accessToken: "tok" }),
+          request: async (): Promise<Credential> => {
+            throw new Error("not implemented in test stub");
+          },
+        },
+      }),
+    );
+    const payload = JSON.parse(result.text) as {
+      tools: Array<{ tool_id: string; direct_tool?: string }>;
+    };
+    expect(payload.tools.every((t) => t.direct_tool === undefined)).toBe(true);
+  });
+});
+
+describe("pluginCatalogTools: pin rejection", () => {
+  /** Collects rejections so a test can assert both the refusal and the fix text. */
+  function pinsWith(
+    plugins: ActionPlugin[],
+    pins: PinnedActionSpec[],
+    reservedToolNames?: string[],
+  ): { names: string[]; rejected: Array<{ actionId: string; reason: string }> } {
+    const rejected: Array<{ actionId: string; reason: string }> = [];
+    const tools = pluginCatalogTools({
+      plugins,
+      pins,
+      reservedToolNames,
+      onPinRejected: (actionId, reason) => rejected.push({ actionId, reason }),
+    });
+    return { names: tools.map((t) => t.name), rejected };
+  }
+
+  it("refuses an id no plugin declares, and keeps the tool list unchanged", () => {
+    const { plugin } = makePinnablePlugin();
+    const { names, rejected } = pinsWith([plugin], [{ actionId: "workflows.no_such_action" }]);
+    expect(names).toEqual(["list_tools", "call_tool"]);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.actionId).toBe("workflows.no_such_action");
+    expect(rejected[0]?.reason).toMatch(/no plugin declares this action/);
+  });
+
+  it("refuses an id outside the name-mapping domain", () => {
+    const plugin: ActionPlugin = {
+      service: "linear",
+      actions: [
+        {
+          id: "linear.create-issue",
+          name: "Create issue",
+          description: "Create an issue.",
+          riskLevel: "low",
+          parameters: Type.Object({}),
+          execute: async () => ({ success: true }),
+        },
+      ],
+    };
+    const { names, rejected } = pinsWith([plugin], [{ actionId: "linear.create-issue" }]);
+    expect(names).toEqual(["list_tools", "call_tool"]);
+    expect(rejected[0]?.reason).toMatch(/cannot become a tool name/);
+  });
+
+  it("refuses a dynamically resolved action, which has no catalog entry at build", () => {
+    const dynamicPlugin = makeDynamicPlugin("notion", async () => [
+      {
+        id: "notion.search_pages",
+        name: "Search Pages",
+        description: "Search Notion pages.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async () => ({ success: true }),
+      },
+    ]);
+    const { names, rejected } = pinsWith([dynamicPlugin], [{ actionId: "notion.search_pages" }]);
+    expect(names).toEqual(["list_tools", "call_tool"]);
+    expect(rejected[0]?.reason).toMatch(/dynamically resolved action cannot be pinned/);
+  });
+
+  it("refuses the same pin twice, so no two tools share a name", () => {
+    const { plugin } = makePinnablePlugin();
+    const { names, rejected } = pinsWith([plugin], [PATCH_PIN, PATCH_PIN]);
+    expect(names).toEqual(["list_tools", "call_tool", "workflows__patch_workflow"]);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toMatch(/"workflows__patch_workflow" is already in use/);
+  });
+
+  it("refuses a pin whose mapped name the caller has already claimed", () => {
+    const { plugin } = makePinnablePlugin();
+    const { names, rejected } = pinsWith([plugin], [PATCH_PIN], ["workflows__patch_workflow"]);
+    expect(names).toEqual(["list_tools", "call_tool"]);
+    expect(rejected[0]?.reason).toMatch(/is already in use/);
+  });
+
+  it("refuses pins past MAX_PINNED_ACTIONS and names the ceiling", () => {
+    const count = MAX_PINNED_ACTIONS + 2;
+    const actions: PluginAction[] = Array.from({ length: count }, (_, i) => ({
+      id: `bulk.action_${i}`,
+      name: `Action ${i}`,
+      description: `Action ${i}.`,
+      riskLevel: "low" as const,
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true }),
+    }));
+    const { names, rejected } = pinsWith(
+      [{ service: "bulk", actions }],
+      actions.map((a) => ({ actionId: a.id })),
+    );
+    expect(names).toHaveLength(2 + MAX_PINNED_ACTIONS);
+    expect(rejected).toHaveLength(2);
+    expect(rejected[0]?.reason).toMatch(new RegExp(`ceiling of ${MAX_PINNED_ACTIONS} actions`));
+  });
+
+  it("keeps the good pins when one entry in the list is bad", () => {
+    const { plugin } = makePinnablePlugin();
+    const { names, rejected } = pinsWith(
+      [plugin],
+      [{ actionId: "workflows.bogus" }, PATCH_PIN],
+    );
+    expect(names).toEqual(["list_tools", "call_tool", "workflows__patch_workflow"]);
+    expect(rejected).toHaveLength(1);
+  });
+});
+
+describe("pinned tool: same execution path as call_tool", () => {
+  /**
+   * Drives one (actionId, args) pair through call_tool and through the
+   * pinned tool with the same context, so a difference between the two
+   * routes shows up as a failing assertion rather than as a security gap.
+   */
+  async function bothRoutes(
+    plugin: ActionPlugin,
+    params: Record<string, unknown>,
+    ctxOverrides: Partial<ToolContext> = {},
+  ): Promise<{ viaCallTool: string; viaPinned: string }> {
+    const [, callTool, pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    if (!pinned) throw new Error("pin was refused");
+    const viaCallTool = await callTool.execute(
+      { tool_id: "workflows.patch_workflow", params, summary: "patch it" },
+      makeCtx(ctxOverrides),
+    );
+    const viaPinned = await pinned.execute(params, makeCtx(ctxOverrides));
+    return { viaCallTool: viaCallTool.text, viaPinned: viaPinned.text };
+  }
+
+  it("a deny decision blocks the pinned tool with the same text as call_tool", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const resolver: PolicyResolver = {
+      resolve: async (): Promise<PolicyDecision> => ({
+        mode: "deny",
+        provenance: { baseMode: "deny", source: "org_policy" },
+      }),
+    };
+    const { viaCallTool, viaPinned } = await bothRoutes(
+      plugin,
+      { workflow_id: "wf-1" },
+      { policyResolver: resolver },
+    );
+    expect(viaPinned).toBe(viaCallTool);
+    expect(viaPinned).toContain("blocked by org policy");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a require_approval decision opens a gate for the pinned tool too", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const gates: Array<{ resumeKey?: string; body: string }> = [];
+    const resolver: PolicyResolver = {
+      resolve: async (): Promise<PolicyDecision> => ({
+        mode: "require_approval",
+        provenance: { baseMode: "require_approval", source: "org_policy" },
+      }),
+    };
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    const result = await pinned?.execute(
+      { workflow_id: "wf-1" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async (req): Promise<DecisionResolution> => {
+          gates.push({ resumeKey: req.resumeKey, body: req.body ?? "" });
+          return { actionId: "deny" };
+        },
+      }),
+    );
+    expect(gates).toHaveLength(1);
+    // The gate is keyed and described by the fully-qualified action id, so
+    // one admin rule covers both routes and the audit trail correlates.
+    expect(gates[0]?.resumeKey).toContain("workflows.patch_workflow");
+    expect(gates[0]?.body).toContain("tool_id=workflows.patch_workflow");
+    expect(gates[0]?.body).toContain("wf-1");
+    expect(result?.text).toContain("did not approve");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects schema-violating args before execute, same text as call_tool", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const { viaCallTool, viaPinned } = await bothRoutes(plugin, { workflow_id: 7 });
+    expect(viaPinned).toBe(viaCallTool);
+    expect(viaPinned).toContain("invalid params for workflows.patch_workflow");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("applies schema defaults on the pinned route", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    await pinned?.execute({ workflow_id: "wf-1" }, makeCtx());
+    expect(calls).toEqual([{ workflow_id: "wf-1", name: "untitled" }]);
+  });
+
+  it("treats non-object args as an empty call, so validation still runs", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    const result = await pinned?.execute("not an object", makeCtx());
+    expect(result?.text).toContain("invalid params for workflows.patch_workflow");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("succeeds with the same result text and the same audit record as call_tool", async () => {
+    const { plugin } = makePinnablePlugin();
+    const records: PolicyInvocationRecord[] = [];
+    const resolver: PolicyResolver = {
+      resolve: async (): Promise<PolicyDecision> => ({
+        mode: "allow",
+        provenance: { baseMode: "allow", source: "risk_default" },
+      }),
+      onInvocation: async (record) => {
+        records.push(record);
+      },
+    };
+    const { viaCallTool, viaPinned } = await bothRoutes(
+      plugin,
+      { workflow_id: "wf-1" },
+      { policyResolver: resolver },
+    );
+    expect(viaPinned).toBe(viaCallTool);
+    expect(viaPinned).toContain("wf-1");
+
+    // onInvocation is fire-and-forget, so let the microtask queue drain.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records).toHaveLength(2);
+    const [fromCallTool, fromPinned] = records;
+    for (const field of [
+      "service",
+      "actionId",
+      "toolId",
+      "riskLevel",
+      "status",
+      "resolvedMode",
+      "resumeKey",
+      "appliesIn",
+    ] as const) {
+      expect(fromPinned?.[field]).toEqual(fromCallTool?.[field]);
+    }
+    expect(fromPinned?.actionId).toBe("workflows.patch_workflow");
+    // The only intended difference: this pinned call sent no summary, so the
+    // route falls back to a derived one.
+    expect(fromCallTool?.summary).toBe("patch it");
+    expect(fromPinned?.summary).toBe("Patch workflow (workflows__patch_workflow)");
+  });
+});
+
+describe("pinned tool: the model's summary", () => {
+  /** Collects one audit record per invocation. */
+  function recordingResolver(records: PolicyInvocationRecord[]): PolicyResolver {
+    return {
+      resolve: async (): Promise<PolicyDecision> => ({
+        mode: "allow",
+        provenance: { baseMode: "allow", source: "risk_default" },
+      }),
+      onInvocation: async (record) => {
+        records.push(record);
+      },
+    };
+  }
+
+  it("writes the model's own sentence to the audit record", async () => {
+    const { plugin } = makePinnablePlugin();
+    const records: PolicyInvocationRecord[] = [];
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    await pinned?.execute(
+      { workflow_id: "wf-1", summary: "Remove the approval node from the release workflow" },
+      makeCtx({ policyResolver: recordingResolver(records) }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records[0]?.summary).toBe("Remove the approval node from the release workflow");
+  });
+
+  it("shows the model's own sentence in the approval gate body", async () => {
+    // A person asked to approve an action needs a statement of intent, not
+    // a constant that repeats the tool name.
+    const { plugin } = makePinnablePlugin();
+    const bodies: string[] = [];
+    const resolver: PolicyResolver = {
+      resolve: async (): Promise<PolicyDecision> => ({
+        mode: "require_approval",
+        provenance: { baseMode: "require_approval", source: "org_policy" },
+      }),
+    };
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    await pinned?.execute(
+      { workflow_id: "wf-1", summary: "Delete the nightly backup step" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async (req): Promise<DecisionResolution> => {
+          bodies.push(req.body ?? "");
+          return { actionId: "deny", resolvedBy: "tester", resolvedAt: 0 };
+        },
+      }),
+    );
+    expect(bodies[0]?.startsWith("Delete the nightly backup step\n")).toBe(true);
+  });
+
+  it("keeps the summary out of the action's arguments and out of the audit params", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const records: PolicyInvocationRecord[] = [];
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    await pinned?.execute(
+      { workflow_id: "wf-1", summary: "Rename it" },
+      makeCtx({ policyResolver: recordingResolver(records) }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    // The action receives schema defaults: `name` was not sent, so
+    // `prepareActionArgs` supplied it.
+    expect(calls).toEqual([{ workflow_id: "wf-1", name: "untitled" }]);
+    // The audit record does NOT carry those defaults. `invokeAction` builds
+    // the record from the arguments as received, and `prepareActionArgs` runs
+    // afterwards inside `executeAction`, so the record answers "what was
+    // asked for" rather than "what ran". That is the shared behaviour of
+    // every path — `call_tool` and the slash-command path record the same
+    // way — so the pinned tool matching it is the point.
+    //
+    // What this test actually guards is the summary: it must reach neither
+    // the action's arguments nor the audit params.
+    expect(records[0]?.params).toEqual({ workflow_id: "wf-1" });
+  });
+
+  it("falls back to the derived summary when the model sends a blank one", async () => {
+    const { plugin } = makePinnablePlugin();
+    const records: PolicyInvocationRecord[] = [];
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    await pinned?.execute(
+      { workflow_id: "wf-1", summary: "   " },
+      makeCtx({ policyResolver: recordingResolver(records) }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records[0]?.summary).toBe("Patch workflow (workflows__patch_workflow)");
+  });
+
+  it("distinguishes two calls to one action by purpose", async () => {
+    // The audit trail's whole point on this route: a constant summary makes
+    // two different edits indistinguishable after the fact.
+    const { plugin } = makePinnablePlugin();
+    const records: PolicyInvocationRecord[] = [];
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    const ctx = makeCtx({ policyResolver: recordingResolver(records) });
+    await pinned?.execute({ workflow_id: "wf-1", summary: "Add a Slack notify step" }, ctx);
+    await pinned?.execute({ workflow_id: "wf-1", summary: "Drop the approval gate" }, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records.map((r) => r.summary)).toEqual([
+      "Add a Slack notify step",
+      "Drop the approval gate",
+    ]);
   });
 });

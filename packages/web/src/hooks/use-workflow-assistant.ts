@@ -154,12 +154,19 @@ function forgetOpeningThread(sessionId: string, workflowId: string): void {
  * and a thread has no system prompt hook. It asks for a summary rather than
  * an acknowledgement so the turn it costs produces something the user
  * wanted anyway — an orientation on the workflow they just opened.
+ *
+ * It carries the id and nothing else. A first-turn message decays as the
+ * conversation grows, so the rule that the agent must APPLY an edit rather
+ * than describe it does not live here — it lives in the description of the
+ * pinned `workflows__patch_workflow` tool (`api/src/plugins/pinned-actions.ts`),
+ * which the model receives again on every turn. Each suggestion chip also
+ * re-states the id, so the id itself is repeated as the thread grows.
  */
 export function openingPrompt(workflowId: string, workflowName: string): string {
   return [
     `I am editing the workflow "${workflowName}" (\`${workflowId}\`) in the visual editor.`,
-    `Read it with workflows.get_workflow, then tell me in two sentences what it does.`,
-    `For every change I ask for after this, edit \`${workflowId}\` with workflows.patch_workflow.`,
+    `Read it, then tell me in two sentences what it does.`,
+    `Every change I ask for after this is a change to \`${workflowId}\`.`,
   ].join(" ");
 }
 

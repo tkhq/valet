@@ -28,7 +28,9 @@ describe("a patch the linter rejected", () => {
     const { Body } = pickRenderer("call_tool", args);
     expect(Body).toBeDefined();
     if (!Body) return;
-    render(<Body args={args} result={{ text: REJECTION }} status="completed" />);
+    render(
+      <Body args={args} result={{ text: REJECTION }} status="completed" toolName="call_tool" />,
+    );
   }
 
   it("shows each validator message verbatim, not a paraphrase", () => {

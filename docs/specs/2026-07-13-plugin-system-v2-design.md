@@ -152,3 +152,83 @@ Recorded during implementation (Task 14: content-plugin manifests, tree cleanup,
 - **`TriggerDef.verify` may be async.** The spec's earlier sketch showed a synchronous signature; GitHub HMAC verification (`crypto.subtle`/node `crypto`) is naturally async, and nothing downstream requires sync, so `verify` returns `Promise<boolean> | boolean`.
 - **MCP plugins use the `ActionPlugin.resolveActions` dynamic seam**, not a static `actions` array: `resolveActions(ctx: { credentials: CredentialProvider })` is invoked lazily by `list_tools`/`call_tool`, cached per catalog instance (i.e. per session — no cross-user leakage) with a short TTL, and instantiated fresh per session rather than shared globally. This is how `mcpActionPlugin` (`packages/sdk/src/mcp/action-plugin.ts`) replaces the legacy `McpActionSource` (deleted this task).
 - **Connect UX is manual token entry for this phase.** Users paste a token/API key per service; there is no OAuth client/redirect/consent flow yet. OAuth lands with the separate auth/login design pass — the "connect one OAuth service" style exit criteria in this plan are satisfied by pasting an OAuth access token directly, not by driving a real OAuth dance. (Per-service OAuth connect flows now implemented — see `2026-07-20-integration-oauth-design.md`.)
+
+## Pinned actions (2026-08-17)
+
+The `list_tools`/`call_tool` indirection keeps a dotted action id off the tool
+name and keeps the tool-catalog budget small. It has one cost: an action the
+agent needs on almost every turn is not in its tool list, so the agent can
+describe the change and never make it. The workflow editor's assistant panel
+showed exactly that — it announced an edited workflow and saved nothing.
+
+A **pin** promotes one action to a direct, model-visible tool without removing
+anything.
+
+- **Opt-in.** `PluginCatalogOptions.pins` is a list of `PinnedActionSpec`
+  (`{ actionId, guidance? }`). With no pins, `pluginCatalogTools` returns
+  exactly `[list_tools, call_tool]`, as before.
+- **One execution path.** A pinned tool's body is one call to `invokeAction` —
+  the same core `call_tool` and the slash-command path use. The approval policy
+  gate, `prepareActionArgs` validation, credential scoping and the audit record
+  are therefore identical on both routes, and one admin rule on
+  `service.action` covers both. Both routes render their outcome through one
+  `renderInvokeOutcome`, so denial and error wording cannot drift.
+- **Name mapping.** `pinnedToolName` maps `service.action_name` to
+  `service__action_name`. The accepted id shape (lowercase alphanumeric
+  segments joined by single underscores, exactly two dot-separated halves,
+  126 characters or fewer) makes the inserted `__` the only `__` in the result,
+  so the map is injective and the name fits Anthropic's
+  `^[a-zA-Z0-9_-]{1,128}$`.
+- **A refused pin is never fatal.** An id outside the shape, an id no plugin
+  declares (which includes every `resolveActions`-backed action, since the
+  catalog has none at build time), a name already taken, or a pin past
+  `MAX_PINNED_ACTIONS` calls `onPinRejected` and is dropped. The action stays
+  reachable through `list_tools`/`call_tool`. `pluginCatalogTools` runs on
+  every session build with no try/catch above it, so a throw here would stop a
+  person starting any session.
+- **The host owns the list**, in `packages/api/src/plugins/pinned-actions.ts`,
+  not a flag on `PluginAction`. A per-action flag would put the choice with
+  each plugin author, and the budget problem would come straight back.
+- **A pinned action stays listed** in `list_tools`, with a `direct_tool` field
+  naming its direct tool. `list_tools` is the only complete inventory, and
+  `call_tool` keeps accepting the id, so hiding the row would make one catalog
+  answer differently in two deployments.
+- **The model still writes the summary.** A pinned tool publishes the action's
+  own object schema plus one optional `summary` string — the same sentence
+  `call_tool` asks for, and the first line of an approval gate body and the
+  `summary` field of every audit record. The engine strips it before
+  `prepareActionArgs`, so the two routes still agree about what the action
+  accepts, and the plugin never sees it. Two cases carry no summary argument
+  and fall back to a derived `"<Action name> (<tool name>)"`: an action whose
+  parameters are not an object schema, and an action that already declares its
+  own `summary` property. Without the argument a human would approve a
+  `critical` action with no statement of intent, and every audit row for that
+  action would carry one constant — an org policy can raise an `allow` action
+  to `require_approval` at any time, so this cannot depend on which actions the
+  host pins today.
+- **Scope: one session kind.** `EngineHost.sessionExtras` is the funnel for
+  four session builders, and it pins nothing by default. Only
+  `buildAssistantSession` passes the host list, and only when the assistant's
+  principal is a user. Two rules produce that scope. A pin must not reach an
+  unattended session: a workflow `session` node templates its prompt from run
+  context, so a trigger, a webhook or an email can put text in front of a
+  one-call save tool that carries guidance to call it in the same turn. And a
+  pin must not reach a session whose acting principal is not the person typing:
+  a team assistant's session is cached on the assistant id and freezes `userId`
+  to the first person who woke it, and `workflows.patch_workflow` authorizes on
+  that frozen user. Within a user-owned assistant, session tools are fixed at
+  session build, so the pin does apply to that person's whole session and not
+  to one thread — acceptable, because the tool then reaches nothing `call_tool`
+  could not already reach for that same user. A live cached session keeps its
+  tool array; a change reaches it at its next build.
+- **`guidance` is where a durable instruction belongs.** The tool catalog is
+  rebuilt and re-sent on every turn, so text in a tool description cannot decay
+  the way a first-turn user message does. The rule that the agent must APPLY an
+  edit rather than describe it lives there.
+
+Clients must read both call shapes. A `call_tool` invocation nests the action's
+parameters under `params` and names the action in `tool_id`; a pinned call
+carries the parameters as its own args, alongside the same optional `summary`
+key, and names the action in the tool name.
+The workflow renderer and the editor's canvas-refresh watch both narrow through
+`workflowToolSuffix`/`workflowParams` for that reason.

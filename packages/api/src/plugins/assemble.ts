@@ -29,8 +29,8 @@
  *     happened instead of dropping them in silence.
  */
 import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
-import type { RoleSpec, SkillSource, ToolDef } from "@valet/engine";
-import { buildSkillTool } from "./skill-tool.js";
+import type { PinnedActionSpec, RoleSpec, SkillSource, ToolDef } from "@valet/engine";
+import { buildSkillTool, SKILL_TOOL_NAME } from "./skill-tool.js";
 
 export interface AssembledPlugins {
   plugins: ValetPlugin[];
@@ -139,15 +139,30 @@ export function partitionByName<T extends { name: string }>(
  * per-call/per-session state. Caching the tools array across sessions would
  * leak one session's dynamically-resolved actions (and their TTL clock)
  * into every other session sharing the plugin set.
+ *
+ * `pins` names the actions the host also wants as direct, model-visible
+ * tools (see `plugins/pinned-actions.ts` for why any action gets one). A
+ * pin the catalog refuses is logged, never thrown: the action stays
+ * reachable through `list_tools`/`call_tool`, and this function runs on
+ * every session build with no try/catch above it.
  */
 export function pluginSessionExtras(
   plugins: ValetPlugin[],
   extraSkills: SkillSource[] = [],
+  pins: readonly PinnedActionSpec[] = [],
 ): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
   const tools =
     actionPlugins.length > 0
-      ? pluginCatalogTools({ plugins: actionPlugins })
+      ? pluginCatalogTools({
+          plugins: actionPlugins,
+          pins,
+          // The `skill` tool is appended below, after the catalog has
+          // already chosen its pinned names — so the catalog has to be told
+          // that name is taken.
+          reservedToolNames: [SKILL_TOOL_NAME],
+          onPinRejected: warnPinRejected,
+        })
       : [];
   const pluginSkills = collectSkills(plugins);
   const { kept, shadowed } = partitionByName(
@@ -164,6 +179,19 @@ export function pluginSessionExtras(
   if (skillTool) tools.push(skillTool);
 
   return { tools, skills, roles, shadowedSkills: shadowed };
+}
+
+/**
+ * Pin ids already reported, so one bad host constant does not print a
+ * warning for every session build in the process. The set holds ids only —
+ * it caches no catalog state, so the freshness rule above still holds.
+ */
+const warnedPins = new Set<string>();
+
+function warnPinRejected(actionId: string, reason: string): void {
+  if (warnedPins.has(actionId)) return;
+  warnedPins.add(actionId);
+  console.warn(`plugin pin "${actionId}" refused: ${reason}`);
 }
 
 /**

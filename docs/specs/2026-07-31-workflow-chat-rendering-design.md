@@ -61,6 +61,16 @@ a drawer — plus a lightweight V2 list/detail UI for browsing workflows and run
 - **Run status freshness:** while a run is non-terminal, the card/drawer polls
   the run endpoint (~3s interval). Wiring run updates into the session event
   stream is an explicit follow-up, not part of this slice.
+- **Two call shapes (2026-08-17).** One workflows action can arrive under two
+  tool names. Through the plugin catalog it is `call_tool`, with the action in
+  `args.tool_id` and its parameters under `args.params`. Through a pinned
+  direct tool (see the plugin-system v2 spec) it is `workflows__<action>`,
+  with the parameters as the args themselves. The renderer claims both, and
+  reads them through `workflowToolSuffix(args, toolName)` and
+  `workflowParams(args, toolName)`. The editor's canvas-refresh watch
+  (`use-workflow-patch-watch.ts`) uses the same two parsers: a route it did not
+  follow would save the workflow and leave the canvas stale, which reads to a
+  user as the save having failed.
 
 ## 2. Components
 

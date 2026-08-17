@@ -9,6 +9,11 @@
  * channel. What the client *does* see is the panel's own transcript. A
  * completed workflows tool call in that transcript is the cue to refetch.
  *
+ * The action reaches the model by two routes — `call_tool`, and the pinned
+ * `workflows__patch_workflow` direct tool — so the transcript carries two
+ * call shapes. Both are read through the workflow renderer's parsers, so
+ * this watch cannot follow one route and miss the other.
+ *
  * Success is read off the RESULT, not the arguments. The api runs the patch
  * and the full linter before it writes anything, and a rejected call comes
  * back as `{ success: false, error }` whose text is not JSON — so only a
@@ -62,7 +67,7 @@ export function definitionWriteCallIds(
     for (const part of message.parts) {
       if (part.kind !== "tool_call" || part.status !== "completed") continue;
       if (!isWorkflowCallTool(part.toolName, part.args)) continue;
-      const suffix = workflowToolSuffix(part.args);
+      const suffix = workflowToolSuffix(part.args, part.toolName);
       if (suffix === undefined || !DEFINITION_WRITE_TOOLS.has(suffix)) continue;
       if (workflowRefsFrom(part.result).workflowId !== workflowId) continue;
       ids.push(part.callId);
