@@ -47,7 +47,7 @@ describe("messageCopyText", () => {
             callId: "c1",
             toolName: "bash",
             args: {},
-            status: "success",
+            status: "completed",
           },
           { kind: "text", text: "second" },
         ],

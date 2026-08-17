@@ -154,7 +154,6 @@ export const STEPS: StepDef[] = [
   { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
-  { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
   { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },

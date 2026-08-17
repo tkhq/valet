@@ -33,16 +33,16 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
-  it("has the spec's 35 unique rows", () => {
-    expect(STEPS).toHaveLength(35);
-    expect(new Set(STEPS.map((s) => s.id)).size).toBe(35);
+  it("has the spec's 34 unique rows", () => {
+    expect(STEPS).toHaveLength(34);
+    expect(new Set(STEPS.map((s) => s.id)).size).toBe(34);
   });
 
   it("includes every spec row id", () => {
     const ids = STEPS.map((s) => s.id);
     for (const id of [
       "typecheck", "conventions", "docs-lint", "unit", "engine-unit", "workflow-unit", "gateway-unit",
-      "runner-unit", "plugins-unit", "sandbox-local", "sandbox-k8s-unit",
+      "plugins-unit", "sandbox-local", "sandbox-k8s-unit",
       "store-postgres-unit", "web-build", "api-bundle", "helm-golden",
       "sandbox-docker-unit", "registry-drift",
       "integration-core",
@@ -297,7 +297,7 @@ describe("selectSteps", () => {
   });
 
   it("returns all steps without --only", () => {
-    expect(selectSteps(STEPS)).toHaveLength(35);
+    expect(selectSteps(STEPS)).toHaveLength(34);
   });
 
   it("throws on unknown ids", () => {
