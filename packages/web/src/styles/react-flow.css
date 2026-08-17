@@ -1,0 +1,251 @@
+/**
+ * xyflow (React Flow) surface theme — the library's chrome, repainted in
+ * the tokens from `theme.css`.
+ *
+ * WHY THIS FILE EXISTS. Three surfaces import
+ * `@xyflow/react/dist/style.css`: the workflow editor canvas
+ * (`components/workflows/editor/canvas.tsx`), the read-only workflow
+ * preview (`components/workflows/preview.tsx`), and the memory graph
+ * (`components/memory/memory-graph.tsx`). That stylesheet paints the
+ * controls, edges, handles and dot grid from a hardcoded LIGHT palette —
+ * white buttons with near-black glyphs. Its dark forms exist, but they sit
+ * behind a `.react-flow.dark` class that only the library's own
+ * `colorMode` prop adds, and that prop knows nothing about this app's two
+ * theme axes (`data-theme` and `data-palette`, see `theme.css`). So the
+ * light defaults applied on every polarity, and `<Controls />` rendered as
+ * a stack of white squares on a dark canvas.
+ *
+ * WHY VARIABLES INSTEAD OF REWRITTEN RULES. The library reads every color
+ * as `var(--xy-thing, var(--xy-thing-default))` and ships its light and
+ * dark values as the `-default` half of that pair. Declaring the
+ * undecorated `--xy-thing` therefore outranks BOTH defaults, so one block
+ * of app tokens covers every polarity AND every palette: the tokens
+ * already switch, so nothing here has to switch with them. Only the
+ * controls container needs real declarations, because its radius and
+ * ground are not exposed as variables.
+ *
+ * WHY `:root` LEADS EVERY SELECTOR. `main.tsx` imports this file (through
+ * `globals.css`) before any route chunk pulls in the library stylesheet,
+ * so a rule at the library's own specificity would lose on source order.
+ * A leading `:root` lifts each selector to (0,2,0), one step above the
+ * library's (0,1,0), which settles it whatever the load order turns out
+ * to be.
+ *
+ * The `--xy-node-*` family is deliberately absent. All three surfaces
+ * register custom node types, so `.react-flow__node-default` and its
+ * siblings never render.
+ *
+ * WHY THE CANVAS'S OWN STATES ARE ALSO HERE. The second half of this file
+ * styles our node card (`editor/flow-node.tsx`), not the library's chrome.
+ * Those rules live beside the chrome because they all depend on classes
+ * only xyflow sets — `draggable` tells an editable canvas from the
+ * read-only preview, `animated` marks an edge into a step that is running
+ * — and a Tailwind variant in the component cannot see any of them.
+ */
+
+:root .react-flow {
+  /* Dot grid. `--muted` rather than `--line`: the grid has to read against
+     paper in BOTH polarities, and `--line` is a hairline tone chosen to
+     disappear against a light paper. `--muted` is a mid-tone in every
+     palette, which is the same call the library makes with its own
+     `#91919a`. */
+  --xy-background-pattern-color: var(--muted);
+
+  /* Edges. The library's selected stroke (#555) is DARKER than its resting
+     one (#b1b1b7), so selecting an edge on a dark canvas hid it instead of
+     marking it. Selection is `--moss` everywhere else in the app, so it is
+     `--moss` here. */
+  --xy-edge-stroke: var(--muted);
+  --xy-edge-stroke-selected: var(--moss);
+  /* The library's 1px hairline disappears against the dot grid at any
+     zoom below 1. 1.5 holds the line without making the graph heavy. */
+  --xy-edge-stroke-width: 1.5;
+
+  /* The pill behind an edge's "when" badge — canvas.tsx leans on the
+     default edge type to draw it, so these two are its only styling. */
+  --xy-edge-label-background-color: var(--paper);
+  --xy-edge-label-color: var(--ink);
+
+  /* Connect points. The ring is paper so the dot still separates from the
+     node card it straddles, which is also paper. They rest in `--muted`
+     and turn `--moss` on the node under the cursor (below): a thirty-node
+     graph carries sixty of these dots, and in the brand colour they read
+     as the loudest thing on a canvas whose subject is the steps. */
+  --xy-handle-background-color: var(--muted);
+  --xy-handle-border-color: var(--paper);
+
+  /* Marquee selection on the pane. */
+  --xy-selection-background-color: var(--moss-wash);
+  --xy-selection-border: 1px dotted var(--moss);
+
+  /* Controls. The buttons sit on the container's own paper ground (set
+     below), so the translucent hover wash composites over paper rather
+     than punching a hole through to the canvas behind. */
+  --xy-controls-button-background-color: var(--paper);
+  --xy-controls-button-background-color-hover: var(--ink-wash);
+  --xy-controls-button-color: var(--muted);
+  --xy-controls-button-color-hover: var(--ink);
+  --xy-controls-button-border-color: var(--line);
+  --xy-controls-box-shadow: 0 1px 2px var(--ink-wash-strong);
+
+  --xy-attribution-background-color: var(--ink-wash);
+}
+
+/**
+ * The controls container. Radius and ground are not variables in the
+ * library, so they need declarations: without `overflow: hidden` the
+ * square buttons paint over the rounded corners, and without the paper
+ * ground the hover wash has nothing to composite against.
+ *
+ * `0.5rem` is the `md` radius from `tailwind.config.ts`. It is written out
+ * because a `theme()` call here would tie this file to Tailwind for one
+ * number, and this file is otherwise plain CSS.
+ */
+:root .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--paper);
+}
+
+/* The library hardcodes this link at #999, which is off every palette. */
+:root .react-flow__attribution a {
+  color: var(--muted);
+}
+
+/* ── Edge states ───────────────────────────────────────────────────────
+ *
+ * At rest an edge is a muted line with an arrowhead (`canvas.tsx` sets
+ * the marker). Pointing at one is how a reader finds where it goes in a
+ * dense graph, so it answers with the strongest tone the palette has.
+ * Only an edge the reader can actually select responds: the read-only
+ * preview leaves its edges `selectable`-less, and lighting one up there
+ * would offer a click that goes nowhere.
+ */
+:root .react-flow__edge.selectable:hover .react-flow__edge-path {
+  stroke: var(--ink);
+}
+
+:root .react-flow__edge.selected .react-flow__edge-path,
+:root .react-flow__edge.selectable:hover .react-flow__edge-path {
+  stroke-width: 2;
+}
+
+/**
+ * The travelling dash. An edge is `animated` only where a run overlay
+ * marks it — `preview.tsx` sets it on edges into a node that is running —
+ * so this motion always points at work in flight, and the editor canvas,
+ * which is handed no run, never shows it.
+ *
+ * The still variant keeps the library's `stroke-dasharray` and drops only
+ * the travel: a dashed moss line still separates an edge in flight from
+ * the solid muted ones around it, so the state survives without motion.
+ */
+:root .react-flow__edge.animated .react-flow__edge-path {
+  stroke: var(--moss);
+  stroke-width: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root .react-flow__edge.animated path {
+    animation: none;
+  }
+}
+
+/* ── Node states ───────────────────────────────────────────────────────
+ *
+ * Keyboard focus. xyflow makes every node focusable but paints nothing,
+ * so tabbing through a graph moved an invisible cursor. `outline` rather
+ * than a ring, because the selected card already spends `box-shadow` on
+ * its moss ring and the two must be able to show at once.
+ */
+:root .react-flow__node:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+/**
+ * Hover, on an editable canvas only (`draggable` is xyflow's own mark for
+ * a node that answers a gesture; the preview's nodes never carry it).
+ *
+ * The border darkens only on a card with no run state to report —
+ * `data-status` is written by `flow-node.tsx` — because darkening a
+ * failed node's border would take away the one cue that says it failed.
+ * Elevation is deliberately not part of this: `box-shadow` on the card
+ * carries the selection ring, and setting it here would erase the ring of
+ * a node that is both selected and hovered.
+ */
+.flow-node-card {
+  transition-property: transform, border-color;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+:root .react-flow__node.draggable:hover .flow-node-card {
+  transform: translateY(-1px);
+}
+
+:root .react-flow__node.draggable:hover .flow-node-card[data-status="none"] {
+  border-color: var(--ink);
+}
+
+/**
+ * A read-only surface drops the `true`/`false` words beside an if/approval
+ * node's two source handles. The words are for authoring, and at the scale
+ * the preview draws a card they overhang its right edge.
+ *
+ * The HANDLES stay. They used to be stripped from the data instead, which
+ * left the branch edges with a `sourceHandle` that matched nothing, so
+ * xyflow dropped them: an `if` node's two outgoing edges were missing from
+ * every run page and chat preview.
+ */
+:root .react-flow__node:not(.draggable) .flow-node-branch-label {
+  display: none;
+}
+
+/**
+ * Connect points light up on the node under the cursor, and stay lit on
+ * the selected one. `.react-flow__handle` reads its ground from the
+ * inherited `--xy-handle-background-color`, so re-declaring the variable
+ * on the node covers every handle it owns without naming any of them.
+ */
+:root .react-flow__node.draggable:hover,
+:root .react-flow__node.selected {
+  --xy-handle-background-color: var(--moss);
+}
+
+/**
+ * Arrival. The canvas plays this on a node it has not drawn before, which
+ * in practice is a step the assistant just added — the moment the reader
+ * most needs to see what changed. It is input-driven and runs once;
+ * nothing on an idle canvas repeats it.
+ *
+ * `transform` and `opacity` only, and on the card rather than on
+ * `.react-flow__node`, whose transform is the node's position: animating
+ * that would fly every new step in from the origin of the graph.
+ */
+.flow-node-enter {
+  animation: flow-node-enter 200ms ease-out both;
+}
+
+@keyframes flow-node-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-node-card {
+    transition: none;
+  }
+
+  .flow-node-enter {
+    animation: none;
+  }
+
+  :root .react-flow__node.draggable:hover .flow-node-card {
+    transform: none;
+  }
+}

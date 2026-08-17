@@ -1,5 +1,6 @@
 @import "../theme.css";
 @import "./code-block.css";
+@import "./react-flow.css";
 
 @tailwind base;
 @tailwind components;
