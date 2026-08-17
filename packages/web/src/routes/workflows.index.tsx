@@ -20,6 +20,7 @@ import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
+import { useListOwner } from "~/lib/use-list-owner";
 
 /**
  * `/workflows` — tabbed hub (Workflows | Runs | Triggers | Templates). The
@@ -123,7 +124,12 @@ export function WorkflowsIndexPage() {
 }
 
 function WorkflowsTab({ onNew, onImport }: { onNew: () => void; onImport: () => void }) {
-  const { data, isLoading, error } = useWorkflows();
+  // The nav's workspace switcher decides which workspace this list is FOR.
+  // Without it the list answers with the caller's own workflows plus every
+  // team's, which is a union that does not change when the switcher does —
+  // so switching appeared to do nothing.
+  const owner = useListOwner();
+  const { data, isLoading, error } = useWorkflows(owner);
   const triggersQ = useWorkflowTriggers();
   const workflows = data?.workflows ?? [];
 
