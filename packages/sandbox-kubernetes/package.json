@@ -16,7 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@kubernetes/client-node": "latest",
+    "@kubernetes/client-node": "^1.4.0",
     "@valet/engine": "workspace:*"
   },
   "devDependencies": {
