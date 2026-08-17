@@ -71,9 +71,10 @@ WORKDIR /workspace
 # devDependencies) at /out/gateway.
 FROM node:22-bookworm-slim AS gateway-build
 
-# Corepack defers to the repo's `packageManager` pin, so the version here
-# only warms the cache — keep it equal to package.json's pin or the build
-# silently runs a different pnpm than this line claims.
+# `prepare --activate` warms corepack's cache AND sets the default shim
+# version — but inside this repo the `packageManager` pin in package.json
+# still overrides it. Keep this equal to the pin, or the build silently
+# runs a different pnpm than this line claims.
 RUN corepack enable && corepack prepare pnpm@10.30.3 --activate
 
 WORKDIR /repo
