@@ -172,6 +172,15 @@ root. Consequences:
   (capabilities do not extend to ancestor-owned namespaces) — which is
   why "rootlesskit with --net=host" was not an option and slirp existed
   in the first place.
+- cgroup v2 bootstrap: kubelet mounts `/sys/fs/cgroup` read-only, so
+  runc cannot create per-container groups (`mkdir /sys/fs/cgroup/docker:
+  read-only file system` on every `docker run`). Before dockerd starts,
+  `start-docker.sh` remounts the delegated cgroup2 subtree writable
+  (permitted: the pod owns a private cgroup namespace inside its userns),
+  moves every process into an `/init` leaf, and enables the controllers
+  in `cgroup.subtree_control` — the v2 "no internal processes" rule
+  forbids delegation while the root group has member processes. This is
+  the same dance the official `docker:dind` entrypoint performs.
 
 ### Exec identity
 

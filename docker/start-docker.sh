@@ -51,6 +51,25 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
   if [ -S "$ROOT_SOCK" ] && su -s /bin/sh dockerd -c 'docker version' >/dev/null 2>&1; then
     exit 0
   fi
+  # ── cgroup v2 bootstrap (the docker:dind entrypoint dance) ────────────
+  # Kubelet mounts /sys/fs/cgroup read-only, so runc cannot create
+  # per-container groups: every `docker run` fails with
+  # "mkdir /sys/fs/cgroup/docker: read-only file system". The pod owns a
+  # private cgroup namespace inside its user namespace, so in-container
+  # root may remount the delegated cgroup2 subtree writable. Then satisfy
+  # the v2 "no internal processes" rule: controllers cannot be delegated
+  # to child groups while the root group has member processes, so move
+  # every process into an /init leaf before writing subtree_control.
+  # cgroup.procs accepts one pid per write — hence xargs -n1.
+  if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+    mount -o remount,rw /sys/fs/cgroup 2>>"$LOG" \
+      || mount -t cgroup2 -o rw,nosuid,nodev,noexec cgroup2 /sys/fs/cgroup 2>>"$LOG" \
+      || echo "valet: cgroup2 remount failed — docker run will fail on read-only cgroupfs" >>"$LOG"
+    if mkdir -p /sys/fs/cgroup/init 2>>"$LOG"; then
+      xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>>"$LOG" || true
+      sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>>"$LOG" || true
+    fi
+  fi
   # overlay2 on the emptyDir data-root; vfs only if the probe fails
   # (nothing in a 6.3+ userns kernel should make it fail — belt and
   # suspenders, not an expected path).
