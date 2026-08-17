@@ -542,12 +542,18 @@ describe("installWorkflowTemplate", () => {
     // show an installed workflow that never runs.
     await pgdb.query("ALTER TABLE workflow_schedules ADD CONSTRAINT no_writes CHECK (false) NOT VALID");
 
-    await expect(installWorkflowTemplate(deps(), OWNER, "gmail-sweep")).rejects.toThrow();
+    try {
+      await expect(installWorkflowTemplate(deps(), OWNER, "gmail-sweep")).rejects.toThrow();
 
-    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
-    expect(await db.select().from(workflowVersions)).toHaveLength(0);
-    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
-    await pgdb.query("ALTER TABLE workflow_schedules DROP CONSTRAINT no_writes");
+      expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+      expect(await db.select().from(workflowVersions)).toHaveLength(0);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+    } finally {
+      // Drop the constraint also when an assertion above fails. The tests in
+      // this package share one database, so a constraint that stays makes
+      // every later write to this table fail.
+      await pgdb.query("ALTER TABLE workflow_schedules DROP CONSTRAINT no_writes");
+    }
   });
 
   it("installs the same template twice as two independent workflows", async () => {
