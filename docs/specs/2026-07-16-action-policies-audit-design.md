@@ -158,3 +158,15 @@ Three independent adversarial reviewers (engine contract, policy security, integ
 7. **`findCatalogAction` returns the first plugin matching a duplicate BARE action id**, which can mis-attribute the service in an override bounds-check error message. Invocation-time resolution (rung 0 deny included) is authoritative and unaffected. Accepted as a nit.
 8. **`PluginActionContext.actionId` still mirrors raw `PluginAction.id`** (possibly bare) while the policy/audit actionId is the fqid — intentional (the context field is documented as mirroring the plugin's own id); plugins must not treat it as the policy id.
 9. **After a restart replay, continuation-phase tool calls run with no `runningItem`,** so their audit rows carry no `queueItemId`. Gate ordinals in that state are scoped to the same empty key and stay monotonic per resumeKey, so audit ids remain unique and replay dedup still holds — the cost is turn attribution on those rows, not correctness.
+
+### resumeKey size bound (2026-08-17)
+
+The original resumeKey format was `${fqid}:${stableJson(args)}` with no length bound. The key is embedded in two indexed values: the deterministic gate id (the `engine_decision_gates` text primary key, plus the `engine_decision_gates_resume` index) and the `action_invocations` audit primary key. Postgres btree index rows cap at ~2704 bytes, so any gated tool call with args over ~2.6KB failed to persist its gate: `index row size ... exceeds btree version 4 maximum 2704`. In practice this capped `skills.create_skill` bodies at ~2.7KB.
+
+Fix (`plugin-catalog.ts`): when the args JSON exceeds 256 characters, the key's args portion becomes `fnv1a64:<length>:<64-bit FNV-1a hex>` instead of the raw JSON. Properties preserved:
+
+- Deterministic per (tool_id, args) — restart replay re-derives the identical key, so gate short-circuit and audit dedup are unchanged.
+- Small keys are byte-identical to the old format (the seam tests pin the literal).
+- Pure JS hash — the engine imports no node builtins.
+
+The hash is 64-bit, not cryptographic. A collision only matters when two different large-args calls to the same tool collide within one (session, queue item) scope; with the length prefix the probability is negligible. The gate `body` still carries the full args JSON for display — `body` is an unindexed text column.

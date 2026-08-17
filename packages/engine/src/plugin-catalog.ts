@@ -360,8 +360,11 @@ export async function invokeAction(
   // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
   // to ctx.requestDecision when a gate opens for this call. Recorded on every
   // audit record (even allow/deny, which never open a gate) so a host sink
-  // can correlate all records for one (tool, args) pair.
-  const resumeKey = `${qualifiedId(entry)}:${stableJson(args ?? {})}`;
+  // can correlate all records for one (tool, args) pair. Large args hash into
+  // a bounded suffix: the key is embedded in the engine_decision_gates and
+  // action_invocations primary keys, and Postgres btree index rows cap at
+  // ~2704 bytes.
+  const resumeKey = `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`;
 
   // ── Decision phase ────────────────────────────────────────────
   // Absent resolver: byte-identical to pre-policy behavior — derive the
@@ -1259,4 +1262,30 @@ function stableJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+// Args JSON at or under this length passes through raw, so small keys stay
+// human-readable and byte-identical to the pre-bound format. The threshold
+// keeps the worst-case UTF-8 gate id well under the ~2704-byte btree cap.
+const RESUME_KEY_ARGS_MAX_CHARS = 256;
+
+/**
+ * Returns the args portion of a resumeKey, bounded in length. JSON longer
+ * than the threshold is replaced with its length plus a 64-bit FNV-1a hash —
+ * deterministic, so restart replay re-derives the identical key. Pure JS
+ * (no node:crypto): the engine stays portable.
+ */
+function boundedArgsKey(json: string): string {
+  if (json.length <= RESUME_KEY_ARGS_MAX_CHARS) return json;
+  return `fnv1a64:${json.length}:${fnv1a64Hex(json)}`;
+}
+
+function fnv1a64Hex(input: string): string {
+  const mask = 0xffffffffffffffffn;
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= BigInt(input.charCodeAt(i));
+    hash = (hash * 0x100000001b3n) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
