@@ -754,6 +754,31 @@ describe("KubernetesImageBuilder", () => {
     expect(dockerfile).toContain("FROM node:20-bookworm");
   });
 
+  it("base bake: Dockerfile FROM is untouched for an EXTERNAL registry-hosted base image (ghcr.io)", async () => {
+    // The full-profile stock base is an external ref like
+    // `ghcr.io/tkhq/valet-sandbox:sha-x`. Rewriting its host to the bundled
+    // push host produced `valet-registry…:5000/tkhq/valet-sandbox:sha-x`,
+    // which nobody ever pushed — every full-base bake failed with
+    // "not found" (dev-v2). Only bundled-registry (pull-hosted) refs may be
+    // rewritten; any other host must pass through untouched.
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.ns.svc:5000",
+    });
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "ghcr.io/tkhq/valet-sandbox:sha-b4e24e1",
+        imageRef: "localhost:30500/src-x/base:abc",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM ghcr.io/tkhq/valet-sandbox:sha-b4e24e1");
+    expect(dockerfile).not.toContain("valet-registry.ns.svc:5000/tkhq/");
+  });
+
   it("base bake: Dockerfile FROM is untouched when no push host is configured", async () => {
     const jobsApi = new FakeJobsApi();
     // No registryPushHost — push and pull host are the same (or external registry).

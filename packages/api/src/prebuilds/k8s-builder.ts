@@ -96,6 +96,13 @@ export function pushRefFor(pullRef: string, pushHost: string | undefined): strin
   return `${pushHost}${pullRef.slice(slash)}`;
 }
 
+/** The registry host segment of an image ref, or undefined for a hostless
+ * (docker-backend-shaped) ref like `valet-prebuild/foo:sha`. */
+function refHost(ref: string): string | undefined {
+  const slash = ref.indexOf("/");
+  return slash < 0 ? undefined : ref.slice(0, slash);
+}
+
 function jobName(id: string): string {
   return `valet-prebuild-${id}`;
 }
@@ -560,7 +567,17 @@ export class KubernetesImageBuilder implements ImageBuilder {
       // (`pushRefFor` on `imageRef` → `--output name=`) applied below in
       // `buildKitJobManifest`. Host-agnostic generation stays in recipe.ts —
       // the rewrite lives here at the builder boundary only.
-      const baseImage = pushRefFor(rec.spec.baseImage, this.registryPushHost);
+      //
+      // ONLY bundled-registry refs qualify: a ref is pull-hosted exactly when
+      // it shares the output ref's host (imageRef is always pull-hosted).
+      // External hosts (ghcr.io stock bases, prebuild.yaml image overrides)
+      // must pass through — rewriting them points BuildKit at an image nobody
+      // pushed and the bake fails with "not found".
+      const fromHost = refHost(rec.spec.baseImage);
+      const baseImage =
+        fromHost !== undefined && fromHost === refHost(rec.spec.imageRef)
+          ? pushRefFor(rec.spec.baseImage, this.registryPushHost)
+          : rec.spec.baseImage;
       const dockerfile =
         rec.spec.kind === "base"
           ? generateBaseDockerfile({ baseImage, setup: rec.spec.setup ?? [] })
