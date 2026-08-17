@@ -1,9 +1,18 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { InMemoryWorkflowStore, type RunHost } from "@valet/workflow";
-import { workflowsActionPlugin, ownerFromContext } from "./actions.js";
+import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
+import {
+  findingKey,
+  formatEditLintErrors,
+  ownerFromContext,
+  workflowsActionPlugin,
+} from "./actions.js";
 import type { PluginActionContext } from "@valet/engine";
-import { createWorkflowDefinition, type WorkflowServiceDeps } from "./service.js";
+import {
+  createWorkflowDefinition,
+  getWorkflowDefinition,
+  type WorkflowServiceDeps,
+} from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
@@ -94,6 +103,75 @@ describe("save_workflow validation", () => {
     const result = await save.execute({ definition: { nodes: "nope" } }, ctx());
     expect(result.success).toBe(false);
     expect(result.error).toContain("definition.nodes");
+  });
+});
+
+/**
+ * The web renderer reads this text back and splits it into a list
+ * (`parseLintReport`, packages/web/src/components/session/tool-renderers/
+ * workflow.tsx). It tells a validator message from api prose by the bullet
+ * marker alone, so a message that loses its bullet is shown and counted as
+ * prose, and prose that gains one is shown as a validator message.
+ */
+describe("the shape the lint report is read back by", () => {
+  const lines = (text: string): string[] =>
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .slice(1);
+
+  it("bullets every validator message and nothing else", () => {
+    const text = formatEditLintErrors(
+      ["introduced one", "carried one", "carried two"],
+      ["carried one", "carried two"],
+    );
+    const body = lines(text);
+    expect(body.filter((line) => line.startsWith("- "))).toEqual([
+      "- introduced one",
+      "- carried one",
+      "- carried two",
+    ]);
+    // Exactly one line is not a message: the sentence about the carried ones.
+    expect(body.filter((line) => !line.startsWith("- "))).toHaveLength(1);
+  });
+
+  it("keeps the sentence above the errors it speaks for", () => {
+    const body = lines(formatEditLintErrors(["introduced", "carried"], ["carried"]));
+    const advice = body.findIndex((line) => !line.startsWith("- "));
+    expect(body.slice(0, advice)).toEqual(["- introduced"]);
+    expect(body.slice(advice + 1)).toEqual(["- carried"]);
+  });
+
+  it("bullets every message when nothing was carried in", () => {
+    const body = lines(formatEditLintErrors(["introduced one", "introduced two"], []));
+    expect(body.every((line) => line.startsWith("- "))).toBe(true);
+  });
+});
+
+describe("findingKey", () => {
+  it("reads a message and the same message with a near-match hint as one finding", () => {
+    expect(findingKey('node "b": values.x references unknown node "clasify"')).toBe(
+      findingKey('node "b": values.x references unknown node "clasify" — did you mean "classify"?'),
+    );
+  });
+
+  it("reads an unknown root the same after an unrelated node adds an alias", () => {
+    expect(findingKey('node "b": values.x references unknown root "foo" (available: trigger, nodes)')).toBe(
+      findingKey('node "b": values.x references unknown root "foo" (available: trigger, nodes, item)'),
+    );
+  });
+
+  it("survives an edge index that moved because an earlier edge went away", () => {
+    expect(findingKey('edge[3]: unknown target node "notify"')).toBe(
+      findingKey('edge[1]: unknown target node "notify"'),
+    );
+  });
+
+  it("still tells two different findings apart", () => {
+    expect(findingKey('node "a": values.x references unknown node "ghost"')).not.toBe(
+      findingKey('node "b": values.x references unknown node "ghost"'),
+    );
   });
 });
 
@@ -288,6 +366,246 @@ describe("DB-backed actions", () => {
 
     const unowned = await del.execute({ workflow_id: workflowId }, ctx({ userId: "someone-else" }));
     expect(unowned.success).toBe(false);
+  });
+
+  /**
+   * A workflow saved before the trigger-path rule holds a path the validator
+   * now refuses. Both actions here edit WITHOUT re-sending the definition,
+   * so they revalidate the merged whole and the stale path blocks them. The
+   * edit stays blocked — that is the point of the rule — but the caller must
+   * be able to tell the stale path from a mistake of its own.
+   */
+  describe("an edit blocked by a path the workflow already held", () => {
+    /** Written through the service, which does not validate, the same way a
+     * workflow saved before the rule sits in the table today. */
+    async function seedLegacyWorkflow(): Promise<string> {
+      const created = await createWorkflowDefinition(
+        deps,
+        { userId: "user1", orgId: "org1" },
+        {
+          name: "saved-before-the-rule",
+          definition: {
+            version: "dag/v1",
+            nodes: [
+              { id: "trigger", type: "trigger", dataSchema: { email: { type: "string" } } },
+              { id: "build", type: "set", values: { to: "{{trigger.email}}" } },
+            ],
+            edges: [{ from: "trigger", to: "build" }],
+          },
+        },
+      );
+      return created.id;
+    }
+
+    const findWorkflowAction = (id: string) => {
+      const found = workflowsActionPlugin(() => deps).actions.find((a) => a.id === id);
+      if (!found) throw new Error(`action missing: ${id}`);
+      return found;
+    };
+
+    /** Appends a node that reads nothing, so nothing about it can fail. */
+    const cleanPatch = (workflowId: string) => ({
+      workflow_id: workflowId,
+      upsert_nodes: [{ id: "note", type: "set", values: { n: "1" } }],
+      add_edges: [{ from: "build", to: "note" }],
+    });
+
+    it("patch_workflow stays blocked, and says the error is not the caller's", async () => {
+      const workflowId = await seedLegacyWorkflow();
+
+      const result = await findWorkflowAction("workflows.patch_workflow").execute(
+        cleanPatch(workflowId),
+        ctx(),
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error).toContain("already held");
+      expect(result.error).toContain("this edit did not cause them");
+      // The blocking error is still reported in full, correction and all.
+      expect(result.error).toContain('did you mean "trigger.data.email"');
+      // And it names where to go when the caller cannot fix it in place.
+      expect(result.error).toContain("editor");
+    });
+
+    it("patch_workflow renames a workflow the stale path would otherwise block", async () => {
+      const workflowId = await seedLegacyWorkflow();
+
+      const result = await findWorkflowAction("workflows.patch_workflow").execute(
+        { workflow_id: workflowId, name: "renamed" },
+        ctx(),
+      );
+
+      // `PUT /api/workflows/:id` renames this same workflow, because it
+      // validates only a request that carries a definition. The agent path
+      // must not refuse an edit the HTTP path allows.
+      expect(result.success).toBe(true);
+
+      // And the rename leaves the definition exactly as it was, stale path
+      // included — a rename is not a quiet chance to rewrite the graph.
+      const after = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, workflowId);
+      expect(after?.name).toBe("renamed");
+      expect(after?.definition).toEqual({
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger", dataSchema: { email: { type: "string" } } },
+          { id: "build", type: "set", values: { to: "{{trigger.email}}" } },
+        ],
+        edges: [{ from: "trigger", to: "build" }],
+      });
+    });
+
+    it("patch_workflow separates the caller's own new error from the stale one", async () => {
+      const workflowId = await seedLegacyWorkflow();
+
+      const result = await findWorkflowAction("workflows.patch_workflow").execute(
+        {
+          workflow_id: workflowId,
+          upsert_nodes: [{ id: "note", type: "set", values: { n: "{{nodes.ghost.result.x}}" } }],
+          add_edges: [{ from: "build", to: "note" }],
+        },
+        ctx(),
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      const preExisting = result.error?.indexOf("already held") ?? -1;
+      const introduced = result.error?.indexOf('unknown node "ghost"') ?? -1;
+      expect(introduced).toBeGreaterThan(-1);
+      expect(preExisting).toBeGreaterThan(-1);
+      // The caller's own error is read first: it is the one to fix now.
+      expect(introduced).toBeLessThan(preExisting);
+    });
+
+    it("patch_workflow on a valid workflow blames nothing on the past", async () => {
+      const created = await createWorkflowDefinition(
+        deps,
+        { userId: "user1", orgId: "org1" },
+        {
+          name: "valid",
+          definition: {
+            version: "dag/v1",
+            nodes: [
+              { id: "trigger", type: "trigger", dataSchema: { email: { type: "string" } } },
+              { id: "build", type: "set", values: { to: "{{trigger.data.email}}" } },
+            ],
+            edges: [{ from: "trigger", to: "build" }],
+          },
+        },
+      );
+      const workflowId = created.id;
+
+      const result = await findWorkflowAction("workflows.patch_workflow").execute(
+        {
+          workflow_id: workflowId,
+          upsert_nodes: [{ id: "note", type: "set", values: { n: "{{trigger.email}}" } }],
+        },
+        ctx(),
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error).toContain('did you mean "trigger.data.email"');
+      expect(result.error).not.toContain("already held");
+    });
+
+    it("add_aggregate says the stored definition is what blocks it", async () => {
+      const workflowId = await seedLegacyWorkflow();
+
+      const result = await findWorkflowAction("workflows.add_aggregate").execute(
+        { workflow_id: workflowId },
+        ctx(),
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error).toContain("already held");
+      expect(result.error).toContain('did you mean "trigger.data.email"');
+    });
+
+    /**
+     * The validator writes its near-match hint from the WHOLE definition, so
+     * adding a node REWRITES the message of an error in a node the patch
+     * never touched. The split must survive that: an error whose only change
+     * is a hint is the same error, and the caller did not cause it.
+     */
+    describe("when the patch rewrites the hint on an error it did not touch", () => {
+      type WorkflowNodeSeed = WorkflowDefinition["nodes"][number];
+
+      /** `clasify` is 1 edit from `classify`, and no node is named either
+       * until the patch adds one. So the stored definition holds the error
+       * WITHOUT a hint, and the patched one holds it WITH a hint. */
+      async function seedNearMissWorkflow(extraNodes: WorkflowNodeSeed[] = []): Promise<string> {
+        const created = await createWorkflowDefinition(
+          deps,
+          { userId: "user1", orgId: "org1" },
+          {
+            name: "near-miss",
+            definition: {
+              version: "dag/v1",
+              nodes: [
+                { id: "trigger", type: "trigger", dataSchema: { email: { type: "string" } } },
+                { id: "b", type: "set", values: { x: "{{nodes.clasify.result.text}}" } },
+                ...extraNodes,
+              ],
+              edges: [
+                { from: "trigger", to: "b" },
+                ...extraNodes.map((n) => ({ from: "trigger", to: n.id })),
+              ],
+            },
+          },
+        );
+        return created.id;
+      }
+
+      /** Adds the node whose id turns the stale reference into a near miss. */
+      const addNearMatch = (workflowId: string) => ({
+        workflow_id: workflowId,
+        upsert_nodes: [{ id: "classify", type: "set", values: { q: "2" } }],
+        add_edges: [{ from: "b", to: "classify" }],
+      });
+
+      it("still reads the rewritten error as pre-existing, not as the caller's", async () => {
+        // A second stale error that no hint touches, so the pre-existing
+        // notice would be printed either way — what is under test is which
+        // side of it the rewritten error lands on.
+        const workflowId = await seedNearMissWorkflow([
+          { id: "c", type: "set", values: { y: "{{trigger.email}}" } },
+        ]);
+
+        const result = await findWorkflowAction("workflows.patch_workflow").execute(
+          addNearMatch(workflowId),
+          ctx(),
+        );
+
+        expect(result.success).toBe(false);
+        if (result.success) return;
+        const notice = result.error?.indexOf("already held") ?? -1;
+        const rewritten = result.error?.indexOf('unknown node "clasify"') ?? -1;
+        expect(notice).toBeGreaterThan(-1);
+        expect(rewritten).toBeGreaterThan(-1);
+        // Below the notice is the pre-existing side. Above it is the
+        // caller's own — which is where a raw string compare put this one.
+        expect(rewritten).toBeGreaterThan(notice);
+      });
+
+      it("keeps the pre-existing notice when the rewritten error is the only one", async () => {
+        const workflowId = await seedNearMissWorkflow();
+
+        const result = await findWorkflowAction("workflows.patch_workflow").execute(
+          addNearMatch(workflowId),
+          ctx(),
+        );
+
+        expect(result.success).toBe(false);
+        if (result.success) return;
+        // A raw string compare found nothing pre-existing here and dropped
+        // the notice altogether, with nothing to say it had.
+        expect(result.error).toContain("already held");
+        expect(result.error).toContain("this edit did not cause them");
+        expect(result.error).toContain('did you mean "classify"');
+      });
+    });
   });
 
   // The agent's batch tracker (batch-fanout design decision 5). An

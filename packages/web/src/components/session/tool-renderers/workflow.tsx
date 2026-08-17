@@ -125,23 +125,44 @@ export function workflowListFrom(result: unknown): WorkflowListEntry[] | null {
 }
 
 /**
- * Lint bullets out of a failed save/patch result. The api's
- * `formatLintErrors` emits `workflow definition failed validation (fix
- * these and retry):\n- …\n- …` (possibly behind a `workflows.x failed: `
- * prefix); returns the bullet list, or null when the text isn't that shape.
+ * One line of a lint report: a validator message, or a sentence the api
+ * wrote about the messages around it.
  */
-export function parseLintErrors(text: string | undefined): string[] | null {
+export interface LintReportLine {
+  kind: "error" | "note";
+  text: string;
+}
+
+/**
+ * The lint report out of a failed save/patch result.
+ *
+ * The api writes one bullet per validator message. It also writes plain
+ * lines between the bullets: `formatEditLintErrors` says which errors the
+ * workflow already held before the edit, and `formatLintErrors` says how
+ * many errors it cut. A plain line is NOT a validator message, so it must
+ * not be counted as one or shown as one — the bullet marker is what tells
+ * the two apart, and this parse is the only place that reads it.
+ *
+ * Returns the lines in the order the api wrote them, so a note still refers
+ * to the errors it was written to introduce. Returns null when the text is
+ * not a lint report (it may sit behind a `workflows.x failed: ` prefix).
+ */
+export function parseLintReport(text: string | undefined): LintReportLine[] | null {
   if (!text) return null;
   const marker = "failed validation (fix these and retry):";
   const at = text.indexOf(marker);
   if (at === -1) return null;
-  const bullets = text
+  const lines: LintReportLine[] = text
     .slice(at + marker.length)
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => (line.startsWith("- ") ? line.slice(2) : line));
-  return bullets.length > 0 ? bullets : null;
+    .map((line) =>
+      line.startsWith("- ")
+        ? { kind: "error", text: line.slice(2) }
+        : { kind: "note", text: line },
+    );
+  return lines.some((line) => line.kind === "error") ? lines : null;
 }
 
 /** The definition the agent TRIED to save, from the call's own params —
@@ -253,23 +274,54 @@ function RunFailures({
   );
 }
 
+/**
+ * Group a lint report into the runs the api wrote it in: a note, then the
+ * errors it speaks for. The order is kept, so "the error(s) below" still
+ * points at the errors below it.
+ */
+function lintGroups(lines: LintReportLine[]): { note?: string; errors: string[] }[] {
+  const groups: { note?: string; errors: string[] }[] = [];
+  for (const line of lines) {
+    const open = groups[groups.length - 1];
+    if (line.kind === "note") {
+      groups.push({ note: line.text, errors: [] });
+      continue;
+    }
+    if (!open) groups.push({ errors: [line.text] });
+    else open.errors.push(line.text);
+  }
+  return groups;
+}
+
 /** Rich body for a failed save/patch: the DAG the agent attempted (when it
  * parses) above the structured lint list — not a wall of raw text. */
-function LintErrorsBody({ errors, attempted }: { errors: string[]; attempted: unknown }) {
+function LintErrorsBody({ lines, attempted }: { lines: LintReportLine[]; attempted: unknown }) {
+  // Only the validator's own messages are issues. A note is the api talking
+  // about them, so counting it would overstate what the author must fix.
+  const count = lines.filter((line) => line.kind === "error").length;
   return (
     <div className="space-y-2 px-3 py-2">
       {isWorkflowDefinitionShape(attempted) && <WorkflowPreview definition={attempted} />}
       <div className="rounded-md border border-rose-200 bg-rose-50/70 px-3 py-2 dark:border-rose-900/60 dark:bg-rose-950/40">
         <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-danger-500">
-          Validation failed — {errors.length} issue{errors.length === 1 ? "" : "s"}, nothing saved
+          Validation failed — {count} issue{count === 1 ? "" : "s"}, nothing saved
         </div>
-        <ul className="list-disc space-y-1 pl-4">
-          {errors.map((e, i) => (
-            <li key={i} className="text-xs leading-snug text-ink">
-              {e}
-            </li>
+        <div className="space-y-1.5">
+          {lintGroups(lines).map((group, gi) => (
+            <div key={gi} className="space-y-1">
+              {group.note && <p className="text-xs leading-snug text-muted">{group.note}</p>}
+              {group.errors.length > 0 && (
+                <ul className="list-disc space-y-1 pl-4">
+                  {group.errors.map((e, i) => (
+                    <li key={i} className="text-xs leading-snug text-ink">
+                      {e}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           ))}
-        </ul>
+        </div>
       </div>
     </div>
   );
@@ -387,9 +439,9 @@ function WorkflowToolBody({ args, result, status, error, toolName }: ToolRendere
   }
 
   // A save/patch rejected by the linter → attempted DAG + structured list.
-  const lintErrors = parseLintErrors(error ?? resultText(result));
-  if (lintErrors) {
-    return <LintErrorsBody errors={lintErrors} attempted={attemptedDefinition(args, toolName)} />;
+  const lintReport = parseLintReport(error ?? resultText(result));
+  if (lintReport) {
+    return <LintErrorsBody lines={lintReport} attempted={attemptedDefinition(args, toolName)} />;
   }
 
   if (refs.runId) return <RunBody runId={refs.runId} />;

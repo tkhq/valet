@@ -137,6 +137,7 @@ vi.mock("~/hooks/use-workflow-patch-watch", () => ({
   useWorkflowPatchWatch: () => undefined,
 }));
 
+import { ApiError } from "~/api/client";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { WorkflowEditorPage } from "./workflows.$workflowId";
 
@@ -281,6 +282,39 @@ describe("WorkflowEditorPage", () => {
         name: "Deploy pipeline",        definition: workflowData.definition,
       }),
     );
+  });
+
+  /**
+   * A restore re-saves an old definition, so the save-time validator judges
+   * it. A version snapshotted before a rule existed does not pass that rule
+   * and the PUT 400s. `ApiError.message` is only "PUT /workflows/wf_1 → 400",
+   * so showing it leaves the reader with no fault and no fix. The drawer is
+   * the only surface that can show the `errors` list for an old version.
+   */
+  it("restore names the node and the corrected path when the old version no longer validates", async () => {
+    updateMutateAsync.mockRejectedValueOnce(
+      new ApiError(400, "PUT /workflows/wf_1 → 400", {
+        error: "invalid workflow definition",
+        errors: [
+          'node "build": values.to reads "trigger.email", but a trigger payload carries only ' +
+            'type, triggerId, timestamp, data, metadata (did you mean "trigger.data.email"?)',
+        ],
+      }),
+    );
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("Version history"));
+    fireEvent.click(screen.getByText("v1"));
+    fireEvent.click(screen.getByRole("button", { name: "Restore v1" }));
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore v1" }));
+
+    const shown = await within(dialog).findByText(/trigger\.data\.email/);
+    expect(shown.textContent).toContain('node "build"');
+    // And it says what to do, not only that the request failed.
+    expect(shown.textContent).toContain("then save");
+    expect(shown.textContent).not.toContain("→ 400");
   });
 
   it("arms the leave guard for a rename, and leaves it off on a clean page", () => {

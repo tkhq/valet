@@ -63,7 +63,16 @@ function nodeNamed(response: PreviewWorkflowResponse, nodeId: string) {
  * The typo reads a `trigger.data` field the schema does not declare: the
  * save-time validator statically rejects `trigger.<field>` (the payload-key
  * check in validate.ts), so a data-level miss is the shape only the
- * preview can catch.
+ * preview can catch. The editor-flow tests at the end of this file pin
+ * both halves of that split.
+ *
+ * The validator reads only the FIRST segment after `trigger`. This fixture
+ * does declare a `dataSchema`, so `username` is in fact knowably absent —
+ * the validator simply does not read the schema yet. If it is ever taught
+ * to, move this typo onto a trigger that declares no schema, or onto a
+ * `nodes.<id>.result.<field>` read. Do NOT relax the rule to keep these
+ * tests passing: the rule is what stops a path that resolves to nothing
+ * from reaching a run.
  */
 const PURE_DEFINITION = {
   version: "dag/v1",
@@ -474,6 +483,81 @@ describe("POST /api/workflows/:id/preview — request handling", () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * The two halves of the editor's correction loop, which meet at the same
+ * template path but are caught by different things. A path whose second
+ * segment is not a trigger-payload key is knowably wrong without any data,
+ * so the validator refuses it at save AND at preview. A path under
+ * `trigger.data` can only be judged against data, so it saves, and the
+ * preview is what tells the reader it resolves to nothing.
+ */
+describe("POST /api/workflows/:id/preview — the editor's correction loop", () => {
+  const withTypo = (typo: string) => ({
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger", dataSchema: { email: { type: "string", required: true } } },
+      { id: "build", type: "set", values: { to: typo } },
+    ],
+    edges: [{ from: "trigger", to: "build" }],
+  });
+
+  it("previews an unsaved draft, reports the empty path, and saves the correction", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl, withTypo("{{trigger.data.email}}"));
+
+    // 1. The editor holds an edit that is not saved yet.
+    const draft = await preview(api.baseUrl, created.id, {
+      definition: withTypo("{{trigger.data.emial}}"),
+      input: { email: "a@example.com" },
+    });
+
+    // 2. The preview names the path, and the value it would have written.
+    const build = nodeNamed(draft, "build");
+    expect(build.unresolved.map((u) => u.path)).toEqual(["trigger.data.emial"]);
+    expect(build.unresolved[0]?.message).toContain("Correct the path");
+    expect(build.output).toEqual({ to: null });
+
+    // 3. The reader corrects the path, and the same definition saves.
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition: withTypo("{{trigger.data.email}}") }),
+    });
+    expect(res.status).toBe(200);
+
+    // 4. And the saved definition previews with nothing left unresolved.
+    const after = await preview(api.baseUrl, created.id, { input: { email: "a@example.com" } });
+    expect(nodeNamed(after, "build").unresolved).toEqual([]);
+    expect(nodeNamed(after, "build").output).toEqual({ to: "a@example.com" });
+  });
+
+  it("refuses a wrong trigger-payload key at preview and at save, with the same correction", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl, withTypo("{{trigger.data.email}}"));
+    const bad = withTypo("{{trigger.email}}");
+
+    const previewRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition: bad }),
+    });
+    expect(previewRes.status).toBe(400);
+    const previewBody = (await previewRes.json()) as { error: string; errors: string[] };
+    expect(previewBody.error).toBe("invalid workflow definition");
+    // The message names the corrective action, not just the fault.
+    expect(previewBody.errors.join(" ")).toContain('did you mean "trigger.data.email"');
+
+    const saveRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition: bad }),
+    });
+    expect(saveRes.status).toBe(400);
+    const saveBody = (await saveRes.json()) as { error: string; errors: string[] };
+    expect(saveBody.errors).toEqual(previewBody.errors);
   });
 });
 
