@@ -194,7 +194,9 @@ export async function ensureAssistantSession(
   meta: { actorUserId: string; orgId: string },
 ): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
   const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
-  const session = await deps.engineHost.assistantSessionFor(assistant.id, meta);
+  const session = await deps.engineHost.assistantSessionFor(assistant.id, meta, {
+    sessionId: assistant.sessionId,
+  });
   const sessionId = session.id;
 
   const existingRows = await deps.db
