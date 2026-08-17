@@ -1271,20 +1271,22 @@ const RESUME_KEY_ARGS_MAX_CHARS = 256;
 
 /**
  * Returns the args portion of a resumeKey, bounded in length. JSON longer
- * than the threshold is replaced with its length plus a 64-bit FNV-1a hash —
- * deterministic, so restart replay re-derives the identical key. Pure JS
- * (no node:crypto): the engine stays portable.
+ * than the threshold is replaced with its UTF-8 byte length plus a 64-bit
+ * FNV-1a hash over the UTF-8 bytes — deterministic, so restart replay
+ * re-derives the identical key. TextEncoder is a web-standard global (no
+ * node:crypto): the engine stays portable.
  */
 function boundedArgsKey(json: string): string {
   if (json.length <= RESUME_KEY_ARGS_MAX_CHARS) return json;
-  return `fnv1a64:${json.length}:${fnv1a64Hex(json)}`;
+  const bytes = new TextEncoder().encode(json);
+  return `fnv1a64:${bytes.length}:${fnv1a64Hex(bytes)}`;
 }
 
-function fnv1a64Hex(input: string): string {
+function fnv1a64Hex(bytes: Uint8Array): string {
   const mask = 0xffffffffffffffffn;
   let hash = 0xcbf29ce484222325n;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= BigInt(input.charCodeAt(i));
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
     hash = (hash * 0x100000001b3n) & mask;
   }
   return hash.toString(16).padStart(16, "0");

@@ -163,7 +163,7 @@ Three independent adversarial reviewers (engine contract, policy security, integ
 
 The original resumeKey format was `${fqid}:${stableJson(args)}` with no length bound. The key is embedded in two indexed values: the deterministic gate id (the `engine_decision_gates` text primary key, plus the `engine_decision_gates_resume` index) and the `action_invocations` audit primary key. Postgres btree index rows cap at ~2704 bytes, so any gated tool call with args over ~2.6KB failed to persist its gate: `index row size ... exceeds btree version 4 maximum 2704`. In practice this capped `skills.create_skill` bodies at ~2.7KB.
 
-Fix (`plugin-catalog.ts`): when the args JSON exceeds 256 characters, the key's args portion becomes `fnv1a64:<length>:<64-bit FNV-1a hex>` instead of the raw JSON. Properties preserved:
+Fix (`plugin-catalog.ts`): when the args JSON exceeds 256 characters, the key's args portion becomes `fnv1a64:<utf8-byte-length>:<64-bit FNV-1a hex over the UTF-8 bytes>` instead of the raw JSON. Properties preserved:
 
 - Deterministic per (tool_id, args) — restart replay re-derives the identical key, so gate short-circuit and audit dedup are unchanged.
 - Small keys are byte-identical to the old format (the seam tests pin the literal).
