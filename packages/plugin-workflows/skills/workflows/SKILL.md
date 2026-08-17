@@ -99,6 +99,21 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 
 **Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
 
+**Let the model abstain.** When an `outputSchema` field feeds a tool param, a required plain string forces the model to invent a value it does not have ("Unable to determine…" as a GitHub username) — and the invented value fails nodes later, at the tool, with a confusing API error. Give the field an explicit abstain value (`""`, or an enum member like `"none"`), tell the prompt when to return it, and branch on it with `when`-guarded edges to a stop node:
+
+```json
+{ "id": "pick", "type": "llm", "model": "claude-haiku-4-5",
+  "prompt": "... Return an empty assignee when the data does not name one.",
+  "outputSchema": { "type": "object", "properties": { "assignee": { "type": "string" } }, "required": ["assignee"] } }
+```
+
+```json
+{ "from": "pick", "to": "assign", "when": "nodes.pick.result.output.assignee" },
+{ "from": "pick", "to": "no_assignee", "when": "!nodes.pick.result.output.assignee" }
+```
+
+For list-shaped output, abstain with an empty array and gate on `if` with `lengthGreaterThan`.
+
 ## Working practices
 
 - `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, and tool service/actions. On error it returns a bulleted list — fix each item and retry; never save around validation.
