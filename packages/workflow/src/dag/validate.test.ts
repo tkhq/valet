@@ -229,6 +229,115 @@ describe('validateWorkflowDefinition', () => {
     }
   });
 
+  describe('trigger node dataSchema', () => {
+    function triggerDefinition(trigger: Record<string, unknown>): WorkflowDefinition {
+      return definition({
+        nodes: [
+          rawNode(trigger),
+          { id: 'set-a', type: 'set', values: { hello: 'world' } },
+          { id: 'stop', type: 'stop' },
+        ],
+      });
+    }
+
+    it('accepts a valid dataSchema', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({
+          id: 'trigger',
+          type: 'trigger',
+          dataSchema: {
+            owner: { type: 'string', required: true, description: 'GitHub org or user' },
+            number: { type: 'number', required: true, label: 'PR number' },
+            draft: { type: 'boolean', default: false },
+          },
+        }),
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('points "inputSchema" at "dataSchema" (beyond edit-distance hints)', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({
+          id: 'trigger',
+          type: 'trigger',
+          inputSchema: { owner: { type: 'string' } },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) =>
+            e.includes('unknown field "inputSchema" on a "trigger" node — did you mean "dataSchema"?'),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('rejects a non-object field definition', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({ id: 'trigger', type: 'trigger', dataSchema: { owner: 'string' } }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('trigger.dataSchema.owner must be an object'))).toBe(true);
+      }
+    });
+
+    it('rejects an unknown input type and names the accepted ones', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({
+          id: 'trigger',
+          type: 'trigger',
+          dataSchema: { count: { type: 'integer' } },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) =>
+            e.includes('trigger.dataSchema.count.type must be one of: "string", "number", "boolean", "object", "array"'),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('rejects a non-boolean required and a non-array enum', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({
+          id: 'trigger',
+          type: 'trigger',
+          dataSchema: {
+            owner: { type: 'string', required: 'yes' },
+            env: { type: 'string', enum: 'prod' },
+          },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('trigger.dataSchema.owner.required must be a boolean'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('trigger.dataSchema.env.enum must be an array'))).toBe(true);
+      }
+    });
+
+    it('hints near-miss keys inside an input definition', () => {
+      const result = validateWorkflowDefinition(
+        triggerDefinition({
+          id: 'trigger',
+          type: 'trigger',
+          dataSchema: { owner: { type: 'string', requird: true } },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) =>
+            e.includes('trigger.dataSchema.owner: unknown field "requird" in an input definition — did you mean "required"?'),
+          ),
+        ).toBe(true);
+      }
+    });
+  });
+
   describe('llm node', () => {
     function llmDefinition(overrides: Partial<{ model: string; prompt: string }>): WorkflowDefinition {
       return definition({

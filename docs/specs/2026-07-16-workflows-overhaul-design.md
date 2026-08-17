@@ -89,6 +89,25 @@ The manual-trigger path now enforces the trigger node's `dataSchema`
 Webhook/schedule/event trigger payloads are not validated against
 `dataSchema` in this pass — manual runs only.
 
+### 2026-08-17 follow-up: make `dataSchema` discoverable and lint it
+
+Agents could not find the feature: the workflows skill never mentioned
+`dataSchema`, and a trigger patched with `inputSchema` (the name agents
+guess first) failed the unknown-field lint with no hint — `inputSchema`
+is past the edit-distance-2 window from `dataSchema`. Observed in a
+session that concluded "the dag/v1 format has no place to declare
+trigger arg types" and gave up.
+
+- The skill documents `dataSchema` (shape, example, run-form behavior).
+- `validateWorkflowDefinition` gains a per-node-type alias table
+  (`KEY_ALIASES`): `inputSchema`/`input_schema`/`inputs`/`schema` on a
+  trigger now error with `did you mean "dataSchema"?`.
+- The linter validates `dataSchema` contents at save time (each field an
+  object; `type` one of the five input types; `required` boolean; `enum`
+  array; unknown definition keys get did-you-mean hints). Previously a
+  malformed schema saved silently and surfaced only as a skipped check
+  at run time.
+
 ## 2026-08-10 addendum: triggers + team-owner surface in the web UI
 
 The editor page gains a Triggers drawer (`packages/web/src/components/
