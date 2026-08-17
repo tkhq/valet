@@ -18,8 +18,10 @@ import type {
   CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  DeleteCredentialResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
+  GetSlackAppResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
   ListTeamMembersResponse,
@@ -40,6 +42,7 @@ import type {
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   ProbeLlmProviderResponse,
+  PutCredentialResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
@@ -63,6 +66,10 @@ export const qkSettings = {
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
   githubApp: () => ["settings", "githubApp"] as const,
+  /** Prefix of every `slackApp` key — what the mutations invalidate. */
+  slackAppAll: () => ["settings", "slackApp"] as const,
+  /** One manifest per requested app name; `""` is the server default name. */
+  slackApp: (name?: string) => ["settings", "slackApp", name ?? ""] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -390,6 +397,46 @@ export function useDeleteGithubApp() {
     mutationFn: () => api.deleteGithubApp(),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+    },
+  });
+}
+
+// ── Slack app (agent surface) — org-admin-only ─────────────────────────────
+
+export function useSlackApp(name?: string, opts?: Partial<UseQueryOptions<GetSlackAppResponse>>) {
+  return useQuery<GetSlackAppResponse>({
+    queryKey: qkSettings.slackApp(name),
+    queryFn: () => api.getSlackApp(name),
+    ...opts,
+  });
+}
+
+/** Saves the org Slack credential. The server checks the bot token with
+ * Slack (`auth.test` + required scopes) before it stores anything, so a
+ * rejection here means the token or secret is wrong, not that the save
+ * failed. */
+export function useSaveSlackCredential() {
+  const qc = useQueryClient();
+  return useMutation<PutCredentialResponse, Error, { accessToken: string; webhookSecret: string }>({
+    mutationFn: ({ accessToken, webhookSecret }) =>
+      api.putCredential("slack", {
+        type: "bot_token",
+        accessToken,
+        scope: "org",
+        metadata: { webhookSecret },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
+    },
+  });
+}
+
+export function useDeleteSlackApp() {
+  const qc = useQueryClient();
+  return useMutation<DeleteCredentialResponse, Error, void>({
+    mutationFn: () => api.deleteCredential("slack", { scope: "org" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
     },
   });
 }
