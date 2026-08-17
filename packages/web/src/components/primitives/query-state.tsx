@@ -15,8 +15,17 @@ export function LoadingRow({ label = "Loading…", className }: { label?: string
   );
 }
 
+/**
+ * `role="alert"` because a query failure usually resolves after first paint:
+ * the row mounts into an already-rendered page, which a screen reader does
+ * not read again unless the new content is a live region.
+ */
 export function ErrorRow({ children, className }: { children: ReactNode; className?: string }) {
-  return <p className={cn("py-4 text-sm text-danger-500", className)}>{children}</p>;
+  return (
+    <p role="alert" className={cn("py-4 text-sm text-danger-500", className)}>
+      {children}
+    </p>
+  );
 }
 
 export function EmptyRow({ children, className }: { children: ReactNode; className?: string }) {

@@ -37,13 +37,15 @@ function MemoryDocPage() {
   }
 
   return (
-    <main className="flex-1 min-h-0 overflow-y-auto">
+    // A plain `div`, not `main`: the app shell already renders the page's one
+    // `main` landmark, and this route paints inside it.
+    <div className="flex-1 min-h-0 overflow-y-auto">
       <MemoryDoc
         path={path}
         onNavigateToChat={onNavigateToChat}
         onDeleted={onDeleted}
         onOpenPath={onOpenPath}
       />
-    </main>
+    </div>
   );
 }

@@ -38,7 +38,7 @@ export function Dashboard() {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
         <div>
-          Couldn't load your assistant.
+          Couldn’t load your assistant.
           <div className="mt-2">
             <button type="button" className="underline" onClick={() => info.refetch()}>
               Retry

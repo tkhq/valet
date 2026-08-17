@@ -63,7 +63,7 @@ export function SessionsPage() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-line">
         <h1 className="text-lg font-semibold tracking-tight text-ink">Sessions</h1>
         <Button size="sm" onClick={() => setNewOpen(true)}>
-          <Plus className="h-4 w-4" />
+          <Plus className="h-4 w-4" aria-hidden />
           <span>New session</span>
         </Button>
       </div>

@@ -18,7 +18,7 @@ import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 
 /**
  * `/workflows` — tabbed hub (Workflows | Runs | Triggers | Templates). The
@@ -183,6 +183,7 @@ function DefinitionRow({
   const countLabel = runCountLabel(runsQ.data);
   const latestRun = runs[0];
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
 
   // A trigger with declared inputs routes through the run dialog; without
@@ -218,12 +219,14 @@ function DefinitionRow({
   }
 
   async function handleDelete() {
-    if (!confirm(`Delete workflow "${workflow.name}"? Settled run history is kept.`)) return;
     setDeleteError(null);
     try {
       await del.mutateAsync(workflow.id);
+      setDeleteOpen(false);
     } catch (err) {
-      // 409 = active runs; surface the server's actionable message.
+      // 409 = active runs; surface the server's actionable message. The
+      // dialog stays open so the message sits beside the button that
+      // caused it, and a retry needs no second trip through the row.
       setDeleteError(err instanceof Error ? err.message : "Delete failed.");
     }
   }
@@ -278,19 +281,32 @@ function DefinitionRow({
         {latestRun && (
           <RunStatusChip status={latestRun.status} outcome={latestRun.outcome} needsApproval={false} />
         )}
-        {deleteError && <span className="text-xs text-danger-500">{deleteError}</span>}
         <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
           {startRun.isPending ? "Starting…" : "Run"}
         </Button>
         <Button
           size="sm"
           variant="ghost"
-          onClick={() => void handleDelete()}
+          onClick={() => {
+            setDeleteError(null);
+            setDeleteOpen(true);
+          }}
           disabled={del.isPending}
           aria-label={`Delete ${workflow.name}`}
         >
           <Trash2 className="h-4 w-4" />
         </Button>
+        <ConfirmDialog
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          title={`Delete "${workflow.name}"?`}
+          description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
+          confirmLabel="Delete workflow"
+          pendingLabel="Deleting…"
+          pending={del.isPending}
+          error={deleteError}
+          onConfirm={() => void handleDelete()}
+        />
       </div>
     </li>
   );

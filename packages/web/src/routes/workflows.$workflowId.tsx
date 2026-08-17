@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import { triggerDataSchema, type WorkflowDefinition } from "@valet/workflow";
 import type { ListWorkflowRunsResponse } from "@valet/api/wire";
@@ -19,6 +19,7 @@ import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import {
   Button,
+  ConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -88,6 +89,11 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
   );
 }
 
+/** Module scope so the blocker's effect does not re-register on each render.
+ * `disabled` decides whether the blocker runs at all; when it runs, every
+ * departure is blocked. */
+const alwaysBlock = () => true;
+
 function WorkflowEditorPane({
   workflowId,
   initialName,
@@ -124,6 +130,20 @@ function WorkflowEditorPane({
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
+
+  // Unsaved work is only in memory: the rename lives here and the definition
+  // draft lives in `Editor`, so any navigation away drops both. `useBlocker`
+  // catches every route change — the back link, the nav, a run link in the
+  // drawer — and `enableBeforeUnload` (its default) catches a tab close or a
+  // reload. `disabled` keeps the blocker off a clean page, where a
+  // beforeunload prompt would be noise.
+  const [definitionDirty, setDefinitionDirty] = useState(false);
+  const unsaved = nameDirty || definitionDirty;
+  const leaveBlocker = useBlocker({
+    shouldBlockFn: alwaysBlock,
+    disabled: !unsaved,
+    withResolver: true,
+  });
 
   // Run executes the SAVED definition (the api snapshots the stored row),
   // so the run dialog's schema comes from `initialDefinition`, not the
@@ -223,6 +243,7 @@ function WorkflowEditorPane({
           saving={update.isPending}
           externalDirty={nameDirty}
           onCancelExternal={handleCancelName}
+          onDirtyChange={setDefinitionDirty}
         />
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
@@ -239,6 +260,19 @@ function WorkflowEditorPane({
           />
         )}
       </div>
+
+      {leaveBlocker.status === "blocked" && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) leaveBlocker.reset();
+          }}
+          title="Leave without saving?"
+          description="This workflow has changes that are not saved. If you leave now, the changes are lost. To keep them, stay on this page and select Save."
+          confirmLabel="Leave without saving"
+          onConfirm={leaveBlocker.proceed}
+        />
+      )}
     </div>
   );
 }
@@ -260,7 +294,9 @@ function DrawerShell({
           ✕
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      {/* `overscroll-contain` keeps a scroll that reaches the end of the drawer
+          from continuing into the canvas behind it. */}
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
     </div>
   );
 }
@@ -341,13 +377,25 @@ function HistoryDrawer({
 }) {
   const versionsQ = useWorkflowVersions(workflowId);
   const [selected, setSelected] = useState<number | null>(null);
+  // Restore overwrites the live definition and has no undo, so it asks
+  // first. `confirming` holds the version being restored, which is also
+  // what the dialog names.
+  const [confirming, setConfirming] = useState<number | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const versionQ = useWorkflowVersion(workflowId, selected);
   const versions = versionsQ.data?.versions ?? [];
   const latest = versions[0]?.version;
 
   async function restore() {
     if (!versionQ.data) return;
-    await update.mutateAsync({ name: currentName, definition: versionQ.data.definition });
+    setRestoreError(null);
+    try {
+      await update.mutateAsync({ name: currentName, definition: versionQ.data.definition });
+    } catch (err) {
+      setRestoreError(err instanceof Error ? err.message : "Restore failed.");
+      return;
+    }
+    setConfirming(null);
     setSelected(null);
   }
 
@@ -397,7 +445,15 @@ function HistoryDrawer({
                   <div className="text-xs text-muted">Stored definition is not a dag/v1 workflow.</div>
                 )}
                 {v.version !== latest && versionQ.data && (
-                  <Button size="sm" variant="secondary" onClick={() => void restore()} disabled={update.isPending}>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setRestoreError(null);
+                      setConfirming(v.version);
+                    }}
+                    disabled={update.isPending}
+                  >
                     {update.isPending ? "Restoring…" : `Restore v${v.version}`}
                   </Button>
                 )}
@@ -406,6 +462,22 @@ function HistoryDrawer({
           </li>
         ))}
       </ul>
+
+      {confirming !== null && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setConfirming(null);
+          }}
+          title={`Restore v${confirming}?`}
+          description={`The live definition is replaced by v${confirming}. The version it replaces stays in this list, so you can restore it again.`}
+          confirmLabel={`Restore v${confirming}`}
+          pendingLabel="Restoring…"
+          pending={update.isPending}
+          error={restoreError}
+          onConfirm={() => void restore()}
+        />
+      )}
     </DrawerShell>
   );
 }

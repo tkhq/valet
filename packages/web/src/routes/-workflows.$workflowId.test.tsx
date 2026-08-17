@@ -10,10 +10,32 @@
  * link and calls `useNavigate` on Run.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 const navigate = vi.fn();
+
+/**
+ * The page guards navigation away from unsaved work with `useBlocker`. The
+ * hook needs a live router, so it is mocked like `useNavigate`: the tests
+ * read back the `disabled` flag the page passed (whether the guard is
+ * armed) and choose the resolver the page sees (`idle` normally, `blocked`
+ * for the case where a departure is being held).
+ */
+type BlockerResolver =
+  | { status: "idle"; proceed: undefined; reset: undefined }
+  | { status: "blocked"; proceed: () => void; reset: () => void };
+
+const blockerProceed = vi.fn();
+const blockerReset = vi.fn();
+const IDLE_BLOCKER: BlockerResolver = { status: "idle", proceed: undefined, reset: undefined };
+const BLOCKED_BLOCKER: BlockerResolver = {
+  status: "blocked",
+  proceed: blockerProceed,
+  reset: blockerReset,
+};
+let blocker: BlockerResolver = IDLE_BLOCKER;
+let blockerDisabled: boolean | undefined;
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
@@ -42,6 +64,10 @@ vi.mock("@tanstack/react-router", () => ({
     <a {...rest}>{children}</a>
   ),
   useNavigate: () => navigate,
+  useBlocker: (opts: { disabled?: boolean }) => {
+    blockerDisabled = opts.disabled;
+    return blocker;
+  },
   createFileRoute: () => (config: unknown) => config,
 }));
 
@@ -100,6 +126,10 @@ describe("WorkflowEditorPage", () => {
     navigate.mockClear();
     updateMutateAsync.mockClear();
     startMutateAsync.mockClear();
+    blockerProceed.mockClear();
+    blockerReset.mockClear();
+    blocker = IDLE_BLOCKER;
+    blockerDisabled = undefined;
   });
 
   it("loads the fetched definition into the editor and the name field", () => {
@@ -210,13 +240,53 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByText("v2"));
     expect(screen.queryByRole("button", { name: /Restore/ })).toBeNull();
 
-    // An older version offers restore, which PUTs its definition back.
+    // An older version offers restore. Restore overwrites the live
+    // definition with no undo, so the button asks before it PUTs — this
+    // case used to assert the PUT fired on the first click.
     fireEvent.click(screen.getByText("v1"));
     fireEvent.click(screen.getByRole("button", { name: "Restore v1" }));
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore v1" }));
     await waitFor(() =>
       expect(updateMutateAsync).toHaveBeenCalledWith({
         name: "Deploy pipeline",        definition: workflowData.definition,
       }),
     );
+  });
+
+  it("arms the leave guard for a rename, and leaves it off on a clean page", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    // A clean page must not arm the guard, or every tab close would ask.
+    expect(blockerDisabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Workflow name"), {
+      target: { value: "Renamed pipeline" },
+    });
+    expect(blockerDisabled).toBe(false);
+  });
+
+  it("arms the leave guard for a definition edit, not only a rename", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(blockerDisabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit JSON" }));
+    const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: textarea.value.replace('"success"', '"failure"') },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(blockerDisabled).toBe(false);
+  });
+
+  it("offers Leave without saving while a departure is held, and proceeds on confirm", () => {
+    blocker = BLOCKED_BLOCKER;
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Leave without saving" }));
+    expect(blockerProceed).toHaveBeenCalledTimes(1);
+    expect(blockerReset).not.toHaveBeenCalled();
   });
 });

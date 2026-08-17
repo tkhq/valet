@@ -14,7 +14,7 @@
  * wrapper `session-header.test.tsx` uses.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -88,6 +88,7 @@ let searchState: Record<string, unknown> = {};
 
 const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
+const deleteMutateAsync = vi.fn().mockResolvedValue(undefined);
 const createMutateAsync = vi.fn().mockResolvedValue({
   id: "wf_new",
   name: "My new workflow",
@@ -143,7 +144,7 @@ vi.mock("~/api/workflows", () => ({
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
-  useDeleteWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
   useWorkflowTriggers: () => ({ data: triggersData, isLoading: false, error: null }),
   useAllWorkflowRuns: () => ({ data: allRunsData, isLoading: false, error: null }),
   useUpdateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -185,6 +186,7 @@ beforeEach(() => {
   workflowsData.workflows = [...populated];
   searchState = {};
   navigate.mockClear();
+  deleteMutateAsync.mockClear();
 });
 
 describe("WorkflowsIndexPage", () => {
@@ -233,6 +235,18 @@ describe("WorkflowsIndexPage", () => {
         params: { workflowId: "wf_new" },
       }),
     );
+  });
+
+  it("asks in-page before deleting a workflow, and only deletes once confirmed", async () => {
+    renderPage();
+    fireEvent.click(screen.getByLabelText("Delete Deploy pipeline"));
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Settled run history is kept/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete workflow" }));
+
+    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("wf_1"));
   });
 
   it("shows the Workflows tab by default with per-workflow trigger badges", () => {

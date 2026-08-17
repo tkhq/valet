@@ -158,7 +158,7 @@ function ChatPage() {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
         <div>
-          Couldn't load your assistant.
+          Couldn’t load your assistant.
           <div className="mt-2">
             <button type="button" className="underline" onClick={() => info.refetch()}>
               Retry
@@ -219,10 +219,18 @@ function ChatPage() {
 
 /** A hairline strip directly above the conversation. It sits here rather
  * than inside `SessionView` so it reads as context for what you are about
- * to type, not as a property of the session. */
+ * to type, not as a property of the session.
+ *
+ * `role="status"` because every notice appears after its queries settle: the
+ * strip pushes into a page the screen reader has already read, and who else
+ * can read the conversation is not something to learn by looking. Polite,
+ * not `alert` — the notice adds context, it does not stop the work. */
 function ScopeNotice({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-2 border-b border-line bg-ink-wash/40 px-4 py-1.5 text-xs text-muted">
+    <div
+      role="status"
+      className="flex items-center gap-2 border-b border-line bg-ink-wash/40 px-4 py-1.5 text-xs text-muted"
+    >
       {children}
     </div>
   );

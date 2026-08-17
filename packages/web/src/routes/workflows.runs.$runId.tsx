@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail } from "@valet/api/wire";
 import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
@@ -12,7 +13,7 @@ import {
 } from "~/components/workflows/run-detail-helpers";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowPreview } from "~/components/workflows/preview";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 
 /**
@@ -89,6 +90,8 @@ export function RunDetailBody({
   onRetry,
   retryPending,
 }: RunDetailBodyProps) {
+  // Cancel stops a run part-way and cannot be undone, so it asks first.
+  const [cancelOpen, setCancelOpen] = useState(false);
   const { run, checkpoints } = data;
   const pendingGates = data.pendingGates ?? [];
   const needsApproval = runNeedsApproval(run, pendingGates);
@@ -109,28 +112,51 @@ export function RunDetailBody({
 
   return (
     <>
-      <div className="flex items-center justify-between px-6 py-4 border-b border-line">
-        <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
+      <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-line">
+        {/* A run id has no length bound. A flex item defaults to
+            `min-width: auto`, so without `min-w-0` the heading refuses to
+            shrink and pushes the status chip and the run controls off the
+            row. */}
+        <h1 className="min-w-0 truncate text-lg font-semibold tracking-tight text-ink font-display">
           {run.runId}
         </h1>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <RunStatusChip
             status={run.status}
             outcome={run.outcome}
             needsApproval={needsApproval}
           />
           {nonTerminal && (
-            <Button size="sm" variant="danger" onClick={onCancel} disabled={cancelPending}>
-              Cancel run
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => setCancelOpen(true)}
+              disabled={cancelPending}
+            >
+              {cancelPending ? "Cancelling…" : "Cancel run"}
             </Button>
           )}
           {retryable && (
             <Button size="sm" onClick={onRetry} disabled={retryPending}>
-              Retry run
+              {retryPending ? "Retrying…" : "Retry run"}
             </Button>
           )}
         </div>
       </div>
+
+      {/* Tied to `nonTerminal` so a run that settles while the dialog is open
+          takes the dialog with it — a confirm on a settled run does nothing. */}
+      <ConfirmDialog
+        open={cancelOpen && nonTerminal}
+        onOpenChange={setCancelOpen}
+        title="Cancel this run?"
+        description="The run stops at the step it reached and cannot continue. To run the workflow again, select Retry run."
+        confirmLabel="Cancel run"
+        onConfirm={() => {
+          setCancelOpen(false);
+          onCancel();
+        }}
+      />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {isWorkflowDefinitionShape(run.definition) && (

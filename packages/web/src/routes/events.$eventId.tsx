@@ -63,8 +63,12 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
         </p>
         {refs.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
+            {/* `break-all`, not `break-words`: a ref value is one unbroken
+                token (a branch name, a URL, a commit sha), and only a rule
+                that can break mid-token lets the chip shrink inside the row
+                instead of running past its edge. */}
             {refs.map(([key, value]) => (
-              <span key={key} className="rounded-sm bg-neutral-100 px-1.5 py-0.5 font-mono text-[11px] text-muted dark:bg-neutral-800">
+              <span key={key} className="rounded-sm bg-neutral-100 px-1.5 py-0.5 font-mono text-[11px] text-muted break-all dark:bg-neutral-800">
                 {key}: {value}
               </span>
             ))}

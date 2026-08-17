@@ -21,6 +21,13 @@ import { cn } from "~/lib/cn";
  */
 export type PresenceState = "idle" | "thinking" | "working";
 export type PresenceSize = "hero" | "nav";
+/**
+ * Element for the name. The mark is the page title where it is the hero, and
+ * a repeated brand label in the nav, so the page picks the tag instead of the
+ * component fixing one. Tailwind's preflight resets heading size and weight
+ * to inherit, so `h1` looks the same as `span` under the size classes below.
+ */
+export type PresenceNameTag = "span" | "h1";
 
 /**
  * Pure state → class mapping, extracted so it's testable without rendering
@@ -84,18 +91,20 @@ export function PresenceMark({
   name,
   state,
   size = "nav",
+  as: NameTag = "span",
   className,
 }: {
   name: string;
   state: PresenceState;
   size?: PresenceSize;
+  as?: PresenceNameTag;
   className?: string;
 }) {
   const reducedMotion = usePrefersReducedMotion();
 
   return (
     <div className={cn("inline-flex", LAYOUT[size], WRAP_GAP[size], className)}>
-      <span className={NAME_SIZE[size]}>{name}</span>
+      <NameTag className={NAME_SIZE[size]}>{name}</NameTag>
       <span
         aria-hidden
         data-presence={state}

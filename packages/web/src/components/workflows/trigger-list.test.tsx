@@ -5,7 +5,7 @@
  * `-workflows.index.test.tsx`.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
 
 const triggersData: { triggers: WorkflowTriggerItem[] } = {
@@ -103,6 +103,18 @@ describe("TriggerList", () => {
     render(<TriggerList />);
     fireEvent.click(screen.getAllByLabelText(/run now/i)[0]);
     expect(runNowMutateAsync).toHaveBeenCalledWith("sch_1");
+  });
+
+  it("asks in-page before deleting a trigger, and only deletes once confirmed", async () => {
+    deleteScheduleMutateAsync.mockClear();
+    render(<TriggerList />);
+    fireEvent.click(screen.getByLabelText("Delete Nightly build"));
+    expect(deleteScheduleMutateAsync).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete trigger" }));
+
+    await waitFor(() => expect(deleteScheduleMutateAsync).toHaveBeenCalledWith("sch_1"));
   });
 
   it("shows global empty-state copy when no workflowId and no triggers", () => {

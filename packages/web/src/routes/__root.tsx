@@ -28,7 +28,7 @@ function NotFound() {
   return (
     <div className="flex-1 grid place-items-center p-8 text-center">
       <div className="max-w-sm space-y-3">
-        <div className="font-display text-2xl text-ink">This page doesn't exist.</div>
+        <h1 className="font-display text-2xl text-ink">This page doesn’t exist.</h1>
         <p className="text-sm text-muted">The dashboard does.</p>
         <Link
           to="/"

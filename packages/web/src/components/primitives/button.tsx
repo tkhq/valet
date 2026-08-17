@@ -39,7 +39,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       ref={ref}
       type={asChild ? undefined : (type ?? "button")}
       className={cn(
-        "inline-flex items-center justify-center rounded font-medium transition-colors",
+        // `touch-manipulation` removes the ~300ms tap delay mobile browsers
+        // hold to see if the tap is a double-tap zoom.
+        "inline-flex items-center justify-center rounded font-medium transition-colors touch-manipulation",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]",
         "disabled:pointer-events-none disabled:opacity-50",
         VARIANT[variant],

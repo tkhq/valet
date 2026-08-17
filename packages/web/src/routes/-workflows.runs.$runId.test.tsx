@@ -8,7 +8,7 @@
  * mocking.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -122,6 +122,46 @@ describe("RunDetailBody", () => {
     const data = baseRun({ status: "running" });
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+  });
+
+  it("asks before cancelling, and only cancels once confirmed", async () => {
+    const onCancel = vi.fn();
+    const data = baseRun({ status: "running" });
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={onCancel} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(onCancel).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel run" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the pending action on the run controls rather than only disabling them", () => {
+    const { unmount } = render(
+      <RunDetailBody
+        runId="wfrun_1"
+        data={baseRun({ status: "running" })}
+        onCancel={vi.fn()}
+        cancelPending
+        onRetry={vi.fn()}
+        retryPending={false}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Cancelling…" })).toBeTruthy();
+    unmount();
+
+    render(
+      <RunDetailBody
+        runId="wfrun_1"
+        data={baseRun({ status: "settled", outcome: "failed" })}
+        onCancel={vi.fn()}
+        cancelPending={false}
+        onRetry={vi.fn()}
+        retryPending
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeTruthy();
   });
 
   it("hides the Cancel button once the run has settled", () => {

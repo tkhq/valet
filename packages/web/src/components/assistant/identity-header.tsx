@@ -43,7 +43,9 @@ export function IdentityHeader({ info }: { info: GetOrchestratorInfoResponse }) 
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
-        <PresenceMark name={name} state={info.presence} size="hero" />
+        {/* The hero is the dashboard's only title, so the name carries the
+            page's `h1`. Without it the first heading on `/` is a card `h2`. */}
+        <PresenceMark name={name} state={info.presence} size="hero" as="h1" />
         <p className="mt-1 text-sm text-muted">
           {presenceStatusLine(info.presence, info.activeChildren)}
         </p>
