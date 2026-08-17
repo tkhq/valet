@@ -95,7 +95,7 @@ export function ConnectDialog({ service, title, slug, open, onOpenChange }: Conn
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-3xl gap-0 overflow-hidden p-0"
+        className="max-w-3xl gap-0 overflow-hidden p-0 lg:max-w-4xl xl:max-w-5xl"
         aria-describedby={undefined}
       >
         {/* One scroller on narrow screens, where the panes stack. From `lg`
@@ -104,7 +104,7 @@ export function ConnectDialog({ service, title, slug, open, onOpenChange }: Conn
             reach. `lg:overflow-hidden` on the grid is what makes the child
             scrollers the ones that move; `overflow-visible` here left the
             taller pane clipped with nowhere to scroll. */}
-        <div className="grid max-h-[85vh] grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_18rem] lg:overflow-hidden">
+        <div className="grid max-h-[85vh] grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_18rem] lg:overflow-hidden xl:grid-cols-[minmax(0,1fr)_20rem]">
           <DecisionPane
             service={service}
             title={title}
