@@ -232,6 +232,50 @@ trade already accepted for rootless BuildKit build pods.
    (`make e2e E2E_ARGS="--only sandbox-docker,store-postgres,prebuilds-docker"`).
    Record results in the PR.
 
+## Kubernetes reality (2026-08-17 addendum)
+
+Live verification on EKS v1.31 (agents-dev) found three failures with a
+single dominant root cause. Valet's CR was correct in every case.
+
+1. **The API server drops `procMount: Unmasked`.** The `ProcMountType`
+   feature gate is beta and OFF by default until Kubernetes 1.33, and EKS
+   does not let operators set control-plane gates. Admission silently
+   rewrites the field to `Default` (verified with a server-side dry-run).
+   The pod's /proc keeps its masked and read-only paths, which breaks:
+   - `dockerd-rootless.sh`: its `--detach-netns` path writes
+     `net.ipv4.ip_forward` through the read-only `/proc/sys` → EPERM.
+   - runc for EVERY inner container: the kernel refuses a fresh procfs
+     mount in a user namespace unless an existing fully-visible procfs is
+     present → `mount proc: operation not permitted` on `docker run` and
+     `docker build`.
+2. **`/dev/fuse` open fails with EPERM.** A hostPath char-device volume
+   carries no device-cgroup grant (unlike the docker backend's
+   `--device /dev/fuse`), so fuse-overlayfs cannot open the device even
+   though the node is mounted.
+3. **`overlay2` needs a non-overlay data-root.** The pod rootfs is
+   overlay; the emptyDir docker-state volume is not — native rootless
+   overlay2 works there (kernel >= 5.11).
+
+Mitigations shipped:
+
+- `start-docker.sh` invokes rootlesskit directly WITHOUT `--detach-netns`
+  (empirically starts on masked-proc clusters) and probes storage drivers
+  in order overlay2 → fuse-overlayfs → vfs. The daemon now starts
+  everywhere; inner containers still need an unmasked /proc.
+- The manifest sets `hostUsers: false` on docker pods. Kubernetes >= 1.31
+  validation requires it for `procMount: Unmasked` and REJECTS the pod
+  without it once the ProcMountType gate is on (default from 1.33). On
+  clusters with `UserNamespacesSupport` off the field is dropped at
+  admission — inert today, load-bearing after the upgrade.
+- The image's `dockerd` sub-id range moved to `2000:63536` so it fits
+  inside the 65536-id pod user namespace that `hostUsers: false` creates.
+
+Cluster requirement for FULL DinD on kubernetes: **Kubernetes >= 1.33**
+(ProcMountType + UserNamespacesSupport on by default) with a node runtime
+that supports user-namespaced pods. Until the cluster upgrade, DinD on
+kubernetes is degraded: the daemon runs, `docker pull`/`system df` work,
+`docker run`/`build` fail on the proc mount.
+
 ## Out of scope
 
 - Persistent docker data-root across hibernation.

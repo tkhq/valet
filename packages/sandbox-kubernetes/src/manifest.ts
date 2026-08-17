@@ -216,6 +216,14 @@ export function buildSandboxManifest(
     // dockerd user's gid, so non-privileged (dockerd) execs can write
     // /workspace — the k8s analog of start-docker.sh's `chown /workspace`.
     podSpec.securityContext = { fsGroup: DOCKER_WORKLOAD_FS_GROUP };
+    // Required companion of `procMount: Unmasked`: k8s validation ties the
+    // two together ("hostUsers must be false to use Unmasked"), enforced
+    // once the ProcMountType gate is on (default from 1.33). Clusters with
+    // UserNamespacesSupport off drop the field on admission — inert there,
+    // load-bearing after a cluster upgrade. The dockerd user's /etc/subuid
+    // range must fit inside the pod user namespace (see
+    // docker/Dockerfile.sandbox-k8s).
+    podSpec.hostUsers = false;
   }
   if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
     podSpec.imagePullSecrets = cfg.imagePullSecrets;
