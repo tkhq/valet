@@ -40,7 +40,11 @@ export interface WorkflowEditorState {
  * person, such as a value a webhook maps in.
  */
 export interface WorkflowInputDefinition {
-  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  /** `integer` is an accepted alias for `number` — every other schema
+   * surface in the product is JSON Schema, where `integer` is idiomatic,
+   * so authors keep writing it. Consumers that branch on the type must
+   * call `normalizeInputType` first (`trigger-input.ts`). */
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'integer';
   required?: boolean;
   default?: unknown;
   description?: string;

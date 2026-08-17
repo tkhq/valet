@@ -35,6 +35,7 @@ import type { ActionPlugin, CredentialOwner, CredentialStore, ValetPlugin, Workf
 import {
   collectTemplatePaths,
   resolveTriggerInput,
+  normalizeInputType,
   triggerDataSchema,
   type ForeachNode,
   type ToolNode,
@@ -244,11 +245,12 @@ export function templateInputs(
   const inputs: WorkflowTemplateInput[] = [];
   for (const [name, def] of Object.entries(schema)) {
     if (def.hidden === true) continue;
-    if (def.type !== "string" && def.type !== "number" && def.type !== "boolean") continue;
+    const type = normalizeInputType(def.type);
+    if (type !== "string" && type !== "number" && type !== "boolean") continue;
     const fallback = primitiveDefault(def.default);
     inputs.push({
       name,
-      type: def.type,
+      type,
       label: def.label ?? name,
       ...(def.placeholder !== undefined ? { placeholder: def.placeholder } : {}),
       ...(def.description !== undefined ? { description: def.description } : {}),

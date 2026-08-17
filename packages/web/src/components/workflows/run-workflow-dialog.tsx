@@ -9,7 +9,7 @@
  * dialog. Mirrors `new-workflow-dialog.tsx`'s controlled Dialog pattern.
  */
 import { useId, useState } from "react";
-import { resolveTriggerInput, type WorkflowInputDefinition } from "@valet/workflow";
+import { normalizeInputType, resolveTriggerInput, type WorkflowInputDefinition } from "@valet/workflow";
 import { Button, Dialog, DialogContent, DialogFooter, Label } from "~/components/primitives";
 import { useStartRun } from "~/api/workflows";
 import { JsonTextarea, LabeledInput, NumberField, SelectField } from "./editor/fields";
@@ -170,7 +170,10 @@ function SchemaFieldControl({
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
-  switch (def.type) {
+  // `integer` is an alias for `number` — normalize before branching so an
+  // integer field renders a number input, not the raw-JSON fallback.
+  const type = normalizeInputType(def.type);
+  switch (type) {
     case "string": {
       if (def.enum && def.enum.length > 0) {
         const options = def.enum
@@ -210,7 +213,7 @@ function SchemaFieldControl({
           label={label}
           value={value}
           onChange={onChange}
-          placeholder={def.type === "array" ? "[]" : "{}"}
+          placeholder={type === "array" ? "[]" : "{}"}
         />
       );
   }

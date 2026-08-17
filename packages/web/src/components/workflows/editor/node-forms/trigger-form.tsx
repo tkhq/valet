@@ -1,7 +1,9 @@
-import type { TriggerNode, WorkflowInputDefinition } from "@valet/workflow";
+import { normalizeInputType, type TriggerNode, type WorkflowInputDefinition } from "@valet/workflow";
 import { Button } from "~/components/primitives";
 import { JsonTextarea, LabeledInput, NumberField, SelectField } from "../fields";
 
+// The canonical types only — `integer` is an accepted alias for `number`
+// in authored JSON, and the editor shows it as `number`.
 const INPUT_TYPES: WorkflowInputDefinition["type"][] = [
   "string",
   "number",
@@ -91,7 +93,7 @@ function TriggerInputRow({
       <LabeledInput label="Name" value={field} onChange={onRename} />
       <SelectField
         label="Type"
-        value={def.type}
+        value={normalizeInputType(def.type)}
         onChange={(value) =>
           // Safe narrowing: `value` always comes from `INPUT_TYPES`, the
           // exhaustive type list this select's `options` were built from.
@@ -148,7 +150,8 @@ function TriggerDefaultField({
   def: WorkflowInputDefinition;
   onPatch: (patch: Partial<WorkflowInputDefinition>) => void;
 }) {
-  switch (def.type) {
+  const type = normalizeInputType(def.type);
+  switch (type) {
     case "string":
       return (
         <LabeledInput
@@ -185,7 +188,7 @@ function TriggerDefaultField({
           label="Default"
           value={def.default}
           onChange={(value) => onPatch({ default: value })}
-          placeholder={def.type === "array" ? "[]" : "{}"}
+          placeholder={type === "array" ? "[]" : "{}"}
         />
       );
   }

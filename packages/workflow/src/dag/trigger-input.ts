@@ -17,8 +17,17 @@ export interface ResolvedTriggerInput {
   errors: TriggerInputError[];
 }
 
+/** Collapse the `integer` alias to `number`. Call this before branching on
+ * an input definition's type, so `integer` behaves identically to `number`
+ * on every surface (validation, run form, template inputs). */
+export function normalizeInputType(
+  type: WorkflowInputDefinition['type'],
+): Exclude<WorkflowInputDefinition['type'], 'integer'> {
+  return type === 'integer' ? 'number' : type;
+}
+
 function matchesType(value: unknown, type: WorkflowInputDefinition['type']): boolean {
-  switch (type) {
+  switch (normalizeInputType(type)) {
     case 'string':
       return typeof value === 'string';
     case 'number':
@@ -80,9 +89,12 @@ export function resolveTriggerInput(
       continue;
     }
     if (!matchesType(value, def.type)) {
+      // Report the canonical type: a schema that wrote `integer` still
+      // takes any number, so the corrective action names `number`.
+      const typeName = normalizeInputType(def.type);
       errors.push({
         field,
-        message: `Input "${field}" must be a ${def.type}. Provide a ${def.type} value.`,
+        message: `Input "${field}" must be a ${typeName}. Provide a ${typeName} value.`,
       });
       continue;
     }

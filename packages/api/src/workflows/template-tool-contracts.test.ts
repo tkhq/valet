@@ -182,6 +182,7 @@ const WHOLE_ALIAS_PARAM = /^\s*\{\{\s*item\s*\}\}\s*$/;
 const PLACEHOLDER_BY_TYPE: Record<WorkflowInputDefinition["type"], unknown> = {
   string: "fixture",
   number: 1,
+  integer: 1,
   boolean: true,
   object: {},
   array: [],

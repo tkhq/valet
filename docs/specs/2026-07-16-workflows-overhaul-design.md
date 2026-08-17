@@ -107,6 +107,13 @@ trigger arg types" and gave up.
   array; unknown definition keys get did-you-mean hints). Previously a
   malformed schema saved silently and surfaced only as a skipped check
   at run time.
+- `integer` is an accepted alias for `number` (2026-08-17). Every other
+  schema surface is JSON Schema, where `integer` is idiomatic, so agents
+  kept writing it and the linter kept rejecting it. `normalizeInputType`
+  (`trigger-input.ts`) collapses the alias, and every consumer that
+  branches on the type — run-time input validation, the run form, the
+  editor's trigger form, template inputs — normalizes first, so
+  `integer` behaves identically to `number` on every surface.
 
 ## 2026-08-10 addendum: triggers + team-owner surface in the web UI
 
