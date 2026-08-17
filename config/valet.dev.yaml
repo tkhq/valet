@@ -40,3 +40,13 @@ skillSources:
   - repo: obra/superpowers
     ref: main
     subpath: skills
+
+# Custom MCP servers. Each entry becomes an action service at boot; tools
+# surface as <name>.<tool>. auth is one of none | oauth | api_key | bearer.
+# bearer reads an instance-wide token from tokenEnv — no secrets in this
+# file. See the spec's `mcpServers` section for all keys.
+# mcpServers:
+#   - name: deepwiki-custom
+#     url: https://mcp.deepwiki.com/mcp
+#     auth: none
+#     riskLevel: low
