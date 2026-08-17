@@ -1848,14 +1848,27 @@ export class EngineHost {
     // start-ref sink: a child session records no start-ref today. An absent
     // `opts.db` (tests that wire no db) degrades to empty bindings, same as
     // `sessionExtras`/`mintSandboxEnv`.
+    // `profile`/`docker` MUST reach the meta: `buildSpecProvider` resolves
+    // the sandbox image per-profile from it. Dropping them here resolved a
+    // full/docker child against the HEADLESS base bake — an image without
+    // /start-full.sh or the docker toolchain — while the manifest ran the
+    // full-profile command, so the pod crash-looped (dev-v2 DinD outage).
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,
           userId: opts.actorUserId,
           orgId: opts.orgId,
           workspace: opts.workspace,
+          profile,
+          ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         })
-      : { userId: opts.actorUserId, orgId: opts.orgId, workspace: opts.workspace };
+      : {
+          userId: opts.actorUserId,
+          orgId: opts.orgId,
+          workspace: opts.workspace,
+          profile,
+          ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+        };
     const specProvider = await this.buildSpecProvider(childSessionId, meta);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a

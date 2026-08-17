@@ -34,7 +34,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -85,6 +85,90 @@ function queuedItem(id: string, threadId: string, prompt: string): QueueItem {
  * handle carries an `id`; plain create-opts do not. */
 function asCreateOpts(sb: Sandbox | SandboxCreateOpts | undefined): SandboxCreateOpts | undefined {
   return sb && !("id" in sb) ? sb : undefined;
+}
+
+/** Isolated + customImage provider backed by VirtualSandbox — enough for
+ * `buildSpecProvider` to wire per-profile image resolution for a child. */
+function makeImageRecordingProvider(): SandboxProvider {
+  const sandboxes = new Map<string, VirtualSandbox>();
+  let nextId = 1;
+  return {
+    backend: "recording-image",
+    capabilities(): SandboxCapabilities {
+      return {
+        snapshot: "none",
+        persistentWorkspace: false,
+        tunnels: false,
+        warmPool: false,
+        hibernation: false,
+        isolated: true,
+        customImage: true,
+      };
+    },
+    async create(): Promise<Sandbox> {
+      const id = `img-${nextId++}`;
+      const sb = new VirtualSandbox(id);
+      sandboxes.set(id, sb);
+      return sb;
+    },
+    async restore(id: string): Promise<Sandbox> {
+      const sb = sandboxes.get(id);
+      if (!sb) throw new Error(`not found: ${id}`);
+      return sb;
+    },
+    async destroy(id: string): Promise<void> {
+      sandboxes.delete(id);
+    },
+    async status(id: string): Promise<SandboxStatus> {
+      return sandboxes.has(id)
+        ? { id, state: "ready", startedAt: Date.now() }
+        : { id, state: "released" };
+    },
+  };
+}
+
+/** Seeds a kind='base' image source with one pushed bake for `profile`. */
+async function seedBaseSourceWithBake(
+  a: TestApi,
+  id: string,
+  profile: "headless" | "full",
+  bakeRef: string,
+): Promise<void> {
+  const now = Date.now();
+  await a.providers.db.insert(imageSources).values({
+    id,
+    orgId: "local-org",
+    kind: "base",
+    parentId: null,
+    name: `default-${profile}`,
+    externalRef: null,
+    pullSecretName: null,
+    setupCommands: [],
+    profile,
+    repoHost: null,
+    repoFullName: null,
+    cloneUrl: null,
+    schedule: "nightly",
+    enabled: true,
+    lastBoundAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await a.providers.db.insert(bakes).values({
+    id: `${id}-bake`,
+    sourceId: id,
+    identityHash: "",
+    commitSha: null,
+    imageRef: bakeRef,
+    status: "pushed",
+    builderBackend: "docker",
+    recipe: { recipe: [], setup: [], image: undefined },
+    error: null,
+    logTail: null,
+    startedAt: now,
+    finishedAt: now,
+    createdAt: now,
+  });
 }
 
 describe("buildChildSpawner", () => {
@@ -193,6 +277,42 @@ describe("buildChildSpawner", () => {
       .limit(1);
     expect(plainRows[0]?.profile).toBe("headless");
     expect(plainRows[0]?.docker).toBe(false);
+  });
+
+  it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
+    // Isolated + customImage provider so buildSpecProvider wires image
+    // resolution (resolveBaseImage consults the org's per-profile base bakes).
+    const provider = makeImageRecordingProvider();
+    api = await bootTestApi({
+      sandboxProvider: provider,
+      defaultImages: { headless: "stock-headless:img", full: "stock-full:img" },
+    });
+    // Pushed base bakes for BOTH profiles: a child meta that drops the
+    // profile resolves the headless bake; the correct meta resolves full.
+    await seedBaseSourceWithBake(api, "cb-h", "headless", "reg/cb-h/base:1");
+    await seedBaseSourceWithBake(api, "cb-f", "full", "reg/cb-f/base:1");
+
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-image", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const result = await spawner(
+      { prompt: "dind verification", profile: "full", docker: true },
+      {
+        parentSessionId: "parent-image",
+        parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user",
+        owner: { type: "user" as const, id: "local-user" },
+      },
+    );
+
+    const built = api.providers.engineHost.liveSession(result.childSessionId);
+    const spec = await built?.options.specProvider?.();
+    expect(spec).toBeDefined();
+    expect(spec?.image).toBe("reg/cb-f/base:1");
   });
 
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
