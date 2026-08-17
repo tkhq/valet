@@ -414,16 +414,22 @@ export function useSlackApp(name?: string, opts?: Partial<UseQueryOptions<GetSla
 /** Saves the org Slack credential. The server checks the bot token with
  * Slack (`auth.test` + required scopes) before it stores anything, so a
  * rejection here means the token or secret is wrong, not that the save
- * failed. */
+ * failed. `appToken` is the app-level `xapp-` token Socket Mode ingress
+ * polls with (`plugin-slack`'s `socketModePoll`); a webhook deployment has
+ * no use for it. */
 export function useSaveSlackCredential() {
   const qc = useQueryClient();
-  return useMutation<PutCredentialResponse, Error, { accessToken: string; webhookSecret: string }>({
-    mutationFn: ({ accessToken, webhookSecret }) =>
+  return useMutation<
+    PutCredentialResponse,
+    Error,
+    { accessToken: string; webhookSecret: string; appToken?: string }
+  >({
+    mutationFn: ({ accessToken, webhookSecret, appToken }) =>
       api.putCredential("slack", {
         type: "bot_token",
         accessToken,
         scope: "org",
-        metadata: { webhookSecret },
+        metadata: { webhookSecret, ...(appToken ? { appToken } : {}) },
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });

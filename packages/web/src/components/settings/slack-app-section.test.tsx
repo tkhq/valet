@@ -16,6 +16,7 @@ let slackAppData: GetSlackAppResponse | undefined;
 let isLoading = false;
 let isError = false;
 let saveCredentialError: Error | null = null;
+let lastRequestedName: string | undefined;
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -23,7 +24,10 @@ vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
-    useSlackApp: () => ({ data: slackAppData, isLoading, error: isError ? new Error("boom") : null }),
+    useSlackApp: (name?: string) => {
+      lastRequestedName = name;
+      return { data: slackAppData, isLoading, error: isError ? new Error("boom") : null };
+    },
     useSaveSlackCredential: () => ({
       mutateAsync: saveCredentialMutateAsync,
       isPending: false,
@@ -81,6 +85,7 @@ describe("SlackAppSection", () => {
     isLoading = false;
     isError = false;
     saveCredentialError = null;
+    lastRequestedName = undefined;
     vi.stubGlobal("confirm", vi.fn(() => true));
   });
 
@@ -93,7 +98,7 @@ describe("SlackAppSection", () => {
   it("shows failure text on error", () => {
     isError = true;
     render(<SlackAppSection />);
-    expect(screen.getByText("Failed to load the Slack app setup.")).toBeTruthy();
+    expect(screen.getByText(/Failed to load the Slack app setup/)).toBeTruthy();
   });
 
   it("not connected: shows the manifest and the Slack create link", () => {
@@ -133,12 +138,76 @@ describe("SlackAppSection", () => {
   it("shows the Socket Mode notice only when the deployment has no public URL", () => {
     slackAppData = slackAppResponse({ ingress: "socket_mode", requestUrl: null });
     const { unmount } = render(<SlackAppSection />);
-    expect(screen.getByText(/Socket Mode/)).toBeTruthy();
+    expect(screen.getByText(/no public URL/)).toBeTruthy();
     unmount();
 
     slackAppData = slackAppResponse();
     render(<SlackAppSection />);
     expect(screen.queryByText(/Socket Mode/)).toBeNull();
+    expect(screen.queryByLabelText("App-level token")).toBeNull();
+  });
+
+  it("socket mode: requires the app-level token and sends it with the save", async () => {
+    slackAppData = slackAppResponse({ ingress: "socket_mode", requestUrl: null });
+    saveCredentialMutateAsync.mockResolvedValue({ ok: true });
+    render(<SlackAppSection />);
+
+    const connectBtn = screen.getByRole("button", { name: "Connect Slack" }) as HTMLButtonElement;
+    fireEvent.change(screen.getByLabelText("Bot token"), { target: { value: "xoxb-token" } });
+    fireEvent.change(screen.getByLabelText("Signing secret"), { target: { value: "sig-secret" } });
+    // Both webhook-mode credentials entered, but Socket Mode still needs the
+    // app-level token — without it no event would ever arrive.
+    expect(connectBtn.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("App-level token"), { target: { value: "xapp-1-a" } });
+    expect(connectBtn.disabled).toBe(false);
+
+    fireEvent.click(connectBtn);
+    await waitFor(() =>
+      expect(saveCredentialMutateAsync).toHaveBeenCalledWith({
+        accessToken: "xoxb-token",
+        webhookSecret: "sig-secret",
+        appToken: "xapp-1-a",
+      }),
+    );
+  });
+
+  it("commits the app name on blur, refetching the manifest under that name", () => {
+    slackAppData = slackAppResponse();
+    render(<SlackAppSection />);
+    expect(lastRequestedName).toBeUndefined();
+
+    const nameInput = screen.getByLabelText("App name");
+    fireEvent.change(nameInput, { target: { value: "  Valet Dev  " } });
+    fireEvent.blur(nameInput);
+    expect(lastRequestedName).toBe("Valet Dev");
+
+    fireEvent.change(nameInput, { target: { value: "   " } });
+    fireEvent.blur(nameInput);
+    expect(lastRequestedName).toBeUndefined();
+  });
+
+  it("copies the manifest through the Clipboard API when it exists", async () => {
+    slackAppData = slackAppResponse();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<SlackAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy manifest" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(JSON.stringify(slackAppData?.manifest, null, 2)),
+    );
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  it("falls back to selecting the manifest when the Clipboard API is unavailable", async () => {
+    slackAppData = slackAppResponse();
+    // A plain-http origin exposes no `navigator.clipboard` at all.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    render(<SlackAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy manifest" }));
+    expect(await screen.findByText(/the manifest is selected/)).toBeTruthy();
   });
 
   it("surfaces the save error the server explains", () => {

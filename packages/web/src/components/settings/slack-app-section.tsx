@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { GetSlackAppResponse } from "@valet/api/wire";
 import { Badge, Button, Input, Spinner, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
@@ -38,7 +38,11 @@ export function SlackAppSection() {
     );
   }
   if (slackQ.error) {
-    return <div className="py-4 text-sm text-danger-500">Failed to load the Slack app setup.</div>;
+    return (
+      <div className="py-4 text-sm text-danger-500">
+        Failed to load the Slack app setup. Reload the page to try again.
+      </div>
+    );
   }
   if (!slackQ.data) return null;
 
@@ -70,17 +74,34 @@ function SetupCards({
 }) {
   const save = useSaveSlackCredential();
   const [nameInput, setNameInput] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "select">("idle");
   const [botToken, setBotToken] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
+  const [appToken, setAppToken] = useState("");
+  const manifestRef = useRef<HTMLTextAreaElement>(null);
 
   const manifestJson = JSON.stringify(data.manifest, null, 2);
-  const incomplete = botToken.trim().length === 0 || signingSecret.trim().length === 0;
+  // Socket Mode ingress polls with the app-level token; without one the
+  // credential saves fine and then no event ever arrives, so require it here.
+  const socketMode = data.ingress === "socket_mode";
+  const incomplete =
+    botToken.trim().length === 0 ||
+    signingSecret.trim().length === 0 ||
+    (socketMode && appToken.trim().length === 0);
 
   async function copyManifest() {
-    await navigator.clipboard.writeText(manifestJson);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(manifestJson);
+      setCopyState("copied");
+    } catch {
+      // A plain-http origin has no Clipboard API. Select the manifest so one
+      // keystroke finishes the copy, and say so beside the button.
+      manifestRef.current?.focus();
+      manifestRef.current?.select();
+      setCopyState("select");
+    }
+    window.setTimeout(() => setCopyState("idle"), 4000);
   }
 
   async function connect() {
@@ -88,6 +109,7 @@ function SetupCards({
       await save.mutateAsync({
         accessToken: botToken.trim(),
         webhookSecret: signingSecret.trim(),
+        ...(socketMode && appToken.trim() ? { appToken: appToken.trim() } : {}),
       });
       // On success the section re-renders as the connected card, because the
       // mutation invalidates the Slack app query.
@@ -113,10 +135,11 @@ function SetupCards({
         </div>
 
         <div className="space-y-4 px-6 py-5">
-          {data.ingress === "socket_mode" && (
+          {socketMode && (
             <div className="rounded border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs leading-relaxed text-ink dark:border-amber-700/60 dark:bg-amber-950/40">
               This deployment has no public URL, so the manifest enables Socket Mode and Slack
-              delivers events over a socket instead of a webhook. To use webhooks, set
+              delivers events over a socket instead of a webhook. Socket Mode needs one extra
+              credential: an app-level token, asked for below. To use webhooks instead, set
               VALET_PUBLIC_URL (e.g. a tunnel) and reload this page before creating the app.
             </div>
           )}
@@ -146,17 +169,24 @@ function SetupCards({
                 App manifest
               </label>
               <Button type="button" variant="secondary" size="sm" onClick={() => void copyManifest()}>
-                {copied ? "Copied" : "Copy manifest"}
+                {copyState === "copied" ? "Copied" : "Copy manifest"}
               </Button>
             </div>
             <Textarea
               id="slack-manifest"
+              ref={manifestRef}
               readOnly
               rows={10}
               value={manifestJson}
               aria-label="App manifest"
               className="font-mono text-xs"
             />
+            {copyState === "select" && (
+              <p role="status" className="text-xs text-muted">
+                Clipboard access is unavailable here — the manifest is selected, press ⌘C or
+                Ctrl+C to copy it.
+              </p>
+            )}
             {data.requestUrl && (
               <p className="text-xs text-muted">
                 Events and interactivity are delivered to{" "}
@@ -222,6 +252,27 @@ function SetupCards({
               event deliveries.
             </p>
           </div>
+
+          {socketMode && (
+            <div className="space-y-1.5 sm:col-span-2">
+              <label htmlFor="slack-app-token" className="text-sm font-medium text-ink">
+                App-level token
+              </label>
+              <Input
+                id="slack-app-token"
+                type="password"
+                value={appToken}
+                onChange={(e) => setAppToken(e.target.value)}
+                placeholder="xapp-…"
+                aria-label="App-level token"
+              />
+              <p className="text-xs leading-relaxed text-muted">
+                Basic Information → App-Level Tokens → Generate, with the connections:write
+                scope. Socket Mode receives events through this token; without it the app
+                connects but never hears a message.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-line px-6 py-4">
