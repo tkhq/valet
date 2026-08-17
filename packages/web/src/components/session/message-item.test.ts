@@ -1,11 +1,12 @@
 /**
- * Pure-logic tests for `isEmptyAssistantMessage` — the predicate behind the
- * "(no response)" placeholder that names a turn that died before its first
- * token (bad key, exhausted credits) instead of rendering a blank bubble.
+ * Pure-logic tests for `message-item` helpers: `isEmptyAssistantMessage`
+ * (the predicate behind the "(no response)" placeholder) and
+ * `messageCopyText` (the clipboard payload behind the per-message copy
+ * button).
  */
 import { describe, expect, it } from "vitest";
 import type { StreamMessage } from "~/stores/stream";
-import { isEmptyAssistantMessage } from "./message-item";
+import { isEmptyAssistantMessage, messageCopyText } from "./message-item";
 
 function msg(over: Partial<StreamMessage>): StreamMessage {
   return {
@@ -31,5 +32,41 @@ describe("isEmptyAssistantMessage", () => {
     expect(
       isEmptyAssistantMessage(msg({ parts: [{ kind: "text", text: "hi" }] })),
     ).toBe(false);
+  });
+});
+
+describe("messageCopyText", () => {
+  it("joins text parts with blank lines and skips thinking/tool parts", () => {
+    const text = messageCopyText(
+      msg({
+        parts: [
+          { kind: "thinking", text: "pondering" },
+          { kind: "text", text: "first" },
+          {
+            kind: "tool_call",
+            callId: "c1",
+            toolName: "bash",
+            args: {},
+            status: "success",
+          },
+          { kind: "text", text: "second" },
+        ],
+      }),
+    );
+    expect(text).toBe("first\n\nsecond");
+  });
+
+  it("falls back to content when a message has no text parts", () => {
+    expect(messageCopyText(msg({ content: "legacy body" }))).toBe("legacy body");
+    expect(
+      messageCopyText(
+        msg({ content: "legacy body", parts: [{ kind: "thinking", text: "x" }] }),
+      ),
+    ).toBe("legacy body");
+  });
+
+  it("returns an empty string when there is nothing to copy", () => {
+    expect(messageCopyText(msg({}))).toBe("");
+    expect(messageCopyText(msg({ parts: [{ kind: "text", text: "  " }] }))).toBe("");
   });
 });

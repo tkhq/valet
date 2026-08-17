@@ -3,6 +3,7 @@ import type { MessagePart } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
+import { CopyButton } from "./tool-renderers/tool-shell";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
 import { ToolBody } from "./tool-renderers/tool-shell";
@@ -19,6 +20,7 @@ export function MessageItem({
   suppressEmptyPlaceholder?: boolean;
 }) {
   const isUser = message.role === "user";
+  const copyText = messageCopyText(message);
   return (
     <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
       {/* Row background spans full width; the content column is capped at a
@@ -45,6 +47,13 @@ export function MessageItem({
               </span>
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
+            {copyText && (
+              <CopyButton
+                getText={() => copyText}
+                label="Copy message"
+                className="ml-auto opacity-0 group-hover:opacity-100"
+              />
+            )}
           </div>
           <div className="space-y-2">
             {message.parts.length === 0 && message.content && (
@@ -80,6 +89,22 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
     !message.content &&
     !message.signal
   );
+}
+
+/**
+ * The clipboard payload for a message's copy button: the visible prose —
+ * text parts joined by blank lines, or the legacy `content` field when a
+ * message has no parts. Thinking and tool-call parts stay out; the debug
+ * transcript (session header) covers those. Empty string means no button.
+ * Exported for tests.
+ */
+export function messageCopyText(message: StreamMessage): string {
+  const texts = message.parts
+    .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")
+    .map((p) => p.text.trim())
+    .filter(Boolean);
+  if (texts.length > 0) return texts.join("\n\n");
+  return message.content?.trim() ?? "";
 }
 
 function PartView({ part }: { part: MessagePart }) {
