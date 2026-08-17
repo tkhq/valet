@@ -281,17 +281,33 @@ export function Canvas({
   // The model is the source of truth; whenever the parent hands us a new
   // snapshot (add/remove/duplicate/connect/patch), re-derive local state
   // from it. Position changes during an in-progress drag are local-only
-  // until drag-end, so this doesn't fight the user's cursor.
-  // `gateByNodeId` is a dependency because it arrives from its own query,
-  // usually AFTER the first snapshot renders — without it the badges would
-  // wait for the next edit to appear.
+  // until drag-end, so this doesn't fight the user's cursor. `gateByNodeId`
+  // is read from the closure here, NOT a dependency — a full rebuild on a
+  // query refresh would snap back a mid-drag card and drop xyflow's
+  // selection state. The patch effect below paints late-arriving gates.
   useEffect(() => {
     const drawn = new Set(flow.nodes.map((node) => node.id));
     const entering = enteringNodeIds(flow, drawnIds.current ?? drawn);
     drawnIds.current = drawn;
     setNodes(toXyNodes(flow, errors, entering, concurrency, gateByNodeId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flow, gateByNodeId]);
+  }, [flow]);
+
+  // The permissions query usually lands AFTER the first snapshot renders.
+  // Patch `gate` in place instead of rebuilding, so positions, selection,
+  // and in-flight arrival animations survive the refresh.
+  useEffect(() => {
+    setNodes((current) =>
+      current.map((node) => {
+        const gate = gateByNodeId?.get(node.id);
+        if (gate === node.data.gate) return node;
+        const data = { ...node.data };
+        if (gate) data.gate = gate;
+        else delete data.gate;
+        return { ...node, data };
+      }),
+    );
+  }, [gateByNodeId]);
 
   useEffect(() => {
     setEdges(toXyEdges(flow));

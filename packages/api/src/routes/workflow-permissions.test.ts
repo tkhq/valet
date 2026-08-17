@@ -38,7 +38,12 @@ function widgetsPlugin(): ValetPlugin {
   return {
     name: "widgets",
     version: "0.0.1",
-    actions: [{ service: "widgets", actions: [widgetAction("deploy", "high"), widgetAction("list", "low")] }],
+    actions: [
+      {
+        service: "widgets",
+        actions: [widgetAction("deploy", "high"), widgetAction("list", "low"), widgetAction("purge", "critical")],
+      },
+    ],
   };
 }
 
@@ -49,6 +54,15 @@ const DEFINITION = {
     { id: "ship", type: "tool", service: "widgets", action: "deploy", params: {} },
     { id: "inventory", type: "tool", service: "widgets", action: "list", params: {} },
     { id: "mystery", type: "tool", service: "unplugged", action: "thing", params: {} },
+    // A foreach whose body is a gating tool action: the run gates on it
+    // exactly like a top-level tool node, so the analysis must report it —
+    // attributed to the foreach node's id, the card the editor draws.
+    {
+      id: "fanout",
+      type: "foreach",
+      items: "{{ trigger.data.items }}",
+      body: { id: "fanout-body", type: "tool", service: "widgets", action: "purge", params: {} },
+    },
     { id: "human", type: "approval", prompt: "ok to continue?" },
     { id: "stop", type: "stop" },
   ],
@@ -56,7 +70,8 @@ const DEFINITION = {
     { from: "trigger", to: "ship" },
     { from: "ship", to: "inventory" },
     { from: "inventory", to: "mystery" },
-    { from: "mystery", to: "human" },
+    { from: "mystery", to: "fanout" },
+    { from: "fanout", to: "human" },
     { from: "human", to: "stop" },
   ],
 };
@@ -102,7 +117,7 @@ describe("GET /api/workflows/:id/permissions", () => {
     const body = (await res.json()) as GetWorkflowPermissionsResponse;
     const nodes = byNodeId(body);
 
-    expect(body.nodes).toHaveLength(3);
+    expect(body.nodes).toHaveLength(4);
     expect(nodes.get("ship")).toMatchObject({
       service: "widgets",
       action: "deploy",
@@ -111,6 +126,16 @@ describe("GET /api/workflows/:id/permissions", () => {
       mode: "require_approval",
       provenance: "risk_default",
     });
+    // The foreach body's tool action, attributed to the foreach node's id.
+    expect(nodes.get("fanout")).toMatchObject({
+      service: "widgets",
+      action: "purge",
+      actionId: "widgets.purge",
+      riskLevel: "critical",
+      mode: "require_approval",
+      provenance: "risk_default",
+    });
+    expect(nodes.has("fanout-body")).toBe(false);
     expect(nodes.get("inventory")).toMatchObject({
       actionId: "widgets.list",
       riskLevel: "low",
@@ -157,19 +182,17 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as AllowWorkflowPermissionsResponse;
-    expect(body).toEqual({ allowed: ["widgets.deploy"], blocked: [] });
+    expect(body).toEqual({ allowed: ["widgets.deploy", "widgets.purge"], blocked: [] });
 
     const rows = await api.providers.db.select().from(actionPolicyOverrides);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      userId: "local-user",
-      actionId: "widgets.deploy",
-      mode: "allow",
-    });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.actionId).sort()).toEqual(["widgets.deploy", "widgets.purge"]);
+    expect(rows.every((r) => r.userId === "local-user" && r.mode === "allow")).toBe(true);
 
     const preview = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
     const previewBody = (await preview.json()) as GetWorkflowPermissionsResponse;
     expect(byNodeId(previewBody).get("ship")).toMatchObject({ mode: "allow", provenance: "override" });
+    expect(byNodeId(previewBody).get("fanout")).toMatchObject({ mode: "allow", provenance: "override" });
   });
 
   it("is idempotent — a second call updates the same override row", async () => {
@@ -178,14 +201,14 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
 
     const first = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
     expect(first.status).toBe(200);
-    // The gating set is empty on the second call (the override now allows
-    // the action), so the response allows nothing and writes nothing new.
+    // The gating set is empty on the second call (the overrides now allow
+    // the actions), so the response allows nothing and writes nothing new.
     const second = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
     expect(second.status).toBe(200);
     expect((await second.json()) as AllowWorkflowPermissionsResponse).toEqual({ allowed: [], blocked: [] });
 
     const rows = await api.providers.db.select().from(actionPolicyOverrides);
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(2);
   });
 
   it("an actionId outside the gating set → 400", async () => {
@@ -216,9 +239,28 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as AllowWorkflowPermissionsResponse;
-    expect(body.allowed).toEqual([]);
+    // The org policy pins widgets.deploy; widgets.purge stays self-serviceable.
+    expect(body.allowed).toEqual(["widgets.purge"]);
     expect(body.blocked).toHaveLength(1);
     expect(body.blocked[0].actionId).toBe("widgets.deploy");
+    const rows = await api.providers.db.select().from(actionPolicyOverrides);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].actionId).toBe("widgets.purge");
+  });
+
+  it("a null body → 400, a bare-array body → 400, nothing written", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api);
+
+    for (const raw of ["null", '["widgets.deploy"]']) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: expect.stringContaining("JSON object") });
+    }
     const rows = await api.providers.db.select().from(actionPolicyOverrides);
     expect(rows).toHaveLength(0);
   });

@@ -492,10 +492,23 @@ workflowsRouter.get("/:id/permissions", async (c) => {
 workflowsRouter.post("/:id/permissions/allow", async (c) => {
   const { deps, owner } = serviceCtx(c);
 
+  // Shape-check before use: `null` would throw on property access below,
+  // and a bare array has no own `actionIds`, so it would silently take the
+  // "omitted → pre-approve all" branch — a narrowing request must never
+  // widen on a permissions-granting route.
   let body: AllowWorkflowPermissionsRequest = {};
   try {
     const text = await c.req.text();
-    if (text.length > 0) body = JSON.parse(text) as AllowWorkflowPermissionsRequest;
+    if (text.length > 0) {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return c.json(
+          { error: 'request body must be a JSON object, e.g. {"actionIds": ["service.action"]}. Omit actionIds to pre-approve all gating actions.' },
+          400,
+        );
+      }
+      body = parsed as AllowWorkflowPermissionsRequest;
+    }
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }

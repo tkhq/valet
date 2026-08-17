@@ -95,6 +95,7 @@ vi.mock("~/api/workflows", () => ({
     mutateAsync: allowMutateAsync,
     isPending: false,
     error: null,
+    reset: vi.fn(),
   }),
   // A page with `nextCursor` set: the workflow has more runs than this page
   // holds, which is what the count and the drawer notice must say.

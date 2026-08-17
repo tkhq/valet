@@ -16,11 +16,14 @@ author fix that ahead of the run.
 ### 1. Predict gates server-side, per tool node
 
 `GET /api/workflows/:id/permissions` walks the stored definition's tool
-nodes and resolves each `(service, qualified actionId)` with the same
-`resolveActionPolicy` core the run-time invoker uses (`appliesIn:
-"workflow"`, the caller's `userId`, no execution id). The prediction must be
-server-side: org policies are readable only by org admins, so a member's
-client cannot compute it.
+nodes — including a `foreach` node whose body is a tool node, which gates
+at run time exactly like a top-level one — and resolves each `(service,
+qualified actionId)` with the same precedence core the run-time invoker
+uses (`resolvePolicyDecision` over one `loadPolicyRows` snapshot,
+`appliesIn: "workflow"`, the caller's `userId`, no execution id). A
+foreach-body action is attributed to the foreach node's id, the card the
+editor draws. The prediction must be server-side: org policies are readable
+only by org admins, so a member's client cannot compute it.
 
 Response: one entry per tool node — `nodeId`, `service`, `action`,
 qualified `actionId`, `riskLevel`, `mode` (`allow` | `require_approval` |

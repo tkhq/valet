@@ -230,10 +230,22 @@ function WorkflowEditorPane({
     goToRun(result.runId);
   }
 
+  function closePreapprove(open: boolean) {
+    setPreapproveOpen(open);
+    // A closed dialog must not reopen showing the previous attempt's error.
+    if (!open) allowPermissions.reset();
+  }
+
   async function handlePreapprove() {
-    const result = await allowPermissions.mutateAsync();
+    let result;
+    try {
+      result = await allowPermissions.mutateAsync();
+    } catch {
+      // `allowPermissions.error` renders the message inside the dialog.
+      return;
+    }
     setBlockedActions(result.blocked);
-    setPreapproveOpen(false);
+    closePreapprove(false);
   }
 
   return (
@@ -324,13 +336,13 @@ function WorkflowEditorPane({
         />
       )}
 
-      <Dialog open={preapproveOpen} onOpenChange={setPreapproveOpen}>
+      <Dialog open={preapproveOpen} onOpenChange={closePreapprove}>
         <DialogContent
           title="Pre-approve actions"
           description={
             "Each action below pauses a run until someone approves it. " +
-            "Pre-approving writes an allow rule for your user. The rule applies to every " +
-            "workflow and session you run, not only this workflow. Remove it any time " +
+            "Pre-approving writes an allow override for your user. The override applies to " +
+            "every workflow and session you run, not only this workflow. Remove it any time " +
             "under Settings → Policy overrides."
           }
         >
@@ -343,7 +355,7 @@ function WorkflowEditorPane({
             ))}
           </ul>
           <DialogFooter>
-            <Button type="button" variant="secondary" onClick={() => setPreapproveOpen(false)}>
+            <Button type="button" variant="secondary" onClick={() => closePreapprove(false)}>
               Cancel
             </Button>
             <Button

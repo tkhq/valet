@@ -20,7 +20,8 @@
  * node is an intended gate, not a permission requirement.
  */
 import { upsertOverride } from "../policies/admin.js";
-import { resolveActionPolicy } from "../policies/service.js";
+import { resolvePolicyDecision } from "../policies/resolution.js";
+import { loadPolicyRows } from "../policies/service.js";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
 import type {
   AllowWorkflowPermissionsResponse,
@@ -46,15 +47,37 @@ function toolNodeRefs(definition: unknown): ToolNodeRef[] {
   for (const node of nodes) {
     if (typeof node !== "object" || node === null) continue;
     const n = node as Record<string, unknown>;
-    if (n.type !== "tool") continue;
-    if (typeof n.id !== "string" || typeof n.service !== "string" || typeof n.action !== "string") continue;
-    const params =
-      typeof n.params === "object" && n.params !== null && !Array.isArray(n.params)
-        ? (n.params as Record<string, unknown>)
-        : undefined;
-    refs.push({ nodeId: n.id, service: n.service, action: n.action, params });
+    if (typeof n.id !== "string") continue;
+    if (n.type === "tool") {
+      const ref = toToolRef(n.id, n);
+      if (ref) refs.push(ref);
+      continue;
+    }
+    // A foreach body can be a tool node, and the foreach executor dispatches
+    // it through the same policy enforcement as a top-level tool node. The
+    // ref carries the FOREACH node's id so the editor badge lands on the
+    // card that is actually drawn. Body nesting depth is 1 by the dag/v1
+    // types — a foreach cannot contain another foreach.
+    if (n.type === "foreach" && typeof n.body === "object" && n.body !== null) {
+      const body = n.body as Record<string, unknown>;
+      if (body.type !== "tool") continue;
+      const ref = toToolRef(n.id, body);
+      if (ref) refs.push(ref);
+    }
   }
   return refs;
+}
+
+/** Narrows one tool-node object to a ref, or null when service/action are
+ * not both strings. `nodeId` is the DISPLAYED node's id — for a foreach
+ * body that is the foreach node itself. */
+function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | null {
+  if (typeof n.service !== "string" || typeof n.action !== "string") return null;
+  const params =
+    typeof n.params === "object" && n.params !== null && !Array.isArray(n.params)
+      ? (n.params as Record<string, unknown>)
+      : undefined;
+  return { nodeId, service: n.service, action: n.action, params };
 }
 
 /** Predicts the policy resolution of every tool node for `owner.userId`.
@@ -73,26 +96,33 @@ export async function analyzeWorkflowPermissions(
 
   const refs = toolNodeRefs(summary.definition);
   const now = Date.now();
+  // One row load for the whole definition: the scope has no per-node
+  // component (no session/execution id — a run that has not started has no
+  // grants), so a per-node `resolveActionPolicy` would re-read the same two
+  // row sets N times. The pure core then decides per node from one
+  // consistent snapshot.
+  const rows = refs.length > 0 ? await loadPolicyRows(deps.db, { orgId: owner.orgId, userId: owner.userId }) : null;
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
-    if (!entry || !action) {
+    if (!entry || !action || rows === null) {
       nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown" });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
-    const decision = await resolveActionPolicy(deps.db, {
-      orgId: owner.orgId,
-      userId: owner.userId,
-      service: ref.service,
-      actionId,
-      riskLevel: action.riskLevel,
-      params: ref.params,
-      appliesIn: "workflow",
-      pluginDefault: entry.actionPlugin.defaultApprovalMode,
-      now,
-    });
+    const decision = resolvePolicyDecision(
+      rows,
+      {
+        service: ref.service,
+        actionId,
+        riskLevel: action.riskLevel,
+        params: ref.params,
+        appliesIn: "workflow",
+        now,
+      },
+      entry.actionPlugin.defaultApprovalMode,
+    );
     nodes.push({
       nodeId: ref.nodeId,
       service: ref.service,
