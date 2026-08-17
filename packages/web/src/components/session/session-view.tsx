@@ -39,9 +39,9 @@ import { Button, Spinner } from "~/components/primitives";
  *
  * - default: the existing `SessionHeader` (title, model picker,
  *   sandbox/connection/status chips, delete).
- * - `panel`: compact header (title + "open full page" + ✕ close) instead,
- *   no delete/model-picker chrome — this is a lightweight peek, not the
- *   session's home.
+ * - `panel`: compact header (title, "open full page", and a ✕ close for a
+ *   host that passes `onClose`) instead, with no delete/model-picker
+ *   chrome — this is a lightweight peek, not the session's home.
  */
 export function SessionView({
   sessionId,
@@ -61,7 +61,11 @@ export function SessionView({
    * view falls back to the session's first/default thread.
    */
   activeThreadId?: string;
-  /** panel-only: closes the slide-over. Required when `panel` is true. */
+  /**
+   * panel-only: closes the slide-over. Omitted by a host whose panel is
+   * permanent — the workflow editor's assistant column is the surface
+   * itself, so a ✕ there would offer to close something that must stay.
+   */
   onClose?: () => void;
   /**
    * Called when a child-card signal is clicked. When omitted, `SignalCard`
@@ -266,9 +270,11 @@ function PanelHeader({
         <ExternalLink className="h-3.5 w-3.5" />
         open full page
       </Link>
-      <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close panel">
-        <X className="h-4 w-4" />
-      </Button>
+      {onClose && (
+        <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close panel">
+          <X className="h-4 w-4" />
+        </Button>
+      )}
     </header>
   );
 }

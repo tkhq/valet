@@ -158,6 +158,42 @@ const notesTemplate: WorkflowTemplate = {
   ),
 };
 
+/**
+ * Scheduled AND parameterised — the combination the baking rule exists for.
+ * A scheduled run applies no `dataSchema` defaults, so install has to
+ * resolve every field before it writes: the declared default for one, and a
+ * refusal for the required field nobody supplied.
+ */
+const notesNightly: WorkflowTemplate = {
+  id: "notes-nightly",
+  name: "Notes nightly",
+  description: "Reads one note every night.",
+  category: "Batch work",
+  apps: ["notes"],
+  steps: ["Read"],
+  definition: definition(
+    [
+      {
+        id: "start",
+        type: "trigger",
+        dataSchema: {
+          noteId: { type: "string", required: true, label: "Note id", placeholder: "n_123" },
+          depth: { type: "number", required: true, default: 3, label: "Depth" },
+        },
+      },
+      {
+        id: "read",
+        type: "tool",
+        service: "notes",
+        action: "read",
+        params: { id: "{{ trigger.data.noteId }}", depth: "{{ trigger.data.depth }}" },
+      },
+    ],
+    [{ from: "start", to: "read" }],
+  ),
+  schedule: { name: "Notes nightly", cron: "0 3 * * *", timezone: "UTC", description: "Every day at 03:00" },
+};
+
 const brokenTemplate: WorkflowTemplate = {
   id: "broken",
   name: "Broken",
@@ -194,7 +230,7 @@ const notesPlugin: ValetPlugin = {
   name: "notes",
   version: "0.0.1",
   actions: [localActions],
-  templates: [notesTemplate, brokenTemplate],
+  templates: [notesTemplate, notesNightly, brokenTemplate],
 };
 
 // ─── Harness ─────────────────────────────────────────────────────────────
@@ -576,6 +612,37 @@ describe("installWorkflowTemplate", () => {
     expect(result.ok).toBe(true);
     const row = (await db.select().from(workflowDefinitions))[0]!;
     expect(JSON.stringify(row.definition)).toContain("trigger.data.noteId");
+  });
+
+  it("refuses a scheduled install with no value for a required input, and names the field", async () => {
+    // The same omission on a manual template is harmless — its run form
+    // collects the value later. On a schedule there is no later: the cron
+    // run gets no defaults and no form, so the reference would read null
+    // every night with nothing to report it.
+    const result = await installWorkflowTemplate(deps(), OWNER, "notes-nightly");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    if (result.code !== "invalid_input") throw new Error(`expected invalid_input, got ${result.code}`);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('Missing value for "noteId"');
+    expect(result.errors[0]).toContain("a scheduled run applies no input defaults");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("bakes a scheduled template's own default without being asked for it", async () => {
+    const result = await installWorkflowTemplate(deps(), OWNER, "notes-nightly", { inputs: { noteId: "n_9" } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    const row = (await db.select().from(workflowDefinitions))[0]!;
+    const stored = JSON.stringify(row.definition);
+    // Both fields are literals now, and both are gone from the schema, so
+    // the nightly run reads no input at all.
+    expect(stored).toContain('"id":"n_9"');
+    expect(stored).toContain('"depth":3');
+    expect(stored).not.toContain("trigger.data");
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
   });
 });
 

@@ -36,6 +36,7 @@ import type {
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
+  PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   ProbeLlmProviderResponse,
@@ -357,6 +358,19 @@ export function useCreateGithubAppManifest() {
     mutationFn: (body) => api.postGithubAppManifest(body ?? {}),
     // No invalidation — nothing changes until the admin completes the
     // browser-POST manifest flow and GitHub redirects back to `GET /setup`.
+  });
+}
+
+/** Connects a GitHub App that already exists. The server checks the
+ * credential with GitHub before it stores anything, so a rejection here means
+ * the credential is wrong, not that the save failed. */
+export function useSaveGithubAppCredential() {
+  const qc = useQueryClient();
+  return useMutation<GetGithubAppResponse, Error, PostGithubAppCredentialRequest>({
+    mutationFn: (body) => api.postGithubAppCredential(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+    },
   });
 }
 

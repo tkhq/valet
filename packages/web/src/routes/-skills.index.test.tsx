@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
 /**
- * `/skills` — the skill catalog in one grid. Mocks `~/api/skills` the same
- * way `-integrations.test.tsx` mocks its api module: this suite cares that
- * the page renders from query data and links to the right detail route, not
- * that TanStack Query works.
+ * `/skills` — the skill catalog in one grid, with the tracked-repository
+ * panel above it. Mocks `~/api/skills` the same way `-integrations.test.tsx`
+ * mocks its api module: this suite cares that the page renders from query
+ * data, asks the server the right question, and links to the right detail
+ * route, not that TanStack Query works.
+ *
+ * The repository cases came from the retired `/settings/library-sources`
+ * suite together with the panel they cover.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { ListSkillsResponse } from "@valet/api/wire";
+import type { ListSkillsResponse, ListSkillSourcesResponse } from "@valet/api/wire";
 
 const skillsData: ListSkillsResponse = {
   skills: [
@@ -48,20 +52,40 @@ const skillsData: ListSkillsResponse = {
       argHint: "<topic>",
     },
   ],
+  nextCursor: null,
 };
 
 let currentData: ListSkillsResponse = skillsData;
 let currentState = { isLoading: false, error: null as Error | null };
+let sourcesData: ListSkillSourcesResponse = { sources: [], nextCursor: null };
+/** The search params the page is rendered with, and where it navigates. The
+ * filters and both cursor stacks live here, never in component state. */
+let searchParams: Record<string, string> = {};
+const navigate = vi.fn();
+const skillsQuery = vi.fn();
+const addSource = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
   ),
   createFileRoute: () => (config: unknown) => config,
+  useSearch: () => searchParams,
+  useNavigate: () => navigate,
 }));
 
 vi.mock("~/api/skills", () => ({
-  useSkills: () => ({ data: currentData, ...currentState }),
+  useSkills: (query: unknown) => {
+    skillsQuery(query);
+    return { data: currentData, ...currentState };
+  },
+}));
+
+vi.mock("~/api/skill-sources", () => ({
+  useSkillSources: () => ({ data: sourcesData, isLoading: false, error: null }),
+  useAddSkillSource: () => ({ mutate: addSource, isPending: false, error: null }),
+  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 // A team card carries an `OwnerBadge`, which reads the teams list. No fixture
@@ -69,14 +93,34 @@ vi.mock("~/api/skills", () => ({
 // adding a team-owned fixture does not need a query client as well.
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
 }));
 
 import { SkillsIndexPage } from "./skills.index";
+
+/** The last query the page sent to `GET /api/skills`. */
+function lastSkillsQuery(): Record<string, unknown> {
+  const call = skillsQuery.mock.calls[skillsQuery.mock.calls.length - 1];
+  const [query] = (call ?? [{}]) as [Record<string, unknown>];
+  return query;
+}
+
+/** The search params of the page's last navigation. */
+function lastNavigationSearch(): Record<string, unknown> {
+  const call = navigate.mock.calls[navigate.mock.calls.length - 1];
+  const [options] = (call ?? [{}]) as [{ search?: Record<string, unknown> }];
+  return options.search ?? {};
+}
 
 describe("SkillsIndexPage", () => {
   beforeEach(() => {
     currentData = skillsData;
     currentState = { isLoading: false, error: null };
+    sourcesData = { sources: [], nextCursor: null };
+    searchParams = {};
+    navigate.mockReset();
+    skillsQuery.mockReset();
+    addSource.mockReset();
   });
 
   it("lists every skill in one grid, with no per-plugin sections", () => {
@@ -128,7 +172,7 @@ describe("SkillsIndexPage", () => {
   });
 
   it("shows an empty state when nothing is installed and nothing is stored", () => {
-    currentData = { skills: [] };
+    currentData = { skills: [], nextCursor: null };
     render(<SkillsIndexPage />);
     expect(screen.getByText(/No skills yet/)).toBeTruthy();
     // The header carries no counter at all now: the grid's own chips and
@@ -142,45 +186,6 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
   });
 
-  it("filters to prompts when the Prompts chip is picked", () => {
-    const { container } = render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
-    // Only the one prompt-invocation skill stays in the grid.
-    expect(container.querySelectorAll(".grid a").length).toBe(1);
-    expect(screen.getByText("Standup")).toBeTruthy();
-  });
-
-  it("hides the prompt when the Skills chip is picked", () => {
-    const { container } = render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
-    // The four plugin skills stay; the one prompt drops out.
-    expect(container.querySelectorAll(".grid a").length).toBe(4);
-    expect(screen.queryByText("Standup")).toBeNull();
-  });
-
-  it("links to the settings sync-sources page instead of an inline panel", () => {
-    render(<SkillsIndexPage />);
-    const link = screen.getByText(/Manage sync sources in Settings/).closest("a");
-    expect(link?.getAttribute("to")).toBe("/settings/library-sources");
-    // The inline import panel is gone.
-    expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
-  });
-
-  it("filters the grid by a case-insensitive search over name and description", () => {
-    const { container } = render(<SkillsIndexPage />);
-    fireEvent.change(screen.getByLabelText("Search skills"), { target: { value: "SLACK" } });
-    expect(container.querySelectorAll(".grid a").length).toBe(1);
-    expect(screen.getByText("Slack tools")).toBeTruthy();
-  });
-
-  it("filters the grid by scope", () => {
-    const { container } = render(<SkillsIndexPage />);
-    fireEvent.change(screen.getByLabelText("Filter by scope"), { target: { value: "personal" } });
-    // Only the one stored personal skill stays.
-    expect(container.querySelectorAll(".grid a").length).toBe(1);
-    expect(screen.getByText("Standup")).toBeTruthy();
-  });
-
   it("shows a scope badge on every card", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
@@ -190,5 +195,161 @@ describe("SkillsIndexPage", () => {
       Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
     expect(badges("Plugin").length).toBe(4);
     expect(badges("Personal").length).toBe(1);
+  });
+});
+
+/**
+ * The chips, the scope select, and the search box narrow the CATALOG, so
+ * they travel to the server through the URL. Filtering the page in hand
+ * would report "No skills match your search" for a skill sitting on the next
+ * page.
+ */
+describe("SkillsIndexPage — the filters go to the URL and to the server", () => {
+  beforeEach(() => {
+    currentData = skillsData;
+    currentState = { isLoading: false, error: null };
+    sourcesData = { sources: [], nextCursor: null };
+    searchParams = {};
+    navigate.mockReset();
+    skillsQuery.mockReset();
+  });
+
+  it("asks the plainest question with no filter set", () => {
+    render(<SkillsIndexPage />);
+    expect(lastSkillsQuery()).toEqual({});
+  });
+
+  it("writes the Prompts chip to the URL as the kind it means", () => {
+    render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+
+    expect(lastNavigationSearch()).toMatchObject({ filter: "prompts" });
+  });
+
+  it("sends the chip on to the server as a kind", () => {
+    searchParams = { filter: "prompts" };
+    render(<SkillsIndexPage />);
+
+    expect(lastSkillsQuery()).toEqual({ kind: "prompt" });
+    expect(screen.getByRole("tab", { name: "Prompts" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("sends the search box on as a catalog-wide query", () => {
+    render(<SkillsIndexPage />);
+    fireEvent.change(screen.getByLabelText("Search skills"), { target: { value: "SLACK" } });
+
+    expect(lastNavigationSearch()).toMatchObject({ q: "SLACK" });
+
+    searchParams = { q: "SLACK" };
+    render(<SkillsIndexPage />);
+    expect(lastSkillsQuery()).toEqual({ q: "SLACK" });
+  });
+
+  it("sends the scope select on as a scope", () => {
+    searchParams = { scope: "personal" };
+    render(<SkillsIndexPage />);
+    expect(lastSkillsQuery()).toEqual({ scope: "personal" });
+  });
+
+  it("returns to the first page when a filter changes", () => {
+    searchParams = { page: "cursor_1" };
+    render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+
+    // A different question has a different first page, so the old cursor
+    // names a row that the new question may not even list.
+    expect(lastNavigationSearch()).toMatchObject({ page: undefined });
+  });
+
+  it("keeps the search box up when a search matches nothing", () => {
+    searchParams = { q: "nothing-matches-this" };
+    currentData = { skills: [], nextCursor: null };
+    render(<SkillsIndexPage />);
+
+    expect(screen.getByText("No skills match your search.")).toBeTruthy();
+    // Hiding the box on an empty page would leave no way to clear the search.
+    expect(screen.getByLabelText("Search skills")).toBeTruthy();
+  });
+});
+
+describe("SkillsIndexPage — paging", () => {
+  beforeEach(() => {
+    currentData = skillsData;
+    currentState = { isLoading: false, error: null };
+    sourcesData = { sources: [], nextCursor: null };
+    searchParams = {};
+    navigate.mockReset();
+    skillsQuery.mockReset();
+  });
+
+  it("pushes the cursor it was handed onto the stack in the URL", () => {
+    currentData = { ...skillsData, nextCursor: "cursor_2" };
+    render(<SkillsIndexPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    // In the URL, not in `useState`: a page is then a history entry, so Back
+    // pages back instead of leaving Skills.
+    expect(lastNavigationSearch()).toMatchObject({ page: "cursor_2" });
+  });
+
+  it("reads the page its stack names and pops back off it", () => {
+    searchParams = { page: "cursor_1~cursor_2" };
+    currentData = { ...skillsData, nextCursor: null };
+    render(<SkillsIndexPage />);
+
+    expect(lastSkillsQuery()).toEqual({ cursor: "cursor_2" });
+    expect(screen.getByText("Page 3")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(lastNavigationSearch()).toMatchObject({ page: "cursor_1" });
+  });
+
+  it("shows no pager while the whole catalog fits on one page", () => {
+    render(<SkillsIndexPage />);
+    expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
+  });
+});
+
+/**
+ * The repositories panel sits on this page now, over the skills it produces.
+ * It used to be a link to `/settings/library-sources`, which is retired: a
+ * row's scope is a badge, so a page per scope bought nothing.
+ */
+describe("SkillsIndexPage — the repositories panel", () => {
+  beforeEach(() => {
+    currentData = skillsData;
+    currentState = { isLoading: false, error: null };
+    sourcesData = { sources: [], nextCursor: null };
+    searchParams = {};
+    navigate.mockReset();
+    addSource.mockReset();
+  });
+
+  it("holds the import panel inline, and no link out to Settings", () => {
+    render(<SkillsIndexPage />);
+
+    expect(screen.getByRole("button", { name: /import from github/i })).toBeTruthy();
+    expect(screen.queryByText(/Manage sync sources in Settings/)).toBeNull();
+  });
+
+  it("adds a source under the reader's own workspace, with no org scope", () => {
+    render(<SkillsIndexPage />);
+    fireEvent.click(screen.getByRole("button", { name: /import from github/i }));
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+
+    expect(addSource).toHaveBeenCalledWith({ repo: "tkhq/skills" });
+  });
+
+  it("keeps its own cursor stack, apart from the grid's", () => {
+    sourcesData = { sources: [], nextCursor: "src_2" };
+    render(<SkillsIndexPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    // Two lists on one page, so two params: paging the repositories must not
+    // move the grid.
+    expect(lastNavigationSearch()).toMatchObject({ sourcePage: "src_2", page: undefined });
   });
 });

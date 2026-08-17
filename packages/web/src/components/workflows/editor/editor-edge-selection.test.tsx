@@ -4,10 +4,10 @@
  * (`createEdgeId`), so editing an edge's fromOutput in the inspector
  * re-keys it in the next `toFlow()` snapshot. Before the fix,
  * `Editor.handleEdgeChange` left `selectedEdgeId` pointed at the old id —
- * `flow.edges.find` then returned `undefined` and the inspector silently
- * fell back to the "select a node or edge" placeholder mid-edit. This
- * verifies the selection is carried to the new id so the inspector stays
- * on the edge the user is actively editing.
+ * `flow.edges.find` then returned `undefined` and the column silently gave
+ * itself back to the assistant mid-edit. This verifies the selection is
+ * carried to the new id so the inspector stays on the edge the user is
+ * actively editing.
  *
  * Selecting/clicking an edge through the real xyflow canvas isn't
  * reliably driveable in jsdom (see `canvas.test.tsx`'s note on
@@ -70,10 +70,11 @@ describe("Editor — edge selection stays live across a fromOutput edit", () => 
     fireEvent.change(fromOutputSelect, { target: { value: "false" } });
 
     // The edge re-keyed from "check:true->stop-a" to "check:false->stop-a" —
-    // the inspector must still be showing it, not the "select a node or
-    // edge" fallback.
+    // the inspector must still be showing it. The back control is the tell
+    // that the column is still given over to a selection: it renders for a
+    // selected node or edge and for nothing else.
     expect(screen.getByText("check → stop-a")).toBeTruthy();
-    expect(screen.queryByText("Select a node or edge to edit its settings.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Assistant" })).toBeTruthy();
     const updatedSelect = screen.getByLabelText("From output") as HTMLSelectElement;
     expect(updatedSelect.value).toBe("false");
   });

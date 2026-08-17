@@ -14,27 +14,35 @@ import type {
   SkillSourceSummary,
   SkillSourceSyncResponse,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { api, type SkillSourceListQuery } from "./client";
 import { qkSkills } from "./skills";
 
 export const qkSkillSources = {
-  list: () => ["skill-sources"] as const,
+  all: () => ["skill-sources"] as const,
+  list: (query: SkillSourceListQuery = {}) => ["skill-sources", "list", query] as const,
 };
 
-export function useSkillSources(opts?: Partial<UseQueryOptions<ListSkillSourcesResponse>>) {
+/** One page of tracked repositories. The owner pin and the cursor go into the
+ * key, so every page is its own cache entry. */
+export function useSkillSources(
+  query: SkillSourceListQuery = {},
+  opts?: Partial<UseQueryOptions<ListSkillSourcesResponse>>,
+) {
   return useQuery<ListSkillSourcesResponse>({
-    queryKey: qkSkillSources.list(),
-    queryFn: () => api.listSkillSources(),
+    queryKey: qkSkillSources.list(query),
+    queryFn: () => api.listSkillSources(query),
     ...opts,
   });
 }
 
-/** Invalidates the source list and the skill catalog together. */
+/** Invalidates every page of the source list and of the skill catalog
+ * together: a sync writes skills, and a source added on page one shifts the
+ * pages after it. */
 function useSourceInvalidation(): () => void {
   const qc = useQueryClient();
   return () => {
-    void qc.invalidateQueries({ queryKey: qkSkillSources.list() });
-    void qc.invalidateQueries({ queryKey: qkSkills.list() });
+    void qc.invalidateQueries({ queryKey: qkSkillSources.all() });
+    void qc.invalidateQueries({ queryKey: qkSkills.all() });
   };
 }
 

@@ -11,6 +11,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
 const navigate = vi.fn();
@@ -119,7 +120,32 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
+/**
+ * The assistant panel resolves a session and watches its transcript, both
+ * of which need a live QueryClient. This file mocks the data layer rather
+ * than providing one, so the two hooks are stubbed here as well. Left
+ * un-resolved on purpose: the panel then renders its own "opening" state
+ * instead of mounting `SessionView`, which keeps these page-level tests off
+ * the whole chat stack. Its header and its openings render either way,
+ * which is what the tests below reach for. What the panel does once a
+ * session resolves belongs to the session tests.
+ */
+vi.mock("~/hooks/use-workflow-assistant", () => ({
+  useWorkflowAssistant: () => ({ opening: true }),
+}));
+vi.mock("~/hooks/use-workflow-patch-watch", () => ({
+  useWorkflowPatchWatch: () => undefined,
+}));
+
+import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { WorkflowEditorPage } from "./workflows.$workflowId";
+
+/** JSON mode is deliberately behind the editor's overflow menu — the
+ * assistant panel is the promoted path for changing a definition. */
+async function openJsonMode(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "More editor actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit JSON" }));
+}
 
 describe("WorkflowEditorPage", () => {
   beforeEach(() => {
@@ -173,9 +199,10 @@ describe("WorkflowEditorPage", () => {
   });
 
   it("Save fires the update mutation with the edited definition", async () => {
+    const user = userEvent.setup();
     render(<WorkflowEditorPage workflowId="wf_1" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit JSON" }));
+    await openJsonMode(user);
     const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
     const updatedText = textarea.value.replace('"Deploy pipeline"', '"Deploy pipeline"').replace(
       '"outcome": "success"',
@@ -267,11 +294,12 @@ describe("WorkflowEditorPage", () => {
     expect(blockerDisabled).toBe(false);
   });
 
-  it("arms the leave guard for a definition edit, not only a rename", () => {
+  it("arms the leave guard for a definition edit, not only a rename", async () => {
+    const user = userEvent.setup();
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(blockerDisabled).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit JSON" }));
+    await openJsonMode(user);
     const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
     fireEvent.change(textarea, {
       target: { value: textarea.value.replace('"success"', '"failure"') },
@@ -279,6 +307,24 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     expect(blockerDisabled).toBe(false);
+  });
+
+  it("has the assistant on screen from the start, with nothing to press to reach it", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByRole("complementary", { name: "Workflow assistant" })).toBeTruthy();
+    // Beside the canvas, not over it: the conversation is about the
+    // diagram, so the diagram stays visible.
+    expect(screen.getByTestId("workflow-editor")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open the assistant" })).toBeNull();
+  });
+
+  it("puts a suggestion in the composer of the assistant that is already open", () => {
+    useComposerPrefillStore.setState({ text: null });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    // The openings name steps from this workflow, so they are instructions
+    // the agent can act on, not a generic "ask me anything".
+    fireEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    expect(useComposerPrefillStore.getState().text).toContain("wf_1");
   });
 
   it("offers Leave without saving while a departure is held, and proceeds on confirm", () => {

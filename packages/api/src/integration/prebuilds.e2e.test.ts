@@ -40,11 +40,10 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
-import { DockerSandboxProvider } from "@valet/sandbox-docker";
+import { DockerSandboxProvider, createSandboxWorkspace } from "@valet/sandbox-docker";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { DockerImageBuilder } from "../prebuilds/docker-builder.js";
@@ -144,7 +143,7 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
       process.env.GITHUB_API_URL = fixture.url;
       process.env.GITHUB_URL = fixture.url;
 
-      tmp = await mkdtemp(join(tmpdir(), "valet-t7-e2e-"));
+      tmp = await createSandboxWorkspace("valet-t7-e2e-");
       sandboxProvider = new DockerSandboxProvider();
 
       api = await bootTestApi({

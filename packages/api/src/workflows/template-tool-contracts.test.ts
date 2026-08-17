@@ -47,6 +47,7 @@ import {
   type TemplateContext,
   type ToolNode,
   type WorkflowDefinition,
+  type WorkflowInputDefinition,
 } from "@valet/workflow";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -156,24 +157,77 @@ function readsWholeResult(definition: WorkflowDefinition, nodeId: string): boole
  * values of the right type first. The alias values are deliberately
  * plausible-looking: a Slack channel id must still look like one, or the
  * action's own guard rejects it for the wrong reason.
+ *
+ * One alias carries every field any body reads, because the bodies disagree
+ * about what an item is — a Slack channel in one template, a routed pull
+ * request in another.
  */
-const PARAM_RENDER_CONTEXT: TemplateContext = {
-  trigger: { type: "manual", timestamp: "2026-08-15T00:00:00.000Z", data: {}, metadata: {} },
-  nodes: {
-    classify: { result: { output: { labelId: "Label_7" } }, output: { output: { labelId: "Label_7" } } },
-  },
-  item: { id: "C0FIXTURE1" },
-  index: 0,
+const ITEM_ALIAS: Record<string, unknown> = {
+  id: "C0FIXTURE1",
+  number: 42,
+  slackUserId: "U0FIXTURE1",
+  comment: "The area that owns these paths should read this.",
+  message: "A pull request is waiting for your review.",
 };
 
-function renderedParams(node: ToolNode): Record<string, unknown> {
-  const rendered = renderJsonTemplates<Record<string, unknown>>(node.params, PARAM_RENDER_CONTEXT);
-  // A foreach body's `item` alias is a channel object in one template and a
-  // bare message id string in another. `{{ item }}` renders to the object
-  // above, which is the wrong type for `messageId` — substitute the string
-  // form only where the whole alias was interpolated.
-  for (const [key, value] of Object.entries(rendered)) {
-    if (isRecord(value) && Object.keys(value).length === 1 && "id" in value) rendered[key] = value.id;
+/** What a body sees when it interpolates the WHOLE alias. One template's
+ * items are bare Gmail message ids, and the object above is the wrong type
+ * for a param that takes one of those. */
+const WHOLE_ITEM_ALIAS = "m1";
+
+/** A param that is exactly the item alias and nothing else. */
+const WHOLE_ALIAS_PARAM = /^\s*\{\{\s*item\s*\}\}\s*$/;
+
+/** Placeholder per declared input type, for a field with no default. */
+const PLACEHOLDER_BY_TYPE: Record<WorkflowInputDefinition["type"], unknown> = {
+  string: "fixture",
+  number: 1,
+  boolean: true,
+  object: {},
+  array: [],
+};
+
+/**
+ * Stand-ins for the literals install bakes into a template's params
+ * (`workflows/templates.ts#bakeInputs`). A param that still reads
+ * `{{ trigger.data.<field> }}` here is holding the place of one of those,
+ * so the field's own `default` is used where it declares one. A field
+ * without one gets a value of its declared type, which keeps the action's
+ * parameter schema exercised rather than dodged by a null.
+ */
+function installedInputValues(definition: WorkflowDefinition): Record<string, unknown> {
+  const trigger = definition.nodes.find((node) => node.type === "trigger");
+  const schema = trigger?.type === "trigger" ? trigger.dataSchema : undefined;
+  const values: Record<string, unknown> = {};
+  for (const [field, def] of Object.entries(schema ?? {})) {
+    values[field] = def.default !== undefined ? def.default : PLACEHOLDER_BY_TYPE[def.type];
+  }
+  return values;
+}
+
+function paramRenderContext(definition: WorkflowDefinition): TemplateContext {
+  return {
+    trigger: {
+      type: "manual",
+      timestamp: "2026-08-15T00:00:00.000Z",
+      data: installedInputValues(definition),
+      metadata: {},
+    },
+    nodes: {
+      classify: { result: { output: { labelId: "Label_7" } }, output: { output: { labelId: "Label_7" } } },
+    },
+    item: ITEM_ALIAS,
+    index: 0,
+  };
+}
+
+function renderedParams(node: ToolNode, definition: WorkflowDefinition): Record<string, unknown> {
+  const rendered = renderJsonTemplates<Record<string, unknown>>(node.params, paramRenderContext(definition));
+  // Substitute the string form of the alias only where the whole alias was
+  // interpolated — the source template says which, so nothing has to be
+  // guessed from the rendered value's shape.
+  for (const [key, source] of Object.entries(node.params)) {
+    if (typeof source === "string" && WHOLE_ALIAS_PARAM.test(source)) rendered[key] = WHOLE_ITEM_ALIAS;
   }
   return rendered;
 }
@@ -220,6 +274,51 @@ const SEARCH_ISSUES_BODY = {
   ],
 };
 
+/** `GET /repos/{owner}/{repo}/pulls/{n}` — the whole pull request, which is
+ * where the reviewer-claim fields live. */
+const PULL_REQUEST_BODY = {
+  number: 42,
+  title: "Fix the flake in the batch suite",
+  state: "open",
+  merged: false,
+  draft: false,
+  user: { login: "octocat" },
+  html_url: "https://github.test/acme/widgets/pull/42",
+  body: "Retries the one case that fails under load.",
+  additions: 12,
+  deletions: 3,
+  changed_files: 1,
+  requested_reviewers: [],
+  requested_teams: [],
+  assignees: [],
+  head: { ref: "fix/flake", sha: "d3adb33fd3adb33fd3adb33fd3adb33fd3adb33f" },
+  base: { ref: "main" },
+};
+
+const PULL_REQUEST_FILES = [
+  {
+    filename: "packages/api/src/batch.test.ts",
+    status: "modified",
+    additions: 12,
+    deletions: 3,
+    patch: "@@ -1,2 +1,2 @@",
+  },
+];
+
+/** `GET /repos/{owner}/{repo}/contents/{path}` — base64, the way GitHub
+ * sends a file, so the action's own decode runs. */
+const REPO_FILE_TEXT = ["path_prefix,area,github_handle,slack_user_id", "packages/api/,api,fixture,U0FIXTURE1"].join(
+  "\n",
+);
+
+const REPO_FILE_BODY = {
+  type: "file",
+  encoding: "base64",
+  path: ".github/reviewer-routing.csv",
+  size: REPO_FILE_TEXT.length,
+  content: Buffer.from(REPO_FILE_TEXT).toString("base64"),
+};
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -261,6 +360,11 @@ function stubUpstream(): void {
         channels: [{ id: "C0FIXTURE1", name: "eng-platform", is_private: false, num_members: 12 }],
       });
     }
+    if (url.includes("slack.com/api/conversations.open")) {
+      // A DM action reads `channel.id` off this and fails without it, so the
+      // generic `ok: true` envelope below is not enough.
+      return json({ ok: true, channel: { id: "D0FIXTURE1" } });
+    }
     if (url.includes("slack.com/api/conversations.info")) {
       return json({ ok: true, channel: { id: "C0FIXTURE1", name: "eng-platform", is_private: false } });
     }
@@ -279,10 +383,28 @@ function stubUpstream(): void {
   });
 }
 
-/** A loopback GitHub the plugin's Octokit reaches through `GITHUB_API_URL`. */
-function startGithubSearchFixture(): { url: string; close: () => Promise<void> } {
+/**
+ * A loopback GitHub the plugin's Octokit reaches through `GITHUB_API_URL`.
+ *
+ * The catch-all answers `{}`, which is enough for an action that returns
+ * the raw payload and reads nothing out of it. Every route below exists
+ * because `{}` is NOT enough: an action reads a field off the response, or
+ * iterates it, and would fail for a reason that has nothing to do with the
+ * mapping under test.
+ */
+function startGithubFixture(): { url: string; close: () => Promise<void> } {
   const app = new Hono();
   app.get("/search/issues", (c) => c.json(SEARCH_ISSUES_BODY));
+  // `inspect_pull_request` makes four calls. The file list is the one it
+  // deliberately does not guard, because an empty list would read as "this
+  // pull request touches nothing".
+  app.get("/repos/:owner/:repo/pulls/:pullNumber/files", (c) => c.json(PULL_REQUEST_FILES));
+  app.get("/repos/:owner/:repo/pulls/:pullNumber/reviews", (c) => c.json([]));
+  app.get("/repos/:owner/:repo/pulls/:pullNumber/comments", (c) => c.json([]));
+  app.get("/repos/:owner/:repo/pulls/:pullNumber", (c) => c.json(PULL_REQUEST_BODY));
+  app.get("/repos/:owner/:repo/commits/:ref/check-runs", (c) => c.json({ check_runs: [] }));
+  // A file path holds slashes, which a plain `:path` segment refuses.
+  app.get("/repos/:owner/:repo/contents/:path{.+}", (c) => c.json(REPO_FILE_BODY));
   app.all("*", (c) => c.json({}));
   const server: ServerType = serve({ fetch: app.fetch, port: 0 });
   const address = server.address();
@@ -351,6 +473,7 @@ async function buildInvoker(): Promise<ReturnType<typeof buildActionInvoker>> {
 
 interface ToolCase {
   templateId: string;
+  definition: WorkflowDefinition;
   node: ToolNode;
   fields: string[];
 }
@@ -358,6 +481,7 @@ interface ToolCase {
 const toolCases: ToolCase[] = owned.flatMap(({ template, definition }) =>
   toolNodesOf(definition).map((node) => ({
     templateId: template.id,
+    definition,
     node,
     fields: fieldsReadFrom(definition, node.id),
   })),
@@ -374,7 +498,7 @@ describe("shipped templates: tool node contracts", () => {
 
   beforeAll(async () => {
     invoke = await buildInvoker();
-    githubFixture = startGithubSearchFixture();
+    githubFixture = startGithubFixture();
     process.env.GITHUB_API_URL = githubFixture.url;
     stubUpstream();
   });
@@ -420,7 +544,7 @@ describe("shipped templates: tool node contracts", () => {
 
   describe.each(toolCases.filter((c) => !isDynamicService(c.node.service)))(
     "$templateId → $node.id",
-    ({ templateId, node, fields }) => {
+    ({ templateId, definition, node, fields }) => {
       it("sends params the action's own schema accepts", () => {
         const entry = actionPluginByService.get(node.service);
         expect(entry).toBeDefined();
@@ -428,7 +552,7 @@ describe("shipped templates: tool node contracts", () => {
         const action = entry?.actionPlugin.actions.find((a) => a.id === qualified || a.id === node.action);
         expect(action).toBeDefined();
         if (!action) return;
-        const prepared = prepareActionArgs(action.parameters, renderedParams(node));
+        const prepared = prepareActionArgs(action.parameters, renderedParams(node, definition));
         expect(prepared.ok ? null : prepared.error).toBeNull();
       });
 
@@ -437,7 +561,7 @@ describe("shipped templates: tool node contracts", () => {
           {
             service: node.service,
             action: node.action,
-            params: renderedParams(node),
+            params: renderedParams(node, definition),
             // The invoker dedupes by `invocationId` and two templates reuse
             // a node id, so the template must be part of the key or the
             // second case silently replays the first one's result.

@@ -10,19 +10,32 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import type { PluginActionSummary, PluginServiceSummary, TeamSummary } from "@valet/api/wire";
+import type {
+  GetGithubOrgStatusResponse,
+  PluginActionSummary,
+  PluginServiceSummary,
+  TeamSummary,
+} from "@valet/api/wire";
+import { ApiError } from "~/api/client";
 
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const githubMutateAsync = vi.fn().mockResolvedValue({ url: "https://github.com/login/oauth" });
 
 let teams: TeamSummary[] = [];
+let orgStatus: GetGithubOrgStatusResponse | undefined;
+let githubConnectError: Error | null = null;
 
 vi.mock("~/api/integrations", () => ({
   useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
 }));
 
 vi.mock("~/api/repos", () => ({
-  useConnectGithub: () => ({ mutateAsync: githubMutateAsync, isPending: false, error: null }),
+  useConnectGithub: () => ({
+    mutateAsync: githubMutateAsync,
+    isPending: false,
+    error: githubConnectError,
+  }),
+  useGithubOrgStatus: (enabled = true) => ({ data: enabled ? orgStatus : undefined }),
 }));
 
 vi.mock("~/api/settings", () => ({
@@ -93,6 +106,8 @@ function show(service: PluginServiceSummary, title = "Gmail") {
 
 beforeEach(() => {
   teams = [];
+  orgStatus = { configured: true, installationCount: 1, suspendedCount: 0 };
+  githubConnectError = null;
   connectMutateAsync.mockClear();
   githubMutateAsync.mockClear();
 });
@@ -205,9 +220,50 @@ describe("a team workspace", () => {
     expect(screen.queryByText(/You are in Finance/)).toBeNull();
   });
 
-  it("adds GitHub's org-wide reach, which no other service has", () => {
+  it("adds GitHub's org-wide reach, read from the organisation's actual App", () => {
+    orgStatus = { configured: true, installationCount: 2, suspendedCount: 0 };
     show(gmail({ service: "github", connect: "manual" }), "GitHub");
-    expect(screen.getByText(/App installation or a shared token/)).toBeTruthy();
+
+    const reach = within(screen.getByLabelText("Who can reach it"));
+    expect(reach.getByText("Your organisation's GitHub App reaches 2 GitHub accounts.")).toBeTruthy();
+    // Two connections, said to be two: the card must not read as though
+    // this credential is the org App or comes with it.
+    expect(
+      reach.getByText(/it acts as you, and the App acts as your organisation/),
+    ).toBeTruthy();
+  });
+
+  it("says the App is missing, rather than claiming a reach it cannot check", () => {
+    orgStatus = { configured: false, installationCount: 0, suspendedCount: 0 };
+    show(gmail({ service: "github", connect: "manual" }), "GitHub");
+
+    const reach = within(screen.getByLabelText("Who can reach it"));
+    expect(reach.getByText("Your organisation has no GitHub App.")).toBeTruthy();
+    expect(reach.getByText(/Enter a token instead/)).toBeTruthy();
+    expect(reach.queryByText(/reaches \d+ GitHub/)).toBeNull();
+  });
+
+  it("names the App as the missed step when nobody installed it", () => {
+    orgStatus = { configured: true, installationCount: 0, suspendedCount: 0 };
+    show(gmail({ service: "github", connect: "manual" }), "GitHub");
+    expect(
+      screen.getByText("Your organisation has a GitHub App, but nobody installed it on a GitHub account."),
+    ).toBeTruthy();
+  });
+
+  it("states the personal reach alone while the org status is unknown", () => {
+    orgStatus = undefined;
+    show(gmail({ service: "github", connect: "manual" }), "GitHub");
+
+    const reach = within(screen.getByLabelText("Who can reach it"));
+    expect(reach.getByText("Valet saves this connection for your account.")).toBeTruthy();
+    expect(reach.queryByText(/GitHub App/)).toBeNull();
+  });
+
+  it("costs no org-status request on a service with no organisation half", () => {
+    show(gmail());
+    const reach = within(screen.getByLabelText("Who can reach it"));
+    expect(reach.queryByText(/GitHub App/)).toBeNull();
   });
 });
 
@@ -248,6 +304,23 @@ describe("the choice reaches the connect call", () => {
     show(gmail());
     fireEvent.click(screen.getByRole("button", { name: "Enter a token instead" }));
     expect(screen.getByLabelText("Access token")).toBeTruthy();
+  });
+
+  it("reads out the server's sentence when the org has no App, not the request line", () => {
+    // `Error.message` on an ApiError is "POST /me/github/connect → 409".
+    // The 409 exists precisely because the org App is missing, and the
+    // payload names who fixes it.
+    githubConnectError = new ApiError(409, "POST /me/github/connect → 409", {
+      error: "no GitHub App is configured for this organization; ask an admin to set it up first",
+    });
+    orgStatus = { configured: false, installationCount: 0, suspendedCount: 0 };
+    show(gmail({ service: "github", connect: "manual" }), "GitHub");
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe(
+      "no GitHub App is configured for this organization; ask an admin to set it up first",
+    );
+    expect(alert.textContent).not.toContain("409");
   });
 });
 

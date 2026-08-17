@@ -7,6 +7,7 @@ import {
   workflowListFrom,
   workflowRefsFrom,
   workflowRefsFromArgs,
+  workflowToolSuffix,
 } from "./workflow";
 import { pickRenderer } from "./index";
 
@@ -146,5 +147,18 @@ describe("latestFailures", () => {
 
   it("is empty for a clean run", () => {
     expect(latestFailures([{ nodeId: "a", status: "completed", createdAt: 1 }])).toEqual([]);
+  });
+});
+
+describe("workflowToolSuffix", () => {
+  it("strips the workflows. prefix, which is how a caller tells a write from a read", () => {
+    expect(workflowToolSuffix({ tool_id: "workflows.patch_workflow" })).toBe("patch_workflow");
+    expect(workflowToolSuffix({ tool_id: "workflows.get_workflow" })).toBe("get_workflow");
+  });
+
+  it("passes an unprefixed id through, and reports nothing for a missing one", () => {
+    expect(workflowToolSuffix({ tool_id: "github.create_issue" })).toBe("github.create_issue");
+    expect(workflowToolSuffix({})).toBeUndefined();
+    expect(workflowToolSuffix(null)).toBeUndefined();
   });
 });

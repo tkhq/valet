@@ -279,6 +279,48 @@ export function createEdgeId(from: string, to: string, fromOutput?: 'true' | 'fa
   return `${from}${fromOutput ? `:${fromOutput}` : ''}->${to}`;
 }
 
+/**
+ * The graph alone, as a string two definitions can be compared by.
+ *
+ * The editor uses it to tell an edit made somewhere else — the assistant
+ * panel patches the stored workflow directly — from its own re-renders.
+ * Two of those re-renders would otherwise read as a change. `ui` moves on
+ * every frame of a pan or a node drag, so it is left out. And a definition
+ * that has been through the `jsonb` column comes back with its keys in the
+ * database's order rather than the order this client wrote them in, so key
+ * order is removed as well: without that, a plain Save followed by more
+ * typing raises the "somebody changed this workflow" bar with nobody on the
+ * other end.
+ */
+export function graphSignature(definition: WorkflowDefinition): string {
+  return stableJson({
+    nodes: definition.nodes,
+    edges: definition.edges,
+    policy: definition.policy ?? null,
+  });
+}
+
+/** `JSON.stringify` with object keys in sorted order. Array order is kept:
+ * in a DAG the node and edge order is content, not formatting. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    const items: unknown[] = value;
+    return `[${items.map(stableJson).join(',')}]`;
+  }
+  if (typeof value === 'object' && value !== null) {
+    // The same narrowing the shape guards below use: `typeof` proves the
+    // object-ness, and the cast only names the index signature.
+    const fields = Object.entries(value as Record<string, unknown>)
+      .filter(([, field]) => field !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, field]) => `${JSON.stringify(key)}:${stableJson(field)}`);
+    return `{${fields.join(',')}}`;
+  }
+  // `JSON.stringify` answers undefined for a bare undefined, which cannot
+  // appear inside an object here but can be passed in directly.
+  return JSON.stringify(value) ?? 'null';
+}
+
 export function workflowEdgeToFlowEdge(edge: WorkflowEdge): WorkflowFlowEdge {
   return {
     id: createEdgeId(edge.from, edge.to, edge.fromOutput),
@@ -560,6 +602,41 @@ export function autoLayout(definition: WorkflowDefinition): Record<string, FlowP
     });
   }
   return positions;
+}
+
+/**
+ * Give a saved position to every node that has none, in a free column to
+ * the right of the placed ones.
+ *
+ * The assistant edits a definition through `workflows.patch_workflow`,
+ * whose patch shape carries no `ui` field, so a node it adds arrives with
+ * no entry in `ui.nodes`. `toFlow` then falls back to `autoLayout` for that
+ * one id, and auto-layout coordinates have no relation to hand-dragged
+ * ones — the new node can land on top of a node the user placed. The
+ * client closes the gap when it adopts a patched definition.
+ *
+ * Returns the definition unchanged when every node already has a position,
+ * and also when NO node has one. A definition with no `ui.nodes` at all is
+ * the normal shape for a workflow the agent wrote or a template installed,
+ * and `toFlow` lays that out with `autoLayout`, which reads the edges.
+ * Nothing is hand-placed there, so nothing can be covered — writing
+ * coordinates would only replace a graph-shaped layout with one flat
+ * column.
+ */
+export function positionNewNodes(definition: WorkflowDefinition): WorkflowDefinition {
+  const saved = definition.ui?.nodes ?? {};
+  const xs = Object.values(saved).map((entry) => entry.position.x);
+  if (xs.length === 0) return definition;
+  const unplaced = definition.nodes.filter((node) => saved[node.id] === undefined);
+  if (unplaced.length === 0) return definition;
+
+  const column = Math.max(...xs) + LAYOUT_COLUMN_GAP;
+  const placed: Record<string, { position: FlowPosition }> = { ...saved };
+  unplaced.forEach((node, row) => {
+    placed[node.id] = { position: { x: column, y: row * LAYOUT_ROW_GAP } };
+  });
+
+  return { ...definition, ui: { ...definition.ui, nodes: placed } };
 }
 
 function computeBfsDepths(

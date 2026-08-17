@@ -15,8 +15,13 @@
  *      data, metadata }`, so an input field lives at `trigger.data.<field>`
  *      and `trigger.<field>` renders null.
  *   2. A scheduled run gets `{ scheduleName, cron, input }` in
- *      `trigger.data`, and NO `dataSchema` defaults — so a scheduled
- *      template must not read `trigger.data.<field>` at all.
+ *      `trigger.data`, and NO `dataSchema` defaults — so a field a
+ *      scheduled template reads must be gone before the schedule fires.
+ *      Install is what removes it: `bakeInputs` rewrites the reference to
+ *      a literal for every field it resolved a value for. It resolves one
+ *      for a field with a primitive `default`, and refuses the whole
+ *      install for a `required` field with no value. A field that is
+ *      neither is the silent case this pins.
  *   3. An llm node exposes `result.text` (and `result.output.<f>` only with
  *      an `outputSchema`); an orchestrator or session node exposes
  *      `result.response`. The two are opposites and easy to swap.
@@ -32,6 +37,7 @@ import {
   type ForeachNode,
   type TemplateContext,
   type WorkflowDefinition,
+  type WorkflowInputDefinition,
   type WorkflowNode,
 } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin, WorkflowTemplate } from "@valet/engine";
@@ -153,6 +159,41 @@ function foreachNodes(definition: WorkflowDefinition): ForeachNode[] {
   return definition.nodes.filter((node): node is ForeachNode => node.type === "foreach");
 }
 
+/** A field name `bakeInputs` will put in a regular expression, and an
+ * expression will read with dot access. One rule covers both. */
+const BAKEABLE_FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Why install cannot rewrite one `trigger.data` reference into a literal,
+ * or null when it can.
+ *
+ * This mirrors the two functions in `templates.ts` that do the work.
+ * `bakeInputs` rewrites a plain `{{ trigger.data.<field> }}` and nothing
+ * longer. `resolveInstallValues` finds a value for that field from what the
+ * installer supplied, then from a primitive `default`; a `required` field
+ * with neither refuses the whole install, which is loud and therefore safe.
+ * Everything else leaves the reference in place, and a scheduled run reads
+ * it as null forever.
+ */
+function unbakeableReason(
+  segments: string[],
+  schema: Record<string, WorkflowInputDefinition> | undefined,
+): string | null {
+  const field = segments[2];
+  if (field === undefined) return "reads trigger.data whole; install replaces one field at a time";
+  if (segments.length > 3) return "reads a path under the field, which the install-time rewrite cannot reach";
+  if (!BAKEABLE_FIELD.test(field)) return `"${field}" is not a plain identifier, so the rewrite skips it`;
+  const def = schema?.[field];
+  if (def === undefined) return `"${field}" is not declared in the trigger's dataSchema`;
+  if (def.type !== "string" && def.type !== "number" && def.type !== "boolean") {
+    return `"${field}" is declared ${def.type}; install bakes primitives only`;
+  }
+  if (def.required === true) return null;
+  const fallback = def.default;
+  if (typeof fallback === "string" || typeof fallback === "number" || typeof fallback === "boolean") return null;
+  return `"${field}" is optional with no default, so install has nothing to bake in`;
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("plugin workflow templates", () => {
@@ -258,20 +299,29 @@ describe("plugin workflow templates", () => {
 
     it("takes its inputs the way its trigger actually delivers them", () => {
       const triggerNode = definition.nodes.find((node) => node.type === "trigger");
-      const declaresInputs = triggerNode?.type === "trigger" && triggerNode.dataSchema !== undefined;
-      const readsInputFields = referencedPaths(definition).some(
+      const schema = triggerNode?.type === "trigger" ? triggerNode.dataSchema : undefined;
+      const inputPaths = referencedPaths(definition).filter(
         (segments) => segments[0] === "trigger" && segments[1] === "data",
       );
 
-      if (template.schedule !== undefined) {
-        // A scheduled run puts { scheduleName, cron, input } in
-        // `trigger.data` and applies no dataSchema defaults. Either habit
-        // silently reads null on the nightly run.
-        expect(readsInputFields).toBe(false);
-        expect(declaresInputs).toBe(false);
-      } else if (readsInputFields) {
-        expect(declaresInputs).toBe(true);
+      if (template.schedule === undefined) {
+        // A manual run reads its form values straight out of `trigger.data`,
+        // so a field it reads has to be declared for the form to collect it.
+        if (inputPaths.length > 0) expect(schema).toBeDefined();
+        return;
       }
+
+      // A scheduled run puts { scheduleName, cron, input } in `trigger.data`
+      // and applies no dataSchema defaults, so a reference that survives
+      // install reads null every night and nothing reports it. Install is
+      // what removes it, and `unbakeable` lists every way that rewrite can
+      // miss.
+      const wrong: string[] = [];
+      for (const segments of inputPaths) {
+        const reason = unbakeableReason(segments, schema);
+        if (reason !== null) wrong.push(`${segments.join(".")} — ${reason}`);
+      }
+      expect(wrong).toEqual([]);
     });
 
     it("labels every declared input", () => {

@@ -18,19 +18,28 @@ import type {
   SkillResponse,
   UpdateSkillRequest,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { api, type SkillListQuery } from "./client";
 
 export const qkSkills = {
   all: () => ["skills"] as const,
-  list: () => ["skills"] as const,
+  list: (query: SkillListQuery = {}) => ["skills", "list", query] as const,
   detail: (name: string) => ["skills", name] as const,
   stored: (id: string) => ["skills", "stored", id] as const,
 };
 
-export function useSkills(opts?: Partial<UseQueryOptions<ListSkillsResponse>>) {
+/**
+ * One page of the catalog. The filters and the cursor go to the server and
+ * into the query key together, so paging or changing a filter reads a fresh
+ * page instead of re-filtering the one already in hand. Every write below
+ * invalidates the whole `["skills"]` subtree, which covers every page.
+ */
+export function useSkills(
+  query: SkillListQuery = {},
+  opts?: Partial<UseQueryOptions<ListSkillsResponse>>,
+) {
   return useQuery<ListSkillsResponse>({
-    queryKey: qkSkills.list(),
-    queryFn: () => api.listSkills(),
+    queryKey: qkSkills.list(query),
+    queryFn: () => api.listSkills(query),
     ...opts,
   });
 }

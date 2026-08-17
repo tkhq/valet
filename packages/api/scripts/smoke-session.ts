@@ -11,13 +11,18 @@
  *
  * Env knobs:
  *   PORT=8788                     server port
- *   VALET_DATA_DIR=/tmp/valet-smoke-session/data  per-run data dir (auto-cleaned)
- *   VALET_WORKSPACE=/tmp/valet-smoke-session/ws   workspace for the agent
+ *   VALET_DATA_DIR=<root>/data    per-run data dir (auto-cleaned)
+ *   VALET_WORKSPACE=<root>/ws     workspace for the agent
  *   VALET_PROMPT="..."           override the smoke prompt
+ *
+ * The default root sits under `sandboxWorkspaceRoot()`, not `/tmp`: this
+ * smoke reads the agent's file back from the host through the bind mount,
+ * which only works where the docker daemon shares the path.
  */
 import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { sandboxWorkspaceRoot } from "@valet/sandbox-docker";
 import { createApp } from "../src/app.js";
 import { buildNodeProviders } from "../src/providers/node.js";
 import type { WireEvent } from "../src/wire/types.js";
@@ -31,7 +36,7 @@ if (!ANTHROPIC_API_KEY) {
 // PORT=0 (default): bind an ephemeral port so the smoke NEVER collides with
 // a running `make dev-local` on :8788 (which it could otherwise write into).
 const PORT = Number.parseInt(process.env.PORT ?? "0", 10);
-const ROOT = process.env.VALET_SMOKE_ROOT ?? "/tmp/valet-smoke-session";
+const ROOT = process.env.VALET_SMOKE_ROOT ?? join(sandboxWorkspaceRoot(), "smoke-session");
 const DATA_DIR = process.env.VALET_DATA_DIR ?? `${ROOT}/data`;
 const WORKSPACE = process.env.VALET_WORKSPACE ?? `${ROOT}/ws`;
 const PROMPT =

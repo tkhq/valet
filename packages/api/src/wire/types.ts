@@ -919,6 +919,25 @@ export interface ListWorkflowsResponse {
   workflows: WorkflowDefinitionSummary[];
 }
 
+/**
+ * `GET /api/workflows/import/repo-file` — one file out of a PUBLIC GitHub
+ * repository, so the import dialog can read a definition that lives in
+ * version control.
+ *
+ * The body is returned as text, not as a parsed definition, because the
+ * import client already owns the parser it applies to a pasted file. One
+ * parser reads both sources, so the two cannot accept different shapes.
+ */
+export interface GetWorkflowImportFileResponse {
+  /** `owner/repo`, as resolved from what the caller typed. */
+  repo: string;
+  path: string;
+  /** The ref that was read. Empty means the repository default branch. */
+  ref: string;
+  /** The file, decoded as UTF-8 text. */
+  content: string;
+}
+
 export interface StartWorkflowRunRequest {
   input?: Record<string, unknown>;
 }
@@ -1524,9 +1543,25 @@ export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
  *
  * A filtered listing carries that owner's stored skills only. Plugin skills
  * belong to no owner, so they appear in the unfiltered listing alone.
+ *
+ * The Library's own controls narrow the catalog through three more
+ * parameters, and the server applies all three so a control answers about
+ * the catalog and not about the page in hand:
+ *   - `?scope=personal|team|org|plugin` — one library scope. It names a CLASS
+ *     of owners where `ownerType`/`ownerId` pin ONE owner by id, so sending
+ *     both answers 400.
+ *   - `?kind=skill|prompt` — prompts run their body; plain skills load it as
+ *     context. A plugin skill is always a plain skill.
+ *   - `?q=` — case-insensitive substring over name and description.
+ *
+ * Keyset-paginated with `?limit=` (default 24, maximum 100) and `?cursor=`.
+ * `cursor` is opaque: pass back a `nextCursor` this listing returned, and
+ * never build one. `nextCursor` is `null` on the last page. Plugin skills
+ * sort ahead of every stored row, so they fill the first page.
  */
 export interface ListSkillsResponse {
   skills: SkillSummary[];
+  nextCursor: string | null;
 }
 
 /** A skill plus its markdown body, with the frontmatter already removed.
@@ -1630,9 +1665,14 @@ export interface SkillSourceSummary {
  * `GET /api/skills/sources`, taking the same `?ownerType=&ownerId=` filter
  * `ListSkillsResponse` documents, with the same rules: both parameters or
  * neither, and 404 for an owner the caller cannot reach.
+ *
+ * Keyset-paginated the same way, with `?limit=` (default 20, maximum 100)
+ * and an opaque `?cursor=`. Sources sort by repository name, then
+ * subdirectory. `nextCursor` is `null` on the last page.
  */
 export interface ListSkillSourcesResponse {
   sources: SkillSourceSummary[];
+  nextCursor: string | null;
 }
 
 export interface CreateSkillSourceRequest {
@@ -2108,6 +2148,30 @@ export interface PostGithubAppManifestResponse {
   state: string;
 }
 
+/**
+ * Body of `POST /api/org/github-app/credential` — the second setup path, for
+ * an admin whose GitHub App already exists. An App name is global on GitHub,
+ * so a second creation attempt with the same name is refused on GitHub's own
+ * page, which the manifest flow cannot explain. This path connects the App
+ * that is already there instead.
+ *
+ * The response is `GetGithubAppResponse`, which carries no secret material —
+ * nothing sent here is ever readable back through the API.
+ */
+export interface PostGithubAppCredentialRequest {
+  appId: string;
+  /** The app's PEM private key, raw or base64-encoded. */
+  privateKey: string;
+  /** Both are read from GitHub when omitted — `GET /app` reports them. */
+  appSlug?: string;
+  oauthClientId?: string;
+  /** Needed only for per-user GitHub sign-in. GitHub never reports it, so it
+   * cannot be filled in for the admin. */
+  oauthClientSecret?: string;
+  /** Needed only for webhook event delivery. */
+  webhookSecret?: string;
+}
+
 // ── REST: user GitHub connect (App-OAuth, GitHub/repo integration plan
 // Task 6) ────────────────────────────────────────────────────────────────
 // `/api/me/github` — a signed-in user's own App-OAuth connection, distinct
@@ -2118,6 +2182,30 @@ export interface PostGithubConnectResponse {
   /** `{github}/login/oauth/authorize?...` — where the browser should
    * navigate to start the App-OAuth authorize flow. */
   url: string;
+}
+
+/**
+ * The org App's state, readable by any org member.
+ *
+ * `GET /api/org/github-app` answers the same question in much more detail,
+ * but it is org-admin-only — so a member had no way to learn that the App
+ * they depend on is missing or uninstalled. This is the projection a
+ * connect surface needs and nothing more: no app id, no slug, no
+ * installation logins, no secrets.
+ */
+export interface GetGithubOrgStatusResponse {
+  /** The org has a GitHub App — its own credential row, or the
+   * deployment-wide `GITHUB_APP_*` fallback. This is the same read
+   * `POST /api/me/github/connect` makes, so `false` means that call 409s. */
+  configured: boolean;
+  /** GitHub accounts the App is installed on. Counts the same rows the
+   * admin page tables, so the two surfaces never disagree. Zero with
+   * `configured: true` is the created-but-never-installed state. */
+  installationCount: number;
+  /** How many of `installationCount` GitHub suspended. A suspended
+   * installation reaches no repository, so a count equal to
+   * `installationCount` means the App reaches nothing. */
+  suspendedCount: number;
 }
 
 // ── REST: repo listing (GitHub/repo integration plan, Task 7)

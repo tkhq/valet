@@ -143,7 +143,11 @@ export function workflowRefsFromArgs(args: unknown): WorkflowRefs {
   return refs;
 }
 
-function toolIdSuffix(args: unknown): string | undefined {
+/** The workflows action a `call_tool` invocation names, without the
+ * `workflows.` prefix — `patch_workflow`, `list_workflows`, and so on.
+ * Exported so callers that react to workflow edits (the editor's assistant
+ * panel) narrow `args` through this one parser instead of their own. */
+export function workflowToolSuffix(args: unknown): string | undefined {
   const toolId = callToolArgs(args).tool_id;
   if (typeof toolId !== "string") return undefined;
   return toolId.startsWith(WORKFLOW_TOOL_PREFIX)
@@ -356,7 +360,7 @@ function WorkflowToolBody({ args, result, status, error }: ToolRendererProps) {
   }
 
   // list_workflows → compact linked table, not raw JSON.
-  if (toolIdSuffix(args) === "list_workflows") {
+  if (workflowToolSuffix(args) === "list_workflows") {
     const rows = workflowListFrom(result);
     if (rows) return <WorkflowListBody rows={rows} />;
   }
@@ -378,7 +382,7 @@ export const workflowRenderer: ToolRenderer = {
   matches: isWorkflowCallTool,
   category: "write",
   Icon: Workflow,
-  formatTarget: (args) => toolIdSuffix(args),
+  formatTarget: (args) => workflowToolSuffix(args),
   formatSummary: (args, result) => {
     const refs = { ...workflowRefsFromArgs(args), ...workflowRefsFrom(result) };
     return refs.runId ?? refs.workflowId;
