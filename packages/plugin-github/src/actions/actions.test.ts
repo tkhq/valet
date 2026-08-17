@@ -206,13 +206,42 @@ function fileEntry(filename: string, patch?: string): Record<string, unknown> {
   return { filename, status: "modified", additions: 1, deletions: 0, ...(patch === undefined ? {} : { patch }) };
 }
 
-async function inspect(args: Record<string, unknown>): Promise<InspectData> {
+async function inspectRaw(args: Record<string, unknown>): Promise<unknown> {
   const result = await findAction("github.inspect_pull_request").execute(
     { owner: "acme", repo: "widgets", pullNumber: 7, ...args },
     fakeActionContext("test-token"),
   );
   if (!result.success) throw new Error(`inspect failed: ${result.error}`);
-  return asInspectData(result.data);
+  return result.data;
+}
+
+async function inspect(args: Record<string, unknown>): Promise<InspectData> {
+  return asInspectData(await inspectRaw(args));
+}
+
+/** The three lists that say a pull request already belongs to somebody. */
+interface ReviewerClaim {
+  requested_reviewers: string[];
+  requested_teams: string[];
+  assignees: string[];
+}
+
+function stringsAt(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  if (!Array.isArray(value)) throw new Error(`${key} is not an array: ${JSON.stringify(value)}`);
+  return value.map((entry) => {
+    if (typeof entry !== "string") throw new Error(`${key} holds a non-string: ${JSON.stringify(entry)}`);
+    return entry;
+  });
+}
+
+function asReviewerClaim(data: unknown): ReviewerClaim {
+  if (!isRecord(data)) throw new Error(`not an object: ${JSON.stringify(data)}`);
+  return {
+    requested_reviewers: stringsAt(data, "requested_reviewers"),
+    requested_teams: stringsAt(data, "requested_teams"),
+    assignees: stringsAt(data, "assignees"),
+  };
 }
 
 /** Serves `files` as real pages, honouring `per_page` and `page`. */
@@ -307,6 +336,61 @@ describe("github.inspect_pull_request diff retrieval", () => {
     expect(data.files[0].patch_omitted).toBe("not_provided_by_github");
     expect(data.files[1].patch).toBeDefined();
     expect(data.patch_summary?.omitted_files).toBe(1);
+  });
+});
+
+describe("github.inspect_pull_request reviewer claim", () => {
+  /** One pull request, with whatever claim fields a case wants on it. */
+  function pullClaiming(claim: Record<string, unknown>): GithubFixtureHandlers["getPull"] {
+    return (ref) => ({
+      body: {
+        number: Number(ref.pullNumber),
+        title: "fixture pull request",
+        state: "open",
+        user: { login: "fixture-user" },
+        html_url: "https://github.com/acme/widgets/pull/7",
+        head: { ref: "feature", sha: "head-sha" },
+        base: { ref: "main" },
+        additions: 1,
+        deletions: 0,
+        changed_files: 1,
+        ...claim,
+      },
+    });
+  }
+
+  it("reports who is already requested or assigned, as names", async () => {
+    useFixture({
+      getPull: pullClaiming({
+        requested_reviewers: [{ login: "first-account" }, { login: "second-account" }],
+        requested_teams: [{ slug: "platform" }],
+        assignees: [{ login: "first-account" }],
+      }),
+      listPullFiles: pagedFiles([fileEntry("source/rest/handler.go")]),
+    });
+
+    expect(asReviewerClaim(await inspectRaw({}))).toEqual({
+      requested_reviewers: ["first-account", "second-account"],
+      requested_teams: ["platform"],
+      assignees: ["first-account"],
+    });
+  });
+
+  it("reports an unclaimed pull request as empty lists, not as absent fields", async () => {
+    // GitHub leaves these keys out of some payloads and sends null in
+    // others. A caller looking for unclaimed work compares lengths, so both
+    // have to arrive as an empty array — null has no length, and the
+    // comparison would throw or read as a claim.
+    useFixture({
+      getPull: pullClaiming({ requested_reviewers: null }),
+      listPullFiles: pagedFiles([fileEntry("source/rest/handler.go")]),
+    });
+
+    expect(asReviewerClaim(await inspectRaw({}))).toEqual({
+      requested_reviewers: [],
+      requested_teams: [],
+      assignees: [],
+    });
   });
 });
 
@@ -415,6 +499,118 @@ async function createReview(args: Record<string, unknown>) {
 function reviewWrites(server: GithubFixture): GithubFixtureCall[] {
   return server.calls.filter((c) => c.method === "POST" || c.method === "PUT");
 }
+
+describe("github.search_issues", () => {
+  async function search(args: Record<string, unknown>) {
+    return findAction("github.search_issues").execute(
+      { q: "repo:acme/widgets is:open is:pr review:none", ...args },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  it("sends the order it is given, because the response cannot show it", async () => {
+    // The search returns ONE page and cannot ask for a second. A caller
+    // that sweeps for neglected work therefore depends on oldest-first:
+    // whatever the page size cuts must be the recent end of the list. The
+    // response body looks the same either way, so the only place that
+    // contract can be checked is the query this action sends.
+    const server = useFixture();
+
+    const result = await search({ sort: "created", order: "asc", limit: 50 });
+
+    expect(result.success).toBe(true);
+    expect(server.calls[0]?.query).toMatchObject({
+      q: "repo:acme/widgets is:open is:pr review:none",
+      sort: "created",
+      order: "asc",
+      per_page: "50",
+    });
+  });
+
+  it("sends no order when the caller gives none, leaving GitHub's own default", async () => {
+    const server = useFixture();
+
+    await search({});
+
+    expect(server.calls[0]?.query.sort).toBeUndefined();
+    expect(server.calls[0]?.query.order).toBeUndefined();
+  });
+
+  it("maps the created time and the URL a caller sorts and reports on", async () => {
+    useFixture({
+      searchIssues: () => ({
+        body: {
+          total_count: 1,
+          items: [
+            {
+              number: 7,
+              title: "fixture pull request",
+              state: "open",
+              user: { login: "fixture-user" },
+              html_url: "https://github.com/acme/widgets/pull/7",
+              pull_request: { url: "https://api.github.com/repos/acme/widgets/pulls/7" },
+              labels: [{ name: "area/api" }],
+              created_at: "2026-08-01T00:00:00Z",
+              updated_at: "2026-08-10T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+
+    const result = await search({ sort: "created", order: "asc" });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const items = isRecord(result.data) ? result.data.items : undefined;
+    expect(Array.isArray(items) ? items[0] : undefined).toMatchObject({
+      number: 7,
+      url: "https://github.com/acme/widgets/pull/7",
+      created_at: "2026-08-01T00:00:00Z",
+      is_pr: true,
+    });
+  });
+});
+
+describe("github.read_repo_file", () => {
+  async function read(path: string) {
+    return findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  it("decodes the base64 GitHub sends", async () => {
+    const text = "path_prefix,area,github_handle,slack_user_id\npackages/api/,api,an-account,U0FIXTURE1";
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        body: { type: "file", encoding: "base64", path, size: text.length, content: Buffer.from(text).toString("base64") },
+      }),
+    });
+
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(isRecord(result.data) ? result.data.content : undefined).toBe(text);
+  });
+
+  it("names both corrections when GitHub answers 404", async () => {
+    // GitHub sends 404 for a path that is not there AND for a repository the
+    // token cannot see. A caller reading a configuration file out of another
+    // repository meets the second case, and a bare "404 Not Found" sends
+    // them to check the path they already checked.
+    useFixture({ readFile: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain('no file at ".github/reviewer-routing.csv" in acme/handbook');
+    expect(result.error).toContain("Correct the path");
+    expect(result.error).toContain("read access to that repository");
+  });
+});
 
 describe("github.create_review", () => {
   it("posts the review with the event it is given", async () => {
@@ -581,7 +777,7 @@ describe("github.create_review", () => {
 
   it("updateExisting posts a new review when the pull request has none of ours", async () => {
     const server = useFixture({
-      listReviews: () => ({ body: [{ id: 1, state: "COMMENTED", body: "a human review", user: { login: "conner" } }] }),
+      listReviews: () => ({ body: [{ id: 1, state: "COMMENTED", body: "a human review", user: { login: "human-reviewer" } }] }),
     });
 
     const result = await createReview({ body: "First automated pass.", updateExisting: true });
@@ -600,7 +796,7 @@ describe("github.create_review", () => {
       id: i + 1,
       state: "COMMENTED",
       body: "a human review",
-      user: { login: "conner" },
+      user: { login: "human-reviewer" },
     }));
     const ours = { id: 999, state: "COMMENTED", body: `Stale findings.\n\n${MARKER}`, user: { login: "valet[bot]" } };
     const all = [...older, ours];
@@ -626,7 +822,7 @@ describe("github.create_review", () => {
     const server = useFixture({
       listReviews: () => ({
         body: [
-          { id: 1, state: "COMMENTED", body: "a human review", user: { login: "conner" } },
+          { id: 1, state: "COMMENTED", body: "a human review", user: { login: "human-reviewer" } },
           { id: 42, state: "COMMENTED", body: `Stale findings.\n\n${MARKER}`, user: { login: "valet[bot]" } },
         ],
       }),

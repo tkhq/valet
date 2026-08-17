@@ -110,15 +110,48 @@ const ENV_REQUIRED_VARS = [
 const ENV_ALL_VARS = [...ENV_REQUIRED_VARS, "GITHUB_APP_WEBHOOK_SECRET"] as const;
 
 /** Accepts the private key as a raw PEM or as base64-encoded PEM (the
- * friendly shape for one-line env delivery, e.g. a Kubernetes Secret synced
- * from a secrets manager). Throws when neither form yields a PEM. */
-function parseEnvPrivateKey(raw: string): string {
+ * friendly shape for one-line delivery — an environment variable synced from
+ * a secrets manager, or a copy that went through a base64 round trip).
+ * `null` when the value is neither shape. The caller writes the error,
+ * because the corrective action must name the field the reader can see: an
+ * environment variable on one path, a form field on the other. */
+export function parsePrivateKeyPem(raw: string): string | null {
   if (raw.trimStart().startsWith("-----BEGIN")) return raw;
   const decoded = Buffer.from(raw, "base64").toString("utf8");
-  if (decoded.trimStart().startsWith("-----BEGIN")) return decoded;
-  throw new Error(
-    "GITHUB_APP_PRIVATE_KEY is not a PEM private key. Set it to the app's PEM, raw or base64-encoded.",
-  );
+  return decoded.trimStart().startsWith("-----BEGIN") ? decoded : null;
+}
+
+/** Parts a caller supplies to `buildAppConfig`. The two secrets are optional
+ * because an app works without them: the OAuth client secret is needed only
+ * for per-user GitHub sign-in, and the webhook secret only for event
+ * delivery. */
+export interface AppConfigInput {
+  appId: string;
+  appSlug: string;
+  oauthClientId: string;
+  privateKeyPem: string;
+  oauthClientSecret?: string;
+  webhookSecret?: string;
+  /** The app's page on GitHub. Derived from `appSlug` when absent. */
+  htmlUrl?: string;
+}
+
+/** THE one place that turns supplied parts into the stored config shape.
+ * Both config paths call it — the `GITHUB_APP_*` environment fallback and
+ * the admin route that connects an app which already exists — so neither can
+ * store a shape the other cannot read. An absent secret becomes `""`, which
+ * is what `loadStoredAppConfig` expects and what `verifyWebhookSignature`
+ * treats as "never verifies". */
+export function buildAppConfig(input: AppConfigInput, env: NodeJS.ProcessEnv): GithubAppConfig {
+  return {
+    appId: input.appId,
+    appSlug: input.appSlug,
+    oauthClientId: input.oauthClientId,
+    htmlUrl: input.htmlUrl ?? `${resolveGithubUrl(env)}/apps/${input.appSlug}`,
+    oauthClientSecret: input.oauthClientSecret ?? "",
+    webhookSecret: input.webhookSecret ?? "",
+    privateKeyPem: input.privateKeyPem,
+  };
 }
 
 /** Reads the `GITHUB_APP_*` fallback config from `env`. Returns `null` when
@@ -140,15 +173,16 @@ export function resolveGithubAppEnvConfig(env: NodeJS.ProcessEnv): GithubAppConf
       `Partial GITHUB_APP_* config: missing ${missing.join(", ")}. Set all of ${ENV_REQUIRED_VARS.join(", ")} (GITHUB_APP_WEBHOOK_SECRET is optional), or unset them all.`,
     );
   }
-  return {
-    appId,
-    appSlug,
-    oauthClientId,
-    htmlUrl: `${resolveGithubUrl(env)}/apps/${appSlug}`,
-    oauthClientSecret,
-    webhookSecret: env.GITHUB_APP_WEBHOOK_SECRET ?? "",
-    privateKeyPem: parseEnvPrivateKey(privateKey),
-  };
+  const privateKeyPem = parsePrivateKeyPem(privateKey);
+  if (!privateKeyPem) {
+    throw new Error(
+      "GITHUB_APP_PRIVATE_KEY is not a PEM private key. Set it to the app's PEM, raw or base64-encoded.",
+    );
+  }
+  return buildAppConfig(
+    { appId, appSlug, oauthClientId, oauthClientSecret, webhookSecret: env.GITHUB_APP_WEBHOOK_SECRET, privateKeyPem },
+    env,
+  );
 }
 
 export type GithubAppConfigSource = "org" | "environment";
@@ -251,7 +285,7 @@ function base64url(input: Buffer | string): string {
  * docs: `iat` backdated 60s (clock drift tolerance), `exp` 9 minutes out
  * (under GitHub's 10-minute max), `iss` = the numeric app id (as a string,
  * matching GitHub's own examples). */
-export function mintAppJwt(config: GithubAppConfig): string {
+export function mintAppJwt(config: Pick<GithubAppConfig, "appId" | "privateKeyPem">): string {
   const nowSec = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
   const payload = { iat: nowSec - 60, exp: nowSec + 540, iss: config.appId };
@@ -267,6 +301,110 @@ function githubApiUrl(deps: Pick<GithubAppDeps, "apiUrl">): string {
 
 function githubFetch(deps: Pick<GithubAppDeps, "fetchImpl">): typeof fetch {
   return deps.fetchImpl ?? fetch;
+}
+
+function appJwtHeaders(jwt: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${jwt}`,
+    Accept: "application/vnd.github+json",
+    "User-Agent": "Valet-App",
+  };
+}
+
+// ── Credential verification (`GET /app`) ─────────────────────────────────
+// The admin route that connects an app which already exists checks the app
+// id and the private key against GitHub BEFORE it stores them. Without the
+// check, a wrong credential is accepted here and fails much later, at the
+// first tool call, where nothing points back at the paste that caused it.
+//
+// `GET /app` is the cheapest proof: it is the App-JWT identity endpoint, so
+// a 200 means GitHub matched the id to the key. It also reports the app's
+// slug, page URL and OAuth client id, which saves the admin from copying
+// three more fields by hand. It never reports the OAuth client secret, so
+// that one stays a paste.
+
+const VERIFY_TIMEOUT_MS = 10_000;
+
+/** What `GET /app` tells us about the app behind a credential. Only `appId`
+ * is guaranteed: GitHub marks the rest optional in its schema, so a caller
+ * falls back to what the admin supplied. */
+export interface VerifiedApp {
+  appId: string;
+  appSlug?: string;
+  htmlUrl?: string;
+  oauthClientId?: string;
+  installationsCount?: number;
+}
+
+export type AppCredentialCheck = { ok: true; app: VerifiedApp } | { ok: false; error: string };
+
+function parseAppResponse(payload: unknown): VerifiedApp | null {
+  if (!isRecord(payload)) return null;
+  const { id, slug, html_url: htmlUrl, client_id: clientId, installations_count: count } = payload;
+  if (typeof id !== "number" && typeof id !== "string") return null;
+  return {
+    appId: String(id),
+    ...(typeof slug === "string" ? { appSlug: slug } : {}),
+    ...(typeof htmlUrl === "string" ? { htmlUrl } : {}),
+    ...(typeof clientId === "string" ? { oauthClientId: clientId } : {}),
+    ...(typeof count === "number" ? { installationsCount: count } : {}),
+  };
+}
+
+/** Asks GitHub whether an app id and a private key belong together, without
+ * storing anything. NEVER throws — every failure comes back as an `error`
+ * string the admin can act on, because this runs while somebody waits on a
+ * form. */
+export async function verifyAppCredential(
+  deps: Pick<GithubAppDeps, "apiUrl" | "fetchImpl">,
+  credential: Pick<GithubAppConfig, "appId" | "privateKeyPem">,
+): Promise<AppCredentialCheck> {
+  let jwt: string;
+  try {
+    jwt = mintAppJwt(credential);
+  } catch {
+    return {
+      ok: false,
+      error:
+        "The private key is a PEM, but not a key GitHub apps use. Generate a new private key on the app's settings page, then paste the whole file it downloads.",
+    };
+  }
+
+  let res: Response;
+  try {
+    res = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, {
+      headers: appJwtHeaders(jwt),
+      signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Could not reach GitHub to check the credential: ${detail}. Check network access, then try again.` };
+  }
+
+  // 401 is the answer this check exists for: GitHub read the JWT and refused
+  // it, so the id and the key disagree, or the key was revoked.
+  if (res.status === 401) {
+    return {
+      ok: false,
+      error:
+        "GitHub rejected this App ID and private key. Check the App ID on the app's settings page. If the key is lost, generate a new private key there.",
+    };
+  }
+  if (!res.ok) {
+    return { ok: false, error: `GitHub returned ${res.status} for this credential. Wait for GitHub to recover, then try again.` };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await res.json();
+  } catch {
+    return { ok: false, error: "GitHub sent a reply that is not JSON. Check https://www.githubstatus.com, then try again." };
+  }
+  const app = parseAppResponse(payload);
+  if (!app) {
+    return { ok: false, error: "GitHub sent an app record with no app id. Check https://www.githubstatus.com, then try again." };
+  }
+  return { ok: true, app };
 }
 
 interface ParsedInstallation {
@@ -472,14 +610,6 @@ function hookConfigUrl(deps: Pick<GithubAppDeps, "apiUrl">): string {
   return `${githubApiUrl(deps)}/app/hook/config`;
 }
 
-function appJwtHeaders(jwt: string): Record<string, string> {
-  return {
-    Authorization: `Bearer ${jwt}`,
-    Accept: "application/vnd.github+json",
-    "User-Agent": "Valet-App",
-  };
-}
-
 /** Reads the App's own webhook URL (`GET /app/hook/config`, App JWT auth).
  * `null` when the App has no URL set — the shape a manifest without
  * `hook_attributes` produces. */
@@ -518,9 +648,12 @@ async function writeHookConfigUrl(
  * ── The shared-App guard (load-bearing — do not weaken) ──────────────────
  * `loadAppConfigWithSource` reports where the config came from:
  *
- *   - `"org"` — this instance's manifest flow created the App, and its
- *     private key lives in this instance's database. This instance owns the
- *     App, so it can move the App's webhook URL.
+ *   - `"org"` — the App's private key lives in this instance's database,
+ *     because the manifest flow created the App here, or an admin connected
+ *     an existing App through `POST /credential`. Either way this instance
+ *     owns the App, so it can move the App's webhook URL. Connecting an
+ *     existing App is therefore an ownership claim, and the admin form says
+ *     so before the paste.
  *   - `"environment"` — the App arrived through `GITHUB_APP_*`, which is how
  *     a deployment or a team's shared dev App is supplied. A DIFFERENT
  *     instance owns it.

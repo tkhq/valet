@@ -75,6 +75,12 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.list_repo_directory": "contents:read",
 };
 
+/** True for the one status an action may want to word for itself. Octokit
+ * puts the response status on the thrown error, so no cast is needed. */
+function isNotFound(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "status" in err && err.status === 404;
+}
+
 function handleOctokitError(
   err: unknown,
   actionId: string,
@@ -573,7 +579,8 @@ const inspectPullRequest = action(Type.Object({
   id: "github.inspect_pull_request",
   name: "Inspect Pull Request",
   description:
-    "Get detailed PR info including files changed, review comments, and check status. " +
+    "Get detailed PR info including files changed, review comments, check status, and who is " +
+    "already requested to review or assigned. " +
     "Set includePatch to read the diff, and pathPrefixes to scope to a folder; " +
     "`matched_file_count` is a scalar a workflow if-node can compare against a number.",
   riskLevel: "low",
@@ -673,6 +680,15 @@ const inspectPullRequest = action(Type.Object({
           draft: pr.draft,
           user: pr.user?.login,
           url: pr.html_url,
+          /** Who already owns the review, as logins and team slugs. A caller
+           * that looks for unclaimed work cannot get these from
+           * `list_pull_requests` — that action's mapping drops them — and
+           * reading them here costs no extra request, because the full pull
+           * request is already fetched above. Empty arrays, never null, so a
+           * caller can test length without a null check. */
+          requested_reviewers: (pr.requested_reviewers ?? []).map((r) => r.login),
+          requested_teams: (pr.requested_teams ?? []).map((t) => t.slug),
+          assignees: (pr.assignees ?? []).map((a) => a.login),
           head: { ref: pr.head?.ref, sha: headSha },
           base: { ref: pr.base?.ref },
           body: pr.body,
@@ -2142,6 +2158,19 @@ const readRepoFile = action(Type.Object({
         },
       };
     } catch (err) {
+      if (isNotFound(err)) {
+        // GitHub answers 404 both for a path that is not there and for a
+        // repository the token cannot see, and it never says which. A caller
+        // that reads a configuration file from another repository hits the
+        // second case far more often, so the message must offer both fixes.
+        const onRef = args.ref === undefined ? "" : ` on ref "${args.ref}"`;
+        return {
+          success: false,
+          error:
+            `Read repo file: no file at "${args.path}" in ${args.owner}/${args.repo}${onRef}. ` +
+            `Correct the path, or give the connected GitHub account read access to that repository.`,
+        };
+      }
       return handleOctokitError(err, "github.read_repo_file", "Read repo file");
     }
   },
