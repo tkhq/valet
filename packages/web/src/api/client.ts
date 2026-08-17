@@ -45,11 +45,13 @@ import type {
   DeletePolicyOverrideResponse,
   EnsureOrchestratorResponse,
   GetGithubAppResponse,
+  GetGithubOrgStatusResponse,
   GetMemoryTreeResponse,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
   GetPrebuildForRepoResponse,
   GetReposResponse,
+  GetWorkflowImportFileResponse,
   GetSessionResponse,
   GetSkillResponse,
   GetWorkflowResponse,
@@ -117,6 +119,7 @@ import type {
   PauseSessionResponse,
   PatchThreadRequest,
   PatchThreadResponse,
+  PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
@@ -226,29 +229,91 @@ async function maybeRedirectToLogin(): Promise<void> {
   window.location.href = "/login";
 }
 
+/**
+ * The deadline every REST call gets.
+ *
+ * `fetch` has no timeout of its own. A request that is lost — the server
+ * stopped mid-response, or a socket that never answers — leaves its promise
+ * pending for the life of the page. That is worse than an error, because a
+ * caller which remembers the in-flight promise to avoid duplicate work then
+ * hands the same dead promise to every later caller and never retries. A
+ * rejection is recoverable. A promise that never settles is not.
+ *
+ * 30s is above the slowest normal call (a cold sandbox start) and far below
+ * a person's patience for a spinner that will never stop.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Status for a request that never reached a response. Distinct from any
+ * HTTP status, because no server replied. */
+const NO_RESPONSE_STATUS = 0;
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: unknown = text;
-    try {
-      payload = JSON.parse(text);
-    } catch {}
-    if (res.status === 401) {
-      void maybeRedirectToLogin();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      // The signal also covers reading the body below, so a response whose
+      // stream stalls part way is cut off on the same deadline.
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let payload: unknown = text;
+      try {
+        payload = JSON.parse(text);
+      } catch {}
+      if (res.status === 401) {
+        void maybeRedirectToLogin();
+      }
+      throw new ApiError(res.status, `${method} ${path} → ${res.status}`, payload);
     }
-    throw new ApiError(res.status, `${method} ${path} → ${res.status}`, payload);
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        NO_RESPONSE_STATUS,
+        `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
 }
 
 /** Keyset paging for the run lists. `cursor` is a page's `nextCursor`. */
 export interface WorkflowRunPage {
+  limit?: number;
+  cursor?: string;
+}
+
+/**
+ * What the two Library listings take. Both page the same way — `cursor` is a
+ * page's `nextCursor`, never a value the client builds — and both accept the
+ * owner pin.
+ *
+ * The catalog's own controls ride here too, because the server applies them:
+ * a chip or a search box that filtered the page in hand would answer about
+ * that page while claiming to answer about the library.
+ */
+export interface SkillListQuery {
+  ownerType?: "user" | "team" | "org";
+  ownerId?: string;
+  scope?: "personal" | "team" | "org" | "plugin";
+  kind?: "skill" | "prompt";
+  q?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface SkillSourceListQuery {
+  ownerType?: "user" | "team" | "org";
+  ownerId?: string;
   limit?: number;
   cursor?: string;
 }
@@ -446,6 +511,14 @@ export const api = {
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
     request<CreateWorkflowResponse>("POST", "/workflows", body),
+  /** One file out of a PUBLIC GitHub repository, for the import dialog. The
+   * body comes back as text: the dialog parses it with the same parser it
+   * applies to a pasted file. */
+  getWorkflowImportFile: (opts: { repo: string; path: string; ref?: string }) => {
+    const qs = new URLSearchParams({ repo: opts.repo, path: opts.path });
+    if (opts.ref) qs.set("ref", opts.ref);
+    return request<GetWorkflowImportFileResponse>("GET", `/workflows/import/repo-file?${qs}`);
+  },
   updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
     request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
   deleteWorkflow: (id: string) =>
@@ -689,7 +762,18 @@ export const api = {
   // repository it was synced from, and the next sync would overwrite an
   // edit made here. A stored skill is addressed by row id because a
   // shadowed skill shares its name with the skill that shadows it.
-  listSkills: () => request<ListSkillsResponse>("GET", "/skills"),
+  listSkills: (opts?: SkillListQuery) => {
+    const qs = new URLSearchParams();
+    if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
+    if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.scope) qs.set("scope", opts.scope);
+    if (opts?.kind) qs.set("kind", opts.kind);
+    if (opts?.q) qs.set("q", opts.q);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListSkillsResponse>("GET", `/skills${tail}`);
+  },
   getSkill: (name: string) =>
     request<GetSkillResponse>("GET", `/skills/${encodeURIComponent(name)}`),
   getStoredSkill: (id: string) =>
@@ -703,7 +787,15 @@ export const api = {
   // skill sources — public GitHub repositories Valet mirrors skills from.
   // Adding one imports it right away, so the create call returns what the
   // first sync did.
-  listSkillSources: () => request<ListSkillSourcesResponse>("GET", "/skills/sources"),
+  listSkillSources: (opts?: SkillSourceListQuery) => {
+    const qs = new URLSearchParams();
+    if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
+    if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListSkillSourcesResponse>("GET", `/skills/sources${tail}`);
+  },
   createSkillSource: (body: CreateSkillSourceRequest) =>
     request<SkillSourceSyncResponse>("POST", "/skills/sources", body),
   syncSkillSource: (id: string) =>
@@ -735,12 +827,19 @@ export const api = {
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
   postGithubAppManifest: (body: PostGithubAppManifestRequest = {}) =>
     request<PostGithubAppManifestResponse>("POST", "/org/github-app/manifest", body),
+  // The second setup path: connect an App that already exists. The reply is
+  // the same state `getGithubApp` returns, so nothing sent here comes back.
+  postGithubAppCredential: (body: PostGithubAppCredentialRequest) =>
+    request<GetGithubAppResponse>("POST", "/org/github-app/credential", body),
   refreshGithubApp: () => request<GetGithubAppResponse>("POST", "/org/github-app/refresh"),
   deleteGithubApp: () => request<undefined>("DELETE", "/org/github-app"),
 
   // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
   connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
   disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
+  // The org App's state, readable by a member — `getGithubApp` above is the
+  // admin-only detail read, so connect surfaces use this instead.
+  getGithubOrgStatus: () => request<GetGithubOrgStatusResponse>("GET", "/me/github/org-status"),
 
   // identity links (channel-link Phase 7): per-user Telegram account linking
   listIdentityLinks: () => request<ListIdentityLinksResponse>("GET", "/me/identity-links"),
