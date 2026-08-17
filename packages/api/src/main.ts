@@ -39,6 +39,11 @@ import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
 import { webDistPath } from "./assets/base.js";
 import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
+import {
+  startInstallationSweep,
+  type InstallationSweepHandle,
+} from "./services/github-installation-sweep.js";
+import { deriveSecretKey } from "./lib/secret-crypto.js";
 
 /** Handle returned by `startServer`: a graceful `close()` plus the resolved
  * values the boot actually used. */
@@ -354,6 +359,19 @@ const rotateSweep: RotateSweepHandle = startRotateSweep({
   db: providers.db,
 });
 
+// GitHub App installations: pick up a new installation without anybody
+// pressing "Refresh installations". The tick wakes every minute and checks at
+// most one org that is past its own due time, so most ticks do nothing. An
+// instance with no public URL receives no `installation` webhooks, which is
+// why this cannot be webhook-only. The interval is `.unref()`'d inside
+// `startInstallationSweep`, so it never prevents process exit on its own.
+const installationSweep: InstallationSweepHandle = startInstallationSweep({
+  db: providers.db,
+  credentials: providers.engineCredentials,
+  key: deriveSecretKey(encryptionKey),
+  publicUrl: publicUrlFromEnv(process.env),
+});
+
 // Instance config reconciliation: apply the declarative config to the live
 // database (org name, members, teams, skill sources, etc.). Runs after all
 // boot-restore passes so the db is settled before we write to it. Failure
@@ -472,6 +490,14 @@ async function close(): Promise<void> {
     rotateSweep.stop();
   } catch (err) {
     console.error("rotateSweep.stop failed:", err);
+  }
+  try {
+    // Awaited, unlike the sweeps above it: a pass in flight holds a database
+    // query open, and closing the store under it logs errors that look like
+    // real failures during every shutdown.
+    await installationSweep.stop();
+  } catch (err) {
+    console.error("installationSweep.stop failed:", err);
   }
   try {
     providers.childWatcher.stopRetentionSweep();

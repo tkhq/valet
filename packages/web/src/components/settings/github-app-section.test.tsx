@@ -67,7 +67,7 @@ describe("GithubAppSection", () => {
   });
 
   it("not configured: shows Create GitHub App, then renders the manifest form on click", async () => {
-    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
     const manifestResponse: PostGithubAppManifestResponse = {
       url: "https://github.com/settings/apps/new",
       manifest: {
@@ -100,7 +100,7 @@ describe("GithubAppSection", () => {
   });
 
   it("org toggle gates the button until a name is entered and sends target org:{login}", async () => {
-    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
     createManifestMutateAsync.mockResolvedValue({
       url: "https://github.com/organizations/acme/settings/apps/new",
       manifest: {
@@ -130,7 +130,7 @@ describe("GithubAppSection", () => {
   });
 
   it("advanced picker sends the FULL permission map (deselections stick) and chosen events", async () => {
-    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
     createManifestMutateAsync.mockResolvedValue({
       url: "https://github.com/settings/apps/new",
       manifest: {
@@ -175,6 +175,7 @@ describe("GithubAppSection", () => {
     configured: false,
     installations: [],
     webhook: { mode: "manual" },
+    installationsCheckedAt: null,
   };
 
   /** Opens the second path and fills the two fields the server requires. */
@@ -284,6 +285,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
     expect(screen.queryByRole("button", { name: "I already have a GitHub App" })).toBeNull();
@@ -319,6 +321,7 @@ describe("GithubAppSection", () => {
         },
       ],
       webhook: { mode: "public" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
 
@@ -353,6 +356,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
 
@@ -376,6 +380,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
     fireEvent.click(screen.getByRole("button", { name: "Refresh installations" }));
@@ -393,6 +398,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
     fireEvent.click(screen.getByRole("button", { name: "Remove App" }));

@@ -2100,6 +2100,12 @@ export interface GetGithubAppResponse {
   app?: GithubAppInfo;
   installations: GithubAppInstallationSummary[];
   webhook: { mode: "public" | "manual" };
+  /** When this org's installations were last read from GitHub, in epoch ms.
+   * `null` when none has been read yet. It lets the settings page say how
+   * fresh the list is, so "it is not updating" is answerable without a log.
+   * Derived from the newest installation row, so it also moves when the
+   * manual button or a webhook writes. */
+  installationsCheckedAt: number | null;
 }
 
 export interface PostGithubAppManifestRequest {

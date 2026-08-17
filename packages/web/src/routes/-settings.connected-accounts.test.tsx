@@ -291,6 +291,7 @@ describe("ConnectedAccountsPage", () => {
         },
         installations: [],
         webhook: { mode: "public" },
+        installationsCheckedAt: null,
       };
       render(<ConnectedAccountsPage />);
       expect(
@@ -299,7 +300,7 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("omits the install link when the org App isn't configured", () => {
-      githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+      githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
       render(<ConnectedAccountsPage />);
       expect(screen.queryByRole("link", { name: "Install on your personal account" })).toBeNull();
     });

@@ -711,6 +711,20 @@ export async function syncAppWebhookUrl(
   }
 }
 
+/** Every org that holds a `github_app` credential row. It reads the
+ * `credentials` table directly for the reason the module doc comment gives —
+ * the `CredentialStore` port is owner-scoped and cannot answer "which owners
+ * hold this service". The boot-time webhook sync and the installation sweep
+ * (`github-installation-sweep.ts`) share this one definition of "orgs with an
+ * App row". */
+export async function listOrgsWithAppCredential(db: AppQueryable): Promise<string[]> {
+  const rows = await db
+    .select({ ownerId: credentials.ownerId })
+    .from(credentials)
+    .where(and(eq(credentials.ownerType, "org"), eq(credentials.service, GITHUB_APP_SERVICE)));
+  return rows.map((row) => row.ownerId);
+}
+
 /**
  * Boot-time counterpart to `syncAppWebhookUrl`: syncs every org that owns a
  * `github_app` credential row. The scan reads the `credentials` table
@@ -731,11 +745,7 @@ export async function syncAllAppWebhookUrls(
   }
   let orgIds: string[];
   try {
-    const rows = await deps.db
-      .select({ ownerId: credentials.ownerId })
-      .from(credentials)
-      .where(and(eq(credentials.ownerType, "org"), eq(credentials.service, GITHUB_APP_SERVICE)));
-    orgIds = rows.map((row) => row.ownerId);
+    orgIds = await listOrgsWithAppCredential(deps.db);
   } catch (err) {
     console.error("github-app: failed to list orgs with a github_app credential (continuing):", err);
     return;
