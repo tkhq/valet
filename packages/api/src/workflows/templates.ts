@@ -5,10 +5,11 @@
  * templates`, `@valet/engine`), plus the copy the gallery needs to explain
  * it before install. This module does three things and nothing else:
  *
- *   1. Aggregates the templates every loaded plugin contributes. There is
- *      no registry object — plugin-contributed things are read straight
- *      off `providers.plugins`, the same way `/api/plugins` reads services
- *      and the event catalog reads `plugin.triggers`.
+ *   1. Aggregates the templates every loaded plugin contributes, then the
+ *      seeded catalog the host ships itself (`template-definitions.ts`).
+ *      There is no registry object — plugin-contributed things are read
+ *      straight off `providers.plugins`, the same way `/api/plugins` reads
+ *      services and the event catalog reads `plugin.triggers`.
  *   2. Derives the summary the gallery renders: the services a template
  *      needs and whether the caller connected them, the run-form inputs,
  *      and the caveats. Most caveats are read out of the definition rather
@@ -42,6 +43,7 @@ import {
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, lockTeamForOwnership } from "../services/teams.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
@@ -67,8 +69,9 @@ export interface TemplateServiceDeps {
   credentials: CredentialStore;
 }
 
-/** A template plus the plugin that contributed it, so every message can
- * name the plugin an author has to open to fix the template. */
+/** A template plus what contributed it, so every message can name the place
+ * an author has to open to fix the template. The name is a plugin name, or
+ * `CATALOG_SOURCE` for a template the host ships itself. */
 export interface OwnedTemplate {
   pluginName: string;
   template: WorkflowTemplate;
@@ -105,8 +108,46 @@ export function listPluginTemplates(plugins: ValetPlugin[]): OwnedTemplate[] {
   return out;
 }
 
-export function findPluginTemplate(plugins: ValetPlugin[], id: string): OwnedTemplate | null {
-  return listPluginTemplates(plugins).find((t) => t.template.id === id) ?? null;
+/**
+ * Source name used where a plugin name would go, for a template the host
+ * ships itself. Every message that names a plugin ("open this plugin to fix
+ * the template") stays truthful with it: it points at the seeded catalog
+ * instead of at a plugin that does not own the template.
+ */
+export const CATALOG_SOURCE = "workflows catalog";
+
+/**
+ * Everything the gallery can offer: each loaded plugin's templates first,
+ * in plugin order, then the seeded catalog.
+ *
+ * The seeded catalog goes LAST so a plugin that ships a better template for
+ * the same job appears above the generic one.
+ *
+ * A seeded id that a plugin already claims THROWS, for the reason
+ * `listPluginTemplates` throws on a repeated plugin id: the id is the
+ * install route's lookup key, and the quiet alternative makes one of the
+ * two templates permanently unreachable. We ship both sides, so a collision
+ * is our bug and must be loud.
+ */
+export function listCatalogTemplates(plugins: ValetPlugin[]): OwnedTemplate[] {
+  const out = listPluginTemplates(plugins);
+  const ownerById = new Map(out.map((owned) => [owned.template.id, owned.pluginName]));
+  for (const template of builtinWorkflowTemplates) {
+    const owner = ownerById.get(template.id);
+    if (owner !== undefined) {
+      throw new Error(
+        `workflow template collision: "${template.id}" is shipped by both "${owner}" and the ` +
+          `${CATALOG_SOURCE}. Rename one of them.`,
+      );
+    }
+    ownerById.set(template.id, CATALOG_SOURCE);
+    out.push({ pluginName: CATALOG_SOURCE, template });
+  }
+  return out;
+}
+
+export function findCatalogTemplate(plugins: ValetPlugin[], id: string): OwnedTemplate | null {
+  return listCatalogTemplates(plugins).find((t) => t.template.id === id) ?? null;
 }
 
 // ─── Definition introspection ────────────────────────────────────────────
@@ -366,11 +407,11 @@ export async function listWorkflowTemplateSummaries(
   const connected = new Set((await deps.credentials.list(owner)).map((cred) => cred.service));
 
   const summaries: WorkflowTemplateSummary[] = [];
-  for (const owned of listPluginTemplates(deps.plugins)) {
+  for (const owned of listCatalogTemplates(deps.plugins)) {
     const result = summarizeTemplate(owned, deps.actionPluginByService, connected);
     if (!result.ok) {
       console.error(
-        `workflow templates: hiding "${owned.template.id}" from plugin "${owned.pluginName}" — ` +
+        `workflow templates: hiding "${owned.template.id}" from "${owned.pluginName}" — ` +
           `its definition is invalid: ${result.errors.join("; ")}`,
       );
       continue;
@@ -565,7 +606,7 @@ export async function installWorkflowTemplate(
   input: InstallTemplateInput = {},
   now = Date.now(),
 ): Promise<InstallTemplateResult> {
-  const owned = findPluginTemplate(deps.plugins, templateId);
+  const owned = findCatalogTemplate(deps.plugins, templateId);
   if (!owned) {
     return { ok: false, code: "not_found", error: `No template with id "${templateId}". Reload the gallery and try again.` };
   }
@@ -576,7 +617,7 @@ export async function installWorkflowTemplate(
     return {
       ok: false,
       code: "broken_template",
-      error: `Template "${templateId}" from plugin "${owned.pluginName}" is not a valid workflow, so it cannot be installed. Report the template id.`,
+      error: `Template "${templateId}" from "${owned.pluginName}" is not a valid workflow, so it cannot be installed. Report the template id.`,
       errors: summarized.errors,
     };
   }
@@ -681,7 +722,7 @@ export async function installWorkflowTemplate(
       return {
         ok: false,
         code: "broken_template",
-        error: `Template "${templateId}" from plugin "${owned.pluginName}" declares a schedule that cannot be read, so it cannot be installed. Report the template id.`,
+        error: `Template "${templateId}" from "${owned.pluginName}" declares a schedule that cannot be read, so it cannot be installed. Report the template id.`,
         errors: [next.error],
       };
     }

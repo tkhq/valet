@@ -285,6 +285,90 @@ describe("RunDetailBody", () => {
     expect(screen.getByText("Needs approval")).toBeTruthy();
   });
 
+  it("puts a settled run's stop message and output above the steps", () => {
+    const data = baseRun({
+      status: "settled",
+      outcome: "completed",
+      definition: {
+        version: "dag/v1",
+        nodes: [{ id: "done", type: "stop" }],
+        edges: [],
+      },
+    });
+    data.checkpoints = [
+      {
+        nodeId: "done",
+        iteration: 0,
+        status: "completed",
+        result: { outcome: "success", message: "Opened 3 issues.", output: { count: 3 } },
+        createdAt: Date.now(),
+      },
+    ];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+
+    const panel = screen.getByRole("region", { name: "Run result" });
+    expect(within(panel).getByText("Opened 3 issues.")).toBeTruthy();
+    expect(within(panel).getByText(/"count"/)).toBeTruthy();
+
+    // The panel must come before the checkpoint list in document order, so
+    // the answer is the first thing on the page.
+    const list = screen.getByText("Checkpoints");
+    expect(panel.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("promotes a failed run's reason and does not repeat it open in the step row", () => {
+    const data = baseRun({
+      status: "settled",
+      outcome: "failed",
+      definition: { version: "dag/v1", nodes: [{ id: "done", type: "stop" }], edges: [] },
+    });
+    data.checkpoints = [
+      {
+        nodeId: "done",
+        iteration: 0,
+        status: "failed",
+        error: "The pull request has no reviewer.",
+        result: { outcome: "failure", message: "The pull request has no reviewer." },
+        createdAt: Date.now(),
+      },
+    ];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+
+    const panel = screen.getByRole("region", { name: "Run result" });
+    expect(within(panel).getByText("Failure reason")).toBeTruthy();
+    expect(within(panel).getByText("The pull request has no reviewer.")).toBeTruthy();
+    // The step row keeps its result collapsed: the panel already shows it.
+    expect(screen.getByText("Result").closest("details")?.open).toBe(false);
+  });
+
+  it("shows no result panel while the run is still in flight", () => {
+    const data = baseRun({ status: "running" });
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.queryByRole("region", { name: "Run result" })).toBeNull();
+  });
+
+  it("keeps timings subordinate to the result and only claims a duration once settled", () => {
+    const running = baseRun({ status: "running", createdAt: 1_000, updatedAt: 5_000 });
+    running.checkpoints = [{ nodeId: "a", iteration: 0, status: "completed", createdAt: 2_000 }];
+    const { unmount } = render(
+      <RunDetailBody runId="wfrun_1" data={running} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />,
+    );
+    expect(screen.getByText(/1 checkpoint/)).toBeTruthy();
+    expect(screen.queryByText(/Ran for/)).toBeNull();
+    unmount();
+
+    const settled = baseRun({
+      status: "settled",
+      outcome: "completed",
+      createdAt: 1_000,
+      updatedAt: 5_200,
+    });
+    render(
+      <RunDetailBody runId="wfrun_1" data={settled} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />,
+    );
+    expect(screen.getByText(/Ran for 4\.2s/)).toBeTruthy();
+  });
+
   it("renders 'Denied by' line for a checkpoint with policyDenied=true in the result", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     data.checkpoints = [

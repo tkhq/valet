@@ -14,6 +14,7 @@ import type {
   PluginActionResult,
 } from "@valet/engine";
 import {
+  addAggregateNode,
   cancelWorkflowRun,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
@@ -490,6 +491,55 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const addAggregate = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      mode: Type.Optional(Type.Union([Type.Literal("collect"), Type.Literal("summarize")])),
+      model: Type.Optional(Type.String()),
+      node_id: Type.Optional(Type.String()),
+      sources: Type.Optional(Type.Array(Type.String())),
+      instructions: Type.Optional(Type.String()),
+    }),
+  )({
+    id: "workflows.add_aggregate",
+    name: "Add aggregation node",
+    description:
+      "Append a node that combines several parallel branches into one result, wired with the " +
+      "correct template path for each branch's node type (an llm branch reads result.text, a " +
+      "session branch result.response, a branch with an outputSchema result.output). " +
+      'mode "collect" (default) writes a set node with one field per branch; mode "summarize" ' +
+      "writes an llm node and needs `model`. Omit `sources` to take every branch with no " +
+      "outgoing edge. The node is an ordinary node afterwards — editable and removable like any other.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, mode, model, node_id, sources, instructions }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const result = await addAggregateNode(
+        deps,
+        owner,
+        workflow_id,
+        { mode, model, nodeId: node_id, sources, instructions },
+        buildValidateEnvironment(deps.actionPluginByService),
+      );
+      if (!result.ok) {
+        if (result.reason === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
+        // Two failure shapes: a lint list, or one sentence naming the fix.
+        if ("errors" in result) return { success: false, error: formatLintErrors(result.errors) };
+        return { success: false, error: result.message };
+      }
+      return {
+        success: true,
+        data: {
+          workflowId: result.definition.id,
+          nodeId: result.nodeId,
+          sources: result.sources,
+          updatedAt: result.definition.updatedAt,
+        },
+      };
+    },
+  });
+
   const getNodeResult = action(
     Type.Object({
       run_id: Type.String(),
@@ -869,6 +919,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getWorkflow,
       saveWorkflow,
       patchWorkflow,
+      addAggregate,
       deleteWorkflow,
       startRun,
       getRun,
