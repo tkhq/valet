@@ -135,7 +135,13 @@ describe("GET /api/org/github-app", () => {
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetGithubAppResponse;
-    expect(body).toEqual({ configured: false, installations: [], webhook: { mode: "manual" } });
+    expect(body).toEqual({
+      configured: false,
+      installations: [],
+      webhook: { mode: "manual" },
+      // No installation rows remain after the delete, so nothing to date from.
+      installationsCheckedAt: null,
+    });
   });
 
   it("reports public webhook mode when VALET_PUBLIC_URL is set", async () => {
@@ -474,6 +480,8 @@ describe("POST /api/org/github-app/credential", () => {
       configured: false,
       installations: [],
       webhook: { mode: "manual" },
+      // Declared on every reply. No rows means nothing to date from.
+      installationsCheckedAt: null,
     });
   });
 
@@ -615,7 +623,13 @@ describe("DELETE /api/org/github-app", () => {
 
     const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     const body = (await getRes.json()) as GetGithubAppResponse;
-    expect(body).toEqual({ configured: false, installations: [], webhook: { mode: "manual" } });
+    expect(body).toEqual({
+      configured: false,
+      installations: [],
+      webhook: { mode: "manual" },
+      // No installation rows remain after the delete, so nothing to date from.
+      installationsCheckedAt: null,
+    });
   });
 });
 
