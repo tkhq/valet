@@ -23,6 +23,11 @@ data:
   # The single sandbox base image (used by seedDefaultBasesIfMissing at
   # boot and as the stock fall-through for every session).
   VALET_FULL_BASE_IMAGE: {{ .Values.sandbox.fullBaseImage | quote }}
+  {{- if .Values.sandbox.dockerRuntimeClass }}
+  # RuntimeClass with containerd cgroup_writable=true — required for
+  # docker-enabled sandboxes to run containers (see values.yaml).
+  VALET_SANDBOX_DOCKER_RUNTIME_CLASS: {{ .Values.sandbox.dockerRuntimeClass | quote }}
+  {{- end }}
   VALET_WEB_DIST_DIR: "/app/web/dist"
   # Sandbox images v2 plan, Task 5: kubernetes prebuild image builder +
   # registry wiring. VALET_IMAGE_BUILDER pins the kubernetes builder

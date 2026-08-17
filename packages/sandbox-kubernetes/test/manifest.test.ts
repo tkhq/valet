@@ -345,6 +345,29 @@ describe("docker flag (rootless DinD)", () => {
     expect(cr.spec.podTemplate.spec.hostUsers).toBeUndefined();
   });
 
+  it("sets runtimeClassName from dockerRuntimeClassName for docker sandboxes", () => {
+    // The runtime class maps to a containerd runtime with
+    // cgroup_writable=true — without it the pod cgroupfs is read-only and
+    // owned by unmapped host root, so runc cannot create per-container
+    // groups and every `docker run` fails (observed live on EKS 1.33).
+    const rcCfg: K8sProviderConfig = { ...cfg, dockerRuntimeClassName: "valet-docker" };
+    const cr = buildSandboxManifest(rcCfg, "sb-docker", { docker: true });
+    expect(cr.spec.podTemplate.spec.runtimeClassName).toBe("valet-docker");
+  });
+
+  it("leaves runtimeClassName unset when the config names none", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(cr.spec.podTemplate.spec.runtimeClassName).toBeUndefined();
+  });
+
+  it("leaves runtimeClassName unset for non-docker sandboxes even when configured", () => {
+    // Only docker sandboxes need writable cgroups; plain sandboxes stay on
+    // the cluster-default runtime with its stricter posture.
+    const rcCfg: K8sProviderConfig = { ...cfg, dockerRuntimeClassName: "valet-docker" };
+    const cr = buildSandboxManifest(rcCfg, "sb-plain", {});
+    expect(cr.spec.podTemplate.spec.runtimeClassName).toBeUndefined();
+  });
+
   it("labels the CR docker-enabled so restore() can re-derive the flag", () => {
     const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
     expect(cr.metadata.labels[DOCKER_LABEL_KEY]).toBe("true");

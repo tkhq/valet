@@ -172,15 +172,29 @@ root. Consequences:
   (capabilities do not extend to ancestor-owned namespaces) — which is
   why "rootlesskit with --net=host" was not an option and slirp existed
   in the first place.
-- cgroup v2 bootstrap: kubelet mounts `/sys/fs/cgroup` read-only, so
-  runc cannot create per-container groups (`mkdir /sys/fs/cgroup/docker:
-  read-only file system` on every `docker run`). Before dockerd starts,
-  `start-docker.sh` remounts the delegated cgroup2 subtree writable
-  (permitted: the pod owns a private cgroup namespace inside its userns),
-  moves every process into an `/init` leaf, and enables the controllers
-  in `cgroup.subtree_control` — the v2 "no internal processes" rule
-  forbids delegation while the root group has member processes. This is
-  the same dance the official `docker:dind` entrypoint performs.
+- cgroup v2 delegation (two layers, both required). Kubelet mounts
+  `/sys/fs/cgroup` read-only AND the pod cgroup directory is owned by
+  host root, which is unmapped in the pod userns — so runc inside the
+  sandbox cannot create per-container groups (`mkdir
+  /sys/fs/cgroup/docker: read-only file system`, or EACCES after a rw
+  remount; observed live on EKS 1.33, containerd issue #12182).
+  - Ownership: the cluster must run the sandbox under a RuntimeClass
+    whose containerd runtime sets `cgroup_writable = true` (containerd
+    >= 2.1, systemd cgroup driver) — that premounts the cgroupfs rw and
+    chowns it to the pod's mapped root. The chart threads the name via
+    `sandbox.dockerRuntimeClass` →
+    `VALET_SANDBOX_DOCKER_RUNTIME_CLASS` → the manifest's
+    `runtimeClassName` (docker sandboxes only). The `docker:dind`
+    remount trick alone is NOT enough here: a plain remount is EPERM
+    from a userns (superblock op), a bind remount clears the ro flag
+    but cannot fix ownership, and a fresh cgroup2 mount over the
+    mountpoint is refused (fs already mounted).
+  - Bootstrap: before dockerd starts, `start-docker.sh` bind-remounts
+    the cgroupfs rw (harmless if `cgroup_writable` already did it),
+    moves every process into an `/init` leaf, and enables the
+    controllers in `cgroup.subtree_control` — the v2 "no internal
+    processes" rule forbids delegation while the root group has member
+    processes (same dance as moby `hack/dind`).
 
 ### Exec identity
 

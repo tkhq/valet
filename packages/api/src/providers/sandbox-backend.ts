@@ -202,6 +202,12 @@ export function buildSandboxProvider(
         // in the chart). Omitted (undefined, not []) for the bundled registry
         // — nothing to authenticate against an in-cluster insecure registry.
         ...(pullSecret ? { imagePullSecrets: [{ name: pullSecret }] } : {}),
+        // RuntimeClass for docker-enabled sandboxes: a containerd runtime
+        // with cgroup_writable=true, required for `docker run` to work in
+        // hostUsers:false pods (K8sProviderConfig docblock has the story).
+        ...(env.VALET_SANDBOX_DOCKER_RUNTIME_CLASS
+          ? { dockerRuntimeClassName: env.VALET_SANDBOX_DOCKER_RUNTIME_CLASS }
+          : {}),
       };
       const secretsApi = sandboxSecretsApiAdapter(coreApi);
       return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
