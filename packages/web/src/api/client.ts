@@ -808,10 +808,12 @@ export const api = {
       `/credentials/${encodeURIComponent(service)}`,
       body,
     ),
+  // The server defaults a missing `scope` to `"user"`; sending it whenever
+  // the caller states one keeps the request self-describing either way.
   deleteCredential: (service: string, opts?: { scope?: "user" | "org" }) =>
     request<DeleteCredentialResponse>(
       "DELETE",
-      `/credentials/${encodeURIComponent(service)}${opts?.scope === "org" ? "?scope=org" : ""}`,
+      `/credentials/${encodeURIComponent(service)}${opts?.scope ? `?scope=${opts.scope}` : ""}`,
     ),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the

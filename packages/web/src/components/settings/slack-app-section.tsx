@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { GetSlackAppResponse } from "@valet/api/wire";
 import { Badge, Button, Input, Spinner, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { qkSettings, useDeleteSlackApp, useSaveSlackCredential, useSlackApp } from "~/api/settings";
+import { useDeleteSlackApp, useSaveSlackCredential, useSlackApp } from "~/api/settings";
 
 /** Where an operator manages the app after creation — install page, signing
  * secret, scope review all live behind it. */
@@ -26,8 +26,6 @@ export function SlackAppSection() {
   // every character.
   const [manifestName, setManifestName] = useState<string | undefined>(undefined);
   const slackQ = useSlackApp(manifestName, {
-    // `useSlackApp` sets the same key; `UseQueryOptions` makes it required.
-    queryKey: qkSettings.slackApp(manifestName),
     // Keep the previous manifest on screen while a renamed one loads.
     placeholderData: (prev: GetSlackAppResponse | undefined) => prev,
   });
