@@ -1,8 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DockerSandboxProvider } from "../src/index.js";
+import { rm } from "node:fs/promises";
+import { DockerSandboxProvider, createSandboxWorkspace } from "../src/index.js";
 
 const image = process.env.VALET_SANDBOX_IMAGE;
 
@@ -24,7 +22,7 @@ let provider: DockerSandboxProvider;
 
 describe.skipIf(!image)("rootless docker-in-sandbox (e2e)", () => {
   beforeEach(async () => {
-    tmp = await mkdtemp(join(tmpdir(), "valet-dind-"));
+    tmp = await createSandboxWorkspace("valet-dind-");
     provider = new DockerSandboxProvider();
   });
 

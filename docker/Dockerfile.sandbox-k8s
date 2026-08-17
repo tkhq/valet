@@ -22,9 +22,10 @@
 #
 # What matters either way: a shell, coreutils (incl. base64, used for
 # binary-safe file ops over `pods/exec` — see the design doc's "File ops
-# ride exec" section), git, ripgrep, ca-certificates, and Node (the engine's
-# exec-based tool calls assume these are on PATH) — plus, for `full`
-# profile, ttyd + code-server + the bundled `@valet/sandbox-gateway`.
+# ride exec" section), git, ripgrep, ca-certificates, Node, and the
+# `agent-browser` CLI with its chromium (the engine's exec-based tool calls
+# and the bundled `browser` skill assume these are on PATH) — plus, for
+# `full` profile, ttyd + code-server + the bundled `@valet/sandbox-gateway`.
 #
 # Build with plain `docker build` (decision 2 — moby mode, not nerdctl):
 #
@@ -122,6 +123,33 @@ RUN curl -fsSL -o /tmp/gh.deb \
     && dpkg -i /tmp/gh.deb \
     && rm /tmp/gh.deb \
     && gh --version
+
+# Browser automation. The bundled `browser` plugin skill tells the agent it
+# has `agent-browser`; without these two layers the agent follows the skill
+# and bash answers "command not found".
+#
+# Headless only. V1 ran the browser on an X display and showed it in a VNC
+# panel; V2 has no X server, no VNC panel, and no screenshot tool, so the
+# skill directs the agent to `agent-browser screenshot <path>` instead. Do
+# not add `--headed` support without also adding Xvfb and a viewer.
+#
+# Chromium comes from apt and is what Playwright (bundled inside
+# agent-browser since 0.30) launches, through AGENT_BROWSER_EXECUTABLE_PATH.
+# Playwright's own `chromium-headless-shell` was measured as an alternative:
+# it needs the same X/GTK shared libraries, so it saves under 40 MB and adds
+# a second browser-version axis to keep aligned.
+#
+# SIZE: these two layers add ~794 MB (chromium ~699 MB, agent-browser
+# ~94 MB) to a ~386 MB base. That is the price of the capability — the
+# browser binary is most of it and there is no smaller one that runs
+# Playwright.
+ARG AGENT_BROWSER_VERSION=0.34.0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      chromium fonts-liberation \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && npm cache clean --force
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Bundled auth gateway (Task 2): `node /gateway/dist/bin.js` is what
 # docker/start-full.sh execs. Requires VALET_SESSION_ID +
