@@ -1073,6 +1073,60 @@ export interface RetryWorkflowRunResponse {
   runId: string;
 }
 
+// ── Workflow permissions preview ──────────────────────────────────────────
+//
+// `GET /api/workflows/:id/permissions` predicts, per tool node in the STORED
+// definition, how the policy ladder would resolve the node's action for the
+// calling user if a run started now. The prediction runs the same
+// `resolveActionPolicy` core as the run-time invoker, with `appliesIn:
+// "workflow"` and no execution id (a run that has not started has no
+// exec-scoped grants). It is advisory: org policies with param matchers
+// evaluate against the node's static params, so a template value (`{{ ... }}`)
+// can flip a matcher at run time.
+//
+// Approval nodes are deliberately absent — an author-placed approval node is
+// an intended gate, not a permission requirement.
+
+export interface WorkflowNodePermissionWire {
+  nodeId: string;
+  service: string;
+  action: string;
+  /** The fully-qualified policy actionId (`service.action`). Null when the
+   * action is not in the static plugin catalog (for example a dynamic MCP
+   * action), which also makes the prediction `unknown`. */
+  actionId: string | null;
+  riskLevel?: string;
+  /** Predicted resolution for the calling user. `unknown` when the action
+   * is not in the static catalog. */
+  mode: "allow" | "require_approval" | "deny" | "unknown";
+  /** `PolicyProvenanceSource` of the prediction (org_policy, override,
+   * plugin_default, risk_default, ...). Absent when `mode` is `unknown`. */
+  provenance?: string;
+}
+
+export interface GetWorkflowPermissionsResponse {
+  nodes: WorkflowNodePermissionWire[];
+}
+
+export interface AllowWorkflowPermissionsRequest {
+  /** Qualified actionIds to pre-approve. Each must be one of the workflow's
+   * gating actions (mode `require_approval`). Omit to pre-approve all of
+   * them. The server re-derives the gating set from the stored definition —
+   * the client cannot mint an override for an unrelated action here. */
+  actionIds?: string[];
+}
+
+export interface AllowWorkflowPermissionsResponse {
+  /** Qualified actionIds now covered by a per-user allow override. The
+   * override applies to every run and session of this user, not only this
+   * workflow. */
+  allowed: string[];
+  /** Gating actions an override cannot cover: the write-time bounds check
+   * rejects an allow override that would bypass an org `deny` or
+   * `require_approval` policy. Each carries the corrective reason. */
+  blocked: { actionId: string; reason: string }[];
+}
+
 // ── Node preview (dry run) ────────────────────────────────────────────────
 //
 // `POST /api/workflows/:id/preview` resolves every `{{ ... }}` path in a
