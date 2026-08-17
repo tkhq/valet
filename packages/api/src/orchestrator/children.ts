@@ -255,6 +255,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       owner: ctx.owner,
       workspace,
       modelId: req.model,
+      profile: req.profile,
+      docker: req.docker,
     });
 
     const now = Date.now();
@@ -266,6 +268,10 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         orgId,
         workspace,
         title: req.title ?? null,
+        // Persisted so a post-restart rebuild through the generic
+        // `sessionFor` (which reads the row) keeps the same sandbox shape.
+        profile: req.profile ?? "headless",
+        docker: req.docker === true,
         status: "active",
         ownerType: ctx.owner.type,
         ownerId: ctx.owner.id,

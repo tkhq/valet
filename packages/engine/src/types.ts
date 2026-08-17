@@ -1899,6 +1899,11 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
+  /** Interactive-service profile for the child's sandbox (default "headless"). */
+  profile?: "headless" | "full";
+  /** Request a rootless docker daemon inside the child's sandbox
+   * (docker-in-sandbox, `SandboxCreateOpts.docker`). */
+  docker?: boolean;
 }
 
 export interface SpawnChildResult {

@@ -56,6 +56,11 @@ The flag rides the same path as `profile`:
    the key, so existing bakes do not churn.
 2. The session-create API gains an optional `docker: boolean`. Session
    meta assembly (`packages/api/src/engine/session-meta.ts`) stores it.
+   The `task` built-in carries the same optional `docker` (and `profile`)
+   parameters, so an orchestrator can spawn a docker-enabled child: the
+   spawner threads them into the child build and persists them on the
+   child's `agent_sessions` row, which keeps a post-restart rebuild
+   (through the generic `sessionFor`) on the same sandbox shape.
 3. `EngineHost.provisionSandbox` (`packages/api/src/engine/host.ts`)
    resolves `docker = sessionMeta.docker || repoConfig.docker` and sets
    it on `SandboxCreateOpts`.
