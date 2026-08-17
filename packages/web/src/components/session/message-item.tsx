@@ -104,9 +104,9 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
   // formatTarget/formatSummary would compute from partial, jagged args
   // (truncated paths, churning line counts) the renderer never opted to see.
   const live = showsLiveBody(renderer, part.status);
-  const target = live ? renderer.formatTarget(part.args) : undefined;
+  const target = live ? renderer.formatTarget(part.args, part.toolName) : undefined;
   const summary = live
-    ? renderer.formatSummary?.(part.args, part.result, part.status)
+    ? renderer.formatSummary?.(part.args, part.result, part.status, part.toolName)
     : undefined;
   const Body = renderer.Body;
 
@@ -125,6 +125,7 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
           result={part.result}
           status={part.status}
           error={part.error}
+          toolName={part.toolName}
         />
       ) : (
         // Args are still streaming and this renderer didn't opt in — hold

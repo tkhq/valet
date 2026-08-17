@@ -868,6 +868,59 @@ describe('validateWorkflowDefinition — linter checks', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('rejects a trigger path that names a field instead of trigger.data.<field>', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'gen', type: 'llm', model: 'm', prompt: 'mail {{trigger.email}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('"trigger.data.email"'))).toBe(true);
+    }
+  });
+
+  it('accepts every key a trigger payload actually carries', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        {
+          id: 'gen',
+          type: 'llm',
+          model: 'm',
+          prompt: '{{trigger.type}} {{trigger.triggerId}} {{trigger.timestamp}} {{trigger.data.x}} {{trigger.metadata.y}}',
+        },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects an unknown policy.onUnresolvedPath value and names both accepted ones', () => {
+    const definition = linear([
+      { id: 'trigger', type: 'trigger' },
+      { id: 'stop', type: 'stop' },
+    ]);
+    // Stored definitions are unchecked JSON, so the guard must reject a
+    // value the type cannot hold — same single-cast seam as `rawNode`.
+    const stored: unknown = { onUnresolvedPath: 'strict' };
+    const result = validateWorkflowDefinition({ ...definition, policy: stored as WorkflowDefinition['policy'] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('"empty"') && e.includes('"fail"'))).toBe(true);
+    }
+  });
+
+  it('accepts policy.onUnresolvedPath: "fail"', () => {
+    const definition = linear([
+      { id: 'trigger', type: 'trigger' },
+      { id: 'stop', type: 'stop' },
+    ]);
+    expect(validateWorkflowDefinition({ ...definition, policy: { onUnresolvedPath: 'fail' } }).ok).toBe(true);
+  });
+
   it('requires fromOutput on edges leaving an if node', () => {
     const result = validateWorkflowDefinition(
       linear(

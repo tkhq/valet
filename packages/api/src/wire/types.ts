@@ -1073,6 +1073,126 @@ export interface RetryWorkflowRunResponse {
   runId: string;
 }
 
+// ── Node preview (dry run) ────────────────────────────────────────────────
+//
+// `POST /api/workflows/:id/preview` resolves every `{{ ... }}` path in a
+// definition against real data and reports what each node would receive. A
+// template path that does not resolve renders as an empty value and the run
+// still reports success, so a preview that only showed outputs would hide
+// the failure it exists to find. Two rules keep it honest:
+//
+//   1. A node is either EXECUTED or DESCRIBED, never faked. Only pure node
+//      types run (`trigger`, `set`, `if`, `stop`). Everything with a side
+//      effect — a model call, an action, a session, a child run — is
+//      described from its declared shape and never invoked.
+//   2. Every value says where it came from: a real run, this preview's own
+//      pure execution, or the sample input the caller typed.
+
+export interface PreviewWorkflowRequest {
+  /**
+   * Preview an unsaved definition. Omit to preview the stored one. The
+   * editor sends the definition in hand, which is the whole point: the
+   * paths a person is fixing are not saved yet.
+   */
+  definition?: unknown;
+  /** Sample trigger fields. They override the sample run's `trigger.data`. */
+  input?: Record<string, unknown>;
+  /**
+   * Where node results come from. `last_run` (the default) reads the
+   * newest run of this workflow; `none` previews against the sample input
+   * alone, which is what a workflow that has never run has.
+   */
+  sample?: "last_run" | "none";
+  /** Preview one node. Omit for every node in the definition. */
+  nodeId?: string;
+}
+
+/**
+ * `executed` — the node really ran and `output` is its real output.
+ * `described` — nothing ran; `outputShape` says what a real run produces.
+ */
+export type PreviewFidelity = "executed" | "described";
+
+/** One templated field on a node, and what it resolves to. */
+export interface PreviewField {
+  /** Dotted field path inside the node, e.g. `prompt` or `params.title`. */
+  field: string;
+  /** The template exactly as written. */
+  source: string;
+  /** What the template renders to against the sample data. */
+  resolved: unknown;
+  /** Paths in this field that did not resolve. Empty is the normal case. */
+  unresolvedPaths: string[];
+}
+
+/** One `{{ ... }}` path that resolved to nothing. */
+export interface PreviewUnresolvedPath {
+  /** The path exactly as written, e.g. `nodes.draft.result.response`. */
+  path: string;
+  /** The node field the path was written in. */
+  field: string;
+  /** The longest leading part of `path` that does hold a value. */
+  resolvedPrefix: string;
+  /** Keys present at `resolvedPrefix`. This is the list to pick from. */
+  availableKeys: string[];
+  /** The finding in one line, ready to show. */
+  message: string;
+}
+
+/**
+ * Where the shape came from. `observed` is read off a real result in the
+ * sample run and is therefore exact. `declared` comes from the node's own
+ * `outputSchema`. `known` is the node type's documented result. `unknown`
+ * means only the caller of the action can say.
+ */
+export type PreviewShapeOrigin = "observed" | "declared" | "known" | "unknown";
+
+export interface PreviewOutputShape {
+  origin: PreviewShapeOrigin;
+  /** An example value of this shape. Absent when nothing is known. */
+  example?: unknown;
+  /** Paths a downstream node can read, e.g. `nodes.draft.result.text`. */
+  paths: string[];
+  /** What the reader must know about this shape. */
+  note?: string;
+}
+
+export interface PreviewNode {
+  nodeId: string;
+  /** The node's `type` field, verbatim. */
+  type: string;
+  fidelity: PreviewFidelity;
+  /** Why the node was described instead of executed. Absent when executed. */
+  describedReason?: string;
+  fields: PreviewField[];
+  unresolved: PreviewUnresolvedPath[];
+  /** The node's real output. Present only when `fidelity` is `executed`. */
+  output?: unknown;
+  outputShape: PreviewOutputShape;
+  /** Facts that change what this node does, e.g. a foreach truncation. */
+  warnings: string[];
+  /** Set when the node could not be previewed at all, e.g. a broken template. */
+  error?: string;
+}
+
+export interface PreviewSample {
+  /** `last_run` when run data was found; `sample_only` when there was none. */
+  kind: "last_run" | "sample_only";
+  runId?: string;
+  runCreatedAt?: number;
+  /** Node ids whose values came from that run. */
+  fromRun: string[];
+  /** Node ids whose values this preview computed by executing a pure node. */
+  fromPreview: string[];
+  /** Trigger input that does not satisfy the declared `dataSchema`. */
+  inputErrors: Array<{ field: string; message: string }>;
+}
+
+export interface PreviewWorkflowResponse {
+  sample: PreviewSample;
+  nodes: PreviewNode[];
+}
+
 // Arbitrary-URL webhook triggers (overhaul design decision 5). `hookId` is
 // the bearer secret in `POST /api/hooks/workflows/:workflowId/:hookId` —
 // minting/rotating returns it once; `GetWorkflowWebhookResponse` also

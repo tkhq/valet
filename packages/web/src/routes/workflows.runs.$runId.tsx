@@ -6,20 +6,25 @@ import { ApprovalCard } from "~/components/workflows/approval-card";
 import { CheckpointList } from "~/components/workflows/checkpoint-list";
 import { PolicyGateCard } from "~/components/workflows/policy-gate-card";
 import {
+  deriveRunResult,
   findApprovalPrompt,
   findPendingApproval,
+  formatRunDuration,
   runNeedsApproval,
   statusByNodeId,
 } from "~/components/workflows/run-detail-helpers";
+import { RunResultPanel } from "~/components/workflows/run-detail-result";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
+import { formatWhen } from "~/lib/format-when";
 
 /**
- * `/workflows/runs/$runId` — status header, checkpoint list, pending-gate
- * cards, Cancel button (plan decision 19). Polls every 5s via `useRunDetail`
- * (stops once `run.status === 'settled'`).
+ * `/workflows/runs/$runId` — the settled run's result first, then the canvas,
+ * pending-gate cards and the checkpoint list, with a status header and Cancel
+ * button (plan decision 19). Polls every 5s via `useRunDetail` (stops once
+ * `run.status === 'settled'`).
  */
 export const Route = createFileRoute("/workflows/runs/$runId")({
   component: RunDetailPage,
@@ -77,10 +82,10 @@ export interface RunDetailBodyProps {
 }
 
 /**
- * Props-driven body (status bar + gate cards + checkpoint list), split out
- * from `RunDetailPage` so it's testable without router/query wiring — the
- * router `<Link>` above is the only thing that needs real router context, and
- * it's kept out of this component.
+ * Props-driven body (result panel + status bar + gate cards + checkpoint
+ * list), split out from `RunDetailPage` so it's testable without router/query
+ * wiring — the router `<Link>` above is the only thing that needs real router
+ * context, and it's kept out of this component.
  */
 export function RunDetailBody({
   runId,
@@ -99,6 +104,9 @@ export function RunDetailBody({
   const retryable =
     run.status === "settled" && (run.outcome === "failed" || run.outcome === "cancelled");
   const nodeStatuses = statusByNodeId(run, checkpoints);
+  // The answer the person came for. Present only once the run has settled.
+  const result = deriveRunResult(run, checkpoints);
+  const duration = formatRunDuration(run.createdAt, run.updatedAt);
 
   // Legacy signal-based approval: still resolve the prompt for approval-kind
   // gates that come via the old waitingOn path (fallback for older runs).
@@ -159,6 +167,20 @@ export function RunDetailBody({
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {/* The settled answer comes first. Everything below it explains how
+            the run reached that answer. */}
+        {result && <RunResultPanel result={result} />}
+
+        {/* Timings stay on one quiet line: they matter when a run is slow,
+            and never more than the result itself. */}
+        <p className="text-xs text-muted">
+          Started {formatWhen(run.createdAt)}
+          {/* `updatedAt` is the last write, not the current time. It gives a
+              true duration only after the run stops writing. */}
+          {run.status === "settled" && duration && ` · Ran for ${duration}`}
+          {` · ${checkpoints.length} ${checkpoints.length === 1 ? "checkpoint" : "checkpoints"}`}
+        </p>
+
         {isWorkflowDefinitionShape(run.definition) && (
           <WorkflowPreview
             definition={run.definition}
@@ -187,7 +209,12 @@ export function RunDetailBody({
           <ApprovalCard runId={runId} nodeId={legacyPending.nodeId} prompt={legacyPrompt} />
         )}
 
-        <CheckpointList checkpoints={checkpoints} />
+        <div>
+          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
+            Checkpoints
+          </h2>
+          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} />
+        </div>
       </div>
     </>
   );

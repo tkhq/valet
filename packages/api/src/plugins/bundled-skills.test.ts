@@ -24,6 +24,20 @@ interface SkillOnDisk {
   file: string;
 }
 
+/** True when the package's `plugin.yaml` parks it with `enabled: false`.
+ * A parked plugin keeps its skill directory on disk but is left out of the
+ * generated registry on purpose, so the loaded set cannot be compared
+ * against every directory that exists. */
+function isParked(pkg: string): boolean {
+  try {
+    return /^\s*enabled:\s*false\s*$/m.test(
+      readFileSync(join(PACKAGES_DIR, pkg, "plugin.yaml"), "utf8"),
+    );
+  } catch {
+    return false; // No manifest: not parked.
+  }
+}
+
 function skillsOnDisk(): SkillOnDisk[] {
   const found: SkillOnDisk[] = [];
   for (const pkg of readdirSync(PACKAGES_DIR)) {
@@ -70,6 +84,14 @@ describe("bundled skills follow the Agent Skills spec", () => {
     const { skills } = pluginSessionExtras(bundledPlugins);
     const names = skills.map((s) => s.name).sort();
     expect(names).toEqual([...new Set(names)]);
-    expect(names).toEqual(onDisk.map((s) => s.directory).sort());
+    // Parked plugins keep their skill directory but ship no skill, so the
+    // comparison is against the ENABLED set. Comparing against every
+    // directory on disk would make parking a plugin fail this test, and
+    // parking is a supported state.
+    const expected = onDisk
+      .filter((s) => !isParked(s.plugin))
+      .map((s) => s.directory)
+      .sort();
+    expect(names).toEqual(expected);
   });
 });

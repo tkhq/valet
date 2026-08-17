@@ -303,6 +303,9 @@ describe("runInstallationSweepTick", () => {
     await runInstallationSweepTick(deps({ fetchImpl: stubFetch(["111"]) }), state);
     expect(state.get("org1")).toEqual({
       failures: 1,
+      // Carried across a failure: a failure says nothing about whether an
+      // installation exists.
+      emptyStreak: 0,
       nextDueAt: NOW + SWEEP_DUE_MS["no-installations"] * 2,
     });
 

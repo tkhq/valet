@@ -27,6 +27,14 @@ export interface ToolRendererProps {
   result: unknown;
   status: ToolStatus;
   error?: string;
+  /**
+   * The tool the model actually called. One plugin action can arrive under
+   * more than one name — through `call_tool`, or through a pinned direct
+   * tool that carries the action id in its own name — and the two shapes
+   * put the parameters in different places, so a renderer that claims both
+   * has to know which it got.
+   */
+  toolName: string;
 }
 
 export interface ToolRenderer {
@@ -43,14 +51,20 @@ export interface ToolRenderer {
   /**
    * One-liner shown in the collapsed header strip (right of the tool name).
    * Returns the most recognisable identifier for this tool call — usually
-   * a path, command excerpt, or first key of args.
+   * a path, command excerpt, or first key of args. `toolName` is the trailing
+   * argument so a renderer that does not need it can ignore it.
    */
-  formatTarget(args: unknown): string | undefined;
+  formatTarget(args: unknown, toolName: string): string | undefined;
   /**
    * Optional compact summary shown on the far right of the header
    * (e.g. "42 lines", "exit 0", "3 messages").
    */
-  formatSummary?(args: unknown, result: unknown, status: ToolStatus): string | undefined;
+  formatSummary?(
+    args: unknown,
+    result: unknown,
+    status: ToolStatus,
+    toolName: string,
+  ): string | undefined;
   /** Body view rendered when expanded. */
   Body: FC<ToolRendererProps>;
   /**

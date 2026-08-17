@@ -44,6 +44,7 @@ import {
   normalizeIfOperation,
   type IfDataType,
 } from './if-operations.js';
+import { didYouMean } from './near-match.js';
 import type { WorkflowDefinition } from './shape.js';
 import type { DagNodeType, ForeachNode, IfNode, WorkflowNode } from './nodes.js';
 
@@ -132,6 +133,15 @@ const ERROR_POLICY_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
 /** Same reason as `TOOL_CREDENTIAL_MODES`: reject what `NodeErrorPolicy` cannot hold. */
 const NODE_ERROR_POLICIES: ReadonlySet<string> = new Set(['fail', 'continue']);
 
+/** The fixed keys of a `WorkflowTriggerPayload` — see `shape.ts`. */
+const TRIGGER_PAYLOAD_KEYS: ReadonlySet<string> = new Set([
+  'type',
+  'triggerId',
+  'timestamp',
+  'data',
+  'metadata',
+]);
+
 const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
 
@@ -143,6 +153,16 @@ export function validateWorkflowDefinition(
 
   if (definition.version !== 'dag/v1') {
     errors.push(`unsupported version ${JSON.stringify(definition.version)}: expected "dag/v1"`);
+  }
+
+  if (definition.policy?.onUnresolvedPath !== undefined) {
+    const mode = definition.policy.onUnresolvedPath;
+    if (mode !== 'empty' && mode !== 'fail') {
+      errors.push(
+        `policy.onUnresolvedPath must be "empty" or "fail", got ${JSON.stringify(mode)} — ` +
+          `"fail" stops a node whose template reads a path that does not resolve`,
+      );
+    }
   }
 
   const nodesById = new Map<string, WorkflowNode>();
@@ -725,7 +745,23 @@ function checkPathRefs(label: string, field: string, paths: string[][], refCtx: 
   for (const segments of paths) {
     const root = segments[0];
     if (root === undefined) continue;
-    if (root === 'trigger' || refCtx.aliasRoots.has(root)) continue;
+    if (root === 'trigger') {
+      // A run's input is always a `WorkflowTriggerPayload` (`shape.ts`), so
+      // the keys under `trigger` are fixed and anything else can only ever
+      // resolve to nothing. `{{trigger.email}}` for `{{trigger.data.email}}`
+      // is the single most common template mistake, and at run time it
+      // renders as empty instead of failing.
+      const second = segments[1];
+      if (second !== undefined && !TRIGGER_PAYLOAD_KEYS.has(second)) {
+        errors.push(
+          `${label}: ${field} reads "trigger.${second}", but a trigger payload carries only ` +
+            `${[...TRIGGER_PAYLOAD_KEYS].join(', ')} — the trigger's own fields live under "data" ` +
+            `(did you mean "trigger.data.${second}"?)`,
+        );
+      }
+      continue;
+    }
+    if (refCtx.aliasRoots.has(root)) continue;
     if (root === 'nodes') {
       const target = segments[1];
       if (target === undefined) {
@@ -809,40 +845,6 @@ function isPositiveInteger(n: unknown): n is number {
 
 function hasKey(value: unknown, key: string): boolean {
   return isPlainObject(value) && key in value;
-}
-
-/** ` — did you mean "x"?` when a close match exists, else "". */
-export function didYouMean(input: string, candidates: readonly string[]): string {
-  let best: string | null = null;
-  let bestDist = 3; // only suggest within edit distance 2
-  for (const candidate of candidates) {
-    const dist = editDistance(input.toLowerCase(), candidate.toLowerCase(), bestDist);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = candidate;
-    }
-  }
-  return best ? ` — did you mean ${JSON.stringify(best)}?` : '';
-}
-
-/** Bounded Levenshtein — bails once the distance exceeds `limit`. */
-function editDistance(a: string, b: string, limit: number): number {
-  if (Math.abs(a.length - b.length) > limit) return limit + 1;
-  const prev = new Array<number>(b.length + 1);
-  const cur = new Array<number>(b.length + 1);
-  for (let j = 0; j <= b.length; j++) prev[j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    cur[0] = i;
-    let rowMin = cur[0]!;
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost);
-      rowMin = Math.min(rowMin, cur[j]!);
-    }
-    if (rowMin > limit) return limit + 1;
-    for (let j = 0; j <= b.length; j++) prev[j] = cur[j]!;
-  }
-  return prev[b.length]!;
 }
 
 function findCycle(nodesById: Map<string, WorkflowNode>, adjacency: Map<string, string[]>): string | null {

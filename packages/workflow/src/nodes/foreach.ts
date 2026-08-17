@@ -11,8 +11,21 @@
  * `node.items` is template-rendered against `{ trigger, nodes }` (+ any
  * inherited aliases — irrelevant in practice since a foreach can never be
  * a foreach body, but threaded for uniformity). A non-array result fails
- * the node immediately (no iterations attempted). The array is truncated
- * to `maxItems` (default 100); `truncatedCount = inputCount - count`.
+ * the node immediately (no iterations attempted).
+ *
+ * Over-length input is never dropped in silence (batch fan-out phase 3):
+ *
+ *   - `maxItems` absent → the author never chose a bound, so the built-in
+ *     ceiling of 100 is a guard, not an instruction. An array over the
+ *     ceiling FAILS the node, and the message names the two corrections
+ *     (set `maxItems`, or narrow the items expression). Before this, the
+ *     run completed against the first 100 rows and reported success.
+ *   - `maxItems` present → the author chose the bound, so the array is
+ *     truncated to it. The aggregate then carries `truncated: true` and a
+ *     `truncationWarning` sentence, both visible on the run page, and the
+ *     first entry into the node logs the same sentence.
+ *
+ * `truncatedCount = inputCount - count` in both shapes.
  *
  * Items re-resolve deterministically on every entry (upstream checkpoints
  * are immutable, so the same render always yields the same array) — this
@@ -25,26 +38,40 @@
  * than silently iterating a different array than the one it started.
  *
  * ─── Per-iteration execution ────────────────────────────────────────────
- * For each index `i` (processed in order):
- *   - a terminal body checkpoint (completed/failed) → its outcome is
- *     recorded and the iteration is never re-entered.
- *   - an `intent` body checkpoint (parked in an earlier pass) → always
- *     re-entered (re-invoking the body executor lets it re-check
- *     `isSettled`/`awaitResult` on its own submission; this does not
- *     consume a fresh concurrency slot — the slot was already spent when
- *     it first parked).
- *   - no checkpoint (never started) → started only if fewer than
- *     `concurrency` iterations are currently in flight (a "dispatched and
- *     still parked as of this pass" count, per decision 8); otherwise
- *     deferred (left absent) for a later pass.
+ * One pass runs in three phases. The phases exist so that `concurrency`
+ * bounds real parallelism (batch fan-out phase 3) while the aggregate
+ * stays byte-for-byte deterministic: every outcome is stored at its own
+ * index, and every index-ordered decision is made after the phase ends,
+ * never from whichever body happened to settle first.
  *
- * `inFlight` is tracked incrementally as the loop proceeds: it only
- * increments when an iteration's outcome THIS pass is `parked` — an
- * iteration that resolves to terminal (whether newly dispatched or
- * re-entered) frees its slot immediately, so a later absent item in the
- * SAME pass can take it. This is why a concurrency=1 run of purely
- * synchronous bodies (e.g. `set`) finishes the entire array in one call:
- * nothing ever parks, so the gate never triggers.
+ *   1. **Terminal scan** (synchronous, index order). An iteration with a
+ *      terminal body checkpoint (completed/failed) takes its recorded
+ *      outcome and is never re-entered. Under `onItemError: 'fail'`, a
+ *      failure found here halts the pass before anything is dispatched.
+ *   2. **Re-entry** (concurrent, width `concurrency`). An `intent` body
+ *      checkpoint was parked by an earlier pass, so re-invoking its body
+ *      executor only re-checks `isSettled`/`awaitResult` — it dispatches
+ *      nothing new. Every re-entry is visited; the width bounds how many
+ *      run at once. A re-entry that parks again holds the slot it already
+ *      held, and that is what `inFlight` counts.
+ *   3. **Dispatch** (concurrent, width `concurrency - inFlight`). An
+ *      iteration with no checkpoint has never started. A worker takes the
+ *      next such index, runs the body, and — when that body PARKS — the
+ *      worker stops, because the slot it spent stays spent for the rest of
+ *      the pass. A worker whose body reaches a terminal outcome frees the
+ *      slot at once and takes the next index. Indices no worker reaches
+ *      are deferred (left absent) for a later pass.
+ *
+ * Phase 3's "stop this worker on a park" rule is what makes the width a
+ * bound on OUTSTANDING work rather than on wall-clock parallelism. It is
+ * also why a concurrency=1 run of purely synchronous bodies (e.g. `set`)
+ * finishes the whole array in one call: nothing parks, so the single
+ * worker walks every index.
+ *
+ * Before phase 3, every body ran behind one `await` in an ordinary `for`
+ * loop, and `inFlight` counted parked submissions only. A hundred `tool`
+ * or `llm` items therefore ran strictly one after another whatever
+ * `concurrency` said, because those bodies never park.
  *
  * ─── onItemError ─────────────────────────────────────────────────────────
  *   - 'skip': a failed body iteration is recorded as `{status:'skipped',
@@ -52,15 +79,16 @@
  *   - 'collect': a failed body iteration is recorded as `{status:'failed',
  *     error}`; the pass continues; the foreach node itself still
  *     completes once every item is terminal.
- *   - 'fail' (default): the FIRST failed iteration encountered while
- *     walking the array in index order this pass immediately halts
- *     further processing — no iteration at a higher index is started (or
- *     even consulted, including ones that may already be terminal from an
- *     earlier pass — an accepted trade-off of the single-pass, index-order
- *     design; see the report). The aggregate is written with whatever is
- *     known: already-terminal iterations keep their real status, and every
- *     other iteration (still `intent`/in-flight, or never reached) is
- *     recorded as `{status:'skipped'}`. The foreach node itself is marked
+ *   - 'fail' (default): a failed iteration halts the pass. No iteration
+ *     that has not started yet is dispatched, and the failure the node
+ *     reports is the one at the LOWEST index, so two bodies failing in the
+ *     same wave still produce one deterministic error. The aggregate is
+ *     written with whatever is known: every terminal iteration keeps its
+ *     real status (phase 1 reads them all before anything is dispatched,
+ *     so a completed item at a higher index than the failure is no longer
+ *     mis-reported as skipped), and every other iteration (still
+ *     `intent`/in-flight, or never reached) is recorded as
+ *     `{status:'skipped'}`. The foreach node itself is marked
  *     `failed`. Body iterations left in-flight (this pass's `waitingOn`,
  *     or an earlier pass's still-`intent` checkpoint the break never
  *     revisited) are aborted best-effort by this executor itself
@@ -107,6 +135,10 @@ export interface ForeachResult {
   completedCount: number;
   skippedCount: number;
   failedCount: number;
+  /** Present only when rows were dropped. Absent reads as "nothing dropped". */
+  truncated?: true;
+  /** The sentence a reader of the run page needs. Present with `truncated`. */
+  truncationWarning?: string;
 }
 
 interface ForeachEffects {
@@ -121,30 +153,38 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
 
   const rendered = renderTemplate(node.items, templateContext);
   if (!Array.isArray(rendered)) {
-    const error = `foreach "${node.id}": items expression did not resolve to an array (got ${typeof rendered})`;
-    if (existingCheckpoint === undefined) {
-      await store.putIntent({ runId: run.runId, nodeId: node.id, iteration, status: 'intent', attempt, createdAt: clock() });
-    }
-    await store.completeCheckpoint(run.runId, node.id, iteration, attempt, {
-      runId: run.runId,
-      nodeId: node.id,
-      iteration,
-      status: 'failed',
-      error,
-      attempt,
-      createdAt: clock(),
-    });
-    return { status: 'failed', error };
+    return await failWithoutIterating(
+      args,
+      `foreach "${node.id}": items expression did not resolve to an array (got ${typeof rendered})`,
+    );
   }
 
   const inputItems: unknown[] = rendered;
   const maxItems = node.maxItems ?? DEFAULT_MAX_ITEMS;
+
+  // An unbounded foreach over an oversized array is the silent-data-loss
+  // case: the node has no author-chosen bound, so the built-in ceiling is
+  // a guard. Stopping here is the whole point — the alternative is a run
+  // that reports success over a prefix of the data.
+  if (node.maxItems === undefined && inputItems.length > maxItems) {
+    return await failWithoutIterating(
+      args,
+      `foreach "${node.id}": items resolved to ${inputItems.length} entries, over the built-in limit of ${maxItems}. ` +
+        `Set maxItems on this foreach to the number of entries to process, or narrow the items expression.`,
+    );
+  }
+
   const items = inputItems.slice(0, maxItems);
   const effects: ForeachEffects = {
     itemCount: items.length,
     truncatedCount: Math.max(0, inputItems.length - items.length),
     inputCount: inputItems.length,
   };
+  // Warn once per node, not once per drive pass: this executor re-enters
+  // on every pass while items are still in flight.
+  if (effects.truncatedCount > 0 && existingCheckpoint === undefined) {
+    console.warn(truncationWarning(node.id, effects));
+  }
 
   if (existingCheckpoint === undefined) {
     await store.putIntent({
@@ -173,40 +213,26 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
 
   const itemAlias = node.itemAlias ?? 'item';
   const indexAlias = node.indexAlias ?? 'index';
-  const concurrency = node.concurrency ?? DEFAULT_CONCURRENCY;
+  // The validator holds `concurrency` to 1..10, so the floor is defensive
+  // only. A width of 0 would defer every item forever.
+  const concurrency = Math.max(1, node.concurrency ?? DEFAULT_CONCURRENCY);
   const onItemError = node.onItemError ?? 'fail';
+  const failMode = onItemError === 'fail';
 
   const bodyCheckpoints = await loadBodyCheckpoints(store, run.runId, node.body.id);
 
   const results: (ForeachItemResult | undefined)[] = new Array(items.length);
-  const waitingOn: RunWaitCondition[] = [];
-  let inFlight = 0;
-  let failure: { error: string } | undefined;
+  /** Waits per index, flattened in index order at the end so a park's shape does not depend on settle order. */
+  const waitsByIndex: (RunWaitCondition[] | undefined)[] = new Array(items.length);
 
-  for (let i = 0; i < items.length; i++) {
-    const existingBodyCp = bodyCheckpoints.get(i);
-
-    if (existingBodyCp !== undefined && existingBodyCp.status !== 'intent') {
-      results[i] = itemResultFromTerminalCheckpoint(existingBodyCp, onItemError);
-      if (results[i]?.status === 'failed' && onItemError === 'fail') {
-        failure = { error: results[i]?.error ?? 'unknown error' };
-        break;
-      }
-      continue;
-    }
-
-    const isReentry = existingBodyCp !== undefined; // status === 'intent'
-    if (!isReentry && inFlight >= concurrency) {
-      continue; // deferred: absent, not started this pass
-    }
-
+  const runItem = async (i: number): Promise<'terminal' | 'parked'> => {
     const bodyArgs: Omit<NodeExecutorArgs, 'node'> = {
       run,
       attempt,
       iteration: i,
       aliases: { ...(args.aliases ?? {}), [itemAlias]: items[i], [indexAlias]: i },
       templateContext: args.templateContext,
-      existingCheckpoint: existingBodyCp,
+      existingCheckpoint: bodyCheckpoints.get(i),
       store,
       clock,
       engine: args.engine,
@@ -217,21 +243,17 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     const outcome = await invokeBody(node.body, bodyArgs);
 
     if (outcome.status === 'parked') {
-      inFlight++;
-      waitingOn.push(...outcome.waitingOn);
-      continue;
+      waitsByIndex[i] = outcome.waitingOn;
+      return 'parked';
     }
     if (outcome.status === 'completed') {
       results[i] = { status: 'completed', data: outcome.result };
-      continue;
+      return 'terminal';
     }
     if (outcome.status === 'failed') {
-      results[i] = onItemError === 'skip' ? { status: 'skipped', error: outcome.error } : { status: 'failed', error: outcome.error };
-      if (onItemError === 'fail') {
-        failure = { error: outcome.error };
-        break;
-      }
-      continue;
+      results[i] =
+        onItemError === 'skip' ? { status: 'skipped', error: outcome.error } : { status: 'failed', error: outcome.error };
+      return 'terminal';
     }
     // No allowed body type (llm/tool/set/session/orchestrator) ever
     // returns 'skipped' from its own executor — that status is reserved
@@ -240,15 +262,45 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     throw new Error(
       `foreach "${node.id}": body node "${node.body.id}" returned status "skipped", which is not a valid body outcome`,
     );
+  };
+
+  // Phase 1 — terminal rows, index order, nothing dispatched.
+  const reentries: number[] = [];
+  const unstarted: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const existingBodyCp = bodyCheckpoints.get(i);
+    if (existingBodyCp !== undefined && existingBodyCp.status !== 'intent') {
+      results[i] = itemResultFromTerminalCheckpoint(existingBodyCp, onItemError);
+      continue;
+    }
+    if (existingBodyCp !== undefined) reentries.push(i); // status === 'intent'
+    else unstarted.push(i);
   }
+
+  // Phase 2 — re-entries. Each already holds a slot, so the width bounds
+  // how many run at once but never how many are visited.
+  if (!(failMode && hasFailure(results))) {
+    await runPool(reentries, concurrency, runItem, failMode ? () => hasFailure(results) : undefined);
+  }
+
+  // Phase 3 — dispatch, with the slots the parked re-entries left free.
+  const inFlight = reentries.filter((i) => waitsByIndex[i] !== undefined).length;
+  if (!(failMode && hasFailure(results))) {
+    await runPool(unstarted, concurrency - inFlight, runItem, failMode ? () => hasFailure(results) : undefined, true);
+  }
+
+  const waitingOn: RunWaitCondition[] = [];
+  for (const waits of waitsByIndex) {
+    if (waits !== undefined) waitingOn.push(...waits);
+  }
+
+  const failure = failMode ? firstFailure(results) : undefined;
 
   if (failure !== undefined) {
     // Best-effort: abort every body submission left in-flight because of
     // this failure — both ones this pass just parked (`waitingOn`) and
-    // ones that were already parked from an earlier pass and never got
-    // revisited this pass because the fail-mode break happened at a lower
-    // index (see module doc's "Any body iterations left parked" note,
-    // updated by this fix). Must run BEFORE the placeholder-fill loop
+    // ones that were already parked from an earlier pass and that the
+    // fail-mode halt never revisited. Must run BEFORE the placeholder-fill
     // below, which would otherwise erase the "never resolved this pass"
     // signal `results[i] === undefined` relies on. Deduped by
     // sessionId+threadId; a throw from any single abort must not mask the
@@ -290,7 +342,7 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     for (let i = 0; i < results.length; i++) {
       if (results[i] === undefined) results[i] = { status: 'skipped' };
     }
-    const aggregate = buildAggregate(results as ForeachItemResult[], effects);
+    const aggregate = buildAggregate(collectSettled(results, node.id), effects, node.id);
     await store.completeCheckpoint(run.runId, node.id, iteration, attempt, {
       runId: run.runId,
       nodeId: node.id,
@@ -309,10 +361,13 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     return { status: 'parked', waitingOn };
   }
 
-  // Every item resolved to a terminal outcome this pass (concurrency >= 1
-  // guarantees an item is never left absent without something parked to
-  // account for it — see the module doc).
-  const aggregate = buildAggregate(results as ForeachItemResult[], effects);
+  // Every item must have resolved to a terminal outcome. A worker only
+  // stops taking indices when its body parks, so an absent item always has
+  // a park to account for it, and `waitingOn` is empty here. The check
+  // turns a broken invariant into a named error instead of an aggregate
+  // with holes in it.
+  const settled = collectSettled(results, node.id);
+  const aggregate = buildAggregate(settled, effects, node.id);
   await store.completeCheckpoint(run.runId, node.id, iteration, attempt, {
     runId: run.runId,
     nodeId: node.id,
@@ -324,6 +379,100 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     createdAt: clock(),
   });
   return { status: 'completed', result: aggregate };
+}
+
+/**
+ * Runs `indices` through `width` concurrent workers, in index order.
+ *
+ * `halted` is polled before each index is taken, so a fail-mode pass stops
+ * taking new work as soon as any body fails. `stopWorkerOnPark` is the
+ * dispatch-phase rule: a body that parks holds its concurrency slot for the
+ * rest of the pass, so the worker that spent that slot must stop.
+ *
+ * A throw from any worker propagates only after every other worker has
+ * settled, so no body write is left mid-air when the drive aborts. This
+ * mirrors `executeWave` in the interpreter, for the same reason.
+ */
+async function runPool(
+  indices: number[],
+  width: number,
+  runItem: (i: number) => Promise<'terminal' | 'parked'>,
+  halted?: () => boolean,
+  stopWorkerOnPark = false,
+): Promise<void> {
+  // `Math.max(0, width)` is load-bearing, not defensive. The re-entry phase
+  // passes `concurrency - inFlight`, and parked re-entries can hold every
+  // slot, which makes that negative. A negative width must run no worker and
+  // return, rather than throw: the parked bodies still hold the slots, and
+  // the next pass runs the rest once they release them.
+  const workers = Math.min(Math.max(0, width), indices.length);
+  if (workers === 0) return;
+
+  let next = 0;
+  const settled = await Promise.allSettled(
+    Array.from({ length: workers }, async () => {
+      while (true) {
+        if (halted?.() === true) return;
+        const at = next++;
+        if (at >= indices.length) return;
+        const outcome = await runItem(indices[at]);
+        if (outcome === 'parked' && stopWorkerOnPark) return;
+      }
+    }),
+  );
+  const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+  if (rejected) throw rejected.reason;
+}
+
+function hasFailure(results: (ForeachItemResult | undefined)[]): boolean {
+  return results.some((r) => r?.status === 'failed');
+}
+
+/** The lowest-index failure, so a wave with two failures still reports one deterministic error. */
+function firstFailure(results: (ForeachItemResult | undefined)[]): { error: string } | undefined {
+  for (const result of results) {
+    if (result?.status === 'failed') return { error: result.error ?? 'unknown error' };
+  }
+  return undefined;
+}
+
+/** Narrows the per-index results to a dense array, naming the node when the invariant is broken. */
+function collectSettled(results: (ForeachItemResult | undefined)[], nodeId: string): ForeachItemResult[] {
+  const out: ForeachItemResult[] = [];
+  for (const [i, result] of results.entries()) {
+    if (result === undefined) {
+      throw new Error(
+        `foreach "${nodeId}": item ${i} has no outcome and nothing is parked for it — contract violation`,
+      );
+    }
+    out.push(result);
+  }
+  return out;
+}
+
+function truncationWarning(nodeId: string, effects: ForeachEffects): string {
+  return (
+    `foreach "${nodeId}": ${effects.truncatedCount} of ${effects.inputCount} entries were dropped by maxItems=${effects.itemCount}. ` +
+    `Raise maxItems to process them, or narrow the items expression so the count is intentional.`
+  );
+}
+
+/** The intent-then-failed checkpoint pair for a failure raised before any iteration starts. */
+async function failWithoutIterating(args: NodeExecutorArgs<ForeachNode>, error: string): Promise<NodeExecuteResult> {
+  const { run, node, attempt, iteration, store, clock, existingCheckpoint } = args;
+  if (existingCheckpoint === undefined) {
+    await store.putIntent({ runId: run.runId, nodeId: node.id, iteration, status: 'intent', attempt, createdAt: clock() });
+  }
+  await store.completeCheckpoint(run.runId, node.id, iteration, attempt, {
+    runId: run.runId,
+    nodeId: node.id,
+    iteration,
+    status: 'failed',
+    error,
+    attempt,
+    createdAt: clock(),
+  });
+  return { status: 'failed', error };
 }
 
 async function invokeBody(body: ForeachBodyNode, argsBase: Omit<NodeExecutorArgs, 'node'>): Promise<NodeExecuteResult> {
@@ -382,7 +531,7 @@ function itemResultFromTerminalCheckpoint(cp: NodeCheckpoint, onItemError: 'fail
   throw new Error(`foreach body checkpoint "${cp.nodeId}" has unexpected terminal status "${cp.status}"`);
 }
 
-function buildAggregate(items: ForeachItemResult[], effects: ForeachEffects): ForeachResult {
+function buildAggregate(items: ForeachItemResult[], effects: ForeachEffects, nodeId: string): ForeachResult {
   const completedCount = items.filter((r) => r.status === 'completed').length;
   const skippedCount = items.filter((r) => r.status === 'skipped').length;
   const failedCount = items.filter((r) => r.status === 'failed').length;
@@ -394,6 +543,11 @@ function buildAggregate(items: ForeachItemResult[], effects: ForeachEffects): Fo
     completedCount,
     skippedCount,
     failedCount,
+    // Only present when rows were dropped, so an untruncated aggregate
+    // keeps the exact shape every existing consumer reads.
+    ...(effects.truncatedCount > 0
+      ? { truncated: true as const, truncationWarning: truncationWarning(nodeId, effects) }
+      : {}),
   };
 }
 

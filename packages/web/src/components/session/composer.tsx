@@ -1,11 +1,33 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Send, Square } from "lucide-react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent,
+} from "react";
+import { ImagePlus, Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
+import { cn } from "~/lib/cn";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
+import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
+import {
+  acceptImages,
+  filesFromClipboard,
+  filesFromList,
+  readFailure,
+  readImage,
+  transferHasFiles,
+  IMAGE_ACCEPT_ATTRIBUTE,
+  IMAGE_ATTACHMENTS_ENABLED,
+  MAX_IMAGES,
+  type ComposerImage,
+} from "./composer-images";
 
 /**
  * What the submit button does with the text in the composer.
@@ -69,6 +91,17 @@ export function Composer({
   // from under whatever the user is typing.
   const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Images held for the next message. Paste, drop, and the picker all land
+  // here; `imageErrors` holds one line for each file the intake refused.
+  const [images, setImages] = useState<ComposerImage[]>([]);
+  const [imageErrors, setImageErrors] = useState<string[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Drag events fire for every child element the pointer crosses, so a
+  // single `dragleave` does not mean the pointer left the composer. Count
+  // enter and leave, and clear the highlight only at zero.
+  const dragDepth = useRef(0);
 
   // Slash-command autocomplete: two popup modes derived from the text.
   // COMMAND mode while the message is a lone "/token"; ARGUMENT mode while it
@@ -172,11 +205,105 @@ export function Composer({
       ? "steer"
       : "queue";
   const canSend = !send.isPending && !!threadId && text.trim().length > 0;
+  // An image alone cannot go out: the route requires text on the prompt.
+  // Say so on the disabled button instead of leaving the user guessing.
+  const sendTitle = working
+    ? ACTION_HINT[action]
+    : images.length > 0 && text.trim().length === 0
+      ? "Add a message to send with the images."
+      : undefined;
+
+  /** True while the composer refuses new files. */
+  const intakeBlocked = !IMAGE_ATTACHMENTS_ENABLED || send.isPending || !threadId;
+
+  /**
+   * Take files from a paste, a drop, or the picker. Refused files leave a
+   * message; accepted files are read into `data:` URLs for the preview and
+   * for the request body.
+   */
+  async function addFiles(files: File[]) {
+    if (intakeBlocked || files.length === 0) return;
+    const { accepted, rejected } = acceptImages(images, files);
+    setImageErrors(rejected);
+    const read: ComposerImage[] = [];
+    const failures: string[] = [];
+    for (const file of accepted) {
+      try {
+        read.push(await readImage(file));
+      } catch (err) {
+        failures.push(err instanceof Error ? err.message : readFailure(file.name));
+      }
+    }
+    if (failures.length > 0) setImageErrors((prev) => [...prev, ...failures]);
+    if (read.length === 0) return;
+    // `acceptImages` ran against the state this call captured. A second
+    // intake that overlaps this one (a drop while a paste still reads)
+    // would push past the cap, so the cap is applied again at the state
+    // edge, where the real list is.
+    setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
+  }
+
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    if (intakeBlocked) return;
+    const files = filesFromClipboard(e.clipboardData?.items);
+    if (files.length === 0) return;
+    // A pasted screenshot must not also drop its file name into the text.
+    e.preventDefault();
+    void addFiles(files);
+  }
+
+  function onDragEnter(e: DragEvent<HTMLFormElement>) {
+    if (intakeBlocked || !transferHasFiles(e.dataTransfer?.types)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragActive(true);
+  }
+
+  function onDragOver(e: DragEvent<HTMLFormElement>) {
+    if (intakeBlocked || !transferHasFiles(e.dataTransfer?.types)) return;
+    // Without this the browser refuses the drop and opens the file instead.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }
+
+  function onDragLeave(e: DragEvent<HTMLFormElement>) {
+    if (intakeBlocked || !transferHasFiles(e.dataTransfer?.types)) return;
+    e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  }
+
+  function onDrop(e: DragEvent<HTMLFormElement>) {
+    if (intakeBlocked || !transferHasFiles(e.dataTransfer?.types)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    void addFiles(filesFromList(e.dataTransfer.files));
+  }
+
+  function onPickFiles(e: ChangeEvent<HTMLInputElement>) {
+    const files = filesFromList(e.target.files);
+    // Clear the input so the same file can be chosen again later.
+    e.target.value = "";
+    void addFiles(files);
+  }
+
+  function removeImage(id: string) {
+    setImages((prev) => prev.filter((image) => image.id !== id));
+  }
 
   async function submit() {
     const t = text.trim();
     if (!t || send.isPending || !threadId) return;
+    // Held images go with the message. `send.mutateAsync` cannot carry them
+    // yet — see IMAGE_ATTACHMENTS_ENABLED — so the composer keeps the
+    // intake dark rather than dropping pictures on the floor. When the
+    // request body gains `attachments`, pass
+    // `toPromptAttachments(pendingImages)` on the call below.
+    const pendingImages = images;
     setText("");
+    setImages([]);
+    setImageErrors([]);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
@@ -195,6 +322,7 @@ export function Composer({
       // message stays visible — they can see what they sent + retry; on the
       // next reload it'll be reconciled against server truth.
       setText(t);
+      setImages(pendingImages);
       console.error("send failed:", err);
     }
   }
@@ -291,9 +419,19 @@ export function Composer({
         e.preventDefault();
         void submit();
       }}
-      className="border-t border-[--border] p-3 bg-[--bg]"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      className={cn(
+        "border-t border-[--border] p-3 bg-[--bg]",
+        dragActive && "ring-2 ring-inset ring-moss",
+      )}
     >
       <QueueIndicator queueState={queueState} />
+      {dragActive && <p className="mb-2 text-xs text-muted">Drop the images to attach them.</p>}
+      <ComposerImageErrors messages={imageErrors} onDismiss={() => setImageErrors([])} />
+      <ComposerImageStrip images={images} onRemove={removeImage} />
       {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
       {/* `relative` anchors the command popup to the input row, so the hint
           above it never moves the popup. */}
@@ -317,11 +455,36 @@ export function Composer({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
           rows={2}
           className="flex-1"
           disabled={send.isPending || !threadId}
         />
+        {IMAGE_ATTACHMENTS_ENABLED && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={IMAGE_ACCEPT_ATTRIBUTE}
+              multiple
+              className="hidden"
+              onChange={onPickFiles}
+              data-testid="composer-image-input"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="lg"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={intakeBlocked}
+              aria-label="Attach images"
+              title="Attach images"
+            >
+              <ImagePlus className="h-4 w-4" />
+            </Button>
+          </>
+        )}
         {working && (
           <Button
             type="button"
@@ -341,7 +504,7 @@ export function Composer({
           type="submit"
           disabled={!canSend}
           size="lg"
-          title={working ? ACTION_HINT[action] : undefined}
+          title={sendTitle}
         >
           <Send className="h-4 w-4" />
           <span>{ACTION_LABEL[action]}</span>
