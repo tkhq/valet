@@ -400,6 +400,11 @@ async function runPool(
   halted?: () => boolean,
   stopWorkerOnPark = false,
 ): Promise<void> {
+  // `Math.max(0, width)` is load-bearing, not defensive. The re-entry phase
+  // passes `concurrency - inFlight`, and parked re-entries can hold every
+  // slot, which makes that negative. A negative width must run no worker and
+  // return, rather than throw: the parked bodies still hold the slots, and
+  // the next pass runs the rest once they release them.
   const workers = Math.min(Math.max(0, width), indices.length);
   if (workers === 0) return;
 
