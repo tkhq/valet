@@ -15,6 +15,7 @@ import {
   MAX_DIRECTORY_ENTRIES,
 } from "./repo-directory.js";
 import { resolveGithubApiUrl } from "./api.js";
+import { commitFiles, MAX_COMMIT_FILES } from "./commit-files.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.fork_repository": "contents:write",
   "github.read_repo_file": "contents:read",
   "github.list_repo_directory": "contents:read",
+  "github.commit_files": "contents:write",
 };
 
 /** True for the one status an action may want to word for itself. Octokit
@@ -2128,7 +2130,9 @@ const readRepoFile = action(Type.Object({
   }))({
   id: "github.read_repo_file",
   name: "Read Repository File",
-  description: "Read a file from a GitHub repository without cloning it",
+  description:
+    "Read a file from a GitHub repository without cloning it. The result carries the file's blob " +
+    "SHA — pass it to github.commit_files as expectedSha to replace the content you just read.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
@@ -2154,6 +2158,10 @@ const readRepoFile = action(Type.Object({
           repo: `${args.owner}/${args.repo}`,
           ref: args.ref,
           size: data.size,
+          // The blob SHA is what `github.commit_files` takes as
+          // `expectedSha`. Every conflict message there says to read the
+          // file with this action, so this action must supply the value.
+          sha: data.sha,
           content,
         },
       };
@@ -2221,6 +2229,94 @@ const listRepoDirectory = action(Type.Object({
   },
 });
 
+const commitFilesAction = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    branch: Type.String({
+      description:
+        "Branch to commit to. Required — this action never picks a branch for you, and it " +
+        "refuses the repository's default branch unless allowDefaultBranch is true. " +
+        "Create the branch first with github.create_branch.",
+    }),
+    message: Type.String({ description: "Commit message" }),
+    files: Type.Array(
+      Type.Object({
+        path: Type.String({
+          description: "File path relative to the repository root, e.g. docs/plan.md",
+        }),
+        content: Type.String({
+          description: "Whole new content of the file. This replaces the file, it does not append to it.",
+        }),
+        encoding: Type.Optional(
+          Type.Union([Type.Literal("utf-8"), Type.Literal("base64")], {
+            description:
+              'Encoding of "content" (default: utf-8). Use base64 for a file that is not text.',
+          }),
+        ),
+        expectedSha: Type.Optional(
+          Type.String({
+            description:
+              "Blob SHA this file had when you read it, from github.read_repo_file. Pass it to " +
+              "REPLACE an existing file. Leave it out to CREATE a file that is not there yet. " +
+              "A path that already exists is refused without it, and a SHA that has moved on is " +
+              "refused as well, so a change made by somebody else is never overwritten unseen.",
+          }),
+        ),
+      }),
+      {
+        description: `Files to create or update, up to ${MAX_COMMIT_FILES}, all in one commit`,
+      },
+    ),
+    allowDefaultBranch: Type.Optional(
+      Type.Boolean({
+        description:
+          "Set to true to allow the commit when branch is the repository's default branch. " +
+          "Leave it out for normal work: commit to a feature branch and open a pull request.",
+      }),
+    ),
+  }))({
+  id: "github.commit_files",
+  name: "Commit Files",
+  description:
+    "Create or update files in a GitHub repository and commit them to a branch, without cloning " +
+    "it. This is the step between github.create_branch and github.create_pull_request: it is how " +
+    "content reaches a branch when git add, git commit, and git push are not available. Every " +
+    "file in the call lands in ONE commit, so a partly-written change set never reaches the " +
+    "branch. It only adds a commit — it never forces a branch and never rewrites history.",
+  // Writing to a repository changes what other people read and what CI runs.
+  riskLevel: "high",
+  execute: async (args, ctx) => {
+    const octokit = await getOctokit(ctx);
+    try {
+      const outcome = await commitFiles(octokit, {
+        owner: args.owner,
+        repo: args.repo,
+        branch: args.branch,
+        message: args.message,
+        files: args.files,
+        allowDefaultBranch: args.allowDefaultBranch,
+      });
+      if (!outcome.ok) return { success: false, error: outcome.error };
+      return {
+        success: true,
+        data: {
+          repo: `${args.owner}/${args.repo}`,
+          branch: args.branch,
+          commit_sha: outcome.commitSha,
+          commit_url: outcome.commitUrl,
+          parent_sha: outcome.parentSha,
+          tree_sha: outcome.treeSha,
+          files: outcome.files,
+        },
+      };
+    } catch (err) {
+      // Every failure this action can word for itself is worded inside
+      // `commitFiles`, where the step that failed is known.
+      return handleOctokitError(err, "github.commit_files", "Commit files");
+    }
+  },
+});
+
 // ─── Plugin export ───────────────────────────────────────────────────────────
 
 export const githubPlugin: ActionPlugin = {
@@ -2262,5 +2358,6 @@ export const githubPlugin: ActionPlugin = {
     triggerWorkflow,
     readRepoFile,
     listRepoDirectory,
+    commitFilesAction,
   ],
 };

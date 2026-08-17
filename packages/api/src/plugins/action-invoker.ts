@@ -46,7 +46,9 @@ import { actionInvocations } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   resolveInstallationApiToken,
+  type GitHubActorPresence,
   type GitHubTokenDeps,
+  type GitHubTokenSource,
 } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
@@ -74,10 +76,12 @@ export interface ActionInvocationContext {
    * (a synthetic `wf:invoke:{invocationId}` id `buildActionContext` mints
    * below, which carries no repo-binding meaning). Today's only production
    * caller (`../workflows/engine-deps.ts`'s `invokeAction`) never sets this
-   * — a workflow run has no live sandbox/session behind it — so `github`
-   * resolution falls through to the repo-less `auto` tier for every
-   * real invocation. The field exists so a future session-bound caller (or
-   * a test exercising the repo-bound branch) can opt in.
+   * — a workflow run has no live sandbox/session behind it — so no session
+   * binding takes part in `github` resolution for a real invocation. The
+   * repository comes from the action's own `owner`/`repo` parameters
+   * instead (see `buildGithubCredentialProvider`). The field exists so a
+   * future session-bound caller (or a test exercising the binding branch)
+   * can opt in.
    */
   sessionId?: string;
   /**
@@ -89,6 +93,16 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  /**
+   * Whether a live person stands behind this invocation. Set by
+   * `../workflows/engine-deps.ts` from the run's trigger
+   * (`../workflows/run-presence.ts`).
+   *
+   * Only an `auto` credential selection reads it: an explicit `app`/`user`
+   * selection on the node already names the identity. Absent means
+   * `"attended"`, so a direct or test caller keeps the old precedence.
+   */
+  presence?: GitHubActorPresence;
 }
 
 export interface ActionInvokerOpts {
@@ -214,9 +228,12 @@ async function computeResult(
         `Remove the credential field from this tool node.`,
     };
   }
+  // Filled in when the github provider resolves, and read by `identityNote`
+  // on every failure below.
+  const githubIdentity: ResolvedGithubIdentity = {};
   const credentials =
     credentialService === "github"
-      ? buildGithubCredentialProvider(opts, req, ctx, owner)
+      ? buildGithubCredentialProvider(opts, req, ctx, owner, githubIdentity)
       : buildCredentialProvider(opts.credentials, owner, credentialService);
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
@@ -278,7 +295,7 @@ async function computeResult(
     // `call_tool` executor (`plugin-catalog.ts`) uses for this exact call.
     result = await action.execute(prepared.args as Static<typeof action.parameters>, actionCtx);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = `${err instanceof Error ? err.message : String(err)}${identityNote(githubIdentity, req)}`;
     if (auditOrgId) {
       await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
         status: "error",
@@ -304,7 +321,8 @@ async function computeResult(
   }
 
   if (!result.success) {
-    return { ok: false, error: result.error ?? `${req.service}.${req.action} failed with no error detail` };
+    const detail = result.error ?? `${req.service}.${req.action} failed with no error detail`;
+    return { ok: false, error: `${detail}${identityNote(githubIdentity, req)}` };
   }
   // V2-GAP: attachments dropped — workflow results are JSON-only; revisit
   // once workflow runs have a place to store binary artifacts.
@@ -313,6 +331,44 @@ async function computeResult(
 
 function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionResult {
   return { ok: false, error: `unknown action: ${req.service}.${req.action}` };
+}
+
+/**
+ * Which GitHub identity an invocation ran as. Empty until the credential
+ * provider resolves one, and empty for every non-github service.
+ */
+interface ResolvedGithubIdentity {
+  source?: GitHubTokenSource;
+  login?: string;
+}
+
+/**
+ * Names the identity behind a failed github call.
+ *
+ * A node that selects no credential runs as the App installation when
+ * nothing attends the run, and as the run owner when a person started it —
+ * so one definition produces two identities, and the node text names
+ * neither. GitHub hides a repository the credential cannot reach behind
+ * 404 rather than 403, so the bare API error names no cause either. This
+ * sentence is the only place the operator can read which identity the call
+ * carried.
+ *
+ * Returns an empty string when nothing resolved, so a non-github failure
+ * and a failure before resolution both keep their exact previous text.
+ */
+function identityNote(identity: ResolvedGithubIdentity, req: WorkflowInvokeActionRequest): string {
+  if (identity.source === undefined) return "";
+  const selected = req.credential !== undefined && req.credential !== "auto";
+  if (identity.source === "installation") {
+    const how = selected ? "" : " (the default for a run with no live actor)";
+    return (
+      ` This call ran as the GitHub App installation${how}.` +
+      ` If GitHub refused the access, install the App on the repository owner and add the repository to the` +
+      ` repositories it covers, or set credential: "user" on this tool node.`
+    );
+  }
+  const who = identity.login === undefined ? "the run owner's own GitHub account" : `the GitHub account "${identity.login}"`;
+  return ` This call ran as ${who}.`;
 }
 
 /**
@@ -532,14 +588,21 @@ function buildCredentialProvider(store: CredentialStore, owner: CredentialOwner,
  *     an automated review that cannot reach the App must fail visibly
  *     rather than post under the workflow owner's personal account.
  *   - `"user"` → `auth: "user"`, equally strict in the other direction.
- *   - `"auto"` or absent → the pre-existing precedence, binding included.
- *     Every definition written before this field existed lands here.
+ *   - `"auto"` or absent → the tier chain, ordered by `ctx.presence`. Every
+ *     definition written before this field existed lands here.
+ *
+ * The repository named by the action's own `owner`/`repo` parameters goes
+ * to the resolver for every selection. It is what the installation tier
+ * matches an installation against, so a node that targets a repository the
+ * App does not cover falls through to the user credential rather than
+ * borrowing a token minted for another account.
  */
 function buildGithubCredentialProvider(
   opts: ActionInvokerOpts,
   req: WorkflowInvokeActionRequest,
   ctx: ActionInvocationContext,
   owner: CredentialOwner,
+  identity: ResolvedGithubIdentity,
 ): CredentialProvider {
   return {
     async get(service?: string): Promise<Credential | null> {
@@ -575,7 +638,9 @@ function buildGithubCredentialProvider(
         // installation applies. Same org-scoped lookup as the `"app"`
         // selection below — no cross-tenant reach.
         const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
-        return token === null ? null : { accessToken: token };
+        if (token === null) return null;
+        identity.source = "installation";
+        return { accessToken: token };
       }
       const selection = req.credential ?? "auto";
       // `params` are template-rendered, so a webhook payload can choose this
@@ -583,7 +648,14 @@ function buildGithubCredentialProvider(
       // installation up by `(orgId, accountLogin)` — the reachable set is
       // the caller's own org. Keep that scoping: a global installation
       // lookup would turn this node into cross-tenant access.
-      const repo = selection === "app" ? repoFromParams(req.params) : undefined;
+      //
+      // Read for EVERY selection, not only `app`. The `auto` tier chain
+      // needs the target owner to match an installation against; with no
+      // repo it falls to the org's sole installation, which is a token for
+      // whichever account the org installed on — not the account this call
+      // names. `auth: "user"` ignores the repo, so passing it is inert
+      // there.
+      const repo = repoFromParams(req.params);
       if (selection === "app" && !repo) {
         throw new Error(
           `${req.service}.${req.action} cannot use the "app" credential: the repository owner is unknown. ` +
@@ -598,11 +670,16 @@ function buildGithubCredentialProvider(
         // `auto` means "keep the default precedence", so it must NOT
         // override a session binding's own selection.
         ...(selection === "auto" ? {} : { auth: selection }),
+        // Presence only shifts the `auto` precedence. An explicit selection
+        // already names the identity, so it must stay strict.
+        ...(selection === "auto" && ctx.presence !== undefined ? { presence: ctx.presence } : {}),
         ...(repo ? { repo } : {}),
       });
       // `purpose: "api"` never returns `{ source: "none" }` (it throws
       // instead) — `token` is non-null whenever resolution didn't throw.
       if (resolved.token === null) return null;
+      identity.source = resolved.source;
+      identity.login = resolved.login;
       return { accessToken: resolved.token };
     },
     request(): Promise<Credential> {

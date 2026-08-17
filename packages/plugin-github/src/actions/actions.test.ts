@@ -595,6 +595,31 @@ describe("github.read_repo_file", () => {
     expect(isRecord(result.data) ? result.data.content : undefined).toBe(text);
   });
 
+  it("reports the blob SHA, because commit_files asks the caller for it", async () => {
+    // Every expectedSha conflict message in `github.commit_files` says to
+    // read the file with this action. Without the SHA here that instruction
+    // cannot be followed, and the caller has to take a refusal first.
+    const text = "hello";
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        body: {
+          type: "file",
+          encoding: "base64",
+          path,
+          size: text.length,
+          sha: "blob-sha-1",
+          content: Buffer.from(text).toString("base64"),
+        },
+      }),
+    });
+
+    const result = await read("docs/notes.md");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(isRecord(result.data) ? result.data.sha : undefined).toBe("blob-sha-1");
+  });
+
   it("names both corrections when GitHub answers 404", async () => {
     // GitHub sends 404 for a path that is not there AND for a repository the
     // token cannot see. A caller reading a configuration file out of another
@@ -899,5 +924,354 @@ describe("github.create_review", () => {
     expect(result.data.url).toBe("https://github.com/acme/widgets/pull/7#pullrequestreview-900");
     expect(result.data.updated).toBe(false);
     expect(result.data.inline_comments).toBe(1);
+  });
+});
+
+// ─── commit_files ───────────────────────────────────────────────────────────
+
+describe("github.commit_files", () => {
+  interface CommitArgs {
+    owner?: string;
+    repo?: string;
+    branch?: string;
+    message?: string;
+    files?: Array<{
+      path: string;
+      content: string;
+      encoding?: "utf-8" | "base64";
+      expectedSha?: string;
+    }>;
+    allowDefaultBranch?: boolean;
+  }
+
+  async function commit(args: CommitArgs = {}) {
+    return findAction("github.commit_files").execute(
+      {
+        owner: "acme",
+        repo: "handbook",
+        branch: "feat/notes",
+        message: "add notes",
+        files: [{ path: "docs/notes.md", content: "hello" }],
+        ...args,
+      },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  /** A base tree that reports one blob at `path`. */
+  function treeWith(path: string, sha: string, mode = "100644"): GithubFixtureHandlers {
+    return {
+      getTree: () => ({
+        body: {
+          sha: "base-tree-sha",
+          truncated: false,
+          tree: [{ path, mode, type: "blob", sha, size: 1 }],
+        },
+      }),
+    };
+  }
+
+  /** Every request that could change the repository. */
+  function writes(server: GithubFixture): GithubFixtureCall[] {
+    return server.calls.filter((c) => c.method !== "GET");
+  }
+
+  it("creates one commit for several files and moves the branch to it", async () => {
+    const server = useFixture();
+
+    const result = await commit({
+      message: "add the handbook notes",
+      files: [
+        { path: "docs/notes.md", content: "hello" },
+        { path: "docs/index.md", content: "- notes" },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error(result.error);
+
+    // One tree, one commit, one ref update — not one commit per file.
+    expect(writes(server).map((c) => `${c.method} ${c.path}`)).toEqual([
+      "POST /repos/acme/handbook/git/trees",
+      "POST /repos/acme/handbook/git/commits",
+      "PATCH /repos/acme/handbook/git/refs/heads/feat/notes",
+    ]);
+
+    const tree = writes(server)[0];
+    if (!isRecord(tree.body)) throw new Error("no tree body");
+    // `base_tree` carries every path this commit does not name. Without it
+    // the commit deletes the rest of the repository.
+    expect(tree.body.base_tree).toBe("base-tree-sha");
+    expect(tree.body.tree).toEqual([
+      { path: "docs/notes.md", mode: "100644", type: "blob", content: "hello" },
+      { path: "docs/index.md", mode: "100644", type: "blob", content: "- notes" },
+    ]);
+
+    const commitBody = writes(server)[1].body;
+    if (!isRecord(commitBody)) throw new Error("no commit body");
+    expect(commitBody.message).toBe("add the handbook notes");
+    expect(commitBody.parents).toEqual(["base-commit-sha"]);
+
+    if (!isRecord(result.data)) throw new Error("no data");
+    expect(result.data.commit_sha).toBe("new-commit-sha");
+    expect(result.data.parent_sha).toBe("base-commit-sha");
+    expect(result.data.files).toEqual([
+      { path: "docs/notes.md", status: "created", sha: "blob-docs/notes.md" },
+      { path: "docs/index.md", status: "created", sha: "blob-docs/index.md" },
+    ]);
+  });
+
+  it("never forces the branch update", async () => {
+    const server = useFixture();
+
+    await commit();
+
+    const patch = writes(server).find((c) => c.method === "PATCH");
+    if (patch === undefined || !isRecord(patch.body)) throw new Error("no ref update");
+    expect(patch.body.force).toBe(false);
+  });
+
+  it("sends the branch name with its slashes, not as one encoded segment", async () => {
+    // Feature branches are named `feat/x`. Octokit percent-encodes a whole
+    // `{ref}` value into one path segment, which sends GitHub a branch that
+    // is not there.
+    const server = useFixture();
+
+    await commit({ branch: "feat/notes" });
+
+    const ref = server.calls.find((c) => c.path.includes("/git/ref/"));
+    expect(ref?.path).toBe("/repos/acme/handbook/git/ref/heads/feat/notes");
+  });
+
+  // ── The stale-SHA guard ──────────────────────────────────────────────────
+
+  it("refuses a stale expectedSha, names the live SHA, and writes nothing", async () => {
+    const server = useFixture(treeWith("docs/notes.md", "live-sha"));
+
+    const result = await commit({
+      files: [{ path: "docs/notes.md", content: "hello", expectedSha: "stale-sha" }],
+    });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("now at blob SHA live-sha");
+    expect(result.error).toContain("stale-sha");
+    expect(result.error).toContain("github.read_repo_file");
+    // The guard has to run BEFORE anything is created, or a refused write
+    // still leaves objects behind.
+    expect(writes(server)).toEqual([]);
+  });
+
+  it("refuses to overwrite an existing file when no expectedSha was given", async () => {
+    const server = useFixture(treeWith("docs/notes.md", "live-sha"));
+
+    const result = await commit({ files: [{ path: "docs/notes.md", content: "hello" }] });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("already exists at blob SHA live-sha");
+    expect(result.error).toContain('expectedSha "live-sha"');
+    expect(writes(server)).toEqual([]);
+  });
+
+  it("commits when expectedSha matches, and keeps the executable bit", async () => {
+    const server = useFixture(treeWith("scripts/run.sh", "live-sha", "100755"));
+
+    const result = await commit({
+      files: [{ path: "scripts/run.sh", content: "#!/bin/sh\necho ok\n", expectedSha: "live-sha" }],
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error(result.error);
+    const tree = writes(server)[0];
+    if (!isRecord(tree.body)) throw new Error("no tree body");
+    expect(tree.body.tree).toEqual([
+      { path: "scripts/run.sh", mode: "100755", type: "blob", content: "#!/bin/sh\necho ok\n" },
+    ]);
+    if (!isRecord(result.data)) throw new Error("no data");
+    expect(result.data.files).toEqual([
+      { path: "scripts/run.sh", status: "updated", sha: "blob-scripts/run.sh" },
+    ]);
+  });
+
+  it("refuses a commit when a truncated listing cannot prove the path is free", async () => {
+    // A truncated tree proves what it shows and nothing about what it omits.
+    // Writing anyway would overwrite content this action never read.
+    const server = useFixture({
+      getTree: () => ({ body: { sha: "base-tree-sha", truncated: true, tree: [] } }),
+    });
+
+    const result = await commit();
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("truncated");
+    expect(result.error).toContain("docs/notes.md");
+    expect(result.error).toContain("git CLI");
+    expect(writes(server)).toEqual([]);
+  });
+
+  // ── The default-branch guard ─────────────────────────────────────────────
+
+  it("refuses the default branch and writes nothing", async () => {
+    // An agent that meant to write its feature branch and landed on the
+    // default branch is the worst outcome this action can have.
+    const server = useFixture({
+      getRepo: (owner, repo) => ({ body: { full_name: `${owner}/${repo}`, default_branch: "main" } }),
+    });
+
+    const result = await commit({ branch: "main" });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain('"main" is the default branch');
+    expect(result.error).toContain("github.create_pull_request");
+    expect(result.error).toContain("allowDefaultBranch");
+    // Refused before the head of the branch is even read.
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /repos/acme/handbook",
+    ]);
+  });
+
+  it("refuses a branch name with a dot segment before it sends anything", async () => {
+    // `{+branch}` reaches the URL unencoded, so `../heads/main` would make
+    // the URL parser address the default branch while the guard compared
+    // the literal string and saw no match.
+    const server = useFixture({
+      getRepo: (owner, repo) => ({ body: { full_name: `${owner}/${repo}`, default_branch: "main" } }),
+    });
+
+    const result = await commit({ branch: "../heads/main" });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("is not a usable branch name");
+    expect(result.error).toContain("github.create_branch");
+    expect(server.calls).toEqual([]);
+  });
+
+  it("writes the default branch only when the caller opts in", async () => {
+    const server = useFixture({
+      getRepo: (owner, repo) => ({ body: { full_name: `${owner}/${repo}`, default_branch: "main" } }),
+    });
+
+    const result = await commit({ branch: "main", allowDefaultBranch: true });
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error(result.error);
+    expect(writes(server).map((c) => c.method)).toEqual(["POST", "POST", "PATCH"]);
+  });
+
+  it("does not treat a same-named non-default branch as the default branch", async () => {
+    // The guard compares against the repository's own default branch, so a
+    // repo whose default is "trunk" still writes a branch named "main".
+    useFixture({
+      getRepo: (owner, repo) => ({ body: { full_name: `${owner}/${repo}`, default_branch: "trunk" } }),
+    });
+
+    const result = await commit({ branch: "main" });
+
+    expect(result.success).toBe(true);
+  });
+
+  // ── Failures that name the corrective action ─────────────────────────────
+
+  it("tells the caller to create the branch when it is not there", async () => {
+    useFixture({ getRef: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+    const result = await commit();
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain('has no branch "feat/notes"');
+    expect(result.error).toContain("github.create_branch");
+  });
+
+  it("reports a branch that moved while the commit was being prepared", async () => {
+    let refReads = 0;
+    useFixture({
+      getRef: (_owner, _repo, ref) => {
+        refReads += 1;
+        // The second read is the one after the rejected update.
+        const sha = refReads === 1 ? "base-commit-sha" : "someone-elses-commit";
+        return { body: { ref: `refs/${ref}`, object: { type: "commit", sha } } };
+      },
+      updateRef: () => ({ status: 422, body: { message: "Update is not a fast forward" } }),
+    });
+
+    const result = await commit();
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("moved from base-commit-sha to someone-elses-commit");
+    expect(result.error).toContain("Nothing was committed");
+    expect(result.error).toContain("github.read_repo_file");
+  });
+
+  it("names both fixes when the repository answers 404", async () => {
+    useFixture({ getRepo: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+    const result = await commit();
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("acme/handbook is not there");
+    expect(result.error).toContain("cannot see it");
+    expect(result.error).toContain("write access");
+  });
+
+  it("names the permission a 403 needs", async () => {
+    useFixture({
+      createTree: () => ({ status: 403, body: { message: "Resource not accessible by integration" } }),
+    });
+
+    const result = await commit();
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("contents:write");
+  });
+
+  it("uploads a blob for content that is not utf-8 text", async () => {
+    const server = useFixture();
+    const content = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+
+    const result = await commit({
+      files: [{ path: "docs/logo.png", content, encoding: "base64" }],
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error(result.error);
+    const blobPost = writes(server)[0];
+    expect(blobPost.path).toBe("/repos/acme/handbook/git/blobs");
+    if (!isRecord(blobPost.body)) throw new Error("no blob body");
+    expect(blobPost.body.encoding).toBe("base64");
+    expect(blobPost.body.content).toBe(content);
+    // A tree entry writes inline `content` as utf-8, so bytes go in by SHA.
+    const tree = writes(server)[1];
+    if (!isRecord(tree.body)) throw new Error("no tree body");
+    expect(tree.body.tree).toEqual([
+      { path: "docs/logo.png", mode: "100644", type: "blob", sha: "new-blob-sha" },
+    ]);
+  });
+
+  it("rejects a bad request before it sends anything", async () => {
+    const server = useFixture();
+
+    const result = await commit({
+      files: [
+        { path: "docs/notes.md", content: "a" },
+        { path: "docs/notes.md", content: "b" },
+      ],
+    });
+
+    expect(result.success).toBe(false);
+    expect(server.calls).toEqual([]);
+  });
+});
+
+describe("github.commit_files risk", () => {
+  it("is declared high risk, because it changes what the repository holds", () => {
+    expect(findAction("github.commit_files").riskLevel).toBe("high");
   });
 });

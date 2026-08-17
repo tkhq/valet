@@ -389,6 +389,23 @@ describe("buildActionInvoker: github service resolution", () => {
     };
   }
 
+  /** Same credential consumption again, but it reports the 404 GitHub gives
+   * for a repository the resolved token cannot reach. That message names no
+   * identity on its own — the invoker has to add it. */
+  function githubFailingAction(): PluginAction {
+    return {
+      id: "github.create_comment",
+      name: "create_comment",
+      description: "create a comment",
+      riskLevel: "low",
+      parameters: Type.Object({ owner: Type.String(), repo: Type.String() }),
+      execute: async (_args, ctx) => {
+        await ctx.credentials.get();
+        return { success: false, error: "Create comment: GitHub returned 404 Not Found." };
+      },
+    };
+  }
+
   function githubActionPluginByService(): Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }> {
     return actionPluginByServiceOf("github", {
       service: "github",
@@ -709,6 +726,168 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({
       ok: false,
       error: "no GitHub account is connected for this user",
+    });
+  });
+
+  // ── the unattended default ────────────────────────────────────────────
+
+  it("unattended: an installation that does not cover the node's owner falls back to the user token", async () => {
+    const { appDb, credentials } = await harness();
+    // The App is installed on `acme` and nowhere else. The node targets a
+    // repository under `partner-co`, which the run owner reaches personally.
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "partner-co", repo: "docs" },
+        invocationId: "workflow:r1:n6",
+      },
+      { userId, orgId, owner: { type: "user", id: userId }, presence: "unattended" },
+    );
+
+    // A token minted for `acme` cannot reach `partner-co/docs`, so borrowing
+    // it would turn a working nightly run into a GitHub 404.
+    expect(result).toEqual({ ok: true, result: { token: "user-tok" } });
+  });
+
+  it("unattended: the installation that DOES cover the node's owner runs the call", async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n7",
+      },
+      { userId, orgId, owner: { type: "user", id: userId }, presence: "unattended" },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-222" } });
+  });
+
+  // ── the identity behind a failure ─────────────────────────────────────
+  // GitHub hides a repository a token cannot reach behind 404, not 403, so
+  // the API error alone never says which identity the call carried.
+
+  it("names the App installation on a failure, and names the fix", async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: actionPluginByServiceOf("github", {
+        service: "github",
+        actions: [githubFailingAction()],
+      }),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n8",
+      },
+      { userId, orgId, owner: { type: "user", id: userId }, presence: "unattended" },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({
+      error: expect.stringContaining("Create comment: GitHub returned 404 Not Found"),
+    });
+    expect(result).toMatchObject({
+      error: expect.stringContaining("This call ran as the GitHub App installation"),
+    });
+    expect(result).toMatchObject({ error: expect.stringContaining("install the App on the repository owner") });
+    expect(result).toMatchObject({ error: expect.stringContaining('credential: "user"') });
+  });
+
+  it("names the run owner's own account when that is the identity that ran", async () => {
+    const { appDb, credentials } = await harness();
+    await seedAppAndUser(appDb, credentials);
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: actionPluginByServiceOf("github", {
+        service: "github",
+        actions: [githubFailingAction()],
+      }),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n9",
+      },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ error: expect.stringContaining('This call ran as the GitHub account "octocat"') });
+  });
+
+  it("adds no identity sentence when resolution never produced one", async () => {
+    const { appDb, credentials } = await harness();
+    // No user credential, no App: resolution throws before any identity is
+    // chosen, and the connect hint must reach the caller unchanged.
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      {
+        service: "github",
+        action: "create_comment",
+        params: { owner: "acme", repo: "widgets" },
+        invocationId: "workflow:r1:n10",
+      },
+      { userId, orgId, owner: { type: "user", id: userId }, presence: "unattended" },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
     });
   });
 

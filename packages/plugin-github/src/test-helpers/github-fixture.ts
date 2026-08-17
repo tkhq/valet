@@ -72,6 +72,41 @@ export interface GithubFixtureHandlers {
   /** `GET /installation/repositories` — same auth-header view; the real API
    * rejects user tokens on this endpoint. */
   listInstallationRepos?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/git/ref/:ref` — `ref` arrives with its slashes
+   * intact (`heads/feat/x`), so a test can assert the branch was NOT folded
+   * into one percent-encoded segment. */
+  getRef?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
+  /** `PATCH /repos/:owner/:repo/git/refs/:ref` — the one commit point.
+   * Receives the body so a test can assert `force` was never set. */
+  updateRef?: (owner: string, repo: string, ref: string, body: unknown) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/git/trees/:tree_sha` — receives the parsed
+   * query, because `recursive` decides whether nested paths appear at all. */
+  getTree?: (
+    owner: string,
+    repo: string,
+    treeSha: string,
+    query: Record<string, string>,
+  ) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/git/trees` */
+  createTree?: (owner: string, repo: string, body: unknown) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/git/blobs` */
+  createBlob?: (owner: string, repo: string, body: unknown) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/git/commits` */
+  createCommit?: (owner: string, repo: string, body: unknown) => GithubFixtureResponse;
+}
+
+/** Paths out of a `POST /git/trees` body, for the echoed response tree. */
+function requestedTreePaths(body: unknown): string[] {
+  if (typeof body !== "object" || body === null) return [];
+  const tree = (body as Record<string, unknown>).tree;
+  if (!Array.isArray(tree)) return [];
+  const paths: string[] = [];
+  for (const entry of tree) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const path = (entry as Record<string, unknown>).path;
+    if (typeof path === "string") paths.push(path);
+  }
+  return paths;
 }
 
 export interface GithubFixture {
@@ -110,7 +145,45 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   listInstallationRepos: () => ({
     body: { total_count: 1, repositories: [{ full_name: "fixture-org/repo" }] },
   }),
+  getRef: (_owner, _repo, ref) => ({
+    body: { ref: `refs/${ref}`, object: { type: "commit", sha: "base-commit-sha" } },
+  }),
+  updateRef: (_owner, _repo, ref, body) => ({
+    body: {
+      ref: `refs/${ref}`,
+      object: {
+        type: "commit",
+        sha: isRecord(body) && typeof body.sha === "string" ? body.sha : "new-commit-sha",
+      },
+    },
+  }),
+  getTree: () => ({ body: { sha: "base-tree-sha", truncated: false, tree: [] } }),
+  createTree: (_owner, _repo, body) => ({
+    status: 201,
+    body: {
+      sha: "new-tree-sha",
+      tree: requestedTreePaths(body).map((path) => ({
+        path,
+        mode: "100644",
+        type: "blob",
+        sha: `blob-${path}`,
+      })),
+    },
+  }),
+  createBlob: () => ({ status: 201, body: { sha: "new-blob-sha", url: "" } }),
+  createCommit: () => ({
+    status: 201,
+    body: {
+      sha: "new-commit-sha",
+      html_url: "https://github.com/fixture-org/repo/commit/new-commit-sha",
+      message: "fixture commit",
+    },
+  }),
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 function listenPort(server: ServerType): number {
   const address = server.address();
@@ -250,6 +323,64 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     const auth = c.req.header("authorization") ?? undefined;
     const { status, body } = handlers.listInstallationRepos(auth);
     return c.json(body as object, status ?? 200);
+  });
+
+  // The git-data routes. `:ref{.+}` spans slashes on purpose — a branch name
+  // holds them, and the point of these routes is to show the request arrived
+  // with the slashes intact.
+  app.get("/repos/:owner/:repo/git/ref/:ref{.+}", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const ref = c.req.param("ref");
+    record(c, { owner, repo, ref });
+    const { status, body } = handlers.getRef(owner, repo, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.patch("/repos/:owner/:repo/git/refs/:ref{.+}", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const ref = c.req.param("ref");
+    const body = await readJson(c);
+    record(c, { owner, repo, ref }, body);
+    const { status, body: respBody } = handlers.updateRef(owner, repo, ref, body);
+    return c.json(respBody as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/git/trees/:tree_sha", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const treeSha = c.req.param("tree_sha");
+    record(c, { owner, repo, tree_sha: treeSha });
+    const { status, body } = handlers.getTree(owner, repo, treeSha, c.req.query());
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.post("/repos/:owner/:repo/git/trees", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const body = await readJson(c);
+    record(c, { owner, repo }, body);
+    const { status, body: respBody } = handlers.createTree(owner, repo, body);
+    return c.json(respBody as object, status ?? 201);
+  });
+
+  app.post("/repos/:owner/:repo/git/blobs", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const body = await readJson(c);
+    record(c, { owner, repo }, body);
+    const { status, body: respBody } = handlers.createBlob(owner, repo, body);
+    return c.json(respBody as object, status ?? 201);
+  });
+
+  app.post("/repos/:owner/:repo/git/commits", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const body = await readJson(c);
+    record(c, { owner, repo }, body);
+    const { status, body: respBody } = handlers.createCommit(owner, repo, body);
+    return c.json(respBody as object, status ?? 201);
   });
 
   app.get("/repos/:owner/:repo", (c) => {

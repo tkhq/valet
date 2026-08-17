@@ -65,6 +65,8 @@ import type {
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
+import { resolveRunPresence } from "./run-presence.js";
+import type { GitHubActorPresence } from "../services/github-tokens.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { loadAssistant, resolveDefaultAssistant } from "../assistants/service.js";
 
@@ -155,6 +157,18 @@ interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
+  /**
+   * Whether a live person stands behind this run, derived from the trigger
+   * that started it (`run-presence.ts`).
+   *
+   * This covers the `tool` node path only. A `session`/`orchestrator` node
+   * builds its credential resolver ONCE at session-build time
+   * (`engine/host.ts`), and the session outlives the fire that created it,
+   * so presence cannot be attached to it here. Carrying the signal there
+   * needs the session builder to pass it, the same way it already passes
+   * pins — only the caller knows whether a human is watching.
+   */
+  presence: GitHubActorPresence;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -179,7 +193,12 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { orgId: defRow.orgId, actorUserId: actorUserIdFor(owner), owner };
+  return {
+    orgId: defRow.orgId,
+    actorUserId: actorUserIdFor(owner),
+    owner,
+    presence: await resolveRunPresence(opts.store, run),
+  };
 }
 
 /**
@@ -443,6 +462,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        presence: ctx.presence,
       });
     },
 

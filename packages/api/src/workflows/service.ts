@@ -720,12 +720,17 @@ export async function deleteWorkflowDefinition(
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an
  * `invalidInput` result when the caller's input fails the trigger's
- * declared dataSchema (routes map that to 400). */
+ * declared dataSchema (routes map that to 400).
+ *
+ * `retryOf` names the run this start re-runs. It only records provenance —
+ * the new run is a normal `manual` run in every other way. See
+ * `RunParams.retryOf`. */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   input?: Record<string, unknown>,
+  retryOf?: string,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -747,6 +752,7 @@ export async function startWorkflowRun(
     workflowId,
     definitionVersionId: versionId,
     input: trigger,
+    ...(retryOf !== undefined ? { retryOf } : {}),
   };
 
   await deps.workflowRunHost.start(runId, params, definition, {
@@ -1017,11 +1023,17 @@ export async function retryWorkflowRun(
   if (!run) return "not_found";
   if (run.status !== "settled" || run.outcome === "completed") return "not_retryable";
 
+  // `retryOf` keeps the link to the run being retried. A retry of a
+  // SCHEDULED run is still unattended work, but its own trigger payload
+  // says `manual` (a person clicked retry). Without this link the retry
+  // would resolve a different identity than the run it retries, so it
+  // would test something other than the thing that failed.
   const started = await startWorkflowRun(
     deps,
     owner,
     run.params.workflowId,
     triggerData(run.params.input),
+    runId,
   );
   if (!started) return "workflow_deleted";
   return started;

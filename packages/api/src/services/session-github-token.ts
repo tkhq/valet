@@ -12,6 +12,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { sessionRepos } from "../schema/index.js";
 import {
   resolveGitHubToken,
+  type GitHubActorPresence,
   type GitHubAuthMode,
   type GitHubTokenDeps,
   type ResolvedGitHubToken,
@@ -67,6 +68,10 @@ export async function primaryRepoBinding(
  * session binding to read a selection from, and the repository comes from
  * the action's own parameters. Omit both to keep the binding-derived
  * behavior.
+ *
+ * `presence` passes straight through. A session binding cannot supply it:
+ * attendedness is a property of the REQUEST, and one long-lived session
+ * serves both attended and unattended requests. Only the caller knows.
  */
 export async function resolveSessionGitHubToken(
   deps: GitHubTokenDeps,
@@ -77,6 +82,7 @@ export async function resolveSessionGitHubToken(
     purpose: "git" | "api";
     auth?: GitHubAuthMode;
     repo?: { owner: string; name: string };
+    presence?: GitHubActorPresence;
   },
 ): Promise<ResolvedGitHubToken> {
   const binding = args.sessionId ? await primaryRepoBinding(deps.db, args.sessionId) : undefined;
@@ -86,5 +92,6 @@ export async function resolveSessionGitHubToken(
     purpose: args.purpose,
     repo: args.repo ?? binding?.repo,
     auth: args.auth ?? binding?.auth ?? "auto",
+    ...(args.presence !== undefined ? { presence: args.presence } : {}),
   });
 }

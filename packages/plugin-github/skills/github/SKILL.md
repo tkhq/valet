@@ -61,6 +61,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 
 ### Branches & Commits
 - `github.create_branch` — create a branch from a ref
+- `github.commit_files` — create or update files and commit them to a branch, all in one commit
 - `github.delete_branch` — delete a branch
 - `github.list_commits` — list commits on a branch
 
@@ -88,6 +89,41 @@ call_tool github:github.create_pull_request \
   head="feature/my-change" base="main" \
   summary="Create PR for feature/my-change"
 ```
+
+### Write files to a branch without a clone
+Use this when the sandbox has no clone of the repository, or when git push is
+not available. `github.create_branch` makes an empty branch, and a pull request
+needs a branch that carries commits — `github.commit_files` is the step between.
+
+```
+call_tool github:github.create_branch \
+  owner=<owner> repo=<repo> branch="feature/my-change" \
+  summary="Branch for my change"
+
+call_tool github:github.commit_files \
+  owner=<owner> repo=<repo> branch="feature/my-change" \
+  message="Add the design note" \
+  files='[{"path":"docs/design.md","content":"# Design\n..."}]' \
+  summary="Commit the design note to feature/my-change"
+
+call_tool github:github.create_pull_request ...
+```
+
+Rules that action holds you to:
+
+- Name the branch. The action never picks one, and it refuses the repository's
+  default branch unless you pass `allowDefaultBranch=true`. Pass the name
+  exactly as `github.create_branch` made it — a name Git itself refuses, such
+  as one holding `..`, is rejected before any request goes out.
+- To REPLACE a file, read it first with `github.read_repo_file` and pass its
+  blob `sha` as that file's `expectedSha`. Without `expectedSha` the action
+  only creates a file that is not there yet, so it cannot overwrite work you
+  have not read. A stale `expectedSha` is refused, and the error carries the
+  current SHA.
+- Send every file of one change in ONE call. All the files land in a single
+  commit, so a failure leaves the branch untouched instead of half written.
+- The action only adds a commit. It never forces a branch and never rewrites
+  history.
 
 ### List all repos you have access to
 ```

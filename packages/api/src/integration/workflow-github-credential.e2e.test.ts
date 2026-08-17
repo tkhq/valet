@@ -23,6 +23,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
+import type { RunParams, WorkflowTriggerPayload } from "@valet/workflow";
+import { definitionVersionId } from "../workflows/definition-version.js";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -148,16 +150,35 @@ async function installAppOn(a: TestApi, accountLogin: string, installationId: nu
   });
 }
 
-/** Creates the workflow, starts a run, and polls until the run settles. */
-async function runDefinition(a: TestApi, definition: unknown, name: string): Promise<GetWorkflowRunResponse> {
+/** Creates the workflow and returns its id. */
+async function createWorkflow(a: TestApi, definition: unknown, name: string): Promise<string> {
   const createRes = await fetch(`${a.baseUrl}/api/workflows`, {
     method: "POST",
     headers: HEADERS,
     body: JSON.stringify({ name, definition }),
   });
   expect(createRes.status).toBe(201);
-  const { id: workflowId } = (await createRes.json()) as CreateWorkflowResponse;
+  const { id } = (await createRes.json()) as CreateWorkflowResponse;
+  return id;
+}
 
+/** Polls one run until it settles. */
+async function pollRun(a: TestApi, runId: string): Promise<GetWorkflowRunResponse> {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const res = await fetch(`${a.baseUrl}/api/workflows/runs/${runId}`);
+    expect(res.status).toBe(200);
+    const detail = (await res.json()) as GetWorkflowRunResponse;
+    if (detail.run.status === "settled") return detail;
+    if (Date.now() > deadline) throw new Error(`run ${runId} did not settle: ${JSON.stringify(detail.run)}`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/** Creates the workflow, starts a run through the HTTP route (which stamps
+ * a `manual` trigger — an ATTENDED start), and polls until it settles. */
+async function runDefinition(a: TestApi, definition: unknown, name: string): Promise<GetWorkflowRunResponse> {
+  const workflowId = await createWorkflow(a, definition, name);
   const startRes = await fetch(`${a.baseUrl}/api/workflows/${workflowId}/runs`, {
     method: "POST",
     headers: HEADERS,
@@ -165,17 +186,33 @@ async function runDefinition(a: TestApi, definition: unknown, name: string): Pro
   });
   expect(startRes.status).toBe(201);
   const { runId } = (await startRes.json()) as StartWorkflowRunResponse;
+  return pollRun(a, runId);
+}
 
-  const deadline = Date.now() + 15_000;
-  let detail: GetWorkflowRunResponse | undefined;
-  for (;;) {
-    const res = await fetch(`${a.baseUrl}/api/workflows/runs/${runId}`);
-    expect(res.status).toBe(200);
-    detail = (await res.json()) as GetWorkflowRunResponse;
-    if (detail.run.status === "settled") return detail;
-    if (Date.now() > deadline) throw new Error(`run ${runId} did not settle: ${JSON.stringify(detail.run)}`);
-    await new Promise((r) => setTimeout(r, 200));
-  }
+/**
+ * Creates the workflow and fires it the way `workflows/scheduler.ts` fires a
+ * schedule: straight through `workflowRunHost.start` with a `schedule`
+ * trigger payload. There is no HTTP route that produces an unattended run —
+ * every route start is a `manual` one — so this is the only way to drive the
+ * real unattended path end to end.
+ */
+async function runUnattended(a: TestApi, definition: unknown, name: string, runId: string): Promise<GetWorkflowRunResponse> {
+  const workflowId = await createWorkflow(a, definition, name);
+  const trigger: WorkflowTriggerPayload = {
+    type: "schedule",
+    triggerId: "sched_1",
+    timestamp: new Date().toISOString(),
+    data: {},
+    metadata: {},
+  };
+  const params: RunParams = {
+    workflowId,
+    definitionVersionId: definitionVersionId(definition),
+    triggerId: "sched_1",
+    input: trigger,
+  };
+  await a.providers.workflowRunHost.start(runId, params, definition, { ownerType: "user", ownerId: USER_ID });
+  return pollRun(a, runId);
 }
 
 interface EchoedToken {
@@ -220,5 +257,70 @@ describe("api integration: github tool node credential selection", () => {
     expect(checkpoint?.status).toBe("failed");
     expect(checkpoint?.error).toBe("the GitHub App is not installed on acme");
     expect(detail.run.outcome).toBe("failed");
+  }, 30_000);
+});
+
+/**
+ * The unattended default. Same wiring as above, but the run is fired the way
+ * a schedule fires it, so the trigger says `schedule` rather than `manual`.
+ * The node names NO credential — this is the default, not a selection.
+ */
+describe("api integration: github tool node default credential for an unattended run", () => {
+  it("an unattended run acts as the installation that covers the node's own owner", async () => {
+    api = await boot();
+    await connectUser(api);
+    // A second installation, so only an owner-matched mint can produce
+    // `inst-601`. Without it the assertion would also pass on a resolver
+    // that guesses the org's one installation whatever the node targets.
+    await installAppOn(api, "acme", 601);
+    await installAppOn(api, "unrelated-org", 605);
+
+    const detail = await runUnattended(api, definitionWith(undefined), "gh-unattended", "wfrun_sched_1");
+
+    const checkpoint = detail.checkpoints.find((c) => c.nodeId === "comment");
+    expect(checkpoint?.status).toBe("completed");
+    expect((checkpoint?.result as EchoedToken | undefined)?.token).toBe("inst-601");
+    expect(detail.run.outcome).toBe("completed");
+  }, 30_000);
+
+  // The migration promise: an org that never installed the App ON THIS
+  // REPOSITORY keeps running its existing workflows on the owner's own
+  // token. One installation elsewhere is the ordinary single-org shape, and
+  // it must not be borrowed for a repository it does not cover.
+  it("an unattended run falls back to the owner's token when the App is installed only elsewhere", async () => {
+    api = await boot();
+    await connectUser(api);
+    await installAppOn(api, "other-org", 602);
+
+    const detail = await runUnattended(api, definitionWith(undefined), "gh-unattended-no-app", "wfrun_sched_2");
+
+    const checkpoint = detail.checkpoints.find((c) => c.nodeId === "comment");
+    expect(checkpoint?.status).toBe("completed");
+    expect((checkpoint?.result as EchoedToken | undefined)?.token).toBe("user-tok");
+    expect(detail.run.outcome).toBe("completed");
+  }, 30_000);
+
+  it("an unattended run falls back to the owner's token when the App is not installed at all", async () => {
+    api = await boot();
+    await connectUser(api);
+
+    const detail = await runUnattended(api, definitionWith(undefined), "gh-unattended-no-install", "wfrun_sched_4");
+
+    const checkpoint = detail.checkpoints.find((c) => c.nodeId === "comment");
+    expect(checkpoint?.status).toBe("completed");
+    expect((checkpoint?.result as EchoedToken | undefined)?.token).toBe("user-tok");
+    expect(detail.run.outcome).toBe("completed");
+  }, 30_000);
+
+  it('an unattended run still honors an explicit credential "user"', async () => {
+    api = await boot();
+    await connectUser(api);
+    await installAppOn(api, "acme", 604);
+
+    const detail = await runUnattended(api, definitionWith("user"), "gh-unattended-explicit-user", "wfrun_sched_3");
+
+    const checkpoint = detail.checkpoints.find((c) => c.nodeId === "comment");
+    expect(checkpoint?.status).toBe("completed");
+    expect((checkpoint?.result as EchoedToken | undefined)?.token).toBe("user-tok");
   }, 30_000);
 });

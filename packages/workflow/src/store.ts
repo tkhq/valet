@@ -59,6 +59,17 @@ export interface RunParams {
   parentRunId?: string;
   parentNodeId?: string;
   parentIteration?: number;
+  /**
+   * The run this one retries, when a caller restarted a failed run.
+   *
+   * A retry re-enters the normal start path, so its own trigger payload
+   * says `manual` — and it must keep saying that, because a definition can
+   * read `{{trigger.type}}` and because a person really did start it. This
+   * field records the provenance the trigger type cannot: a host that must
+   * know whether the WORK is unattended reads the original run through this
+   * link. Absent on every run that is not a retry.
+   */
+  retryOf?: string;
 }
 
 /**

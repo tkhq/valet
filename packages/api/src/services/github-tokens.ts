@@ -19,9 +19,35 @@
  *     healthy org PAT → `{ token: null, source: "none" }` (tokenless —
  *     public clones proceed bare; a private-repo failure surfaces git's own
  *     error).
- *   - `auto` + `api`: healthy user credential → installation(`repo.owner`)
- *     when a repo is given → the org's SOLE non-suspended installation when
- *     exactly one exists → healthy org PAT → THROW with a connect hint.
+ *   - `auto` + `api`, `presence: "attended"` (the default): healthy user
+ *     credential → the installation tier → healthy org PAT → THROW with a
+ *     connect hint.
+ *   - `auto` + `api`, `presence: "unattended"`: the SAME tiers with the
+ *     installation tier moved AHEAD of the user credential (see below).
+ *
+ * The installation tier reads the REQUEST, not the org: when the request
+ * names a repo it resolves installation(`repo.owner`) and nothing else, and
+ * only a request that names no repo falls to the org's SOLE non-suspended
+ * installation. A token minted for a different account cannot reach the
+ * named repository, so borrowing it would turn a clean fallthrough into a
+ * GitHub 404 that names no cause.
+ *
+ * ── Actor presence ──────────────────────────────────────────────────────
+ * `presence` says whether a live person stands behind this request. It
+ * only reorders the `auto` + `api` chain; an explicit `auth` selection
+ * stays strict, and `auto` + `git` already puts the installation first.
+ *
+ * An unattended request is a machine-started one — a scheduled workflow
+ * fire, an event or webhook delivery. Resolving the user tier first there
+ * makes a team's automation run on one person's personal token: it carries
+ * that person's identity, and it stops working the day they leave. So the
+ * installation tier goes first when nobody is watching.
+ *
+ * The user tier stays in the chain BELOW the installation for an unattended
+ * request. It is a fallback, not a preference: an org that has no App
+ * installed keeps working exactly as before. Only an org that installed the
+ * App sees the identity change. A caller that needs the installation or
+ * nothing asks for `auth: "app"`, which never falls back.
  *
  * ── "Healthy" user credential ───────────────────────────────────────────
  * A user-owned `github` credential is healthy when it is NOT
@@ -94,6 +120,11 @@ export class GitHubAuthError extends Error {
 export type GitHubAuthMode = "auto" | "app" | "user";
 export type GitHubTokenSource = "installation" | "user" | "pat" | "none";
 
+/** Whether a live person stands behind the request that needs this token.
+ * `"unattended"` names a machine-started request (a scheduled workflow
+ * fire, an event or webhook delivery). See the module doc comment. */
+export type GitHubActorPresence = "attended" | "unattended";
+
 export interface ResolveGitHubTokenRequest {
   orgId: string;
   userId?: string;
@@ -102,6 +133,12 @@ export interface ResolveGitHubTokenRequest {
   /** Explicit credential selection. Defaults to `"auto"`. `"app"`/`"user"`
    * are honored STRICTLY (no silent fallback across the selection). */
   auth?: GitHubAuthMode;
+  /**
+   * Defaults to `"attended"`, so every caller that does not set this keeps
+   * the precedence it had before this field existed. Only `auto` + `api`
+   * reads it.
+   */
+  presence?: GitHubActorPresence;
 }
 
 export interface ResolvedGitHubToken {
@@ -520,17 +557,34 @@ export async function resolveGitHubToken(
     return { token: null, source: "none" };
   }
 
-  // auto + api: user → installation(owner) → sole installation → org PAT → throw.
-  const user = await resolveUserCredential(deps, req.orgId, req.userId);
-  if (user.ok) return { token: user.token, source: user.source, login: user.login };
+  // auto + api. Two tiers, then the org PAT, then a throw. Presence decides
+  // which of the two goes first: an unattended request must not prefer a
+  // person's token (see the module doc comment). The org PAT stays last in
+  // both orders — it is the org-wide pasted credential, not an identity.
+  const installationTier = async (): Promise<ResolvedGitHubToken | null> => {
+    if (req.repo) {
+      // A NAMED owner with no installation is a miss for this tier, not an
+      // invitation to use a different account's token. An installation on
+      // another account cannot reach this repository, and GitHub answers
+      // that with 404 rather than 403, so the failure carries no usable
+      // hint. The sole-installation guess below stays valid only when the
+      // request named no owner at all.
+      const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+      return installation === null ? null : { token: installation, source: "installation" };
+    }
+    const sole = await resolveSoleInstallationToken(deps, req.orgId);
+    return sole === null ? null : { token: sole, source: "installation" };
+  };
+  const userTier = async (): Promise<ResolvedGitHubToken | null> => {
+    const user = await resolveUserCredential(deps, req.orgId, req.userId);
+    return user.ok ? { token: user.token, source: user.source, login: user.login } : null;
+  };
 
-  if (req.repo) {
-    const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
-    if (installation) return { token: installation, source: "installation" };
+  const tiers = (req.presence ?? "attended") === "unattended" ? [installationTier, userTier] : [userTier, installationTier];
+  for (const tier of tiers) {
+    const resolved = await tier();
+    if (resolved) return resolved;
   }
-
-  const sole = await resolveSoleInstallationToken(deps, req.orgId);
-  if (sole) return { token: sole, source: "installation" };
 
   const orgPat = await resolveOrgPatCredential(deps, req.orgId);
   if (orgPat.ok) return { token: orgPat.token, source: "pat", login: orgPat.login };

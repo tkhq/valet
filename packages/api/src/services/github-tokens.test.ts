@@ -366,6 +366,245 @@ describe("resolveGitHubToken", () => {
     });
   });
 
+  // ── presence ────────────────────────────────────────────────────────
+  // An unattended request must not prefer a person's token. Presence only
+  // reorders the two `auto` + `api` tiers; everything else is unchanged.
+  describe("actor presence", () => {
+    /** Healthy personal credential the unattended chain must rank BELOW
+     * the installation. */
+    async function connectUser(): Promise<void> {
+      await saveUserGithub({ type: "oauth2", accessToken: "user-tok", metadata: { login: "octocat" } });
+    }
+
+    it('unattended + api: uses the installation even though a healthy user credential exists', async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await connectUser();
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "acme", name: "repo" },
+        presence: "unattended",
+      });
+      expect(result).toEqual({ token: "inst-999", source: "installation" });
+    });
+
+    it("unattended + api: uses the org's SOLE installation when the node names no repo", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await connectUser();
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      const result = await resolveGitHubToken(deps(), { orgId, userId, purpose: "api", presence: "unattended" });
+      expect(result).toEqual({ token: "inst-999", source: "installation" });
+    });
+
+    // The migration promise: an org with no App installed keeps working.
+    it("unattended + api: falls back to the user credential when the App is not installed", async () => {
+      await connectUser();
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "acme", name: "repo" },
+        presence: "unattended",
+      });
+      expect(result).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+
+    it("unattended + api: falls back to the user credential when the App is installed on ANOTHER account", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation({ id: "ghi_1", installationId: 111, accountLogin: "acme" });
+      await seedInstallation({ id: "ghi_2", installationId: 222, accountLogin: "other" });
+      await connectUser();
+      fixture = startGithubFixture();
+
+      // Two installations, neither matching the repo owner: the repo tier
+      // misses and the sole-installation tier does not apply.
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "nobody", name: "repo" },
+        presence: "unattended",
+      });
+      expect(result).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+
+    // The single-org shape, which is the ordinary one. A named owner with no
+    // installation must not borrow the token of the one account the org DID
+    // install on: that token cannot reach the repository, and GitHub answers
+    // 404 rather than 403, so the failure would name no cause.
+    it("unattended + api: does NOT borrow the org's SOLE installation for a repo it does not cover", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation({ id: "ghi_1", installationId: 111, accountLogin: "other" });
+      await connectUser();
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "nobody", name: "repo" },
+        presence: "unattended",
+      });
+      expect(result).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+
+    it("attended + api: does NOT borrow the org's SOLE installation for a repo it does not cover", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation({ id: "ghi_1", installationId: 111, accountLogin: "other" });
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      // No user credential at all, so the installation tier is the only one
+      // left before the throw. It must still refuse to guess an account.
+      await expect(
+        resolveGitHubToken(deps(), { orgId, userId, purpose: "api", repo: { owner: "nobody", name: "repo" } }),
+      ).rejects.toThrow(GitHubAuthError);
+    });
+
+    it("unattended + api: still mints the installation when it covers the named owner", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation({ id: "ghi_1", installationId: 111, accountLogin: "acme" });
+      await seedInstallation({ id: "ghi_2", installationId: 222, accountLogin: "other" });
+      await connectUser();
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      // Two installations, so the sole tier cannot apply. Only an
+      // owner-matched mint can produce this token.
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "acme", name: "repo" },
+        presence: "unattended",
+      });
+      expect(result).toEqual({ token: "inst-111", source: "installation" });
+    });
+
+    it("unattended + api: still THROWS with a connect hint when nothing at all is available", async () => {
+      fixture = startGithubFixture();
+      await expect(
+        resolveGitHubToken(deps(), { orgId, userId, purpose: "api", presence: "unattended" }),
+      ).rejects.toThrow(/connect your GitHub/i);
+    });
+
+    it('attended + api: keeps the user credential ahead of the installation', async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await connectUser();
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "acme", name: "repo" },
+        presence: "attended",
+      });
+      expect(result).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+
+    it("an omitted presence resolves exactly as attended does", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await connectUser();
+      fixture = startGithubFixture();
+
+      const omitted = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "acme", name: "repo" },
+      });
+      expect(omitted).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+
+    it('presence does NOT loosen an explicit auth: "app" — it still throws when not installed', async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await connectUser();
+      fixture = startGithubFixture();
+
+      await expect(
+        resolveGitHubToken(deps(), {
+          orgId,
+          userId,
+          purpose: "api",
+          repo: { owner: "acme", name: "repo" },
+          auth: "app",
+          presence: "attended",
+        }),
+      ).rejects.toThrow(new GitHubAuthError("the GitHub App is not installed on acme"));
+    });
+
+    it('presence does NOT redirect an explicit auth: "user" to the installation', async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await connectUser();
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "api",
+        repo: { owner: "acme", name: "repo" },
+        auth: "user",
+        presence: "unattended",
+      });
+      expect(result).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+
+    it("unattended + git is unchanged: the installation already ranked first there", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await connectUser();
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      const unattended = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "git",
+        repo: { owner: "acme", name: "repo" },
+        presence: "unattended",
+      });
+      const attended = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "git",
+        repo: { owner: "acme", name: "repo" },
+        presence: "attended",
+      });
+      expect(unattended).toEqual({ token: "inst-999", source: "installation" });
+      expect(attended).toEqual(unattended);
+    });
+
+    it("unattended + api: the org PAT stays BELOW the user credential", async () => {
+      await connectUser();
+      await saveOrgGithub({ type: "oauth2", accessToken: "org-pat", metadata: { login: "acme-bot" } });
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), { orgId, userId, purpose: "api", presence: "unattended" });
+      expect(result).toEqual({ token: "user-tok", source: "pat", login: "octocat" });
+    });
+  });
+
   // ── org-owned PAT ───────────────────────────────────────────────────
   describe("org-owned PAT", () => {
     it("auto + git falls through to the org PAT when no installation and no user credential", async () => {
