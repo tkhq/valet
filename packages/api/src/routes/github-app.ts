@@ -4,6 +4,12 @@
  * flow, installations admin, and the public webhook that keeps
  * `github_installations` in sync without a poll loop.
  *
+ * There are two ways an org gets an App, and both end at `saveAppConfig`
+ * with the same credential row. `POST /manifest` + `GET /setup` create a new
+ * App. `POST /credential` connects one that already exists, for an admin
+ * whose App name is taken (names are global on GitHub) or whose database was
+ * reset. The manifest flow stays the default.
+ *
  * Two routers live in this file:
  *
  *   - `githubAppRouter` — admin-gated, mounted at `/api/org/github-app` in
@@ -51,13 +57,19 @@ import { requireOrgAdmin } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState as verifySignedState, STATE_TTL_MS } from "../lib/oauth-state.js";
+import { resolveReturnOrigin } from "./credential-connect.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import {
+  buildAppConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
+  parsePrivateKeyPem,
   resolveGithubAppEnvConfig,
   saveAppConfig,
+  syncAppWebhookUrl,
+  verifyAppCredential,
+  GITHUB_APP_WEBHOOK_PATH,
   type GithubAppConfig,
   type GithubAppDeps,
 } from "../services/github-app.js";
@@ -69,6 +81,7 @@ import type {
   GetGithubAppResponse,
   GithubAppInstallationSummary,
   GithubAppManifestWire,
+  PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
 } from "../wire/types.js";
@@ -113,6 +126,16 @@ async function buildGetResponse(deps: GithubAppDeps, orgId: string): Promise<Get
       : undefined,
     installations: rows.map(toInstallationSummary),
     webhook: { mode: publicUrlFromEnv(process.env) ? "public" : "manual" },
+    // The newest row's timestamp. `discoverInstallations` writes `updatedAt`
+    // on every upsert whether or not the row changed, so this dates the last
+    // successful read rather than the last change — which is what the page
+    // needs to say how fresh the list is. Reduced here rather than by a SQL
+    // `max()`, because the two drivers disagree on what a `max()` over a
+    // bigint column returns.
+    installationsCheckedAt: rows.reduce<number | null>(
+      (newest, row) => (newest === null || row.updatedAt > newest ? row.updatedAt : newest),
+      null,
+    ),
   };
 }
 
@@ -133,17 +156,29 @@ interface ManifestState {
   orgId: string;
   nonce: string;
   exp: number;
+  /** Origin to send the browser back to after GitHub redirects here.
+   * Captured when the state is minted, because at the callback the referer
+   * is GitHub, not this app. Empty when the caller is same-origin, which is
+   * the deployed shape — the api serves the client, so a relative redirect
+   * already lands in the right place. */
+  returnTo?: string;
 }
 
 /** Verifies signature + expiry. Returns `null` for any tampering, malformed
  * shape, or expired `exp` — never throws. */
-function verifyManifestState(state: string, key: Buffer, nowMs: number): { orgId: string } | null {
-  return verifySignedState<{ orgId: string }>(state, key, (payload) => {
+function verifyManifestState(
+  state: string,
+  key: Buffer,
+  nowMs: number,
+): { orgId: string; returnTo: string } | null {
+  return verifySignedState<{ orgId: string; returnTo: string }>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { orgId, exp } = payload;
+    const { orgId, exp, returnTo } = payload;
     if (typeof orgId !== "string" || typeof exp !== "number") return null;
     if (exp < nowMs) return null;
-    return { orgId };
+    // The origin was allow-listed before signing, so trusting it here is
+    // trusting our own signature, not GitHub's query string.
+    return { orgId, returnTo: typeof returnTo === "string" ? returnTo : "" };
   });
 }
 
@@ -270,7 +305,7 @@ githubAppRouter.post("/manifest", async (c) => {
     url: apiBase,
     redirect_url: `${apiBase}/api/org/github-app/setup`,
     callback_urls: [`${apiBase}/api/me/github/callback`],
-    ...(webhookOn ? { hook_attributes: { url: `${apiBase}/webhooks/github-app` } } : {}),
+    ...(webhookOn ? { hook_attributes: { url: `${apiBase}${GITHUB_APP_WEBHOOK_PATH}` } } : {}),
     public: false,
     // Subscribe ONLY to events an App may subscribe to. GitHub delivers
     // the App-lifecycle events (`installation`,
@@ -294,7 +329,13 @@ githubAppRouter.post("/manifest", async (c) => {
   };
 
   const key = deriveSecretKey(encryptionKey);
-  const statePayload: ManifestState = { orgId, nonce: randomBytes(16).toString("hex"), exp: Date.now() + STATE_TTL_MS };
+  const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
+  const statePayload: ManifestState = {
+    orgId,
+    nonce: randomBytes(16).toString("hex"),
+    exp: Date.now() + STATE_TTL_MS,
+    ...(returnTo ? { returnTo } : {}),
+  };
   const state = signState(statePayload, key);
 
   const responseBody: PostGithubAppManifestResponse = { url, manifest, state };
@@ -355,7 +396,145 @@ githubAppRouter.get("/setup", async (c) => {
     console.error("github-app setup: post-save discovery failed:", err);
   }
 
-  return c.redirect("/settings/organization/github?setup=ok", 302);
+  // The app was created with the public URL this instance had when the
+  // manifest was built. That URL can already be stale (an ephemeral tunnel
+  // restarts between the manifest POST and this callback), so assert the
+  // current one. `syncAppWebhookUrl` never throws — the admin must reach the
+  // success page even when GitHub refuses the update.
+  await syncAppWebhookUrl({ credentials: engineCredentials }, verified.orgId, publicUrlFromEnv(process.env));
+
+  return c.redirect(`${verified.returnTo}/settings/organization/github?setup=ok`, 302);
+});
+
+/** Reads a string field, trimmed. `""` for anything absent or not a string —
+ * the caller decides which fields that makes missing. Trimming is safe for
+ * the private key: a PEM is unchanged by it, and base64 delivery often gains
+ * a trailing newline. */
+function stringField(body: Record<string, unknown>, name: string): string {
+  const value = body[name];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readCredentialRequest(body: Record<string, unknown>): PostGithubAppCredentialRequest {
+  return {
+    appId: stringField(body, "appId"),
+    privateKey: stringField(body, "privateKey"),
+    appSlug: stringField(body, "appSlug"),
+    oauthClientId: stringField(body, "oauthClientId"),
+    oauthClientSecret: stringField(body, "oauthClientSecret"),
+    webhookSecret: stringField(body, "webhookSecret"),
+  };
+}
+
+const SEND_JSON_BODY = "Send a JSON body with the app id and the private key.";
+
+/**
+ * The second setup path: connect a GitHub App that already exists.
+ *
+ * An App name is global on GitHub, so an admin who already made an App — or
+ * whose database was reset — cannot use `POST /manifest` again. That attempt
+ * fails on GitHub's own page, where this app never sees the error and cannot
+ * explain it. Here the admin supplies the credential instead.
+ *
+ * The credential is checked against GitHub BEFORE it is stored (`GET /app`,
+ * see `verifyAppCredential`). A wrong app id or private key is refused at the
+ * paste, with a message naming the fix, rather than at the first tool call an
+ * hour later. The check also reports the app's slug, page URL and OAuth
+ * client id, so the admin only has to supply what GitHub keeps to itself.
+ *
+ * The save overwrites an existing credential row, the same as `GET /setup`
+ * does. That is what rotating an app's private key looks like, and the form
+ * that drives this route is only offered while the org has no app at all.
+ *
+ * The response is `GetGithubAppResponse` — the same body `GET /` returns, so
+ * the client re-renders from one payload, and no secret is echoed back.
+ */
+githubAppRouter.post("/credential", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+
+  let parsed: unknown;
+  try {
+    parsed = await c.req.json();
+  } catch {
+    return c.json({ error: SEND_JSON_BODY }, 400);
+  }
+  if (!isRecord(parsed)) return c.json({ error: SEND_JSON_BODY }, 400);
+  const body = readCredentialRequest(parsed);
+
+  const missing = [...(body.appId ? [] : ["the app id"]), ...(body.privateKey ? [] : ["the private key"])];
+  if (missing.length > 0) {
+    return c.json(
+      {
+        error: `Enter ${missing.join(" and ")}. The app's settings page on GitHub shows the app id, and generates a private key.`,
+      },
+      400,
+    );
+  }
+
+  const privateKeyPem = parsePrivateKeyPem(body.privateKey);
+  if (!privateKeyPem) {
+    return c.json(
+      {
+        error:
+          "The private key is not a PEM. Paste the whole file GitHub downloaded, including the BEGIN and END lines.",
+      },
+      400,
+    );
+  }
+
+  const check = await verifyAppCredential(
+    { apiUrl: resolveGithubApiUrl(process.env) },
+    { appId: body.appId, privateKeyPem },
+  );
+  if (!check.ok) return c.json({ error: check.error }, 400);
+
+  // GitHub is authoritative for everything it reports: it answered for this
+  // exact key, so its slug beats a mistyped one. The supplied values are the
+  // fallback for the fields GitHub marks optional.
+  const appSlug = check.app.appSlug ?? body.appSlug ?? "";
+  if (!appSlug) {
+    return c.json(
+      {
+        error:
+          "GitHub did not report the app's slug. Enter it yourself. The slug is the last part of the app's URL on GitHub.",
+      },
+      400,
+    );
+  }
+
+  const orgId = c.var.user.orgId;
+  const deps = buildAppDeps(c);
+  const config = buildAppConfig(
+    {
+      appId: check.app.appId,
+      appSlug,
+      oauthClientId: check.app.oauthClientId ?? body.oauthClientId ?? "",
+      htmlUrl: check.app.htmlUrl,
+      privateKeyPem,
+      oauthClientSecret: body.oauthClientSecret,
+      webhookSecret: body.webhookSecret,
+    },
+    process.env,
+  );
+  await saveAppConfig({ credentials: c.var.providers.engineCredentials }, orgId, config);
+
+  // Best-effort, same as `GET /setup`: the credential is already stored, so a
+  // transient discovery failure must not read as a failed connect. `POST
+  // /refresh` catches up.
+  try {
+    await discoverInstallations(deps, orgId);
+  } catch (err) {
+    console.error("github-app credential: post-save discovery failed:", err);
+  }
+
+  // The stored key makes this instance the app's owner (see
+  // `syncAppWebhookUrl`), so assert this instance's webhook URL — otherwise
+  // events keep going to wherever the app pointed before, and nothing says
+  // so. Never throws.
+  await syncAppWebhookUrl({ credentials: c.var.providers.engineCredentials }, orgId, publicUrlFromEnv(process.env));
+
+  return c.json(await buildGetResponse(deps, orgId));
 });
 
 githubAppRouter.post("/refresh", async (c) => {

@@ -15,7 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
-  orchestratorSessionId,
+  parseAssistantSessionId,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -34,10 +34,12 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { agentSessions } from "../schema/index.js";
-import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
+import { ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
+import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
+import { ChannelStreamBridge } from "./stream-bridge.js";
 
 export interface ChannelHostDeps {
   db: AppDb;
@@ -50,6 +52,8 @@ export interface ChannelHostDeps {
   publicUrl?: string;
   /** Resolves the single org id (single-org assumption, same as auth middleware). */
   resolveOrgId: () => Promise<string>;
+  /** Durable open-stream state. Defaults to the Postgres store over `db`. */
+  activeStreams?: ActiveStreamStore;
   now?: () => number;
 }
 
@@ -112,6 +116,15 @@ function chatIdFromKey(conversationKey: string): string {
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
 }
 
+/** Feature-detects a transport that opens a direct conversation with one of
+ * its users. A provider whose user id is not also a conversation id (Slack:
+ * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
+function hasOpenDirect(
+  transport: ChannelTransport,
+): transport is ChannelTransport & { openDirectConversation(externalId: string): Promise<string> } {
+  return typeof (transport as { openDirectConversation?: unknown }).openDirectConversation === "function";
+}
+
 export class ChannelHost {
   private transports = new Map<string, ChannelTransport>();
   private botUsernames = new Map<string, string>();
@@ -140,8 +153,40 @@ export class ChannelHost {
   /** Guards against a second `start()` re-creating transports/poll loops
    * on top of already-running ones; reset in `stop()`. */
   private started = false;
+  /** Engine deltas → provider streams. Only transports that implement the
+   * whole start/append/stop triple ever reach it. */
+  private readonly streamBridge: ChannelStreamBridge;
 
-  constructor(private readonly deps: ChannelHostDeps) {}
+  constructor(private readonly deps: ChannelHostDeps) {
+    this.streamBridge = new ChannelStreamBridge({
+      eventStream: deps.eventStream,
+      streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
+      transportFor: (channelType) => this.transportFor(channelType),
+      markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
+      abortTurn: async (sessionId, threadId) => {
+        // Streams only ever run on a channel thread, and channel threads only
+        // exist on an assistant's session (see `handleGateCallback`'s note on
+        // the same invariant). An assistant session id names the assistant,
+        // not its owner, so the owner is read from the row: only a
+        // user-owned assistant has a single actor to abort as.
+        const assistantId = parseAssistantSessionId(sessionId);
+        if (!assistantId) return;
+        const assistant = await loadAssistant(this.deps.db, assistantId);
+        if (!assistant || assistant.ownerType !== "user") return;
+        const session = await this.deps.engineHost.assistantSessionFor(assistantId, {
+          actorUserId: assistant.ownerId,
+          orgId: this.orgId ?? (await this.deps.resolveOrgId()),
+        });
+        await session.abort({ threadId });
+      },
+      now: deps.now,
+    });
+  }
+
+  /** The streaming bridge, for tests and for routes that need its state. */
+  streams(): ChannelStreamBridge {
+    return this.streamBridge;
+  }
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
@@ -180,7 +225,19 @@ export class ChannelHost {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;
         }
-        const transport = factory.create({ credential, config: {} });
+        // A factory rejects a credential it cannot serve — the Slack one
+        // throws when `metadata.teamId` is absent, because every outbound
+        // conversation key embeds it. Contained per transport: one bad
+        // credential must not stop the transports after it in this loop, nor
+        // the outbound queue and the boot stream sweep below. The message
+        // names the fix, so the operator reads it in the startup log.
+        let transport: ChannelTransport;
+        try {
+          transport = factory.create({ credential, config: {} });
+        } catch (err) {
+          console.error(`[channels] ${factory.channelType}: transport not started`, err);
+          continue;
+        }
         this.transports.set(factory.channelType, transport);
         if (hasGetMe(transport)) {
           try {
@@ -194,6 +251,19 @@ export class ChannelHost {
       }
     }
     this.startOutbound();
+    this.streamBridge.start();
+    // Close streams a previous boot left open. Runs after the transports are
+    // up because closing one needs its transport, and after `startOutbound`
+    // so a slow sweep cannot delay live traffic.
+    const bootedAt = this.now();
+    for (const channelType of this.transports.keys()) {
+      try {
+        const closed = await this.streamBridge.sweepOnBoot(channelType, bootedAt);
+        if (closed > 0) console.log(`[channels] ${channelType}: closed ${closed} stream(s) left open by a restart`);
+      } catch (err) {
+        console.error(`[channels] ${channelType}: boot stream sweep failed`, err);
+      }
+    }
   }
 
   /**
@@ -263,6 +333,9 @@ export class ChannelHost {
     await Promise.all(this.pollLoops);
     this.pollControllers.clear();
     this.pollLoops = [];
+    // Before the transports go away: a stream closed here is one the next
+    // boot does not have to apologise for.
+    await this.streamBridge.stop();
     this.stopOutbound();
     this.started = false;
   }
@@ -333,13 +406,31 @@ export class ChannelHost {
     }
   }
 
-  /** Locked convention: split `key` on the FIRST `:`; the first segment must name a running transport. */
+  /**
+   * Locked convention: split `key` on the FIRST `:`; the first segment must
+   * name a running transport.
+   *
+   * The `${channelType}:dm:${rest}` default is Telegram's key shape, where the
+   * chat id is the whole address. A transport whose conversationKey carries
+   * more than that — Slack's holds the workspace id, which lives on the
+   * credential and never reaches the thread key — rebuilds the key itself
+   * through `conversationKeyFromThreadKey`. Without this hop every outbound
+   * call for such a transport is handed a key it did not mint.
+   */
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
     const idx = key.indexOf(":");
     if (idx === -1) return null;
     const channelType = key.slice(0, idx);
     const rest = key.slice(idx + 1);
     if (rest === "" || !this.isRunning(channelType)) return null;
+    const transport = this.transports.get(channelType);
+    const rebuilt = transport?.conversationKeyFromThreadKey?.(key);
+    if (rebuilt !== undefined) {
+      // `null` means the transport disowns the key. Delivering it under the
+      // default shape would post somewhere it did not choose, so stop instead.
+      if (rebuilt === null) return null;
+      return { channelType, conversationKey: rebuilt };
+    }
     return { channelType, conversationKey: `${channelType}:dm:${rest}` };
   }
 
@@ -360,6 +451,11 @@ export class ChannelHost {
     reason: "end_turn" | "error" | "abort",
   ): Promise<void> {
     if (reason !== "end_turn") return;
+    // A streamed message is already on screen. Posting it again as a discrete
+    // message would show the reader the same answer twice, once under the
+    // stream. Checked before any await: the marker is written on
+    // `message_start`, which always precedes this event.
+    if (this.streamBridge.isStreamed(sessionId, messageId)) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
     const mapped = this.channelThreadFor(thread.key);
@@ -444,6 +540,12 @@ export class ChannelHost {
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
+
+    // Close any open stream FIRST, so the approval card lands after the text
+    // that led to it. Sequenced here rather than from the bridge's own
+    // subscriber, because two independent subscribers to `decision_gate` have
+    // no defined order and the reader would sometimes see the card first.
+    await this.streamBridge.closeForGate(sessionId, gate.threadId);
 
     const ref = await transport.sendGatePrompt(mapped.conversationKey, {
       gateId: gate.id,
@@ -533,6 +635,16 @@ export class ChannelHost {
       return;
     }
 
+    if (event.kind === "surface_opened") {
+      // Someone opened the conversation and said nothing. There is no turn to
+      // start, so this ends here — but it is not a dropped update, and a
+      // drop-log row per DM open would bury the reasons that matter. The
+      // useful work for a linked user is a set of suggested prompts, which
+      // needs prompt copy this host does not own yet; the unlinked case
+      // already answered above with the link instructions.
+      return;
+    }
+
     // Rule 6: anything else.
     await this.dropLog(orgId, "unsupported_kind", event.conversationKey, `kind=${event.kind}`);
   }
@@ -593,13 +705,37 @@ export class ChannelHost {
     userId: string,
   ): Promise<void> {
     const orgId = this.orgId ?? (await this.deps.resolveOrgId());
-    const { session } = await ensureOrchestratorSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
+    // An inbound channel message names a USER, never one of that user's
+    // assistants, so it goes to the user's default — the same target every
+    // other machine-driven path resolves to.
+    const { session } = await ensureDefaultAssistantSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
     });
 
-    const chatId = chatIdFromKey(event.conversationKey);
-    const thread = session.thread(`${channelType}:${chatId}`);
+    // Ask the transport for the thread key when it owns the mapping, so this
+    // half and `channelThreadFor`'s inverse cannot drift apart. The default
+    // below is the same derivation Telegram has always used.
+    const threadKey =
+      transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
+      `${channelType}:${chatIdFromKey(event.conversationKey)}`;
+    const thread = session.thread(threadKey);
+
+    // Register the turn before the prompt is submitted, so the first
+    // `message_start` already knows where to stream. Nothing opens yet: a
+    // turn that parks on an approval gate before writing any text must not
+    // leave an empty stream on screen. Transports without a reply anchor
+    // (Telegram) supply no threadTs and never stream.
+    if (event.threadTs !== undefined) {
+      this.streamBridge.noteInboundTurn({
+        channelType,
+        conversationKey: event.conversationKey,
+        sessionId: session.id,
+        threadId: thread.id,
+        threadTs: event.threadTs,
+        orgId,
+      });
+    }
 
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];
@@ -665,18 +801,18 @@ export class ChannelHost {
       return;
     }
 
-    // Resolution deliberately looks up the user's orchestrator session
+    // Resolution deliberately looks up the user's default assistant session
     // rather than reusing `mapped.sessionId` — the ownership check above
     // only proved `mapped.sessionId` belongs to `userId`, not that it IS
-    // the orchestrator session. This relies on the invariant that
-    // channel-keyed threads (see `channelThreadFor`) exist only on
-    // orchestrator sessions: `handleMessage` always threads through
-    // `ensureOrchestratorSession`, so any gate whose ref maps back to a
-    // channel thread must have been raised on that same orchestrator
-    // session. If that invariant is ever violated, `resolveDecision` below
-    // throws on a gateId that doesn't exist on this session — caught by
+    // that session. This relies on the invariant that channel-keyed threads
+    // (see `channelThreadFor`) exist only on the default assistant's
+    // session: `handleMessage` always threads through
+    // `ensureDefaultAssistantSession`, so any gate whose ref maps back to a
+    // channel thread must have been raised on that same session. If that
+    // invariant is ever violated, `resolveDecision` below throws on a
+    // gateId that doesn't exist on this session — caught by
     // `handleUpdate`'s try/catch (fails safe, not silently wrong).
-    const session = await this.deps.engineHost.orchestratorSessionFor({ type: "user", id: userId }, {
+    const { session } = await ensureDefaultAssistantSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
     });
@@ -704,7 +840,14 @@ export class ChannelHost {
             if (!link || link.notifyAttention === false) continue;
             const transport = this.transports.get(channelType);
             if (!transport) continue;
-            await transport.send(`${channelType}:dm:${link.externalId}`, {
+            // `${channelType}:dm:${externalId}` assumes the sender's id is also
+            // the address to answer on, which holds for Telegram and not for
+            // Slack: `U…` names a person, `D…` names the DM with them. Ask the
+            // transport to open the conversation when it knows the difference.
+            const conversationKey = hasOpenDirect(transport)
+              ? await transport.openDirectConversation(link.externalId)
+              : `${channelType}:dm:${link.externalId}`;
+            await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),
             });
           } catch (err) {

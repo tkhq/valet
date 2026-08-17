@@ -55,7 +55,7 @@ const APP_TABLES = [
   "messages",
   "teams",
   "team_members",
-  "orchestrator_identities",
+  "assistants",
   "child_watches",
   "notifications",
   "user_notification_preferences",

@@ -15,6 +15,7 @@ import type {
   CreateWorkflowRequest,
   CreateWorkflowResponse,
   CreateWorkflowScheduleRequest,
+  WorkflowWebhookResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   ListAllWorkflowRunsResponse,
@@ -33,15 +34,26 @@ import type {
   WorkflowEventTriggerResponse,
   WorkflowScheduleResponse,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
-  list: () => ["workflows"] as const,
+  /** The owner is a trailing element, so `["workflows"]` stays the prefix
+   * that invalidates every workspace's list at once — a workflow created in
+   * one workspace still refreshes the others. */
+  list: (owner?: OwnerFilter) =>
+    ["workflows", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   detail: (id: string) => ["workflows", id] as const,
-  runs: (id: string) => ["workflows", id, "runs"] as const,
+  // The page/filter is a trailing key element, so two pages of one list are
+  // two cache entries while the page-less form stays the prefix that
+  // invalidates all of them.
+  runs: (id: string, page?: WorkflowRunPage) =>
+    ["workflows", id, "runs", ...(page ? [page] : [])] as const,
+  runList: (filter?: WorkflowRunFilter) =>
+    ["workflows", "run-list", ...(filter ? [filter] : [])] as const,
   run: (runId: string) => ["workflows", "runs", runId] as const,
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
+  webhook: (id: string) => ["workflows", id, "webhook"] as const,
   triggers: (workflowId?: string) => ["workflows", "triggers", workflowId ?? "all"] as const,
   allRuns: () => ["workflows", "all-runs"] as const,
   triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
@@ -49,10 +61,20 @@ export const qkWorkflows = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useWorkflows(opts?: Partial<UseQueryOptions<ListWorkflowsResponse>>) {
+/**
+ * The workflows of one workspace, or of everything the caller can reach.
+ *
+ * `owner` MUST be part of the query key, not only the request. Without it
+ * React Query answers a switched workspace from the previous workspace's
+ * cache: the list looks right on the first switch and wrong on the way back.
+ */
+export function useWorkflows(
+  owner?: OwnerFilter,
+  opts?: Partial<UseQueryOptions<ListWorkflowsResponse>>,
+) {
   return useQuery<ListWorkflowsResponse>({
-    queryKey: qkWorkflows.list(),
-    queryFn: () => api.listWorkflows(),
+    queryKey: qkWorkflows.list(owner),
+    queryFn: () => api.listWorkflows(owner),
     ...opts,
   });
 }
@@ -69,14 +91,29 @@ export function useWorkflow(
   });
 }
 
+/** One workflow's runs, newest first. Paged — read `nextCursor` to page on. */
 export function useWorkflowRuns(
   id: string,
+  page?: WorkflowRunPage,
   opts?: Partial<UseQueryOptions<ListWorkflowRunsResponse>>,
 ) {
   return useQuery<ListWorkflowRunsResponse>({
-    queryKey: qkWorkflows.runs(id),
-    queryFn: () => api.listWorkflowRuns(id),
+    queryKey: qkWorkflows.runs(id, page),
+    queryFn: () => api.listWorkflowRuns(id, page),
     enabled: !!id,
+    ...opts,
+  });
+}
+
+/** Runs across every workflow the caller can reach. Pass `parentRunId` to
+ * list one batch parent's child runs. */
+export function useRuns(
+  filter?: WorkflowRunFilter,
+  opts?: Partial<UseQueryOptions<ListWorkflowRunsResponse>>,
+) {
+  return useQuery<ListWorkflowRunsResponse>({
+    queryKey: qkWorkflows.runList(filter),
+    queryFn: () => api.listRuns(filter),
     ...opts,
   });
 }
@@ -251,6 +288,50 @@ export function useCancelRun(runId: string) {
     mutationFn: () => api.cancelWorkflowRun(runId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+    },
+  });
+}
+
+// ── Triggers: webhook, schedules, event triggers ─────────────────────────
+
+/** The webhook status read treats "no webhook configured" (404) as `null`
+ * rather than an error — absence is the normal starting state. */
+export function useWorkflowWebhook(id: string) {
+  return useQuery<WorkflowWebhookResponse | null>({
+    queryKey: qkWorkflows.webhook(id),
+    queryFn: async () => {
+      try {
+        return await api.getWorkflowWebhook(id);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+  });
+}
+
+export function useMintWorkflowWebhook(id: string) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowWebhookResponse, Error, void>({
+    mutationFn: () => api.mintWorkflowWebhook(id),
+    onSuccess: (webhook) => {
+      // Seed the cache from the response before the refetch lands: after a
+      // rotate, the old URL is revoked the moment the POST returns, so the
+      // screen must not keep showing it while a refetch round-trips.
+      qc.setQueryData(qkWorkflows.webhook(id), webhook);
+      void qc.invalidateQueries({ queryKey: qkWorkflows.webhook(id) });
+    },
+  });
+}
+
+export function useDeleteWorkflowWebhook(id: string) {
+  const qc = useQueryClient();
+  return useMutation<{ deleted: boolean }, Error, void>({
+    mutationFn: () => api.deleteWorkflowWebhook(id),
+    // onSettled, not onSuccess: a failed delete (e.g. already gone) must
+    // also reconcile the cached row with the server.
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qkWorkflows.webhook(id) });
     },
   });
 }

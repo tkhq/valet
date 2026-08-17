@@ -24,8 +24,6 @@ import { SessionHeader } from "~/components/session/session-header";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { Button, Spinner } from "~/components/primitives";
 
-export type SessionViewVariant = "full" | "panel" | "standalone";
-
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
  * threads/gates/tool cards/WS resume/optimistic messages — everything the
@@ -33,23 +31,21 @@ export type SessionViewVariant = "full" | "panel" | "standalone";
  * the child slide-over, and the standalone session page all share one
  * implementation instead of three copies.
  *
- * Variant controls header chrome only. The threads/thread-tree *sidebar*
- * is NOT rendered here — it's a root-layout concern (`__root.tsx` swaps
- * `ThreadTree`/nothing based on the current route), because the sidebar
- * lives outside this component's DOM subtree in the app shell's `<aside>`.
- * "full" (used by `/chat`) gets the thread-tree sidebar from the root
- * layout; "standalone" (`/sessions/$sessionId`) and "panel" (`ChildPanel`)
- * get no sidebar at all (decisions 14/13).
+ * `panel` selects the header chrome, and nothing else. The threads/
+ * thread-tree *sidebar* is NOT rendered here — it's a root-layout concern
+ * (`__root.tsx` swaps `ThreadTree`/nothing based on the current route),
+ * because the sidebar lives outside this component's DOM subtree in the
+ * app shell's `<aside>`.
  *
- * - `full` / `standalone`: identical body — the existing `SessionHeader`
- *   (title, model picker, sandbox/connection/status chips, delete).
- * - `panel`: compact header (title + "open full page" + ✕ close) instead,
- *   no delete/model-picker chrome — this is a lightweight peek, not the
- *   session's home.
+ * - default: the existing `SessionHeader` (title, model picker,
+ *   sandbox/connection/status chips, delete).
+ * - `panel`: compact header (title, "open full page", and a ✕ close for a
+ *   host that passes `onClose`) instead, with no delete/model-picker
+ *   chrome — this is a lightweight peek, not the session's home.
  */
 export function SessionView({
   sessionId,
-  variant,
+  panel,
   activeThreadId,
   onClose,
   onOpenChild,
@@ -57,14 +53,19 @@ export function SessionView({
   onTabChange,
 }: {
   sessionId: string;
-  variant: SessionViewVariant;
+  /** Renders the compact slide-over header instead of `SessionHeader`. */
+  panel?: boolean;
   /**
    * Controlled active thread id, typically derived from the host route's
    * `?thread=` search param (full/standalone). When omitted (panel), the
    * view falls back to the session's first/default thread.
    */
   activeThreadId?: string;
-  /** panel-only: closes the slide-over. Required when variant === "panel". */
+  /**
+   * panel-only: closes the slide-over. Omitted by a host whose panel is
+   * permanent — the workflow editor's assistant column is the surface
+   * itself, so a ✕ there would offer to close something that must stay.
+   */
   onClose?: () => void;
   /**
    * Called when a child-card signal is clicked. When omitted, `SignalCard`
@@ -73,9 +74,9 @@ export function SessionView({
   onOpenChild?: (childSessionId: string) => void;
   /**
    * Controlled active tab (Chat/Terminal/VS Code), typically derived from
-   * the host route's `?tab=` search param (standalone). When omitted
-   * (full/panel), this view falls back to internal state defaulting to
-   * "chat" — those hosts don't have a `?tab=` search param of their own.
+   * the host route's `?tab=` search param (`/sessions/$sessionId`). When
+   * omitted, this view falls back to internal state defaulting to "chat" —
+   * the other hosts have no `?tab=` search param of their own.
    */
   activeTab?: SandboxTabId;
   /** Required alongside a controlled `activeTab`; ignored otherwise. */
@@ -203,12 +204,13 @@ export function SessionView({
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {variant === "panel" ? (
+      {panel ? (
         <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} />
       ) : (
         <SessionHeader
           session={session.data}
           agentStatus={stream.agentStatus}
+          turnStartedAt={stream.turnStartedAt}
           conn={stream.conn}
           sandbox={stream.sandbox}
           threadId={effectiveThreadId}
@@ -268,9 +270,11 @@ function PanelHeader({
         <ExternalLink className="h-3.5 w-3.5" />
         open full page
       </Link>
-      <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close panel">
-        <X className="h-4 w-4" />
-      </Button>
+      {onClose && (
+        <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close panel">
+          <X className="h-4 w-4" />
+        </Button>
+      )}
     </header>
   );
 }

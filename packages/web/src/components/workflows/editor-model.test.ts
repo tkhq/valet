@@ -2,21 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { validateWorkflowDefinition, type WorkflowDefinition } from '@valet/workflow';
 import {
   ADDABLE_NODE_TYPES,
-  EditorModel,
   LAYOUT_COLUMN_GAP,
   LAYOUT_ROW_GAP,
   NODE_META,
   addNode,
-  applyAutoLayout,
   autoLayout,
   connect,
-  createDefaultWorkflowDefinition,
   createEdgeId,
   createNodeId,
   duplicateNode,
   flowEdgeToWorkflowEdge,
   fromFlow,
+  graphSignature,
   isWorkflowDefinitionShape,
+  positionNewNodes,
   removeNode,
   setNodePosition,
   setViewport,
@@ -24,7 +23,6 @@ import {
   updateEdge,
   updateNode,
   workflowEdgeToFlowEdge,
-  type WorkflowFlowState,
 } from './editor-model';
 
 function baseDefinition(): WorkflowDefinition {
@@ -479,63 +477,6 @@ describe('autoLayout (BFS depth layering)', () => {
     expect(first).toEqual(second);
   });
 
-  it('applyAutoLayout overwrites every saved position but keeps the viewport', () => {
-    const definition = baseDefinition();
-    const next = applyAutoLayout(definition);
-    expect(next.ui?.viewport).toEqual(definition.ui?.viewport);
-    expect(next.ui?.nodes.trigger.position).toEqual({ x: 0, y: 0 });
-    expect(Object.keys(next.ui?.nodes ?? {})).toEqual(['trigger', 'start', 'branch', 'done']);
-  });
-});
-
-describe('EditorModel', () => {
-  it('starts clean and marks dirty on the first mutation', () => {
-    const model = new EditorModel(baseDefinition());
-    expect(model.dirty).toBe(false);
-    model.setNodePosition('start', { x: 1, y: 1 });
-    expect(model.dirty).toBe(true);
-  });
-
-  it('markSaved resets the dirty flag', () => {
-    const model = new EditorModel(baseDefinition());
-    model.addNode('llm');
-    expect(model.dirty).toBe(true);
-    model.markSaved();
-    expect(model.dirty).toBe(false);
-  });
-
-  it('does not mark dirty for a no-op connect (duplicate edge)', () => {
-    const model = new EditorModel(baseDefinition());
-    const result = model.connect({ source: 'trigger', target: 'start' });
-    expect(result.ok).toBe(true);
-    expect(model.dirty).toBe(false);
-  });
-
-  it('exposes add/remove/duplicate/update/connect/validate through the wrapper and serializes the final definition', () => {
-    const model = new EditorModel(createDefaultWorkflowDefinition());
-    const llmId = model.addNode('llm');
-    model.connect({ source: 'trigger', target: llmId });
-    model.updateNode(llmId, { model: 'claude-haiku-4-5', prompt: 'Summarize {{trigger.data.text}}' });
-
-    expect(model.validate()).toEqual({ ok: true });
-
-    const dupId = model.duplicateNode(llmId);
-    expect(dupId).not.toBeNull();
-    model.removeNode(dupId as string);
-
-    const serialized = model.serialize();
-    expect(serialized.nodes.find((n) => n.id === llmId)).toMatchObject({ model: 'claude-haiku-4-5' });
-    expect(serialized.nodes.some((n) => n.id === dupId)).toBe(false);
-    expect(model.dirty).toBe(true);
-  });
-
-  it('toFlow reflects the live definition', () => {
-    const model = new EditorModel(baseDefinition());
-    const flow: WorkflowFlowState = model.toFlow();
-    expect(flow.nodes).toHaveLength(4);
-    model.removeNode('done');
-    expect(model.toFlow().nodes).toHaveLength(3);
-  });
 });
 
 describe('isWorkflowDefinitionShape', () => {
@@ -548,5 +489,119 @@ describe('isWorkflowDefinitionShape', () => {
     expect(isWorkflowDefinitionShape('dag/v1')).toBe(false);
     expect(isWorkflowDefinitionShape({ version: 'dag/v1', nodes: [] })).toBe(false);
     expect(isWorkflowDefinitionShape({ nodes: [], edges: [] })).toBe(false);
+  });
+});
+
+describe('graphSignature', () => {
+  function definition(node: WorkflowDefinition['nodes'][number]): WorkflowDefinition {
+    return {
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, node],
+      edges: [{ from: 'trigger', to: 'draft' }],
+    };
+  }
+
+  it('ignores key order, which a jsonb round trip does not preserve', () => {
+    // Same node, written by the editor and read back from the database.
+    const written = definition({ id: 'draft', type: 'llm', system: 'be terse', prompt: 'hi', model: 'claude-haiku' });
+    const readBack = definition({ id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi', system: 'be terse' });
+    expect(graphSignature(written)).toBe(graphSignature(readBack));
+  });
+
+  it('ignores the camera and the hand-placed positions', () => {
+    const base = definition({ id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi' });
+    const dragged: WorkflowDefinition = {
+      ...base,
+      ui: { nodes: { draft: { position: { x: 900, y: 40 } } }, viewport: { x: 12, y: 12, zoom: 2 } },
+    };
+    expect(graphSignature(dragged)).toBe(graphSignature(base));
+  });
+
+  it('sees a step the assistant added', () => {
+    const base = definition({ id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi' });
+    const patched: WorkflowDefinition = {
+      ...base,
+      nodes: [...base.nodes, { id: 'hold', type: 'wait', mode: 'duration', duration: '5s' }],
+    };
+    expect(graphSignature(patched)).not.toBe(graphSignature(base));
+  });
+
+  it('sees a changed field, not only a changed node count', () => {
+    const before = definition({ id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi' });
+    const after = definition({ id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi again' });
+    expect(graphSignature(after)).not.toBe(graphSignature(before));
+  });
+});
+
+describe('positionNewNodes', () => {
+  function placed(): WorkflowDefinition {
+    return {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi' },
+      ],
+      edges: [{ from: 'trigger', to: 'draft' }],
+      ui: {
+        nodes: {
+          trigger: { position: { x: 40, y: 300 } },
+          draft: { position: { x: 900, y: 300 } },
+        },
+      },
+    };
+  }
+
+  it('leaves a fully placed definition untouched, so adopting one mints no version', () => {
+    const definition = placed();
+    expect(positionNewNodes(definition)).toBe(definition);
+  });
+
+  it('places a node the assistant added clear of the hand-placed ones', () => {
+    const patched: WorkflowDefinition = {
+      ...placed(),
+      nodes: [...placed().nodes, { id: 'notify', type: 'wait', mode: 'duration', duration: '5s' }],
+    };
+    const result = positionNewNodes(patched);
+    const positions = result.ui?.nodes ?? {};
+    expect(positions.notify?.position).toEqual({ x: 900 + LAYOUT_COLUMN_GAP, y: 0 });
+    // The hand-placed ones keep their coordinates.
+    expect(positions.draft?.position).toEqual({ x: 900, y: 300 });
+  });
+
+  it('stacks several added nodes instead of piling them on one point', () => {
+    const patched: WorkflowDefinition = {
+      ...placed(),
+      nodes: [
+        ...placed().nodes,
+        { id: 'one', type: 'wait', mode: 'duration', duration: '1s' },
+        { id: 'two', type: 'wait', mode: 'duration', duration: '2s' },
+      ],
+    };
+    const positions = positionNewNodes(patched).ui?.nodes ?? {};
+    expect(positions.one?.position).not.toEqual(positions.two?.position);
+    expect(positions.two?.position.y).toBe(LAYOUT_ROW_GAP);
+  });
+
+  it('leaves a definition with no saved positions to auto-layout', () => {
+    // The shape of every workflow the agent wrote or a template installed.
+    // Placing these here would put the whole graph in one column at x=0 and
+    // throw away the depth layering `toFlow`/`autoLayout` gives it.
+    const fresh: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'draft', type: 'llm', model: 'claude-haiku', prompt: 'hi' },
+        { id: 'done', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'draft' },
+        { from: 'draft', to: 'done' },
+      ],
+    };
+    expect(positionNewNodes(fresh)).toBe(fresh);
+    // Auto-layout puts them in three columns, which is what the canvas keeps.
+    const layout = autoLayout(fresh);
+    expect(layout.draft?.x).toBe(LAYOUT_COLUMN_GAP);
+    expect(layout.done?.x).toBe(LAYOUT_COLUMN_GAP * 2);
   });
 });

@@ -8,10 +8,8 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DockerSandboxProvider } from "@valet/sandbox-docker";
+import { rm } from "node:fs/promises";
+import { createSandboxWorkspace, DockerSandboxProvider } from "@valet/sandbox-docker";
 import type { Sandbox } from "@valet/engine";
 import { installCredentialHelper, configureGitIdentity, prepBinding, computeTargetDirs } from "./workspace-prep.js";
 
@@ -39,7 +37,7 @@ describeDocker("buildWorkspacePrep (docker)", () => {
   });
 
   beforeEach(async () => {
-    tmp = await mkdtemp(join(tmpdir(), "valet-workspace-prep-"));
+    tmp = await createSandboxWorkspace("valet-workspace-prep-");
     provider = new DockerSandboxProvider();
     sandbox = undefined;
   });

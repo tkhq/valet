@@ -48,10 +48,6 @@ export const CREDS_VOLUME_NAME = "valet-creds";
 export const DOCKER_STATE_VOLUME_NAME = "docker-state";
 /** Mount path for the rootless Docker data-root inside the container. */
 export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
-/** Volume name for the /dev/fuse hostPath device (rootless DinD). */
-export const DEV_FUSE_VOLUME_NAME = "dev-fuse";
-/** Volume name for the /dev/net/tun hostPath device (rootless DinD — needed by rootlesskit). */
-export const DEV_TUN_VOLUME_NAME = "dev-tun";
 /** CR label marking a docker-enabled sandbox. `restore()` re-derives the
  * exec-identity flag from this label (the CR is the only state that
  * survives an api restart — mirrors how `spec.service` records the
@@ -181,22 +177,31 @@ export function buildSandboxManifest(
     ];
   }
 
-  // Rootless DinD: seccomp Unconfined, VALET_SANDBOX_DOCKER env, docker-state
-  // emptyDir + /dev/fuse hostPath volumes. Mirrors the AppArmor+seccomp
-  // mechanism used by the rootless BuildKit builder in k8s-builder.ts. Never
-  // sets privileged — rootless Docker does not require it.
+  // DinD, rootful-inside-the-pod-user-namespace: seccomp Unconfined,
+  // VALET_SANDBOX_DOCKER env, docker-state emptyDir. The pod IS a user
+  // namespace (hostUsers: false below), so dockerd runs as in-container
+  // root — which holds NET_ADMIN over the pod netns (native bridge
+  // networking, no slirp4netns/tun) and mounts overlayfs natively
+  // (kernel >= 5.11 in-userns overlay, no fuse). No device hostPaths: a
+  // hostPath char device cannot be idmap-mounted into a userns pod
+  // (devtmpfs has no idmap support — runc fails with MOUNT_ATTR_IDMAP
+  // EINVAL). VALET_DOCKER_USERNS=1 selects the rootful branch in
+  // start-docker.sh; the docker (local dev) backend keeps rootlesskit.
+  // Never sets privileged.
   if (opts.docker) {
     container.securityContext = {
       seccompProfile: { type: "Unconfined" },
       capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
       procMount: "Unmasked",
     };
-    container.env = [...(container.env ?? []), { name: "VALET_SANDBOX_DOCKER", value: "1" }];
+    container.env = [
+      ...(container.env ?? []),
+      { name: "VALET_SANDBOX_DOCKER", value: "1" },
+      { name: "VALET_DOCKER_USERNS", value: "1" },
+    ];
     container.volumeMounts = [
       ...(container.volumeMounts ?? []),
       { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
-      { name: DEV_FUSE_VOLUME_NAME, mountPath: "/dev/fuse" },
-      { name: DEV_TUN_VOLUME_NAME, mountPath: "/dev/net/tun" },
     ];
     if (!isFullProfile) {
       container.command = [
@@ -216,6 +221,25 @@ export function buildSandboxManifest(
     // dockerd user's gid, so non-privileged (dockerd) execs can write
     // /workspace — the k8s analog of start-docker.sh's `chown /workspace`.
     podSpec.securityContext = { fsGroup: DOCKER_WORKLOAD_FS_GROUP };
+    // Required companion of `procMount: Unmasked`: k8s validation ties the
+    // two together ("hostUsers must be false to use Unmasked"), enforced
+    // once the ProcMountType gate is on (default from 1.33). Clusters with
+    // UserNamespacesSupport off drop the field on admission — inert there,
+    // load-bearing after a cluster upgrade. The dockerd user's /etc/subuid
+    // range must fit inside the pod user namespace (see
+    // docker/Dockerfile.sandbox-k8s).
+    podSpec.hostUsers = false;
+    // Writable, delegated cgroups. The kubelet-default cgroupfs mount is
+    // read-only AND owned by unmapped host root, so runc inside the
+    // sandbox cannot create per-container groups — every `docker run`
+    // fails ("mkdir /sys/fs/cgroup/docker: read-only file system", or
+    // EACCES after a rw remount). The named RuntimeClass maps to a
+    // containerd runtime with `cgroup_writable = true`, which fixes both
+    // the mount flags and — under the systemd cgroup driver — the
+    // ownership. See K8sProviderConfig.dockerRuntimeClassName.
+    if (cfg.dockerRuntimeClassName) {
+      podSpec.runtimeClassName = cfg.dockerRuntimeClassName;
+    }
   }
   if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
     podSpec.imagePullSecrets = cfg.imagePullSecrets;
@@ -233,8 +257,6 @@ export function buildSandboxManifest(
     podSpec.volumes = [
       ...(podSpec.volumes ?? []),
       { name: DOCKER_STATE_VOLUME_NAME, emptyDir: {} },
-      { name: DEV_FUSE_VOLUME_NAME, hostPath: { path: "/dev/fuse", type: "CharDevice" } },
-      { name: DEV_TUN_VOLUME_NAME, hostPath: { path: "/dev/net/tun", type: "CharDevice" } },
     ];
   }
 

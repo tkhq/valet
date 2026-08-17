@@ -432,3 +432,85 @@ describe("validateValetPlugin commands slot", () => {
     }
   });
 });
+
+describe("validateValetPlugin templates slot", () => {
+  function template(): Record<string, unknown> {
+    return {
+      id: "demo-digest",
+      name: "Demo digest",
+      description: "Reads and reports.",
+      category: "Daily digest",
+      apps: ["demo"],
+      steps: ["Read", "Report"],
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+    };
+  }
+
+  it("accepts a plugin with no templates", () => {
+    expect(validateValetPlugin({ name: "demo", version: "1" }).ok).toBe(true);
+  });
+
+  it("accepts a template with only the required fields", () => {
+    expect(validateValetPlugin({ name: "demo", version: "1", templates: [template()] }).ok).toBe(true);
+  });
+
+  it("accepts the optional caveats and schedule", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1",
+      templates: [
+        {
+          ...template(),
+          caveats: ["Needs a connected account."],
+          schedule: { name: "Demo digest", cron: "0 13 * * 1-5", timezone: "UTC", description: "Weekdays at 13:00" },
+        },
+      ],
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a template missing its card copy", () => {
+    for (const key of ["id", "name", "description", "category"]) {
+      const broken = template();
+      delete broken[key];
+      const res = validateValetPlugin({ name: "demo", version: "1", templates: [broken] });
+      expect(res.ok, `expected a missing "${key}" to be rejected`).toBe(false);
+      if (!res.ok) expect(res.issues.some((i) => i.path === `templates[0].${key}`)).toBe(true);
+    }
+  });
+
+  it("rejects apps or steps that are not string arrays", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1",
+      templates: [{ ...template(), apps: "demo", steps: [1] }],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "templates[0].apps")).toBe(true);
+      expect(res.issues.some((i) => i.path === "templates[0].steps")).toBe(true);
+    }
+  });
+
+  it("rejects a definition that is not an object", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1", templates: [{ ...template(), definition: "dag/v1" }] });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.some((i) => i.path === "templates[0].definition")).toBe(true);
+  });
+
+  it("rejects a schedule missing its cron", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1",
+      templates: [{ ...template(), schedule: { name: "Demo", description: "Daily" } }],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.some((i) => i.path === "templates[0].schedule.cron")).toBe(true);
+  });
+
+  it("rejects a templates field that is not an array", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1", templates: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.some((i) => i.path === "templates")).toBe(true);
+  });
+});

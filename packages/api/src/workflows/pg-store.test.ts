@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { afterAll, describe } from 'vitest';
 import {
   describeCheckpointContract,
+  describeListRunsContract,
   describeOwnershipContract,
   describeRunHostContract,
   describeSignalContract,
@@ -60,6 +61,9 @@ function wireContracts(label: string, db: PgDb): void {
     describeCheckpointContract(() => factory());
     describeSignalContract(() => factory());
     describeOwnershipContract(() => factory());
+    // `listRuns` assertions need exact `createdAt` values (same-millisecond
+    // ties), so this suite builds its store with its own clock.
+    describeListRunsContract((clock) => makeStoreFactory(db, migrated, clock)());
 
     // ─── RunHost conformance against LocalRunHost + PgWorkflowStore ─────────
     //

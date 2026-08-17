@@ -395,6 +395,32 @@ export const messages = pgTable(
 // Names unique per org; last-admin guards on role change/removal and
 // creator-auto-admin live in service code (`services/teams.ts`), inside one
 // transaction — not expressible as table constraints.
+//
+// `origin` records where a row came from, as `skills.origin` does below. It
+// names the ONE writer of that row's `team_members`:
+//
+//   `idp`    mirrors an identity-provider group. The login-time sync
+//            (`services/team-sync.ts`) owns its membership, and it removes as
+//            well as adds — that is what offboarding means.
+//   `config` is declared in `valet.yaml`. The boot reconciler
+//            (`services/config-reconcile.ts`) asserts the declared members and
+//            never deletes one, so the file cannot take access away.
+//   `local`  belongs to the people who made it in Valet. Only the team routes
+//            write it.
+//
+// No row has two writers, so no membership has two opinions and nothing can
+// oscillate between boot and login. Every sync write is scoped by
+// `origin = 'idp'`; every reconciler write is scoped by `origin = 'config'`.
+//
+// `external_id` holds the full group path (`/platform`). The path is what the
+// token claim carries, it survives a realm re-import, and it stays legible in
+// a query result. It is NULL for a `local` team and for a `config` team: the
+// file identifies a team by `teams[].name`, which `teams_org_name` already
+// keeps unique, so a second column would only duplicate the first. Postgres
+// treats NULLs as distinct, so `teams_org_external` constrains the mirrored
+// rows only, and unlimited NULL rows coexist in it. `origin` is part of that
+// key so `external_id` is a per-origin namespace the day a second origin
+// populates it.
 
 export const teams = pgTable(
   "teams",
@@ -402,9 +428,24 @@ export const teams = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     name: text("name").notNull(),
+    /**
+     * `local` = created in Valet. `config` = declared in `valet.yaml`.
+     * `idp` = mirrored from an identity-provider group.
+     */
+    origin: text("origin", { enum: ["local", "config", "idp"] })
+      .notNull()
+      .default("local"),
+    /**
+     * Full identity-provider group path this team mirrors. Null for a `local`
+     * and for a `config` team.
+     */
+    externalId: text("external_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [uniqueIndex("teams_org_name").on(t.orgId, t.name)],
+  (t) => [
+    uniqueIndex("teams_org_name").on(t.orgId, t.name),
+    uniqueIndex("teams_org_external").on(t.orgId, t.origin, t.externalId),
+  ],
 );
 
 export const teamMembers = pgTable(
@@ -420,25 +461,45 @@ export const teamMembers = pgTable(
   ],
 );
 
-// ─── Orchestrator identities ────────────────────────────────────────────────
-//
-// One durable identity per orchestrator (user/team/org), never rotated.
-// Unique per (orgId, ownerType, ownerId); handles unique per org (enforced
-// in service code once handles are assigned — no logic this phase).
+// ─── Assistants ─────────────────────────────────────────────────────────────
 
-export const orchestratorIdentities = pgTable(
-  "orchestrator_identities",
+/**
+ * An assistant: a named agent a principal owns, with its own session.
+ *
+ * Replaces `orchestrator_identities`, whose `UNIQUE (org, owner_type,
+ * owner_id)` was the one-assistant-per-principal rule. A principal now owns
+ * any number, and is the assistant's OWNER and SCOPE rather than its
+ * identity. See `docs/specs/2026-08-13-assistants-design.md`.
+ *
+ * `sessionId` is `assistant:{id}` for every row, the default included — one
+ * address, so no consumer has to branch on which kind of assistant it holds.
+ */
+export const assistants = pgTable(
+  "assistants",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
+    /** What the reader calls it. Was `orchestrator_identities.handle`. */
+    name: text("name"),
     sessionId: text("session_id").notNull(),
-    handle: text("handle"),
+    /**
+     * The one a machine picks when nobody chose. Workflow orchestrator
+     * nodes, event subscriptions and channel bindings all say "the team's
+     * assistant" and have no basis for choosing between several, so they
+     * resolve to this. Exactly one per principal, held by a partial unique
+     * index — see the migration.
+     */
+    isDefault: boolean("is_default").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Null while live. Archiving hides an assistant without destroying the
+     * conversation it held; the default cannot be archived while default. */
+    archivedAt: bigint("archived_at", { mode: "number" }),
   },
   (t) => [
-    uniqueIndex("orchestrator_identities_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("assistants_session").on(t.sessionId),
+    index("assistants_owner").on(t.orgId, t.ownerType, t.ownerId),
   ],
 );
 
@@ -607,6 +668,39 @@ export const identityLinkCodes = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("identity_link_codes_provider").on(t.provider, t.codeHash)],
+);
+
+// One row per provider stream the api has started and not yet stopped.
+//
+// The engine publishes `text_delta` through `publishEphemeral` — live-only,
+// no offset, no replay. An api that dies mid-stream therefore cannot rebuild
+// the text, and the reader keeps a message that shimmers forever because
+// Slack documents no timeout for an unclosed stream. This table is the
+// durable "a stream is open" fact that lets the next boot close it. The text
+// itself is not recoverable here and is not meant to be: the `message_end`
+// entry in `engine_entries` is the source of truth, and the web UI shows it.
+export const channelActiveStreams = pgTable(
+  "channel_active_streams",
+  {
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    /** Provider handle for the streaming message (Slack: chat.startStream's `ts`). */
+    messageId: text("message_id").notNull(),
+    threadTs: text("thread_ts").notNull(),
+    sessionId: text("session_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    /** Engine message this stream renders. Null until the first message_start. */
+    engineMessageId: text("engine_message_id"),
+    orgId: text("org_id").notNull(),
+    startedAt: bigint("started_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({
+      name: "channel_active_streams_pk",
+      columns: [t.channelType, t.conversationKey, t.messageId],
+    }),
+    index("channel_active_streams_started").on(t.startedAt),
+  ],
 );
 
 // ─── Memory (OKF) ────────────────────────────────────────────────────────────
@@ -1328,7 +1422,7 @@ export const eventSubscriptions = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     // "team" is intentionally excluded: subscription dispatch targets only user/org orchestrators.
-    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     /** Event key patterns; trailing `.*` wildcard supported (e.g. "github.pull_request.*"). */
@@ -1357,7 +1451,7 @@ export const workflowSchedules = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull().default("user"),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
     /** Fire target: start a workflow run, or prompt the orchestrator
      * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
@@ -1460,7 +1554,7 @@ export type SessionThreadRow = typeof sessionThreads.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type TeamRow = typeof teams.$inferSelect;
 export type TeamMemberRow = typeof teamMembers.$inferSelect;
-export type OrchestratorIdentityRow = typeof orchestratorIdentities.$inferSelect;
+export type AssistantRow = typeof assistants.$inferSelect;
 export type ChildWatchRow = typeof childWatches.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
 export type UserNotificationPreferenceRow = typeof userNotificationPreferences.$inferSelect;
@@ -1468,6 +1562,7 @@ export type EventDropLogRow = typeof eventDropLog.$inferSelect;
 export type ChannelBindingRow = typeof channelBindings.$inferSelect;
 export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
+export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 /** One tracked skill repository. Not the engine's `SkillSource`. */

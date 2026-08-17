@@ -5,8 +5,10 @@ import {
   latestFailures,
   parseLintErrors,
   workflowListFrom,
+  workflowParams,
   workflowRefsFrom,
   workflowRefsFromArgs,
+  workflowToolSuffix,
 } from "./workflow";
 import { pickRenderer } from "./index";
 
@@ -24,12 +26,52 @@ describe("isWorkflowCallTool", () => {
   });
 });
 
+describe("pinned workflow tools", () => {
+  // A pinned action is the SAME action reached by a different route. If the
+  // client followed only the call_tool shape, a pinned patch would save and
+  // the editor would show nothing — the failure the pin exists to fix.
+  it("claims a pinned direct tool, whose args carry no tool_id", () => {
+    expect(isWorkflowCallTool("workflows__patch_workflow", { workflow_id: "wf1" })).toBe(true);
+    expect(isWorkflowCallTool("workflows__get_workflow", { workflow_id: "wf1" })).toBe(true);
+  });
+
+  it("reads the action out of the pinned tool's own name", () => {
+    expect(workflowToolSuffix({ workflow_id: "wf1" }, "workflows__patch_workflow")).toBe(
+      "patch_workflow",
+    );
+  });
+
+  it("treats the pinned call's args as the parameters", () => {
+    expect(workflowRefsFromArgs({ workflow_id: "wf9" }, "workflows__patch_workflow")).toEqual({
+      workflowId: "wf9",
+    });
+    expect(workflowRefsFromArgs({ run_id: "r9" }, "workflows__get_run")).toEqual({ runId: "r9" });
+    expect(workflowParams({ workflow_id: "wf9" }, "workflows__patch_workflow")).toEqual({
+      workflow_id: "wf9",
+    });
+  });
+
+  it("finds an attempted definition in a pinned call's flat args", () => {
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    expect(attemptedDefinition({ definition }, "workflows__save_workflow")).toEqual(definition);
+  });
+
+  it("routes a pinned call to the workflow renderer, not the fallback", () => {
+    const pinned = pickRenderer("workflows__patch_workflow", { workflow_id: "wf1" });
+    const other = pickRenderer("github__create_issue", { owner: "o" });
+    expect(pinned).not.toBe(other);
+    expect(pinned.formatTarget({ workflow_id: "wf1" }, "workflows__patch_workflow")).toBe(
+      "patch_workflow",
+    );
+  });
+});
+
 describe("pickRenderer routing", () => {
   it("routes workflows.* call_tool to the workflow renderer, others to fallback", () => {
     const wf = pickRenderer("call_tool", { tool_id: "workflows.start_run" });
     const other = pickRenderer("call_tool", { tool_id: "github.create_issue" });
     expect(wf).not.toBe(other);
-    expect(wf.formatTarget({ tool_id: "workflows.start_run" })).toBe("start_run");
+    expect(wf.formatTarget({ tool_id: "workflows.start_run" }, "call_tool")).toBe("start_run");
   });
 });
 
@@ -52,22 +94,28 @@ describe("workflowRefsFrom", () => {
 describe("workflowRefsFromArgs", () => {
   it("falls back to the call's own params", () => {
     expect(
-      workflowRefsFromArgs({
-        tool_id: "workflows.get_run",
-        params: { run_id: "r9" },
-      }),
+      workflowRefsFromArgs(
+        {
+          tool_id: "workflows.get_run",
+          params: { run_id: "r9" },
+        },
+        "call_tool",
+      ),
     ).toEqual({ runId: "r9" });
     expect(
-      workflowRefsFromArgs({
-        tool_id: "workflows.save_workflow",
-        params: { workflow_id: "wf9" },
-      }),
+      workflowRefsFromArgs(
+        {
+          tool_id: "workflows.save_workflow",
+          params: { workflow_id: "wf9" },
+        },
+        "call_tool",
+      ),
     ).toEqual({ workflowId: "wf9" });
   });
 
   it("handles absent params", () => {
-    expect(workflowRefsFromArgs({ tool_id: "workflows.list_workflows" })).toEqual({});
-    expect(workflowRefsFromArgs(undefined)).toEqual({});
+    expect(workflowRefsFromArgs({ tool_id: "workflows.list_workflows" }, "call_tool")).toEqual({});
+    expect(workflowRefsFromArgs(undefined, "call_tool")).toEqual({});
   });
 });
 
@@ -122,13 +170,13 @@ describe("attemptedDefinition", () => {
   it("pulls params.definition from the call args", () => {
     const definition = { version: "dag/v1", nodes: [], edges: [] };
     expect(
-      attemptedDefinition({ tool_id: "workflows.save_workflow", params: { definition } }),
+      attemptedDefinition({ tool_id: "workflows.save_workflow", params: { definition } }, "call_tool"),
     ).toEqual(definition);
   });
 
   it("returns null when absent", () => {
-    expect(attemptedDefinition({ tool_id: "workflows.save_workflow", params: {} })).toBeNull();
-    expect(attemptedDefinition(undefined)).toBeNull();
+    expect(attemptedDefinition({ tool_id: "workflows.save_workflow", params: {} }, "call_tool")).toBeNull();
+    expect(attemptedDefinition(undefined, "call_tool")).toBeNull();
   });
 });
 
@@ -146,5 +194,18 @@ describe("latestFailures", () => {
 
   it("is empty for a clean run", () => {
     expect(latestFailures([{ nodeId: "a", status: "completed", createdAt: 1 }])).toEqual([]);
+  });
+});
+
+describe("workflowToolSuffix", () => {
+  it("strips the workflows. prefix, which is how a caller tells a write from a read", () => {
+    expect(workflowToolSuffix({ tool_id: "workflows.patch_workflow" }, "call_tool")).toBe("patch_workflow");
+    expect(workflowToolSuffix({ tool_id: "workflows.get_workflow" }, "call_tool")).toBe("get_workflow");
+  });
+
+  it("passes an unprefixed id through, and reports nothing for a missing one", () => {
+    expect(workflowToolSuffix({ tool_id: "github.create_issue" }, "call_tool")).toBe("github.create_issue");
+    expect(workflowToolSuffix({}, "call_tool")).toBeUndefined();
+    expect(workflowToolSuffix(null, "call_tool")).toBeUndefined();
   });
 });

@@ -393,7 +393,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
               id="policy-risk"
               value={riskLevel}
               onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
             >
               {RISK_LEVELS.map((r) => (
                 <option key={r} value={r}>
@@ -411,7 +411,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
               id="policy-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>
@@ -426,7 +426,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
               id="policy-applies-in"
               value={appliesIn}
               onChange={(e) => setAppliesIn(e.target.value as PolicyAppliesInWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
             >
               {APPLIES_IN.map((a) => (
                 <option key={a} value={a}>
@@ -457,7 +457,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
                 aria-label="Matcher operator"
                 value={m.op}
                 onChange={(e) => updateMatcherRow(m.key, { op: e.target.value as ParamMatcherWire["op"] })}
-                className="h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+                className="h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
               >
                 {MATCHER_OPS.map((op) => (
                   <option key={op} value={op}>

@@ -164,7 +164,11 @@ function ValueCell({ value }: { value: unknown }) {
         className={cn(
           "inline-flex items-center px-1 py-[1px] rounded text-[10px] font-medium uppercase tracking-wider",
           value
-            ? "bg-success-500/15 text-success-700 dark:text-success-500"
+            ? // Wash token, not `bg-success-500/15`: the `success` scale is a raw
+              // `oklch(...)` string, so the slash modifier emits no rule at all and
+              // the pill rendered as bare coloured text. Same trap `badge.tsx` and
+              // the OPACITY-MODIFIER note in theme.css describe.
+              "bg-success-wash text-success-700 dark:text-success-500"
             : "bg-neutral-200/70 dark:bg-neutral-800 text-muted",
         )}
       >

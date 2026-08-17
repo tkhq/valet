@@ -1,7 +1,8 @@
 /**
- * Tracked skill repositories. Two homes: the personal panel on
- * `/settings/library-sources` (personal and team sources) and the org panel on
- * `/settings/organization/library` (org sources only).
+ * Tracked skill repositories. Two homes: the panel above the grid on
+ * `/skills`, where the skills a repository mirrors actually live, and the
+ * org panel on `/settings/organization/library`, which pins the org so an
+ * admin sees the library every member reads.
  *
  * Valet mirrors a repository's `SKILL.md` files into the catalog and re-reads
  * the repository on a schedule. This panel is where a repository is added,
@@ -15,15 +16,31 @@
  * a source removes the skills it brought in, which is why the button is
  * "Remove" and not "Disable".
  *
- * `scope` picks which sources show and which scope a new source takes:
- *   - `personal` (default) — the caller's own and team sources.
- *   - `org` — org sources only; a new source is added with `ownerType: "org"`.
+ * `owner` pins the listing to ONE owner, server-side. The `/skills` panel
+ * sends none and lists every source the caller reaches — their own, their
+ * teams', and the org's — with the row badge carrying the scope, so tracking
+ * a repository no longer starts with picking which page to open. A row's
+ * scope was the reason there were two personal pages; now it is a badge.
+ *
+ * A new source goes to the org when `owner` names it, and otherwise to the
+ * active workspace, which the nav switcher sets: your own, or a team. No
+ * Owner select asks a second time.
+ *
  * `readOnly` hides the add form and the per-row Sync/Remove actions — the org
  * panel passes it for a member, who may read org sources but not change them.
+ *
+ * The listing is paged. `cursors` is the stack of cursors walked so far and
+ * belongs to the route, which keeps it in the URL — see `~/lib/cursor-stack`
+ * for why the pager cannot own it.
  */
 import { useState, type FormEvent } from "react";
 import { Button, Input, Spinner } from "~/components/primitives";
+import { Pager } from "~/components/pager";
 import { relativeTime } from "~/lib/relative-time";
+import { errorText } from "~/lib/error-text";
+import { OwnerBadge } from "~/components/owner-badge";
+import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -33,32 +50,50 @@ import {
 } from "~/api/skill-sources";
 import { ScopeBadge, scopeForOwnerType } from "./scope-badge";
 
-export type SourcesScope = "personal" | "org";
-
-/** Keeps the sources this panel shows. The personal panel keeps the caller's
- * own and team sources; the org panel keeps org sources only. */
-function inScope(source: SkillSourceSummary, scope: SourcesScope): boolean {
-  return scope === "org" ? source.ownerType === "org" : source.ownerType !== "org";
+/** The one owner a panel pins its listing to. */
+export interface SourcesOwner {
+  type: "user" | "team" | "org";
+  id: string;
 }
 
 export function SkillSourcesPanel({
-  scope = "personal",
+  owner,
   readOnly = false,
+  cursors,
+  onCursorsChange,
 }: {
-  scope?: SourcesScope;
+  owner?: SourcesOwner;
   readOnly?: boolean;
-} = {}) {
-  const { data, isLoading, error } = useSkillSources();
-  const sources = (data?.sources ?? []).filter((s) => inScope(s, scope));
+  cursors: string[];
+  onCursorsChange: (next: string[]) => void;
+}) {
+  const cursor = currentCursor(cursors);
+  const { data, isLoading, error } = useSkillSources({
+    ...(owner === undefined ? {} : { ownerType: owner.type, ownerId: owner.id }),
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+  const sources = data?.sources ?? [];
+  const hasNext = data?.nextCursor != null;
+  const paged = !isLoading && !error && (cursors.length > 0 || hasNext);
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
   const add = useAddSkillSource();
+  // The active workspace owns a new source unless `owner` pins the org.
+  // There was an Owner select in this form. It asked again what the nav's
+  // workspace switcher had already answered, and the two could disagree —
+  // the panel could list one workspace's repositories while the form filed a
+  // new one under another.
+  const workspace = useWorkspaceScope();
 
   function submit(e: FormEvent) {
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
-    add.mutate(scope === "org" ? { repo: value, ownerType: "org" } : { repo: value });
+    add.mutate(
+      owner?.type === "org"
+        ? { repo: value, ownerType: "org" }
+        : { repo: value, ...(workspace.teamId === undefined ? {} : { teamId: workspace.teamId }) },
+    );
     setRepo("");
   }
 
@@ -92,7 +127,7 @@ export function SkillSourcesPanel({
             </Button>
           </div>
           <p className="mt-2 text-xs text-muted">Public repositories only.</p>
-          {add.error && <p className="mt-1 text-xs text-danger-500">{add.error.message}</p>}
+          {add.error && <p className="mt-1 text-xs text-danger-500">{errorText(add.error)}</p>}
         </form>
       )}
 
@@ -115,6 +150,24 @@ export function SkillSourcesPanel({
       {sources.map((source) => (
         <SourceRow key={source.id} source={source} readOnly={readOnly} />
       ))}
+
+      {/* The wrapper carries a rule above the pager, so it is conditional on
+          the pager itself and not only on the data being in. An empty
+          bordered strip under a one-page list is a line with nothing in it. */}
+      {paged && (
+        <div className="border-t border-line px-4 pb-4">
+          <Pager
+            label="repositories"
+            page={pageNumber(cursors)}
+            hasPrevious={cursors.length > 0}
+            hasNext={hasNext}
+            onPrevious={() => onCursorsChange(popCursor(cursors))}
+            onNext={() => {
+              if (data?.nextCursor != null) onCursorsChange(pushCursor(cursors, data.nextCursor));
+            }}
+          />
+        </div>
+      )}
     </section>
   );
 }
@@ -129,7 +182,13 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate font-mono text-sm text-ink">{source.repo}</span>
-          <ScopeBadge scope={scopeForOwnerType(source.ownerType)} />
+          {/* One badge for the scope axis, as on `SkillCard`: a team row takes
+              `OwnerBadge`, which names the team and links to its assistant. */}
+          {source.ownerType === "team" ? (
+            <OwnerBadge ownerType={source.ownerType} ownerId={source.ownerId} />
+          ) : (
+            <ScopeBadge scope={scopeForOwnerType(source.ownerType)} />
+          )}
           {pinned.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">{pinned}</span>
           )}

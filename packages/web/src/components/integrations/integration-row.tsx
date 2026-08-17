@@ -2,30 +2,37 @@
  * Cards for `/integrations` (two-column facelift of the Task-15 connect
  * surface).
  *
- * One tile per plugin: a brand monogram, name + connection state, the
- * description, and a footer with the mono "reach" meta (tool count /
+ * One tile per plugin: the service's brand mark, name + connection state,
+ * the description, and a footer with the mono "reach" meta (tool count /
  * "tools load on connect" / "no key needed") and the connect controls.
- * The token-entry reveal expands INSIDE the tile so connecting never
- * navigates away. Built-in plugins get quieter wash tiles — present but
- * visibly not asking anything of you.
+ * Built-in plugins get quieter wash tiles — present but visibly not asking
+ * anything of you.
  *
- * OAuth connect for services declaring `oauth` metadata; manual token
- * entry remains the fallback. The submit action is named "Connect" end to
- * end (button → form submit), never "Save".
+ * A connected service also shows what its credential is worth: the account
+ * it belongs to, and — when the token expired, failed to refresh, or
+ * carries identity only — a badge, the fix, and a Reconnect control. See
+ * `service-health.ts` for the states and `ServiceIcon` for the marks.
+ *
+ * GitHub carries a second line for the half its organisation owns — the
+ * GitHub App, which the personal credential depends on to sign in and which
+ * reaches repositories on its own. See `github-org-app.ts`.
+ *
+ * Connect opens the pre-connect screen (`connect-dialog.tsx`) — for OAuth
+ * services and manual-token services alike. The tile no longer runs any
+ * connect path itself; it names the service and hands off. The submit action
+ * is named "Connect" end to end (button → screen → form submit), never
+ * "Save".
  */
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
-import { Badge, Button, Textarea } from "~/components/primitives";
-import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
-import { useConnectGithub } from "~/api/repos";
+import { Badge, Button } from "~/components/primitives";
+import { useDisconnectCredential } from "~/api/integrations";
+import { ServiceIcon } from "~/components/service-icon";
+import { ConnectDialog } from "./connect-dialog";
 import { displayName } from "./display-name";
+import { GithubOrgAppLine } from "./github-org-app-line";
+import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
 
-const TOKEN_FIELD_LABEL: Record<PluginServiceSummary["type"], string> = {
-  api_key: "API key",
-  oauth2: "Access token",
-  bot_token: "Bot token",
-  service_account: "Service account key",
-};
 
 /** True when the plugin belongs in the Services group (something the assistant reaches out to). */
 export function isService(plugin: PluginSummary): boolean {
@@ -49,56 +56,18 @@ function reachMeta(plugin: PluginSummary): string | null {
   return null;
 }
 
-// ── Brand monograms ──────────────────────────────────────────────────────
-
-/** Recognizable brand hues for the monogram tile; unknown services hash
- * into a small default palette so third-party plugins still get a stable
- * color. Full-strength hexes on purpose — the CSS-var tokens can't take
- * opacity modifiers (theme.css trap). */
-const BRAND_HEX: Record<string, string> = {
-  github: "#24292f",
-  gmail: "#ea4335",
-  "google-calendar": "#4285f4",
-  google_calendar: "#4285f4",
-  "google-workspace": "#34a853",
-  google_workspace: "#34a853",
-  slack: "#611f69",
-  linear: "#5e6ad2",
-  notion: "#111111",
-  sentry: "#362d59",
-  stripe: "#635bff",
-  cloudflare: "#f6821f",
-  deepwiki: "#0ea5e9",
-  typefully: "#1d9bf0",
-  telegram: "#229ed9",
-  figma: "#a259ff",
-  browser: "#64748b",
-  workflows: "#5f7a5a",
-  personas: "#b98a2f",
-  "sandbox-tunnels": "#64748b",
-};
-
-const FALLBACK_HEX = ["#0ea5e9", "#f97316", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1"];
-
-export function brandHex(id: string): string {
-  const known = BRAND_HEX[id];
-  if (known) return known;
-  let h = 5381;
-  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) | 0;
-  return FALLBACK_HEX[Math.abs(h) % FALLBACK_HEX.length];
+/** The slug a card draws its mark from. A plugin declares one per service
+ * (`plugin.yaml`), and a plugin that declares none falls back to its own
+ * id — which is the slug for most of the fleet. */
+function iconSlug(plugin: PluginSummary): string {
+  return plugin.services[0]?.iconSlug ?? plugin.name;
 }
 
-function Monogram({ id, quiet }: { id: string; quiet?: boolean }) {
-  const label = displayName(id);
-  return (
-    <span
-      aria-hidden="true"
-      className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-semibold text-white"
-      style={{ backgroundColor: quiet ? "#a8a29b" : brandHex(id) }}
-    >
-      {label.charAt(0).toUpperCase()}
-    </span>
-  );
+/** GitHub is the only service whose organisation owns a second, separate
+ * way in. Keyed on the credential service, the same key `connectPath` reads
+ * to route GitHub through the org App's OAuth client. */
+function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
+  return service.service === "github" ? <GithubOrgAppLine /> : undefined;
 }
 
 // ── Tiles ────────────────────────────────────────────────────────────────
@@ -113,15 +82,16 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
         <ServiceBlock
           service={single}
           title={displayName(plugin.name)}
-          monogramId={plugin.name}
+          slug={single.iconSlug ?? plugin.name}
           description={plugin.description}
           meta={meta}
+          orgNote={orgNoteFor(single)}
         />
       ) : (
         <>
           <CardHeading
             title={displayName(plugin.name)}
-            monogramId={plugin.name}
+            slug={iconSlug(plugin)}
             description={plugin.description}
           />
           <CardFooter meta={meta} />
@@ -134,7 +104,8 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
                   <ServiceBlock
                     service={service}
                     title={displayName(service.service)}
-                    monogramId={service.service}
+                    slug={service.iconSlug ?? service.service}
+                    orgNote={orgNoteFor(service)}
                   />
                 </li>
               ))}
@@ -149,7 +120,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
 export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
   return (
     <div className="flex items-start gap-3 rounded-lg bg-ink-wash p-4">
-      <Monogram id={plugin.name} quiet />
+      <ServiceIcon slug={iconSlug(plugin)} label={displayName(plugin.name)} tone="quiet" />
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-ink">{displayName(plugin.name)}</div>
         {plugin.description && (
@@ -167,18 +138,18 @@ export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
 
 function CardHeading({
   title,
-  monogramId,
+  slug,
   description,
   state,
 }: {
   title: string;
-  monogramId: string;
+  slug: string;
   description?: string;
   state?: React.ReactNode;
 }) {
   return (
     <div className="flex items-start gap-3">
-      <Monogram id={monogramId} />
+      <ServiceIcon slug={slug} label={title} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{title}</span>
@@ -205,39 +176,50 @@ function CardFooter({ meta, right }: { meta?: string | null; right?: React.React
 function ServiceBlock({
   service,
   title,
-  monogramId,
+  slug,
   description,
   meta,
+  orgNote,
 }: {
   service: PluginServiceSummary;
   title: string;
-  monogramId: string;
+  slug: string;
   description?: string;
   meta?: string | null;
+  /** A second connection the organisation owns, stated beside this one
+   * rather than merged into it. Only GitHub has one — see `orgNoteFor`. */
+  orgNote?: React.ReactNode;
 }) {
-  const [revealed, setRevealed] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const disconnect = useDisconnectCredential();
-  // GitHub connects through the org's GitHub App OAuth (POST
-  // /api/me/github/connect → GitHub authorize → callback saves the user
-  // credential) — not the generic per-service token flow. The manifest
-  // declares no oauth metadata for github on purpose, so without this the
-  // card fell back to manual token paste.
-  const isGithub = service.service === "github";
-  const connectGithub = useConnectGithub();
+  const health = serviceHealth(service);
+  const badge = healthBadge(health);
+  const note = healthNote(health);
+  // A broken connection keeps its row in the credential store, so the card
+  // offers the repair beside the disconnect instead of only "Disconnect".
+  const repair = needsReauth(health);
+  const connectLabel = repair ? "Reconnect" : "Connect";
 
-  async function startGithubOauth() {
-    try {
-      const res = await connectGithub.mutateAsync();
-      window.location.href = res.url;
-    } catch {
-      // Error (e.g. no App configured) surfaces via connectGithub.error.
-    }
-  }
+  // Every connect path — the org's GitHub App OAuth, the generic per-service
+  // OAuth redirect, and manual token entry — now opens the same pre-connect
+  // screen first. That screen states what the credential gives the assistant
+  // and who can reach it; the three paths resume behind its Continue button.
+  // The OAuth path in particular USED to be a bare anchor straight to
+  // /api/credentials/:service/connect, which left no moment between the click
+  // and the redirect in which to say anything.
+  // The visible label stays one word, but the grid holds a dozen identical
+  // "Connect" buttons — so each one names its service to a screen reader.
+  const connectControl = (
+    <Button size="sm" aria-label={`${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
+      {connectLabel}
+    </Button>
+  );
 
-  const controls = service.connected ? (
+  const disconnectControl = (
     <Button
       variant="ghost"
       size="sm"
+      aria-label={`Disconnect ${title}`}
       onClick={() => {
         if (!confirm(`Disconnect ${title}?`)) return;
         void disconnect.mutateAsync(service.service);
@@ -246,113 +228,57 @@ function ServiceBlock({
     >
       {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
     </Button>
-  ) : isGithub ? (
+  );
+
+  const controls = !service.connected ? (
+    connectControl
+  ) : repair ? (
     <span className="flex items-center gap-3">
-      <button
-        type="button"
-        className="text-xs text-muted underline-offset-2 hover:underline"
-        onClick={() => setRevealed((r) => !r)}
-      >
-        Enter token manually
-      </button>
-      <Button size="sm" onClick={() => void startGithubOauth()} disabled={connectGithub.isPending}>
-        {connectGithub.isPending ? "Connecting…" : "Connect"}
-      </Button>
-    </span>
-  ) : service.connect === "oauth" ? (
-    <span className="flex items-center gap-3">
-      <button
-        type="button"
-        className="text-xs text-muted underline-offset-2 hover:underline"
-        onClick={() => setRevealed((r) => !r)}
-      >
-        Enter token manually
-      </button>
-      <Button size="sm" asChild>
-        <a href={`/api/credentials/${encodeURIComponent(service.service)}/connect`}>Connect</a>
-      </Button>
+      {disconnectControl}
+      {connectControl}
     </span>
   ) : (
-    <Button size="sm" onClick={() => setRevealed((r) => !r)}>
-      Connect
-    </Button>
+    disconnectControl
   );
 
   return (
     <>
       <CardHeading
         title={title}
-        monogramId={monogramId}
+        slug={slug}
         description={description}
-        state={service.connected ? <Badge variant="success">Connected</Badge> : undefined}
+        state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
       />
-      <CardFooter meta={meta} right={controls} />
-      {isGithub && connectGithub.error && (
-        <p className="mt-2 text-xs text-danger-500">{connectGithub.error.message}</p>
-      )}
-      {revealed && !service.connected && (
-        <ConnectForm service={service} onClose={() => setRevealed(false)} />
-      )}
-    </>
-  );
-}
-
-function ConnectForm({
-  service,
-  onClose,
-}: {
-  service: PluginServiceSummary;
-  onClose: () => void;
-}) {
-  const [token, setToken] = useState("");
-  const connect = useConnectCredential();
-  const fieldLabel = TOKEN_FIELD_LABEL[service.type];
-
-  async function submit() {
-    const trimmed = token.trim();
-    if (!trimmed) return;
-    try {
-      await connect.mutateAsync({
-        service: service.service,
-        body:
-          service.type === "api_key"
-            ? { type: service.type, apiKey: trimmed }
-            : { type: service.type, accessToken: trimmed },
-      });
-      setToken("");
-      onClose();
-    } catch {
-      // useMutation surfaces the error via `connect.error`; the form stays open.
-    }
-  }
-
-  return (
-    <div className="mt-3 space-y-2 rounded-md border border-line bg-ink-wash p-4">
-      {service.connectLabel && <p className="text-xs text-muted">{service.connectLabel}</p>}
-      <label className="block text-xs font-medium text-ink" htmlFor={`token-${service.service}`}>
-        {fieldLabel}
-      </label>
-      <Textarea
-        id={`token-${service.service}`}
-        rows={2}
-        value={token}
-        onChange={(e) => setToken(e.target.value)}
-        placeholder={`Paste the ${fieldLabel.toLowerCase()}…`}
-        autoFocus
-      />
-      {connect.error && (
-        <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
-          {connect.error.message}
+      {/* The org note reads on a disconnected card too — "your organisation
+          has no GitHub App" is the reason Connect is about to fail — so the
+          stack no longer hangs off `service.connected` alone. */}
+      {(orgNote || (service.connected && (service.health?.login || note))) && (
+        <div className="mt-1.5 space-y-1 pl-12">
+          {service.connected && service.health?.login && (
+            <p className="truncate text-xs text-muted">Account: {service.health.login}</p>
+          )}
+          {service.connected && note && (
+            <p
+              className={
+                health === "identity-only"
+                  ? "text-xs leading-relaxed text-warning-fg"
+                  : "text-xs leading-relaxed text-danger-500"
+              }
+            >
+              {note}
+            </p>
+          )}
+          {orgNote}
         </div>
       )}
-      <div className="flex justify-end gap-2">
-        <Button variant="ghost" size="sm" onClick={onClose} disabled={connect.isPending}>
-          Cancel
-        </Button>
-        <Button size="sm" onClick={() => void submit()} disabled={connect.isPending || !token.trim()}>
-          {connect.isPending ? "Connecting…" : "Connect"}
-        </Button>
-      </div>
-    </div>
+      <CardFooter meta={meta} right={controls} />
+      <ConnectDialog
+        service={service}
+        title={title}
+        slug={slug}
+        open={connecting}
+        onOpenChange={setConnecting}
+      />
+    </>
   );
 }

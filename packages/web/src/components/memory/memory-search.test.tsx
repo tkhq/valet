@@ -10,8 +10,39 @@ const treeEntries = [
   { path: "a.md", title: "Alpha note", type: "note", pinned: false, updatedAt: 0, dir: false, sizeBytes: 10 },
 ];
 const searchResults = [
-  { path: "b.md", title: "Beta match", description: "a matching description", type: "note", rank: 1 },
+  {
+    path: "b.md",
+    title: "Beta match",
+    description: "a matching description",
+    type: "note",
+    rank: 1,
+    snippet: [
+      { text: "the line that holds the ", match: false },
+      { text: "beta", match: true },
+      { text: " term", match: false },
+    ],
+  },
+  // Agent-authored bodies can hold anything. The snippet is text, so this
+  // must render as visible characters, not as an element.
+  {
+    path: "c.md",
+    title: "Gamma match",
+    description: "",
+    type: "note",
+    rank: 0.5,
+    snippet: [{ text: '<img src=x onerror="boom"> beta', match: false }],
+  },
 ];
+
+// The pane reads the workspace it is searching. `useListOwner` needs the
+// caller's own id, because the switcher holds a routing key rather than a
+// principal — mocked here rather than wrapping in a provider, matching how
+// this file already isolates the pane from the network.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
+  useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: false } }, isLoading: false, error: null }),
+}));
 
 vi.mock("~/api/memory", () => ({
   useMemoryTree: () => ({
@@ -97,6 +128,35 @@ describe("MemorySearchPane", () => {
       vi.advanceTimersByTime(250);
     });
     expect(screen.getByText("Alpha note")).toBeTruthy();
+  });
+
+  /** Without the snippet, a result list of 300 journal entries is a list of
+   * dates: the reader has to open each file to find out why it matched. */
+  it("shows the matched text and marks the matched words", () => {
+    const { container } = render(<MemorySearchPane onSelect={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Search memory"), { target: { value: "beta" } });
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+
+    expect(screen.getByText("the line that holds the")).toBeTruthy();
+    const marks = container.querySelectorAll("mark");
+    expect(marks).toHaveLength(1);
+    expect(marks[0].textContent).toBe("beta");
+  });
+
+  /** `ts_headline` marks hits with `<b>` by default and memory documents
+   * are agent-authored — the snippet must reach the DOM as text, never as
+   * markup the browser parses. */
+  it("renders snippet text literally, never as HTML", () => {
+    const { container } = render(<MemorySearchPane onSelect={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Search memory"), { target: { value: "beta" } });
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText('<img src=x onerror="boom"> beta')).toBeTruthy();
   });
 
   it("calls onSelect with a search result's path when clicked", () => {

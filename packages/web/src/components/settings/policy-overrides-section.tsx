@@ -159,7 +159,7 @@ export function PolicyOverridesSection() {
                 id="override-risk"
                 value={riskLevel}
                 onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-                className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+                className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
               >
                 {RISK_LEVELS.map((r) => (
                   <option key={r} value={r}>
@@ -176,7 +176,7 @@ export function PolicyOverridesSection() {
               id="override-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>

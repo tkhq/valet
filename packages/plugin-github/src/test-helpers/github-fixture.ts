@@ -58,6 +58,14 @@ export interface GithubFixtureHandlers {
   listReviewComments?: (ref: PullRef) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/commits/:ref/check-runs` */
   listCheckRuns?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/contents/:path` — one file. Answer with a
+   * status to exercise a failure, which is what a caller reading a file out
+   * of another repository meets most often. */
+  readFile?: (owner: string, repo: string, path: string) => GithubFixtureResponse;
+  /** `GET /search/issues` — receives the parsed query, because the order
+   * and the page size are the part of a search a caller depends on and
+   * cannot see in the response. */
+  searchIssues?: (query: Record<string, string>) => GithubFixtureResponse;
   /** `GET /user/repos` — receives the auth header so a fixture can answer by
    * credential tier (an installation token 403s here on the real API). */
   listUserRepos?: (authHeader: string | undefined) => GithubFixtureResponse;
@@ -96,6 +104,8 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   }),
   listReviewComments: () => ({ body: [] }),
   listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
+  readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, size: 0, content: "" } }),
+  searchIssues: () => ({ body: { total_count: 0, items: [] } }),
   listUserRepos: () => ({ body: [{ full_name: "fixture-user/repo" }] }),
   listInstallationRepos: () => ({
     body: { total_count: 1, repositories: [{ full_name: "fixture-org/repo" }] },
@@ -209,6 +219,22 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     const ref = c.req.param("ref");
     record(c, { owner, repo, ref });
     const { status, body } = handlers.listCheckRuns(owner, repo, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  // A file path holds slashes, which a plain `:path` segment refuses.
+  app.get("/repos/:owner/:repo/contents/:path{.+}", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const path = c.req.param("path");
+    record(c, { owner, repo, path });
+    const { status, body } = handlers.readFile(owner, repo, path);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/search/issues", (c) => {
+    record(c, {});
+    const { status, body } = handlers.searchIssues(c.req.query());
     return c.json(body as object, status ?? 200);
   });
 

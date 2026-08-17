@@ -44,6 +44,7 @@ import {
   normalizeIfOperation,
   type IfDataType,
 } from './if-operations.js';
+import { didYouMean } from './near-match.js';
 import type { WorkflowDefinition } from './shape.js';
 import type { DagNodeType, ForeachNode, IfNode, WorkflowNode } from './nodes.js';
 
@@ -99,10 +100,25 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   approval: ['id', 'type', 'prompt', 'summary', 'details', 'timeout', 'onDeny'],
   session: ['id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
-  llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
+  llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'onError'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
-  workflow: ['id', 'type', 'workflowId', 'input'],
+  // A tool node carries BOTH policies, and they answer different questions.
+  // `onError` decides what a node FAILURE does to the rest of the run;
+  // `onDeny`/`approvalTimeout` decide what a policy GATE's refusal or
+  // expiry does. A denial is not an error, so one field cannot serve both.
+  tool: [
+    'id',
+    'type',
+    'service',
+    'action',
+    'params',
+    'summary',
+    'credential',
+    'onError',
+    'onDeny',
+    'approvalTimeout',
+  ],
+  workflow: ['id', 'type', 'workflowId', 'input', 'onError'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
 
@@ -110,6 +126,21 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
  * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
  * cannot hold. */
 const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
+
+/** Node types that carry `onError` (batch-fanout design decision 3). */
+const ERROR_POLICY_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>(['llm', 'tool', 'workflow']);
+
+/** Same reason as `TOOL_CREDENTIAL_MODES`: reject what `NodeErrorPolicy` cannot hold. */
+const NODE_ERROR_POLICIES: ReadonlySet<string> = new Set(['fail', 'continue']);
+
+/** The fixed keys of a `WorkflowTriggerPayload` — see `shape.ts`. */
+const TRIGGER_PAYLOAD_KEYS: ReadonlySet<string> = new Set([
+  'type',
+  'triggerId',
+  'timestamp',
+  'data',
+  'metadata',
+]);
 
 const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
@@ -122,6 +153,16 @@ export function validateWorkflowDefinition(
 
   if (definition.version !== 'dag/v1') {
     errors.push(`unsupported version ${JSON.stringify(definition.version)}: expected "dag/v1"`);
+  }
+
+  if (definition.policy?.onUnresolvedPath !== undefined) {
+    const mode = definition.policy.onUnresolvedPath;
+    if (mode !== 'empty' && mode !== 'fail') {
+      errors.push(
+        `policy.onUnresolvedPath must be "empty" or "fail", got ${JSON.stringify(mode)} — ` +
+          `"fail" stops a node whose template reads a path that does not resolve`,
+      );
+    }
   }
 
   const nodesById = new Map<string, WorkflowNode>();
@@ -327,6 +368,7 @@ function validateNodeFields(
         errors.push(`${label}: workflow.workflowId must be a non-empty string naming the called workflow`);
       }
       checkJsonTemplates(label, 'input', node.input, refCtx, errors);
+      checkErrorPolicy(label, 'workflow', node.onError, errors);
       break;
     case 'set':
       if (!isPlainObject(node.values)) {
@@ -411,6 +453,7 @@ function validateNodeFields(
       if (node.maxOutputTokens !== undefined && !isPositiveInteger(node.maxOutputTokens)) {
         errors.push(`${label}: llm.maxOutputTokens must be a positive integer`);
       }
+      checkErrorPolicy(label, 'llm', node.onError, errors);
       break;
     case 'orchestrator':
       if (!isNonEmptyString(node.prompt)) {
@@ -450,11 +493,37 @@ function validateNodeFields(
             `"app" makes the action run as the installed application, "user" as the workflow owner`,
         );
       }
+      checkErrorPolicy(label, 'tool', node.onError, errors);
+      // A policy gate on a tool node parks the run (`nodes/tool.ts`), so a
+      // definition needs a way to say what a denial or a timeout does. Both
+      // fields are checked the same way the approval node's are — one rule
+      // for one meaning. They are separate from `onError` above: a gate
+      // refusing is a decision, not a failure.
+      if (node.onDeny !== undefined && node.onDeny !== 'fail' && node.onDeny !== 'skip') {
+        errors.push(`${label}: tool.onDeny must be "fail" or "skip", got ${JSON.stringify(node.onDeny)}`);
+      }
+      if (
+        node.approvalTimeout !== undefined &&
+        (typeof node.approvalTimeout !== 'string' || parseDurationMs(node.approvalTimeout) === null)
+      ) {
+        errors.push(
+          `${label}: unparseable tool.approvalTimeout ${JSON.stringify(node.approvalTimeout)} — use a number + unit like "30m", "24h"`,
+        );
+      }
       break;
     case 'foreach':
       // Field checks live in validateForeachNode (needs nodesById).
       break;
   }
+}
+
+function checkErrorPolicy(label: string, type: DagNodeType, policy: unknown, errors: string[]): void {
+  if (policy === undefined) return;
+  if (typeof policy === 'string' && NODE_ERROR_POLICIES.has(policy)) return;
+  errors.push(
+    `${label}: ${type}.onError must be "fail" or "continue", got ${JSON.stringify(policy)} — ` +
+      `"continue" records the failure and still runs the nodes downstream of it`,
+  );
 }
 
 function validateIfNode(node: IfNode, label: string, refCtx: RefContext, errors: string[]): void {
@@ -554,6 +623,16 @@ function validateForeachNode(
     const bodyLabel = `node ${JSON.stringify(`${node.id}.body (${node.body.id})`)}`;
     lintNodeKeys(node.body, bodyLabel, errors);
     validateNodeFields(node.body, bodyLabel, refCtx, env, errors);
+    // A body has no outgoing edges, so `onError` would pass the shared
+    // field checks and then change nothing. `foreach.onItemError` is the
+    // per-item policy. The key is only accepted here for body types that
+    // declare it — on the others `lintNodeKeys` already rejected it.
+    if (ERROR_POLICY_NODE_TYPES.has(node.body.type) && hasKey(node.body, 'onError')) {
+      errors.push(
+        `${label}: foreach.body must not set onError — use foreach.onItemError ` +
+          `("fail", "skip" or "collect") to choose what a failed item does`,
+      );
+    }
   }
 
   // A body node is not in `definition.nodes`, so the per-node loop in
@@ -666,7 +745,23 @@ function checkPathRefs(label: string, field: string, paths: string[][], refCtx: 
   for (const segments of paths) {
     const root = segments[0];
     if (root === undefined) continue;
-    if (root === 'trigger' || refCtx.aliasRoots.has(root)) continue;
+    if (root === 'trigger') {
+      // A run's input is always a `WorkflowTriggerPayload` (`shape.ts`), so
+      // the keys under `trigger` are fixed and anything else can only ever
+      // resolve to nothing. `{{trigger.email}}` for `{{trigger.data.email}}`
+      // is the single most common template mistake, and at run time it
+      // renders as empty instead of failing.
+      const second = segments[1];
+      if (second !== undefined && !TRIGGER_PAYLOAD_KEYS.has(second)) {
+        errors.push(
+          `${label}: ${field} reads "trigger.${second}", but a trigger payload carries only ` +
+            `${[...TRIGGER_PAYLOAD_KEYS].join(', ')} — the trigger's own fields live under "data" ` +
+            `(did you mean "trigger.data.${second}"?)`,
+        );
+      }
+      continue;
+    }
+    if (refCtx.aliasRoots.has(root)) continue;
     if (root === 'nodes') {
       const target = segments[1];
       if (target === undefined) {
@@ -750,40 +845,6 @@ function isPositiveInteger(n: unknown): n is number {
 
 function hasKey(value: unknown, key: string): boolean {
   return isPlainObject(value) && key in value;
-}
-
-/** ` — did you mean "x"?` when a close match exists, else "". */
-export function didYouMean(input: string, candidates: readonly string[]): string {
-  let best: string | null = null;
-  let bestDist = 3; // only suggest within edit distance 2
-  for (const candidate of candidates) {
-    const dist = editDistance(input.toLowerCase(), candidate.toLowerCase(), bestDist);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = candidate;
-    }
-  }
-  return best ? ` — did you mean ${JSON.stringify(best)}?` : '';
-}
-
-/** Bounded Levenshtein — bails once the distance exceeds `limit`. */
-function editDistance(a: string, b: string, limit: number): number {
-  if (Math.abs(a.length - b.length) > limit) return limit + 1;
-  const prev = new Array<number>(b.length + 1);
-  const cur = new Array<number>(b.length + 1);
-  for (let j = 0; j <= b.length; j++) prev[j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    cur[0] = i;
-    let rowMin = cur[0]!;
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost);
-      rowMin = Math.min(rowMin, cur[j]!);
-    }
-    if (rowMin > limit) return limit + 1;
-    for (let j = 0; j <= b.length; j++) prev[j] = cur[j]!;
-  }
-  return prev[b.length]!;
 }
 
 function findCycle(nodesById: Map<string, WorkflowNode>, adjacency: Map<string, string[]>): string | null {

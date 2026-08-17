@@ -95,7 +95,6 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 | `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
 | `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
 | `gateway-unit` | `pnpm --filter @valet/sandbox-gateway test` — sandbox JWT mint/verify, WS proxy |
-| `runner-unit` | `pnpm --filter @valet/runner test` |
 | `plugins-unit` | `pnpm --filter './packages/plugin-*' test` — telegram/slack/github/google-* action + transport tests |
 | `sandbox-local` | `packages/sandbox-local` test suite |
 | `sandbox-k8s-unit` | `packages/sandbox-kubernetes` non-cluster tests (manifest, lifecycle, provider, framing) |

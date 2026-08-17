@@ -10,10 +10,33 @@
  * link and calls `useNavigate` on Run.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
 const navigate = vi.fn();
+
+/**
+ * The page guards navigation away from unsaved work with `useBlocker`. The
+ * hook needs a live router, so it is mocked like `useNavigate`: the tests
+ * read back the `disabled` flag the page passed (whether the guard is
+ * armed) and choose the resolver the page sees (`idle` normally, `blocked`
+ * for the case where a departure is being held).
+ */
+type BlockerResolver =
+  | { status: "idle"; proceed: undefined; reset: undefined }
+  | { status: "blocked"; proceed: () => void; reset: () => void };
+
+const blockerProceed = vi.fn();
+const blockerReset = vi.fn();
+const IDLE_BLOCKER: BlockerResolver = { status: "idle", proceed: undefined, reset: undefined };
+const BLOCKED_BLOCKER: BlockerResolver = {
+  status: "blocked",
+  proceed: blockerProceed,
+  reset: blockerReset,
+};
+let blocker: BlockerResolver = IDLE_BLOCKER;
+let blockerDisabled: boolean | undefined;
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
@@ -42,6 +65,10 @@ vi.mock("@tanstack/react-router", () => ({
     <a {...rest}>{children}</a>
   ),
   useNavigate: () => navigate,
+  useBlocker: (opts: { disabled?: boolean }) => {
+    blockerDisabled = opts.disabled;
+    return blocker;
+  },
   createFileRoute: () => (config: unknown) => config,
 }));
 
@@ -49,8 +76,13 @@ vi.mock("~/api/workflows", () => ({
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  // A page with `nextCursor` set: the workflow has more runs than this page
+  // holds, which is what the count and the drawer notice must say.
   useWorkflowRuns: () => ({
-    data: { runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }] },
+    data: {
+      runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }],
+      nextCursor: "1:wfrun_0",
+    },
     isLoading: false,
     error: null,
   }),
@@ -74,6 +106,10 @@ vi.mock("~/api/workflows", () => ({
   }),
   useWorkflowTriggers: (workflowId?: string) => useWorkflowTriggersMock(workflowId),
   useWorkflows: () => ({ data: { workflows: [] }, isLoading: false }),
+  // The Triggers drawer holds the webhook section beside the trigger list.
+  useWorkflowWebhook: () => ({ data: null, isLoading: false, error: null }),
+  useMintWorkflowWebhook: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useDeleteWorkflowWebhook: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useUpdateSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
   useUpdateEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
   useDeleteSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
@@ -84,13 +120,42 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
+/**
+ * The assistant panel resolves a session and watches its transcript, both
+ * of which need a live QueryClient. This file mocks the data layer rather
+ * than providing one, so the two hooks are stubbed here as well. Left
+ * un-resolved on purpose: the panel then renders its own "opening" state
+ * instead of mounting `SessionView`, which keeps these page-level tests off
+ * the whole chat stack. Its header and its openings render either way,
+ * which is what the tests below reach for. What the panel does once a
+ * session resolves belongs to the session tests.
+ */
+vi.mock("~/hooks/use-workflow-assistant", () => ({
+  useWorkflowAssistant: () => ({ opening: true }),
+}));
+vi.mock("~/hooks/use-workflow-patch-watch", () => ({
+  useWorkflowPatchWatch: () => undefined,
+}));
+
+import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { WorkflowEditorPage } from "./workflows.$workflowId";
+
+/** JSON mode is deliberately behind the editor's overflow menu — the
+ * assistant panel is the promoted path for changing a definition. */
+async function openJsonMode(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "More editor actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit JSON" }));
+}
 
 describe("WorkflowEditorPage", () => {
   beforeEach(() => {
     navigate.mockClear();
     updateMutateAsync.mockClear();
     startMutateAsync.mockClear();
+    blockerProceed.mockClear();
+    blockerReset.mockClear();
+    blocker = IDLE_BLOCKER;
+    blockerDisabled = undefined;
   });
 
   it("loads the fetched definition into the editor and the name field", () => {
@@ -134,9 +199,10 @@ describe("WorkflowEditorPage", () => {
   });
 
   it("Save fires the update mutation with the edited definition", async () => {
+    const user = userEvent.setup();
     render(<WorkflowEditorPage workflowId="wf_1" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit JSON" }));
+    await openJsonMode(user);
     const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
     const updatedText = textarea.value.replace('"Deploy pipeline"', '"Deploy pipeline"').replace(
       '"outcome": "success"',
@@ -171,22 +237,29 @@ describe("WorkflowEditorPage", () => {
     );
   });
 
-  it("lists runs in the runs drawer", () => {
+  it("lists runs in the runs drawer, and says when the list is one page of more", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    fireEvent.click(screen.getByRole("button", { name: /Runs/ }));
+    // `1+`, not `1`: the count is the page's length, not the run total.
+    fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
+    expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
   });
 
   it("renders the scoped triggers panel for this workflow", () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    expect(screen.getByText("Triggers")).toBeTruthy();
+    // The panel lives in the Triggers drawer, which starts closed, so the
+    // scoped read only happens after the toolbar button opens it.
+    fireEvent.click(screen.getByRole("button", { name: "Triggers" }));
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    // "Version history" lives in the toolbar's overflow menu — Radix
+    // dropdowns don't open on a plain jsdom click, but the keyboard path does.
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("Version history"));
     expect(screen.getByText("v2")).toBeTruthy();
     expect(screen.getByText("current")).toBeTruthy();
 
@@ -194,13 +267,72 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByText("v2"));
     expect(screen.queryByRole("button", { name: /Restore/ })).toBeNull();
 
-    // An older version offers restore, which PUTs its definition back.
+    // An older version offers restore. Restore overwrites the live
+    // definition with no undo, so the button asks before it PUTs — this
+    // case used to assert the PUT fired on the first click.
     fireEvent.click(screen.getByText("v1"));
     fireEvent.click(screen.getByRole("button", { name: "Restore v1" }));
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore v1" }));
     await waitFor(() =>
       expect(updateMutateAsync).toHaveBeenCalledWith({
         name: "Deploy pipeline",        definition: workflowData.definition,
       }),
     );
+  });
+
+  it("arms the leave guard for a rename, and leaves it off on a clean page", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    // A clean page must not arm the guard, or every tab close would ask.
+    expect(blockerDisabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Workflow name"), {
+      target: { value: "Renamed pipeline" },
+    });
+    expect(blockerDisabled).toBe(false);
+  });
+
+  it("arms the leave guard for a definition edit, not only a rename", async () => {
+    const user = userEvent.setup();
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(blockerDisabled).toBe(true);
+
+    await openJsonMode(user);
+    const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: textarea.value.replace('"success"', '"failure"') },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(blockerDisabled).toBe(false);
+  });
+
+  it("has the assistant on screen from the start, with nothing to press to reach it", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByRole("complementary", { name: "Workflow assistant" })).toBeTruthy();
+    // Beside the canvas, not over it: the conversation is about the
+    // diagram, so the diagram stays visible.
+    expect(screen.getByTestId("workflow-editor")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open the assistant" })).toBeNull();
+  });
+
+  it("puts a suggestion in the composer of the assistant that is already open", () => {
+    useComposerPrefillStore.setState({ text: null });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    // The openings name steps from this workflow, so they are instructions
+    // the agent can act on, not a generic "ask me anything".
+    fireEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    expect(useComposerPrefillStore.getState().text).toContain("wf_1");
+  });
+
+  it("offers Leave without saving while a departure is held, and proceeds on confirm", () => {
+    blocker = BLOCKED_BLOCKER;
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Leave without saving" }));
+    expect(blockerProceed).toHaveBeenCalledTimes(1);
+    expect(blockerReset).not.toHaveBeenCalled();
   });
 });

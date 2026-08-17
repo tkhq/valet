@@ -35,6 +35,10 @@ export interface GithubFixtureResponse {
 }
 
 export interface GithubFixtureHandlers {
+  /** `GET /app` — the App-JWT identity endpoint. Answer with a 401 to play
+   * GitHub refusing an app id that does not match the private key, which is
+   * what `verifyAppCredential` exists to catch. */
+  getApp?: () => GithubFixtureResponse;
   /** `GET /app/installations`. Receives the request's parsed query string so
    * multi-page fixtures can branch on `page`/`per_page`. */
   listInstallations?: (query: Record<string, string>) => GithubFixtureResponse;
@@ -50,6 +54,11 @@ export interface GithubFixtureHandlers {
   listInstallationRepositories?: () => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
+  /** `GET /app/hook/config` — the App's OWN webhook config. */
+  getHookConfig?: () => GithubFixtureResponse;
+  /** `PATCH /app/hook/config`. The request body is on the recorded call, so
+   * tests assert the sent URL through `fixture.calls`. */
+  updateHookConfig?: () => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo` (prebuild orchestration, Task 3 — head-sha
    * resolution reads `default_branch` from here). */
   getRepo?: (owner: string, repo: string) => GithubFixtureResponse;
@@ -75,6 +84,19 @@ function listenAddress(server: ServerType): number {
 }
 
 const DEFAULTS: Required<GithubFixtureHandlers> = {
+  getApp: () => ({
+    body: {
+      id: 1,
+      slug: "fixture-app",
+      node_id: "MDM6QXBwMQ==",
+      client_id: "fixture-client-id",
+      name: "Fixture App",
+      html_url: "https://github.com/apps/fixture-app",
+      permissions: {},
+      events: [],
+      installations_count: 0,
+    },
+  }),
   listInstallations: () => ({ body: [] }),
   createInstallationToken: () => ({
     body: { token: "fixture-installation-token", expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -95,6 +117,15 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       html_url: "https://github.com/apps/fixture-app",
     },
   }),
+  getHookConfig: () => ({
+    body: {
+      url: "https://fixture.example.com/webhooks/github-app",
+      content_type: "json",
+      insecure_ssl: "0",
+      secret: "********",
+    },
+  }),
+  updateHookConfig: () => ({ body: { content_type: "json", insecure_ssl: "0", secret: "********" } }),
   getRepo: () => ({ body: { default_branch: "main" } }),
   getCommit: () => ({ body: { sha: "fixture-head-sha" } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),
@@ -130,6 +161,12 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     });
   }
 
+  app.get("/app", (c) => {
+    record(c, {});
+    const { status, body } = handlers.getApp();
+    return c.json(body as object, status ?? 200);
+  });
+
   app.get("/app/installations", (c) => {
     const query = c.req.query();
     record(c, {});
@@ -151,6 +188,24 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     record(c, { id }, body);
     const { status, body: respBody } = handlers.createInstallationToken(id);
     return c.json(respBody as object, status ?? 201);
+  });
+
+  app.get("/app/hook/config", (c) => {
+    record(c, {});
+    const { status, body } = handlers.getHookConfig();
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.patch("/app/hook/config", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      body = undefined;
+    }
+    record(c, {}, body);
+    const { status, body: respBody } = handlers.updateHookConfig();
+    return c.json(respBody as object, status ?? 200);
   });
 
   app.get("/user", (c) => {

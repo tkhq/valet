@@ -5,7 +5,7 @@ import type { SubmissionResult } from '@valet/engine';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
 import type { WorkflowEngineDeps, WorkflowPromptReceipt } from '../engine-deps.js';
-import { driveUntilPark, type InterpreterDeps } from '../interpreter.js';
+import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
 import { executeSession } from './session.js';

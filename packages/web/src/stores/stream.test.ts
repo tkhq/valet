@@ -137,6 +137,84 @@ describe("stream store reducer", () => {
     expect(msg?.settledOutcome).toBe("failed");
   });
 
+  it("keeps the engine's error text next to a failed settled outcome", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "deploy the thing", THREAD);
+
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: msgId,
+      outcome: "failed",
+      error: "credit balance is too low",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const msg = slice.messages.find((m) => m.id === msgId);
+    expect(msg?.settledOutcome).toBe("failed");
+    expect(msg?.settledError).toBe("credit balance is too low");
+  });
+
+  it("leaves settledError undefined when a non-clean outcome carries no reason", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "stop that", THREAD);
+
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: msgId,
+      outcome: "aborted",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const msg = slice.messages.find((m) => m.id === msgId);
+    expect(msg?.settledOutcome).toBe("aborted");
+    expect(msg?.settledError).toBeUndefined();
+  });
+
+  it("clears both the badge and the reason when an item settles completed", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "retry that", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
+
+    // The reducer spreads the previous message, so a clean outcome must
+    // overwrite `settledError` rather than inherit it.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-1",
+      outcome: "failed",
+      error: "sandbox is not reachable",
+    });
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-1",
+      outcome: "completed",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const msg = slice.messages.find((m) => m.id === msgId);
+    expect(msg?.settledOutcome).toBeUndefined();
+    expect(msg?.settledError).toBeUndefined();
+  });
+
   it("matches submission.settled to the exact queueItemId, not the most recently sent message", () => {
     const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
 
@@ -712,6 +790,42 @@ describe("turn error visibility", () => {
     ingest(SESSION, errorEvent(1));
     addUserMessage(SESSION, "retry", THREAD);
     expect(useStreamStore.getState().bySession[SESSION].error).toBeUndefined();
+  });
+});
+
+describe("turnStartedAt", () => {
+  beforeEach(reset);
+
+  function statusEvent(status: "queued" | "thinking" | "idle", ts: number): WireEvent {
+    return { seq: ts, ts, type: "status", threadId: THREAD, status } as WireEvent;
+  }
+
+  it("stamps turnStartedAt on the first non-idle status after idle", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(1000);
+  });
+
+  it("does not re-stamp on a later non-idle status within the same turn", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, statusEvent("thinking", 2000));
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(1000);
+  });
+
+  it("clears turnStartedAt on turn_end", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBeUndefined();
+  });
+
+  it("stamps again on the next turn after idle", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
+    ingest(SESSION, statusEvent("queued", 3000));
+    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(3000);
   });
 });
 

@@ -1,6 +1,6 @@
 /**
  * The dispatcher's orchestrator delivery target: get-or-create the
- * subscription owner's orchestrator session and submit the event as a
+ * subscription owner's DEFAULT assistant session and submit the event as a
  * `SignalContent` prompt on its "events" thread — same delivery path
  * `ChannelHost.handleMessage` uses for inbound channel messages.
  * `dispatchId` (`event:{deliveryId}`) makes the submit idempotent across
@@ -15,20 +15,23 @@
  * durable org is asserted against the event's org, and a mismatch is
  * drop-logged (`event_drop_log`, reason `event_target_mismatch`) and
  * thrown instead of delivered — a subscription-matching bug can't silently
- * deliver an event into another org's orchestrator.
+ * deliver an event into another org's assistant.
  */
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
 export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHost }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, signal, dispatchId }) => {
-    const { session } = await ensureOrchestratorSession(
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
+    // A subscription names an OWNER, never one assistant of that owner, so
+    // this resolves the owner's default — the target automation gets when
+    // nobody chose.
+    const { session } = await ensureDefaultAssistantSession(
       { db: deps.db, engineHost: deps.engineHost },
       { type: ownerType, id: ownerId },
-      { actorUserId: ownerId, orgId },
+      { actorUserId, orgId },
     );
     const data = await session.toData();
     if (data.orgId !== orgId) {
@@ -36,9 +39,9 @@ export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHos
         orgId,
         reason: "event_target_mismatch",
         conversationKey: dispatchId,
-        detail: `orchestrator session ${session.id} belongs to org ${data.orgId}, event belongs to org ${orgId}`,
+        detail: `assistant session ${session.id} belongs to org ${data.orgId}, event belongs to org ${orgId}`,
       });
-      throw new Error(`event delivery refused: orchestrator org mismatch (${data.orgId} != ${orgId})`);
+      throw new Error(`event delivery refused: assistant org mismatch (${data.orgId} != ${orgId})`);
     }
     await session.thread("events").submitPrompt(signal, { dispatchId });
   };

@@ -6,6 +6,12 @@
  * the cursor stack, and Next/Previous walk the keyset cursor forward-only.
  * Mocks `~/api/policies` and `@tanstack/react-router`'s `Link` the same way
  * `thread-tree-new-thread.test.tsx` stubs `Link` as a plain anchor.
+ *
+ * The applied filters now come in as a prop from the route, which holds
+ * them in the URL, and Apply reports the new set back up. The earlier
+ * "Apply filters calls useActionLog with the service filter" test asserted
+ * the section's own state instead, which no longer exists: it is replaced
+ * by one test per half of that round trip.
  */
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -27,7 +33,17 @@ vi.mock("~/api/policies", () => ({
   useActionLog: (...args: unknown[]) => useActionLogMock(...args),
 }));
 
-import { ActionLogSection } from "./action-log-section";
+import {
+  ActionLogSection,
+  parseActionLogSearch,
+  type ActionLogSearch,
+} from "./action-log-section";
+
+const onFiltersChange = vi.fn();
+
+function renderSection(filters: ActionLogSearch = {}) {
+  return render(<ActionLogSection filters={filters} onFiltersChange={onFiltersChange} />);
+}
 
 function entry(overrides: Partial<ActionLogEntryWire> = {}): ActionLogEntryWire {
   return {
@@ -67,20 +83,28 @@ beforeEach(() => {
 
 describe("ActionLogSection — rows", () => {
   it("shows resolvedMode and status as distinct fields, not conflated", () => {
-    render(<ActionLogSection />);
+    renderSection();
     expect(screen.getByText("allow", { selector: "span" })).toBeTruthy();
     expect(screen.getByText("status: completed")).toBeTruthy();
   });
 
   it("links session provenance to the session route", () => {
-    render(<ActionLogSection />);
+    renderSection();
     const link = screen.getByRole("link", { name: "session" });
     expect(link.getAttribute("to")).toBe("/sessions/$sessionId");
   });
 
+  it("keeps the provenance links out of the toggle button", () => {
+    // A link inside a button is invalid, and one click would both navigate
+    // and expand the row.
+    renderSection();
+    const toggle = screen.getByRole("button", { name: "Toggle details for inv_1" });
+    expect(toggle.querySelector("a")).toBeNull();
+  });
+
   it("expanding a row reveals params and result JSON", async () => {
     const user = userEvent.setup();
-    render(<ActionLogSection />);
+    renderSection();
 
     expect(screen.queryByText(/"to": "a@b.com"/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Toggle details for inv_1" }));
@@ -90,22 +114,65 @@ describe("ActionLogSection — rows", () => {
 
   it("shows the empty state when there are no entries", () => {
     useActionLogMock.mockReturnValue({ data: { entries: [], nextCursor: null }, isLoading: false, error: null });
-    render(<ActionLogSection />);
+    renderSection();
     expect(screen.getByText("No invocations match these filters.")).toBeTruthy();
   });
 });
 
 describe("ActionLogSection — filters", () => {
-  it("Apply filters calls useActionLog with the service filter and resets the cursor", async () => {
+  it("Apply filters reports the drafted filter set to the route", async () => {
     const user = userEvent.setup();
-    render(<ActionLogSection />);
+    renderSection();
 
     await user.type(screen.getByLabelText("Service"), "gmail");
     await user.click(screen.getByRole("button", { name: "Apply filters" }));
 
+    expect(onFiltersChange).toHaveBeenCalledWith({
+      service: "gmail",
+      resolvedMode: undefined,
+      status: undefined,
+    });
+  });
+
+  it("reads the applied filters from the prop, and seeds the controls with them", () => {
+    renderSection({ service: "gmail", resolvedMode: "deny" });
+
     const lastCall = useActionLogMock.mock.calls[useActionLogMock.mock.calls.length - 1];
-    expect(lastCall[0]).toEqual({ service: "gmail" });
+    expect(lastCall[0]).toEqual({ service: "gmail", resolvedMode: "deny" });
+    expect((screen.getByLabelText("Service") as HTMLInputElement).value).toBe("gmail");
+    expect((screen.getByLabelText("Resolved mode") as HTMLSelectElement).value).toBe("deny");
+  });
+
+  it("Apply filters resets the pager to the first page", async () => {
+    const user = userEvent.setup();
+    useActionLogMock.mockReturnValue({
+      data: { entries: [entry()], nextCursor: "cursor_abc" },
+      isLoading: false,
+      error: null,
+    });
+    renderSection();
+
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    const lastCall = useActionLogMock.mock.calls[useActionLogMock.mock.calls.length - 1];
     expect(lastCall[1]).toBeUndefined();
+  });
+});
+
+describe("parseActionLogSearch", () => {
+  it("keeps known values and drops the rest", () => {
+    expect(
+      parseActionLogSearch({ service: " gmail ", resolvedMode: "deny", status: "completed" }),
+    ).toEqual({ service: "gmail", resolvedMode: "deny", status: "completed" });
+  });
+
+  it("drops an unknown mode or status instead of filtering on it", () => {
+    expect(parseActionLogSearch({ resolvedMode: "sometimes", status: 7, service: "" })).toEqual({
+      service: undefined,
+      resolvedMode: undefined,
+      status: undefined,
+    });
   });
 });
 
@@ -117,7 +184,7 @@ describe("ActionLogSection — pagination", () => {
       isLoading: false,
       error: null,
     });
-    render(<ActionLogSection />);
+    renderSection();
 
     await user.click(screen.getByRole("button", { name: "Next" }));
 
@@ -126,12 +193,12 @@ describe("ActionLogSection — pagination", () => {
   });
 
   it("Previous is disabled on the first page", () => {
-    render(<ActionLogSection />);
+    renderSection();
     expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("Next is disabled when there is no nextCursor", () => {
-    render(<ActionLogSection />);
+    renderSection();
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

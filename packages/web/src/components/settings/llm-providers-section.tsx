@@ -500,7 +500,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
             aria-label={`Test model for ${provider.name}`}
             value={testModelId}
             onChange={(e) => setTestModelId(e.target.value)}
-            className="h-8 rounded border border-[--border] bg-[--bg] px-2 text-sm"
+            className="h-8 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
           >
             {provider.models.map((m) => (
               <option key={m.id} value={m.id}>

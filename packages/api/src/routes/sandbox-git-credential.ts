@@ -57,10 +57,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { sessionRepos } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
-import type {
-  PostSandboxGitCredentialRequest,
-  PostSandboxGitCredentialResponse,
-} from "../wire/types.js";
+import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
 

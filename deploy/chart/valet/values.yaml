@@ -120,6 +120,16 @@ sandbox:
   # Pin to sha-<shortsha> for reproducible deploys.
   fullBaseImage: ghcr.io/tkhq/valet-sandbox:latest
 
+  # RuntimeClass for docker-enabled sandbox pods. Point it at a containerd
+  # runtime configured with `cgroup_writable = true` (containerd >= 2.1,
+  # systemd cgroup driver) so the in-userns dockerd can create
+  # per-container cgroups. Without it the daemon starts but every
+  # `docker run` fails: kubelet mounts the pod cgroupfs read-only and the
+  # cgroup directory is owned by unmapped host root. The cluster operator
+  # must create the RuntimeClass object and the node containerd config;
+  # the chart only threads the name through. Empty → field omitted.
+  dockerRuntimeClass: ""
+
   # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
   # else resolves. Kept for one release; will be removed in a future v2.x.
   # image:

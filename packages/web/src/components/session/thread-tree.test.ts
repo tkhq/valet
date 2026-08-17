@@ -6,8 +6,12 @@
  * precisely so they're testable without mounting all of that.
  */
 import { describe, expect, it } from "vitest";
-import type { OrchestratorChildSummary } from "@valet/api/wire";
-import { childStatusDotClassName, groupChildrenByThread } from "./thread-tree";
+import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import {
+  childStatusDotClassName,
+  groupChildrenByThread,
+  untitledThreadLabel,
+} from "./thread-tree";
 
 function child(overrides: Partial<OrchestratorChildSummary> = {}): OrchestratorChildSummary {
   return {
@@ -52,5 +56,36 @@ describe("childStatusDotClassName", () => {
     const cls = childStatusDotClassName("settled");
     expect(cls).toContain("bg-muted");
     expect(cls).not.toContain("animate-pulse");
+  });
+});
+
+/**
+ * The fallback label used to be `Thread ${index + 1}`. Threads sort newest
+ * first, so creating one renumbered every row below it — a number that
+ * claims an identity and then hands it to a different thread. At two
+ * threads nobody notices; at thirty the whole list shifts.
+ */
+describe("untitledThreadLabel", () => {
+  const t = (id: string, createdAt: number): ThreadSummary => ({
+    id,
+    sessionId: "s1",
+    createdAt,
+    key: "web:1",
+  });
+
+  it("names the newest thread for what it is", () => {
+    expect(untitledThreadLabel(t("a", 1_000), 0)).toBe("New thread");
+  });
+
+  it("gives an older thread a label that does not change when a new one arrives", () => {
+    const older = t("b", 1_700_000_000_000);
+    // Same thread, two different positions after another thread is created.
+    expect(untitledThreadLabel(older, 3)).toBe(untitledThreadLabel(older, 7));
+  });
+
+  it("distinguishes two untitled threads created at different times", () => {
+    const a = t("a", 1_700_000_000_000);
+    const b = t("b", 1_700_086_400_000);
+    expect(untitledThreadLabel(a, 2)).not.toBe(untitledThreadLabel(b, 3));
   });
 });

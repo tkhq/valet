@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useSkill } from "~/api/skills";
 import { displayName } from "~/components/integrations/display-name";
+import { OwnerBadge } from "~/components/owner-badge";
 import { originLabel } from "~/components/skills/skill-card";
 import { SkillDocument } from "~/components/skills/skill-document";
 
@@ -27,10 +28,15 @@ export function SkillDetailPage() {
       description={skill?.description}
       meta={
         skill && (
-          <>
-            {skill.origin === "plugin" ? `from ${skill.plugin}` : originLabel(skill)}
-            {skill.takesArgs && " · takes arguments"}
-          </>
+          <span className="inline-flex items-center gap-2">
+            <span>
+              {skill.origin === "plugin" ? `from ${skill.plugin}` : originLabel(skill)}
+              {skill.takesArgs && " · takes arguments"}
+            </span>
+            {skill.origin !== "plugin" && (
+              <OwnerBadge ownerType={skill.ownerType} ownerId={skill.ownerId} />
+            )}
+          </span>
         )
       }
       content={skill?.content}

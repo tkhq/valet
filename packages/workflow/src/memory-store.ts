@@ -7,11 +7,16 @@
 
 import {
   WorkflowFenceError,
+  decodeRunCursor,
+  encodeRunCursor,
+  type ListRunsFilter,
+  type ListRunsPage,
   type NodeCheckpoint,
   type RunParams,
   type RunSignal,
   type RunWaitCondition,
   type WorkflowRun,
+  type WorkflowRunListItem,
   type WorkflowStore,
 } from './store.js';
 
@@ -179,6 +184,44 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     const parked = [...this.runs.values()].filter((run) => run.status === 'parked');
     parked.sort((a, b) => a.updatedAt - b.updatedAt);
     return parked.slice(0, limit).map((run) => structuredClone(run));
+  }
+
+  async listRuns(filter: ListRunsFilter): Promise<ListRunsPage> {
+    const after = filter.cursor === undefined ? undefined : decodeRunCursor(filter.cursor);
+    const matched = [...this.runs.values()].filter((run) => {
+      if (filter.workflowIds && !filter.workflowIds.includes(run.params.workflowId)) return false;
+      if (filter.status && !filter.status.includes(run.status)) return false;
+      if (filter.outcome && (run.outcome === undefined || !filter.outcome.includes(run.outcome))) return false;
+      if (filter.parentRunId !== undefined && run.params.parentRunId !== filter.parentRunId) return false;
+      if (filter.since !== undefined && run.createdAt < filter.since) return false;
+      if (after) {
+        // Strictly after the cursor row in `(createdAt, runId)` descending order.
+        if (run.createdAt > after.createdAt) return false;
+        if (run.createdAt === after.createdAt && run.runId >= after.runId) return false;
+      }
+      return true;
+    });
+    matched.sort((a, b) => (b.createdAt - a.createdAt) || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
+
+    // One row past the page tells us whether another page exists, without a
+    // second count query.
+    const page = matched.slice(0, filter.limit);
+    const hasMore = matched.length > filter.limit;
+    const runs: WorkflowRunListItem[] = page.map((run) => ({
+      runId: run.runId,
+      workflowId: run.params.workflowId,
+      status: run.status,
+      outcome: run.outcome,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+      owner: run.owner ? structuredClone(run.owner) : undefined,
+      waitingOn: structuredClone(run.waitingOn),
+      parentRunId: run.params.parentRunId,
+      parentNodeId: run.params.parentNodeId,
+      parentIteration: run.params.parentIteration,
+    }));
+    const last = runs[runs.length - 1];
+    return { runs, nextCursor: hasMore && last ? encodeRunCursor(last) : undefined };
   }
 
   /**

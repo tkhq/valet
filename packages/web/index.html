@@ -3,8 +3,40 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0a0a0a" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Approximate sRGB hex for --paper in each mode (theme.css) — meta
+         theme-color doesn't reliably parse oklch() across browsers yet. -->
+    <meta name="theme-color" content="#fafbfc" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#17181c" media="(prefers-color-scheme: dark)" />
     <title>Valet</title>
+    <!-- Stamp the stored appearance choices on <html> before the stylesheet
+         paints. `main.tsx` applies the same two attributes, but a module
+         script only runs once its bundle has downloaded, which is long
+         enough on a cold load to show one frame of the default palette.
+         Keep this in sync with `src/lib/theme.ts`, which owns the storage
+         keys and the attribute names.
+
+         The palette name is matched against a shape rather than the list of
+         palettes, so adding a palette needs no edit here. An unknown name
+         lands on an attribute that no CSS block selects, and `main.tsx`
+         removes it a moment later. -->
+    <script>
+      (function () {
+        try {
+          var root = document.documentElement;
+          var theme = localStorage.getItem("valet-theme");
+          if (theme === "light" || theme === "dark") root.setAttribute("data-theme", theme);
+          var palette = localStorage.getItem("valet-palette");
+          if (palette && palette !== "default" && /^[a-z]{1,20}$/.test(palette)) {
+            root.setAttribute("data-palette", palette);
+          }
+        } catch (err) {
+          // Reading storage throws when the browser blocks it (private
+          // mode, cookies disabled). `main.tsx` repeats this work, so a
+          // failure here costs a flash, not the appearance choice.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

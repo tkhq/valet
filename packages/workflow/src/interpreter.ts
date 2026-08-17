@@ -19,7 +19,8 @@
  *   3. else propagate skips to a fixed point, then compute the runnable
  *      set (decision 9's edge/skip semantics)
  *   4. nothing runnable, everything terminal → two-phase settle
- *      (`completed`/`failed`, dominated by any node's `failed` status)
+ *      (`completed`/`failed`, dominated by any node's `failed` status
+ *      unless that node declares `onError: "continue"`)
  *   5. nothing runnable, not everything terminal → `parkRun`, return
  *   6. else execute the runnable nodes (deterministic definition order);
  *      a `stop` node's `terminate` signal short-circuits to two-phase
@@ -36,8 +37,11 @@ import {
   parseExpression,
   TemplateEvalError,
   TemplateParseError,
+  withMissRecorder,
   type TemplateContext,
 } from './dag/expression.js';
+import { auditNodeTemplates } from './dag/node-templates.js';
+import { createMissRecorder, type TemplatePathDiagnostic } from './dag/path-diagnostics.js';
 import type { WorkflowNode } from './dag/nodes.js';
 import type { WorkflowDefinition, WorkflowEdge } from './dag/shape.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
@@ -53,6 +57,78 @@ import {
 } from './nodes/index.js';
 import type { NodeCheckpoint, RunParkState, RunWaitCondition, WorkflowRun, WorkflowStore } from './store.js';
 
+/**
+ * What the host learns when a run reaches a terminal outcome (batch-fanout
+ * design decision 4). Every field comes from the run row the settle path
+ * already reads, so reporting costs no extra store call. A handler that
+ * needs node-level detail reads the checkpoints itself — the same division
+ * `onApprovalPending` uses.
+ */
+export interface RunSettledInfo {
+  runId: string;
+  workflowId: string;
+  outcome: 'completed' | 'failed' | 'cancelled';
+  /** Principal ownership of the run. Absent when `createRun` recorded no owner. */
+  owner?: { ownerType: string; ownerId: string };
+  /** Set on a sub-workflow run: the parent run and the `workflow` node parked on it. */
+  parentRunId?: string;
+  parentNodeId?: string;
+  parentIteration?: number;
+  /** The settle write's timestamp, read back from the run row. */
+  settledAt: number;
+}
+
+/**
+ * Settle report hook, fired once per settle finalization (batch-fanout
+ * design decision 4).
+ *
+ * Two obligations on the handler. It MUST NOT throw: the run is already
+ * `settled` when this fires, so nothing reclaims it and a throw only loses
+ * the park state `driveUntilPark` was about to return. It MUST be
+ * idempotent: `settleRun` is idempotent, and a run reclaimed while
+ * `terminalizing` re-runs the whole finalization, so one run can report
+ * more than once. `packages/api` wires both obligations the same way it
+ * wires `onApprovalPending` — a `try`/`catch` around a deterministic
+ * `dedupeKey`.
+ *
+ * Delivery is AT MOST once, never exactly once. The report follows
+ * `settleRun`, and `listRunnable` never returns a `settled` run, so a
+ * process that dies between the two loses the report and nothing reclaims
+ * the run to retry it. Use this hook for best-effort work (attention,
+ * metrics). A consumer that must not miss a settle reads the run row.
+ */
+export type OnRunSettled = (info: RunSettledInfo) => Promise<void> | void;
+
+/**
+ * Template paths that did not resolve during one drive segment.
+ *
+ * A run reaches this hook whether or not the misses failed anything: under
+ * the default `policy.onUnresolvedPath: "empty"` the nodes completed, with
+ * an empty value where the author expected data. That is exactly the case
+ * nothing else reports, so the host should persist these against the run
+ * and show them next to the run's nodes.
+ */
+export interface TemplateDiagnosticsReport {
+  runId: string;
+  workflowId: string;
+  /** The attempt that observed them. */
+  attempt: number;
+  /** Deduplicated by (node, field, path). Never empty. */
+  diagnostics: TemplatePathDiagnostic[];
+  /** True when `policy.onUnresolvedPath: "fail"` made these fail their nodes. */
+  enforced: boolean;
+}
+
+/**
+ * Template-diagnostics sink, fired once per wave that produced findings.
+ *
+ * Best-effort and non-blocking by contract: the interpreter swallows a
+ * throw, because losing a diagnostic must never abandon a drive lease. The
+ * handler must be idempotent — a reclaimed attempt re-drives the same wave
+ * and reports the same findings again.
+ */
+export type OnTemplateDiagnostics = (report: TemplateDiagnosticsReport) => Promise<void> | void;
+
 export interface InterpreterDeps {
   store: WorkflowStore;
   engine: WorkflowEngineDeps;
@@ -61,6 +137,10 @@ export interface InterpreterDeps {
   onApprovalPending?: OnApprovalPending;
   onApprovalGrant?: OnApprovalGrant;
   onGateResolved?: OnGateResolved;
+  /** Fired once per settle finalization — see `OnRunSettled`. */
+  onRunSettled?: OnRunSettled;
+  /** Fired for each wave that read a template path which did not resolve — see `OnTemplateDiagnostics`. */
+  onTemplateDiagnostics?: OnTemplateDiagnostics;
   /**
    * Host-only extension point (Phase 5 plan decision 20): invoked
    * synchronously right after `store.beginTerminalize` succeeds, before
@@ -113,7 +193,15 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 }
 
 async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, span: Span): Promise<RunParkState> {
-  const { store, engine, clock, onApprovalPending, onApprovalGrant, onGateResolved, onBeginTerminalize } = deps;
+  const {
+    store,
+    engine,
+    clock,
+    onApprovalPending,
+    onApprovalGrant,
+    onGateResolved,
+    onBeginTerminalize,
+  } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
 
   // `valet.workflow.id` is fixed for a run's whole lifetime (written once by
@@ -128,6 +216,9 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
   // set at span creation before any store call, remain available to
   // correlate the error.
   let workflowIdKnown = false;
+
+  /** Every template finding this drive segment has seen, for the span attributes. */
+  const driveDiagnostics: TemplatePathDiagnostic[] = [];
 
   while (true) {
     const run = await store.getRun(runId);
@@ -146,7 +237,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // the status stays `terminalizing` across reclaim precisely so this
     // branch is reachable.
     if (run.status === 'terminalizing') {
-      return await resumeTerminalize(store, run);
+      return await resumeTerminalize(deps, run);
     }
 
     // The store snapshots exactly what was passed to `createRun` at run
@@ -164,7 +255,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     }
 
     const graph = compile(definition);
-    const templateContext = buildTemplateContext(definition, cpAll);
+    const templateContext = buildTemplateContext(definition, cpAll, graph);
 
     const skippedAny = await propagateSkips(store, run, definition, graph, cpAll, attempt, clock);
     if (skippedAny) continue; // re-derive the runnable set with the new skips visible
@@ -174,8 +265,8 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     if (runnable.length === 0) {
       const allTerminal = definition.nodes.every((n) => isSettled(cpAll, n.id));
       if (allTerminal) {
-        const anyFailed = [...cpAll.values()].some((cp) => cp.status === 'failed');
-        return await twoPhaseSettle(store, run.runId, attempt, anyFailed ? 'failed' : 'completed', onBeginTerminalize);
+        const anyFailed = hasDominatingFailure(cpAll, graph);
+        return await twoPhaseSettle(deps, run.runId, attempt, anyFailed ? 'failed' : 'completed');
       }
       return await parkAndReturn(store, run, attempt, run.waitingOn, run.wakeAt);
     }
@@ -185,8 +276,32 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // Failure dominance (mirrors main's runtime.ts): if any node in this
     // run — this wave or an earlier one — has a `failed` checkpoint, a
     // terminate settles `failed` regardless of the terminating stop node's
-    // own outcome.
-    let sawFailure = [...cpAll.values()].some((cp) => cp.status === 'failed');
+    // own outcome. Nodes with `onError: "continue"` are exempt.
+    let sawFailure = hasDominatingFailure(cpAll, graph);
+
+    // Audit every runnable node's templates against the context it is
+    // about to render with. Two products come out of one pass: the
+    // findings the host reports (always), and — under
+    // `policy.onUnresolvedPath: "fail"` — the set of nodes that must not
+    // run at all. Auditing BEFORE the wave is what makes strict mode
+    // meaningful: a node that has already sent a prompt or called an
+    // action cannot be un-run, and its checkpoint is already terminal.
+    const strict = definition.policy?.onUnresolvedPath === 'fail';
+    const findings: TemplatePathDiagnostic[] = [];
+    const blocked = new Map<string, TemplatePathDiagnostic[]>();
+    for (const node of runnable) {
+      const audit = auditNodeTemplates(node, templateContext);
+      if (audit.length === 0) continue;
+      findings.push(...audit);
+      if (!strict) continue;
+      const enforceable = audit.filter((d) => d.enforceable);
+      if (enforceable.length > 0) blocked.set(node.id, enforceable);
+    }
+
+    const blockedOutcomes = new Map<string, NodeExecuteResult>();
+    for (const [nodeId, diagnostics] of blocked) {
+      blockedOutcomes.set(nodeId, await failUnresolvedPaths(store, run, nodeId, attempt, clock, diagnostics));
+    }
 
     // Execute the wave's runnable nodes concurrently, bounded (batch-fanout
     // design decision 2). Same-wave nodes never feed each other — the
@@ -195,25 +310,53 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // changes wall-clock, not semantics. Outcomes are aggregated in
     // definition order below, preserving the sequential loop's
     // deterministic terminate selection.
-    const outcomes = await executeWave(runnable, executors, (node) => ({
+    //
+    // Each node renders against its OWN copy of the context, carrying a
+    // recorder that reports the paths it read and did not resolve. That is
+    // how a `foreach` body's misses surface: the body renders with the
+    // foreach node's context plus per-iteration aliases, which the audit
+    // above cannot see.
+    const toExecute = runnable.filter((node) => !blocked.has(node.id));
+    const recorded = new Map<string, TemplatePathDiagnostic[]>();
+    const executed = await executeWave(toExecute, executors, (node) => {
+      const { recorder, diagnostics } = createMissRecorder(node.id);
+      recorded.set(node.id, diagnostics);
+      return {
+        run,
+        attempt,
+        iteration: ITERATION,
+        templateContext: withMissRecorder(templateContext, recorder),
+        existingCheckpoint: cpAll.get(node.id),
+        store,
+        clock,
+        engine,
+        onApprovalPending,
+        onApprovalGrant,
+        onGateResolved,
+      };
+    });
+
+    const outcomeById = new Map<string, NodeExecuteResult>();
+    for (let i = 0; i < toExecute.length; i++) outcomeById.set(toExecute[i].id, executed[i]);
+    for (const [nodeId, outcome] of blockedOutcomes) outcomeById.set(nodeId, outcome);
+
+    await reportDiagnostics(
+      deps,
       run,
       attempt,
-      iteration: ITERATION,
-      templateContext,
-      existingCheckpoint: cpAll.get(node.id),
-      store,
-      clock,
-      engine,
-      onApprovalPending,
-      onApprovalGrant,
-      onGateResolved,
-    }));
+      span,
+      mergeDiagnostics(findings, recorded),
+      strict,
+      driveDiagnostics,
+    );
 
-    for (let i = 0; i < runnable.length; i++) {
-      const node = runnable[i];
-      const outcome = outcomes[i];
+    for (const node of runnable) {
+      // Every runnable node either executed or was blocked by the audit
+      // above, so this lookup always finds an outcome.
+      const outcome = outcomeById.get(node.id);
+      if (outcome === undefined) continue;
 
-      if (outcome.status === 'failed') sawFailure = true;
+      if (outcome.status === 'failed' && !graph.tolerateFailure.has(node.id)) sawFailure = true;
 
       if (outcome.status === 'parked') {
         if (outcome.waitingOn.length === 0) {
@@ -234,7 +377,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome, onBeginTerminalize, clock);
+      return await terminateSettle(deps, run.runId, attempt, waitingOn, finalOutcome);
     }
     if (waitingOn.length > 0) {
       const wakeAt = earliestTimerWake(waitingOn);
@@ -266,7 +409,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
 async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, clock, onBeginTerminalize } = deps;
+  const { store, engine, clock } = deps;
   for (const wait of run.waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
@@ -275,7 +418,7 @@ async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDep
       await cancelChildRun(store, wait.runId, clock);
     }
   }
-  return await twoPhaseSettle(store, run.runId, attempt, 'cancelled', onBeginTerminalize);
+  return await twoPhaseSettle(deps, run.runId, attempt, 'cancelled');
 }
 
 /** Cancel propagation to a sub-workflow run: same durable signal + wake the host's own `terminate()` writes. */
@@ -296,14 +439,12 @@ async function cancelChildRun(store: WorkflowStore, childRunId: string, clock: (
  * `settleRun`, which is idempotent. Never touches checkpoints or recomputes
  * the runnable set.
  */
-async function resumeTerminalize(store: WorkflowStore, run: WorkflowRun): Promise<RunParkState> {
+async function resumeTerminalize(deps: InterpreterDeps, run: WorkflowRun): Promise<RunParkState> {
   if (run.outcome === undefined) {
     throw new Error(`workflow run ${run.runId} is terminalizing with no reserved outcome`);
   }
   // Terminal cleanup hook: no-op this task. See `twoPhaseSettle`.
-  await store.settleRun(run.runId, run.outcome);
-  await wakeParentRun(store, run.runId);
-  return await mustGetParkState(store, run.runId);
+  return await finalizeSettle(deps, run.runId, run.outcome);
 }
 
 /**
@@ -314,15 +455,13 @@ async function resumeTerminalize(store: WorkflowStore, run: WorkflowRun): Promis
  * workflow has settled.
  */
 async function terminateSettle(
-  store: WorkflowStore,
-  engine: WorkflowEngineDeps,
+  deps: InterpreterDeps,
   runId: string,
   attempt: number,
   waitingOn: RunWaitCondition[],
   outcome: 'completed' | 'failed',
-  onBeginTerminalize: (() => void | Promise<void>) | undefined,
-  clock: () => number,
 ): Promise<RunParkState> {
+  const { store, engine, clock } = deps;
   for (const wait of waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
@@ -331,16 +470,16 @@ async function terminateSettle(
       await cancelChildRun(store, wait.runId, clock);
     }
   }
-  return await twoPhaseSettle(store, runId, attempt, outcome, onBeginTerminalize);
+  return await twoPhaseSettle(deps, runId, attempt, outcome);
 }
 
 async function twoPhaseSettle(
-  store: WorkflowStore,
+  deps: InterpreterDeps,
   runId: string,
   attempt: number,
   outcome: 'completed' | 'failed' | 'cancelled',
-  onBeginTerminalize: (() => void | Promise<void>) | undefined,
 ): Promise<RunParkState> {
+  const { store, onBeginTerminalize } = deps;
   await store.beginTerminalize(runId, attempt, outcome);
   // Decision 20's crash-point hook: `LocalRunHost` wires this to simulate a
   // process crash right after the outcome is reserved but before terminal
@@ -351,22 +490,55 @@ async function twoPhaseSettle(
   // Terminal cleanup hook: no-op this task. Later tasks (spawned-session
   // teardown, trace finalization) run here, between reserving the
   // outcome and finalizing it.
-  await store.settleRun(runId, outcome);
-  await wakeParentRun(store, runId);
-  return await mustGetParkState(store, runId);
+  return await finalizeSettle(deps, runId, outcome);
 }
 
 /**
- * A sub-workflow run's settlement is its parent's wake signal (batch-
- * fanout design decision 1): request a wake on `params.parentRunId` so the
- * parked `workflow` node re-drives promptly. Best-effort — the host's
- * lost-wake sweep independently wakes parents whose `run` wait names a
- * settled child, so a crash right here loses nothing.
+ * The single exit from a settled run, shared by `twoPhaseSettle` and the
+ * `resumeTerminalize` reclaim path: finalize the reserved outcome, wake a
+ * sub-workflow run's parent, then report the settle to the host.
+ *
+ * One `store.getRun` serves all three consumers — the parent linkage, the
+ * report payload, and the returned park state — where the two helpers this
+ * replaced each made their own round trip.
+ *
+ * Order is load-bearing.
+ *   1. `settleRun` first: nothing may observe a settle the store has not
+ *      committed.
+ *   2. The parent wake next (batch-fanout design decision 1): a
+ *      sub-workflow run's settlement is its parent's wake signal, so the
+ *      parked `workflow` node re-drives promptly. Best-effort — the host's
+ *      lost-wake sweep independently wakes parents whose `run` wait names a
+ *      settled child.
+ *   3. `onRunSettled` last (decision 4), so a slow or throwing host handler
+ *      can never strand a parked parent.
  */
-async function wakeParentRun(store: WorkflowStore, runId: string): Promise<void> {
+async function finalizeSettle(
+  deps: InterpreterDeps,
+  runId: string,
+  outcome: 'completed' | 'failed' | 'cancelled',
+): Promise<RunParkState> {
+  const { store, onRunSettled } = deps;
+  await store.settleRun(runId, outcome);
+
   const run = await store.getRun(runId);
-  const parentRunId = run?.params.parentRunId;
+  if (!run) throw new Error(`workflow run vanished mid-drive: ${runId}`);
+
+  const { parentRunId, parentNodeId, parentIteration } = run.params;
   if (parentRunId !== undefined) await store.requestWake(parentRunId);
+
+  await onRunSettled?.({
+    runId: run.runId,
+    workflowId: run.params.workflowId,
+    outcome,
+    owner: run.owner,
+    parentRunId,
+    parentNodeId,
+    parentIteration,
+    settledAt: run.updatedAt,
+  });
+
+  return parkStateOf(run);
 }
 
 async function parkAndReturn(
@@ -383,6 +555,11 @@ async function parkAndReturn(
 async function mustGetParkState(store: WorkflowStore, runId: string): Promise<RunParkState> {
   const run = await store.getRun(runId);
   if (!run) throw new Error(`workflow run vanished mid-drive: ${runId}`);
+  return parkStateOf(run);
+}
+
+/** The `RunParkState` view of a run row — the park/ownership fields only. */
+function parkStateOf(run: WorkflowRun): RunParkState {
   return {
     runId: run.runId,
     status: run.status,
@@ -434,6 +611,114 @@ async function executeWave(
   const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
   if (rejected) throw rejected.reason;
   return outcomes;
+}
+
+// ─── Template diagnostics ────────────────────────────────────────────────────
+
+/**
+ * Fail a node whose templates read paths that do not resolve, under
+ * `policy.onUnresolvedPath: "fail"`.
+ *
+ * Writes the same intent-then-terminal pair an executor would, so the node
+ * has an ordinary `failed` checkpoint: failure dominance, `onError:
+ * "continue"`, and the run list all keep working without knowing why it
+ * failed. The node's own executor never runs, so nothing was sent with a
+ * hole in it.
+ */
+async function failUnresolvedPaths(
+  store: WorkflowStore,
+  run: WorkflowRun,
+  nodeId: string,
+  attempt: number,
+  clock: () => number,
+  diagnostics: TemplatePathDiagnostic[],
+): Promise<NodeExecuteResult> {
+  const error =
+    `unresolved template path(s); this workflow sets policy.onUnresolvedPath to "fail":\n` +
+    diagnostics.map((d) => `- ${d.message}`).join('\n');
+  await store.putIntent({
+    runId: run.runId,
+    nodeId,
+    iteration: ITERATION,
+    status: 'intent',
+    attempt,
+    createdAt: clock(),
+  });
+  const terminal: NodeCheckpoint = {
+    runId: run.runId,
+    nodeId,
+    iteration: ITERATION,
+    status: 'failed',
+    error,
+    attempt,
+    createdAt: clock(),
+  };
+  await store.completeCheckpoint(run.runId, nodeId, ITERATION, attempt, terminal);
+  return { status: 'failed', error };
+}
+
+/**
+ * One list from the pre-wave audit and the executors' own recorders.
+ *
+ * The audit sees a node's fields; a recorder sees whatever the node
+ * actually rendered, including a `foreach` body's templates. They overlap
+ * on ordinary nodes, so a path already reported with its field name wins —
+ * the field is the part an author needs to find the text to edit.
+ */
+function mergeDiagnostics(
+  audited: TemplatePathDiagnostic[],
+  recorded: Map<string, TemplatePathDiagnostic[]>,
+): TemplatePathDiagnostic[] {
+  const merged = [...audited];
+  const seen = new Set(audited.map((d) => `${d.nodeId}|${d.path}`));
+  for (const diagnostics of recorded.values()) {
+    for (const diagnostic of diagnostics) {
+      const key = `${diagnostic.nodeId}|${diagnostic.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(diagnostic);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Put the wave's findings where someone can read them: on the drive span
+ * for anyone reading traces, and through `onTemplateDiagnostics` for the
+ * host that persists them against the run.
+ *
+ * The span attributes are cumulative for the whole drive, so a later wave
+ * never overwrites an earlier wave's finding with a shorter list.
+ */
+async function reportDiagnostics(
+  deps: InterpreterDeps,
+  run: WorkflowRun,
+  attempt: number,
+  span: Span,
+  diagnostics: TemplatePathDiagnostic[],
+  enforced: boolean,
+  driveTotal: TemplatePathDiagnostic[],
+): Promise<void> {
+  if (diagnostics.length === 0) return;
+  driveTotal.push(...diagnostics);
+  span.setAttribute('valet.workflow.template.unresolved', driveTotal.length);
+  span.setAttribute(
+    'valet.workflow.template.unresolved_paths',
+    [...new Set(driveTotal.map((d) => `${d.nodeId}.${d.field ?? '*'}:${d.path}`))],
+  );
+  if (deps.onTemplateDiagnostics === undefined) return;
+  try {
+    await deps.onTemplateDiagnostics({
+      runId: run.runId,
+      workflowId: run.params.workflowId,
+      attempt,
+      diagnostics,
+      enforced,
+    });
+  } catch {
+    // Best-effort by contract: a reporting failure must not abandon the
+    // drive's lease. The findings stay on the span either way.
+  }
 }
 
 // ─── Executor dispatch ───────────────────────────────────────────────────────
@@ -568,19 +853,47 @@ function isSettled(cpAll: Map<string, NodeCheckpoint>, nodeId: string): boolean 
 interface CompiledGraph {
   incomingByNode: Map<string, WorkflowEdge[]>;
   nodeById: Map<string, WorkflowNode>;
+  /** Ids of nodes that declare `onError: "continue"` (batch-fanout design decision 3). */
+  tolerateFailure: Set<string>;
 }
 
 function compile(definition: WorkflowDefinition): CompiledGraph {
   const incomingByNode = new Map<string, WorkflowEdge[]>();
   const nodeById = new Map<string, WorkflowNode>();
+  const tolerateFailure = new Set<string>();
   for (const node of definition.nodes) {
     incomingByNode.set(node.id, []);
     nodeById.set(node.id, node);
+    if (toleratesFailure(node)) tolerateFailure.add(node.id);
   }
   for (const edge of definition.edges) {
     incomingByNode.get(edge.to)?.push(edge);
   }
-  return { incomingByNode, nodeById };
+  return { incomingByNode, nodeById, tolerateFailure };
+}
+
+/** The switch narrows the union — only `llm`/`tool`/`workflow` carry `onError`. */
+function toleratesFailure(node: WorkflowNode): boolean {
+  switch (node.type) {
+    case 'llm':
+    case 'tool':
+    case 'workflow':
+      return node.onError === 'continue';
+    default:
+      return false;
+  }
+}
+
+/**
+ * Does any node's failure decide the run's outcome? A node with
+ * `onError: "continue"` is excluded: its failure is recorded on its own
+ * checkpoint, but the run settles on what the rest of the graph did.
+ */
+function hasDominatingFailure(cpAll: Map<string, NodeCheckpoint>, graph: CompiledGraph): boolean {
+  for (const [nodeId, cp] of cpAll) {
+    if (cp.status === 'failed' && !graph.tolerateFailure.has(nodeId)) return true;
+  }
+  return false;
 }
 
 /** An edge is resolved when its source has a terminal checkpoint (completed/failed/skipped). */
@@ -591,13 +904,26 @@ function edgeResolved(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>): b
 /**
  * An edge is active when its source `completed` AND (no `fromOutput` or it
  * matches the source's boolean output) AND (no `when` or it evaluates
- * truthy). A `failed`/`skipped` source never activates an outgoing edge.
+ * truthy). A `skipped` source never activates an outgoing edge, and
+ * neither does a `failed` one unless the node declares
+ * `onError: "continue"` (batch-fanout design decision 3).
  */
-function edgeActive(edge: WorkflowEdge, cpAll: Map<string, NodeCheckpoint>, templateContext: TemplateContext, graph: CompiledGraph): boolean {
+function edgeActive(
+  edge: WorkflowEdge,
+  graph: CompiledGraph,
+  cpAll: Map<string, NodeCheckpoint>,
+  templateContext: TemplateContext,
+): boolean {
   const source = cpAll.get(edge.from);
-  if (!source || source.status !== 'completed') return false;
+  if (!source) return false;
+  const tolerated = source.status === 'failed' && graph.tolerateFailure.has(edge.from);
+  if (source.status !== 'completed' && !tolerated) return false;
 
   if (edge.fromOutput !== undefined) {
+    // `fromOutput` only leaves `if`/`approval` nodes, and neither carries
+    // `onError` — so a tolerated source cannot legitimately reach here.
+    // A failed node has no boolean output to match either way.
+    if (tolerated) return false;
     const sourceType = graph.nodeById.get(edge.from)?.type;
     const actual = booleanOutputOf(source.result, sourceType);
     if (actual === undefined) return false;
@@ -654,13 +980,13 @@ async function propagateSkips(
   let skippedAny = false;
   // Skipped nodes never add a `completed` entry, so the template context
   // is stable across this pass and can be computed once up front.
-  const templateContext = buildTemplateContext(definition, cpAll);
+  const templateContext = buildTemplateContext(definition, cpAll, graph);
   for (const node of definition.nodes) {
     if (cpAll.has(node.id)) continue; // started (intent or terminal) — never a skip candidate
     const incoming = graph.incomingByNode.get(node.id) ?? [];
     if (incoming.length === 0) continue; // runnable, not skippable
     if (!incoming.every((e) => edgeResolved(e, cpAll))) continue;
-    if (incoming.some((e) => edgeActive(e, cpAll, templateContext, graph))) continue;
+    if (incoming.some((e) => edgeActive(e, graph, cpAll, templateContext))) continue;
 
     await store.putIntent({
       runId: run.runId,
@@ -700,21 +1026,44 @@ function computeRunnable(
       continue;
     }
     if (!incoming.every((e) => edgeResolved(e, cpAll))) continue;
-    if (incoming.some((e) => edgeActive(e, cpAll, templateContext, graph))) runnable.push(node);
+    if (incoming.some((e) => edgeActive(e, graph, cpAll, templateContext))) runnable.push(node);
   }
   return runnable;
 }
 
 // ─── Template context (decision 4: `{ trigger, nodes }`, `nodes.<id>.result`) ─
 
-function buildTemplateContext(definition: WorkflowDefinition, cpAll: Map<string, NodeCheckpoint>): TemplateContext {
-  // `result` is the documented form — it names the same checkpoint field
-  // agents see in `get_node_result`. `output` is the original key, kept so
-  // existing definitions keep resolving. Both read the same value.
-  const nodes: Record<string, { result: unknown; output: unknown }> = {};
+/**
+ * A node that failed under `onError: "continue"` contributes
+ * `nodes.<id>.error` instead of an output (batch-fanout design decision
+ * 3), so a downstream node reached over the tolerated failure can report
+ * what broke.
+ *
+ * Only tolerated failures get an entry. A node that failed under the
+ * default policy stays absent, exactly as before decision 3: `exists(nodes
+ * .<id>)` and `{{nodes.<id>}}` keep their old values in every definition
+ * that does not opt in, and the new surface never appears in a run whose
+ * author did not ask for it. Skipped and intent nodes contribute nothing
+ * under either policy.
+ *
+ * A completed node exposes its value under BOTH `result` and `output`.
+ * `result` is the documented form — it names the same checkpoint field
+ * agents see in `get_node_result`. `output` is the original key, kept so
+ * existing definitions keep resolving. Both read the same value.
+ */
+function buildTemplateContext(
+  definition: WorkflowDefinition,
+  cpAll: Map<string, NodeCheckpoint>,
+  graph: CompiledGraph,
+): TemplateContext {
+  const nodes: Record<string, { result?: unknown; output?: unknown; error?: string }> = {};
   for (const [nodeId, cp] of cpAll) {
-    if (cp.status !== 'completed') continue; // skipped/failed/intent nodes contribute no output
-    nodes[nodeId] = { result: cp.result, output: cp.result };
+    if (cp.status === 'completed') nodes[nodeId] = { result: cp.result, output: cp.result };
+    // Every executor sets `error` on a failed checkpoint. The fallback only
+    // keeps `exists(nodes.<id>.error)` honest if one ever does not.
+    else if (cp.status === 'failed' && graph.tolerateFailure.has(nodeId)) {
+      nodes[nodeId] = { error: cp.error ?? 'node failed' };
+    }
   }
   const triggerNode = definition.nodes.find((n) => n.type === 'trigger');
   const trigger = triggerNode ? nodes[triggerNode.id]?.output : undefined;

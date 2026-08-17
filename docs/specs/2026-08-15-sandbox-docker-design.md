@@ -140,15 +140,61 @@ manifest builder (`packages/sandbox-kubernetes/src/manifest.ts`) adds:
   `container.apparmor.security.beta.kubernetes.io/<container>: unconfined`
 - container `securityContext`:
   `{ seccompProfile: { type: "Unconfined" }, capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] }, procMount: "Unmasked" }`
-- `/dev/fuse` hostPath device volume (same mechanism as the rootless
-  BuildKit builder in `packages/api/src/prebuilds/k8s-builder.ts`)
-- `/dev/net/tun` hostPath device volume (needed by rootlesskit)
 - an `emptyDir` volume for docker state
-- `VALET_SANDBOX_DOCKER=1` in the container env
+- `VALET_SANDBOX_DOCKER=1` and `VALET_DOCKER_USERNS=1` in the container env
 
 Note: `procMount: Unmasked` requires the ProcMountType feature gate.
 Where that gate is unavailable, the k8s DinD path does not converge.
 This is checked at acceptance.
+
+**Rootful-inside-the-userns (revision, 2026-08-17).** The first 1.33
+deployment (EKS, kernel 6.12) showed hostPath char devices cannot be
+idmap-mounted into a `hostUsers: false` pod — devtmpfs has no idmap
+support, so runc fails container init with `MOUNT_ATTR_IDMAP EINVAL`
+before a log line is written. Rather than delivering `/dev/fuse` and
+`/dev/net/tun` through a device plugin, the k8s path drops rootlesskit:
+the pod IS a user namespace, and in-container root holds the full
+capability set over pod-owned namespaces, so `start-docker.sh`
+(`VALET_DOCKER_USERNS=1` branch) runs dockerd directly as in-container
+root. Consequences:
+
+- No `/dev/net/tun`, no slirp4netns: the pod userns owns the pod netns,
+  so dockerd's bridge/veth/iptables work natively (and faster).
+- No `/dev/fuse`, no fuse-overlayfs: overlayfs mounts natively inside a
+  userns on kernel >= 5.11; the probe keeps vfs as a paranoid fallback.
+- Exec identity unchanged: the workload still runs as `dockerd` (1500);
+  it reaches the daemon through the socket, `root:docker` mode 660
+  (`--group docker`; the group comes from the docker-ce package).
+- rootlesskit remains the docker (local dev) backend path, where no
+  outer userns exists and it does real work. The sub-id ranges in the
+  image only matter on that path now.
+- A nested-userns rootlesskit cannot hold NET_ADMIN over the pod netns
+  (capabilities do not extend to ancestor-owned namespaces) — which is
+  why "rootlesskit with --net=host" was not an option and slirp existed
+  in the first place.
+- cgroup v2 delegation (two layers, both required). Kubelet mounts
+  `/sys/fs/cgroup` read-only AND the pod cgroup directory is owned by
+  host root, which is unmapped in the pod userns — so runc inside the
+  sandbox cannot create per-container groups (`mkdir
+  /sys/fs/cgroup/docker: read-only file system`, or EACCES after a rw
+  remount; observed live on EKS 1.33, containerd issue #12182).
+  - Ownership: the cluster must run the sandbox under a RuntimeClass
+    whose containerd runtime sets `cgroup_writable = true` (containerd
+    >= 2.1, systemd cgroup driver) — that premounts the cgroupfs rw and
+    chowns it to the pod's mapped root. The chart threads the name via
+    `sandbox.dockerRuntimeClass` →
+    `VALET_SANDBOX_DOCKER_RUNTIME_CLASS` → the manifest's
+    `runtimeClassName` (docker sandboxes only). The `docker:dind`
+    remount trick alone is NOT enough here: a plain remount is EPERM
+    from a userns (superblock op), a bind remount clears the ro flag
+    but cannot fix ownership, and a fresh cgroup2 mount over the
+    mountpoint is refused (fs already mounted).
+  - Bootstrap: before dockerd starts, `start-docker.sh` bind-remounts
+    the cgroupfs rw (harmless if `cgroup_writable` already did it),
+    moves every process into an `/init` leaf, and enables the
+    controllers in `cgroup.subtree_control` — the v2 "no internal
+    processes" rule forbids delegation while the root group has member
+    processes (same dance as moby `hack/dind`).
 
 ### Exec identity
 
@@ -231,6 +277,50 @@ trade already accepted for rootless BuildKit build pods.
    sandbox and run the docker-gated suites
    (`make e2e E2E_ARGS="--only sandbox-docker,store-postgres,prebuilds-docker"`).
    Record results in the PR.
+
+## Kubernetes reality (2026-08-17 addendum)
+
+Live verification on EKS v1.31 (agents-dev) found three failures with a
+single dominant root cause. Valet's CR was correct in every case.
+
+1. **The API server drops `procMount: Unmasked`.** The `ProcMountType`
+   feature gate is beta and OFF by default until Kubernetes 1.33, and EKS
+   does not let operators set control-plane gates. Admission silently
+   rewrites the field to `Default` (verified with a server-side dry-run).
+   The pod's /proc keeps its masked and read-only paths, which breaks:
+   - `dockerd-rootless.sh`: its `--detach-netns` path writes
+     `net.ipv4.ip_forward` through the read-only `/proc/sys` → EPERM.
+   - runc for EVERY inner container: the kernel refuses a fresh procfs
+     mount in a user namespace unless an existing fully-visible procfs is
+     present → `mount proc: operation not permitted` on `docker run` and
+     `docker build`.
+2. **`/dev/fuse` open fails with EPERM.** A hostPath char-device volume
+   carries no device-cgroup grant (unlike the docker backend's
+   `--device /dev/fuse`), so fuse-overlayfs cannot open the device even
+   though the node is mounted.
+3. **`overlay2` needs a non-overlay data-root.** The pod rootfs is
+   overlay; the emptyDir docker-state volume is not — native rootless
+   overlay2 works there (kernel >= 5.11).
+
+Mitigations shipped:
+
+- `start-docker.sh` invokes rootlesskit directly WITHOUT `--detach-netns`
+  (empirically starts on masked-proc clusters) and probes storage drivers
+  in order overlay2 → fuse-overlayfs → vfs. The daemon now starts
+  everywhere; inner containers still need an unmasked /proc.
+- The manifest sets `hostUsers: false` on docker pods. Kubernetes >= 1.31
+  validation requires it for `procMount: Unmasked` and REJECTS the pod
+  without it once the ProcMountType gate is on (default from 1.33). On
+  clusters with `UserNamespacesSupport` off the field is dropped at
+  admission — inert today, load-bearing after the upgrade.
+- The image's `dockerd` sub-id range moved to `2000:63536` so it fits
+  inside the 65536-id pod user namespace that `hostUsers: false` creates.
+
+Cluster requirement for FULL DinD on kubernetes: **Kubernetes >= 1.33**
+(ProcMountType + UserNamespacesSupport on by default) with a node runtime
+that supports user-namespaced pods. Until the cluster upgrade, DinD on
+kubernetes is degraded: the daemon runs, `docker pull`/`system df` work,
+`docker run`/`build` fail on the proc mount.
 
 ## Out of scope
 

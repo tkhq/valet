@@ -9,10 +9,15 @@ import {
   resolveTriggerInput,
   triggerDataSchema,
   validateWorkflowDefinition,
+  type ListRunsFilter,
+  type NodeCheckpoint,
   type RunParams,
   type TriggerInputError,
   type ValidateEnvironment,
   type WorkflowDefinition,
+  type WorkflowEdge,
+  type WorkflowNode,
+  type WorkflowRunListItem,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
@@ -41,8 +46,13 @@ import {
 import type {
   GetWorkflowRunResponse,
   GlobalWorkflowRunSummary,
+  ListAllWorkflowRunsResponse,
+  ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
+  WorkflowRunCheckpoint,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
   WorkflowRunSummary,
 } from "../wire/types.js";
 
@@ -62,6 +72,18 @@ export interface WorkflowServiceDeps {
 export interface WorkflowOwner {
   userId: string;
   orgId: string;
+}
+
+/** The owner types `workflow_definitions.owner_type` holds. Read off the
+ * column so the two can never drift. */
+export type WorkflowOwnerType = (typeof workflowDefinitions.$inferSelect)["ownerType"];
+
+/** One owner, in the `{owner_type, owner_id}` shape every workflow row
+ * carries. `listWorkflowDefinitions` takes one to narrow its result to a
+ * single owner. */
+export interface WorkflowOwnerRef {
+  ownerType: WorkflowOwnerType;
+  ownerId: string;
 }
 
 export function newWorkflowId(prefix: string): string {
@@ -127,8 +149,15 @@ async function isAuthorizedFor(
  * `getWorkflowRunDetail` below) — a run started against a team-owned
  * workflow carries the SAME `{ownerType, ownerId}` shape (scheduler.ts /
  * events/dispatcher.ts copy it straight from the definition row at start
- * time), so both need the identical direct-or-team-member check. */
-async function isAuthorizedForOwner(
+ * time), so both need the identical direct-or-team-member check.
+ *
+ * Exported for the list route's `?ownerType=&ownerId=` filter, which asks
+ * this same question about an owner named in a query string before it
+ * narrows to it. Sharing the check is what keeps "which workflows may I
+ * list" and "which workflow may I open" from drifting apart. An org owner
+ * is false here: no rule admits anybody to an org-owned workflow yet, so
+ * one is neither listable nor openable. */
+export async function isAuthorizedForOwner(
   db: AppDb,
   owner: WorkflowOwner,
   target: { ownerType: string; ownerId: string },
@@ -155,21 +184,63 @@ export async function ownedDefinitionRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
-export async function listWorkflowDefinitions(
-  deps: WorkflowServiceDeps,
-  owner: WorkflowOwner,
-): Promise<WorkflowDefinitionSummary[]> {
-  const myTeams = await listTeamsForUser(deps.db, owner.userId);
+/** The "definitions this caller may read" predicate — their own, plus every
+ * team they are a live member of. Shared by the definitions list and
+ * `ownedWorkflowIds` so the two can never disagree about reach. Membership
+ * is re-read on every call for the same reason `isAuthorizedFor` does. */
+async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner) {
+  const myTeams = await listTeamsForUser(db, owner.userId);
   const teamIds = myTeams.map((t) => t.id);
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, teamIds))
       : undefined;
+  return teamMatch ? or(ownerMatch, teamMatch) : ownerMatch;
+}
+
+/** Ids of every workflow the caller may read. The cross-workflow run list
+ * scopes on these: `WorkflowStore.listRuns` takes no owner filter, so
+ * authorization stays here in application code (batch-fanout design
+ * decision 5). */
+export async function ownedWorkflowIds(db: AppDb, owner: WorkflowOwner): Promise<string[]> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(await ownedDefinitionFilter(db, owner));
+  return rows.map((r) => r.id);
+}
+
+/** The same read as `ownedWorkflowIds`, with the display name each id needs
+ * when the rows leave their own workflow's page. */
+async function ownedWorkflowNames(db: AppDb, owner: WorkflowOwner): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id, name: workflowDefinitions.name })
+    .from(workflowDefinitions)
+    .where(await ownedDefinitionFilter(db, owner));
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
+
+/**
+ * The caller's own workflows unioned with every team they belong to.
+ * `scope` narrows that to one owner — a workspace picker asking for one
+ * team's workflows. It carries no authorization: the caller has already
+ * checked the user may reach that owner (`isAuthorizedForOwner`), because
+ * an id that arrives in a query string is a request, not a permission.
+ */
+export async function listWorkflowDefinitions(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  scope?: WorkflowOwnerRef,
+): Promise<WorkflowDefinitionSummary[]> {
+  // A scoped list reads one owner, so it never needs the team roster.
+  const where = scope
+    ? and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId))
+    : await ownedDefinitionFilter(deps.db, owner);
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(teamMatch ? or(ownerMatch, teamMatch) : ownerMatch)
+    .where(where)
     .orderBy(desc(workflowDefinitions.updatedAt));
   return rows.map(rowToDefinition);
 }
@@ -359,6 +430,237 @@ export async function updateWorkflowDefinition(
   };
 }
 
+// ─── Aggregation node ────────────────────────────────────────────────────────
+//
+// A fan-out graph ends in several branch tips, and the reader almost always
+// wants one result. Writing that join node by hand is where the template
+// path contract bites hardest: an `llm` branch exposes its text at
+// `result.text`, a `session` branch at `result.response`, and a branch with
+// an `outputSchema` puts its fields under `result.output`. A path written
+// against the wrong family resolves to nothing, and the run then SUCCEEDS
+// with a hole where the branch output should be.
+//
+// This inserts the join node instead of asking a person to type it. Two
+// properties are deliberate:
+//
+//   1. It is an ORDINARY node in `definition.nodes` — a `set` or an `llm` —
+//      appended with one edge per branch. It appears on the canvas, it can
+//      be renamed, re-prompted, rewired, or deleted like any other node,
+//      and its behaviour is fully described by the saved definition. It is
+//      NOT a flag that makes the interpreter build a hidden node at run
+//      time: a hidden node cannot be seen in the editor, cannot be edited,
+//      and would make the graph a person reads differ from the graph that
+//      ran.
+//   2. It never rewires the existing graph. Edges are only added, never
+//      moved or removed, so this can never silently change what the
+//      workflow already did.
+
+/** How the aggregate node combines its branches. */
+export type AggregateMode = "collect" | "summarize";
+
+export interface AggregateNodeInput {
+  /** Id for the new node. A taken id gets a numeric suffix. Default `aggregate`. */
+  nodeId?: string;
+  /** Branches to combine. Default: every node with no outgoing edge. */
+  sources?: string[];
+  /** `collect` (default) writes a `set` node; `summarize` writes an `llm` node. */
+  mode?: AggregateMode;
+  /** Required for `summarize`. */
+  model?: string;
+  /** Appended to the summarize prompt, in the author's own words. */
+  instructions?: string;
+}
+
+export type AddAggregateNodeResult =
+  | { ok: true; definition: WorkflowDefinitionSummary; nodeId: string; sources: string[] }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "stored_definition_invalid" | "would_be_invalid"; errors: string[] }
+  | { ok: false; reason: "no_branches" | "unknown_sources" | "model_required"; message: string };
+
+/**
+ * The template path that reads what a node produced.
+ *
+ * Every shape here is the checkpoint `result` its executor writes:
+ * `llm.ts` returns `{ text, output? }`, `session.ts` and `orchestrator.ts`
+ * return `{ sessionId, response, output? }`, `workflow-call.ts` returns
+ * `{ runId, output }`, and `foreach.ts` returns the `ForeachResult`
+ * aggregate. A node with an `outputSchema` is read at its structured
+ * `output`, because that is the field the author declared.
+ */
+export function aggregateSourcePath(node: WorkflowNode): string {
+  const base = `nodes.${node.id}.result`;
+  switch (node.type) {
+    case "llm":
+      return node.outputSchema !== undefined ? `${base}.output` : `${base}.text`;
+    case "session":
+    case "orchestrator":
+      return node.outputSchema !== undefined ? `${base}.output` : `${base}.response`;
+    case "workflow":
+      return `${base}.output`;
+    case "foreach":
+      return `${base}.items`;
+    default:
+      // `tool` returns the action's own response, `set` returns its rendered
+      // values, and neither has a documented sub-field to prefer.
+      return base;
+  }
+}
+
+/** Every node id the definition uses, foreach body ids included — a new id must miss all of them. */
+function usedNodeIds(definition: WorkflowDefinition): Set<string> {
+  const ids = new Set<string>();
+  for (const node of definition.nodes) {
+    ids.add(node.id);
+    if (node.type === "foreach") ids.add(node.body.id);
+  }
+  return ids;
+}
+
+function uniqueNodeId(definition: WorkflowDefinition, preferred: string): string {
+  const taken = usedNodeIds(definition);
+  if (!taken.has(preferred)) return preferred;
+  for (let n = 2; ; n++) {
+    const candidate = `${preferred}_${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * Branch tips: nodes with no outgoing edge, minus the node types that
+ * cannot be a branch result. A `trigger` with no outgoing edge is a broken
+ * graph, not a branch, and a `stop` node ends the run rather than producing
+ * a value for somebody else to read.
+ */
+function branchTips(definition: WorkflowDefinition): WorkflowNode[] {
+  const hasOutgoing = new Set(definition.edges.map((e) => e.from));
+  return definition.nodes.filter(
+    (n) => !hasOutgoing.has(n.id) && n.type !== "stop" && n.type !== "trigger",
+  );
+}
+
+/** The `set` node body: one field per branch, named after the branch. */
+function collectValues(sources: WorkflowNode[]): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const source of sources) values[source.id] = `{{ ${aggregateSourcePath(source)} }}`;
+  return values;
+}
+
+/** The `llm` node prompt: each branch under its own heading, so the model can tell them apart. */
+function summarizePrompt(sources: WorkflowNode[], instructions?: string): string {
+  const lines: string[] = [];
+  for (const source of sources) {
+    lines.push(`## ${source.id}`, `{{ ${aggregateSourcePath(source)} }}`, "");
+  }
+  lines.push(
+    instructions && instructions.trim().length > 0
+      ? instructions.trim()
+      : "Write one combined summary. Keep every point that appears in only one section. Say where two sections disagree. Add nothing they did not say.",
+  );
+  return lines.join("\n");
+}
+
+/** Places the new node to the right of its branches, vertically centred on them. */
+function placeAggregate(
+  definition: WorkflowDefinition,
+  nodeId: string,
+  sources: WorkflowNode[],
+): WorkflowDefinition["ui"] {
+  const ui = definition.ui;
+  if (!ui) return undefined;
+  const points = sources.map((s) => ui.nodes[s.id]?.position).filter((p): p is { x: number; y: number } => !!p);
+  if (points.length === 0) return ui;
+  const x = Math.max(...points.map((p) => p.x)) + 260;
+  const y = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+  return { ...ui, nodes: { ...ui.nodes, [nodeId]: { position: { x, y } } } };
+}
+
+/**
+ * Appends an aggregation node that reads every branch, and saves the result
+ * as a new version. `env` is the same validator environment the save routes
+ * use, so a definition that would not pass a normal save is not written by
+ * this path either.
+ */
+export async function addAggregateNode(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  workflowId: string,
+  input: AggregateNodeInput = {},
+  env?: ValidateEnvironment,
+): Promise<AddAggregateNodeResult> {
+  const row = await ownedDefinitionRow(deps.db, owner, workflowId);
+  if (!row) return { ok: false, reason: "not_found" };
+
+  const parsed = validateDefinitionInput(row.definition, env);
+  if (!parsed.ok) return { ok: false, reason: "stored_definition_invalid", errors: parsed.errors };
+  const definition = parsed.definition;
+
+  const mode: AggregateMode = input.mode ?? "collect";
+  if (mode === "summarize" && (input.model === undefined || input.model.length === 0)) {
+    return {
+      ok: false,
+      reason: "model_required",
+      message: 'mode "summarize" writes an llm node. Name the model to use, or use mode "collect".',
+    };
+  }
+
+  const byId = new Map(definition.nodes.map((n) => [n.id, n]));
+  let sources: WorkflowNode[];
+  if (input.sources !== undefined) {
+    const unknown = input.sources.filter((id) => !byId.has(id));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        reason: "unknown_sources",
+        message: `no node in this workflow has the id ${unknown.join(", ")}. Name ids from the workflow's own nodes.`,
+      };
+    }
+    sources = input.sources.map((id) => {
+      const node = byId.get(id);
+      if (!node) throw new Error(`node ${id} vanished between the check and the read`);
+      return node;
+    });
+  } else {
+    sources = branchTips(definition);
+  }
+
+  if (sources.length < 2) {
+    return {
+      ok: false,
+      reason: "no_branches",
+      message:
+        "an aggregation node needs at least two branches to combine. Add the parallel branches first, or name the source nodes explicitly.",
+    };
+  }
+
+  const nodeId = uniqueNodeId(definition, input.nodeId ?? "aggregate");
+  const aggregateNode: WorkflowNode =
+    mode === "summarize"
+      ? {
+          id: nodeId,
+          type: "llm",
+          // Checked above; the narrowing is for the type, not the value.
+          model: input.model ?? "",
+          system: "You merge several separate analyses into one. Use only what they say.",
+          prompt: summarizePrompt(sources, input.instructions),
+        }
+      : { id: nodeId, type: "set", values: collectValues(sources) };
+
+  const edges: WorkflowEdge[] = sources.map((source) => ({ from: source.id, to: nodeId }));
+  const next: WorkflowDefinition = {
+    ...definition,
+    nodes: [...definition.nodes, aggregateNode],
+    edges: [...definition.edges, ...edges],
+    ui: placeAggregate(definition, nodeId, sources),
+  };
+
+  const checked = validateDefinitionInput(next, env);
+  if (!checked.ok) return { ok: false, reason: "would_be_invalid", errors: checked.errors };
+
+  const saved = await updateWorkflowDefinition(deps, owner, workflowId, { definition: next });
+  if (!saved) return { ok: false, reason: "not_found" };
+  return { ok: true, definition: saved, nodeId, sources: sources.map((s) => s.id) };
+}
+
 export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";
 
 /**
@@ -376,14 +678,12 @@ export async function deleteWorkflowDefinition(
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return "not_found";
 
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, id));
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (run && run.status !== "settled") return "has_active_runs";
-  }
+  const active = await deps.workflowStore.listRuns({
+    workflowIds: [id],
+    status: ["pending", "running", "parked", "terminalizing"],
+    limit: 1,
+  });
+  if (active.runs.length > 0) return "has_active_runs";
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
@@ -410,6 +710,11 @@ export async function deleteWorkflowDefinition(
   // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
   // which is now gone) but never actually removed.
   await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
+  // Same reasoning as webhooks: workflow_schedules.workflow_id is a plain
+  // text column with no cascade, and the scheduler sweeps ALL enabled rows
+  // regardless of owner reachability — an orphan keeps firing forever
+  // against a workflow that no longer exists.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
   return "deleted";
 }
 
@@ -451,58 +756,161 @@ export async function startWorkflowRun(
   return { runId };
 }
 
+/** Page size when the caller names none, and the ceiling it is clamped to.
+ * Exported so callers can name the accepted range in their error message. */
+export const RUN_PAGE_LIMIT_DEFAULT = 50;
+export const RUN_PAGE_LIMIT_MAX = 200;
+
+/** The run filter values callers may pass, and their guards. Defined once
+ * here so the HTTP route and the agent action reject the same set. */
+export const RUN_STATUS_VALUES = ["pending", "running", "parked", "terminalizing", "settled"] as const;
+export const RUN_OUTCOME_VALUES = ["completed", "failed", "cancelled"] as const;
+
+export function isRunStatus(value: string): value is WorkflowRunStatus {
+  return RUN_STATUS_VALUES.some((v) => v === value);
+}
+
+export function isRunOutcome(value: string): value is WorkflowRunOutcome {
+  return RUN_OUTCOME_VALUES.some((v) => v === value);
+}
+
+function clampRunLimit(limit: number | undefined): number {
+  if (limit === undefined) return RUN_PAGE_LIMIT_DEFAULT;
+  return Math.min(Math.max(Math.trunc(limit), 1), RUN_PAGE_LIMIT_MAX);
+}
+
+function toRunSummary(item: WorkflowRunListItem): WorkflowRunSummary {
+  const parked = item.status === "parked";
+  return {
+    runId: item.runId,
+    workflowId: item.workflowId,
+    status: item.status,
+    outcome: item.outcome,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    needsApproval:
+      (parked &&
+        item.waitingOn.some((w) => w.kind === "signal" && w.signalType.startsWith("approval:"))) ||
+      undefined,
+    // Parked only: name the blocking conditions in the list itself, so a
+    // surprising park (e.g. a policy gate on a tool node) is visible
+    // without a per-run detail fetch. The list query carries `waiting_on`
+    // for exactly this — reading it here costs no extra round trip.
+    waitingOn:
+      parked && item.waitingOn.length > 0
+        ? item.waitingOn.map((w) => ({
+            kind: w.kind,
+            nodeId: w.nodeId,
+            ...(w.kind === "signal" ? { signalType: w.signalType } : {}),
+            ...(w.kind === "timer" ? { wakeAt: w.wakeAt } : {}),
+          }))
+        : undefined,
+    parentRunId: item.parentRunId,
+    parentNodeId: item.parentNodeId,
+    parentIteration: item.parentIteration,
+  };
+}
+
+/** Paging controls every run list shares. */
+export interface RunPageOptions {
+  limit?: number;
+  cursor?: string;
+}
+
+/** One workflow's runs, newest first. Null when the workflow isn't owned. */
 export async function listWorkflowRuns(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
-): Promise<WorkflowRunSummary[] | null> {
+  page: RunPageOptions = {},
+): Promise<ListWorkflowRunsResponse | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
-  // `WorkflowStore` has no "list runs by workflowId" method — it's a small,
-  // portable port (decision 6) and this is an API-only read concern, so the
-  // list is built by asking the app db for the definition's run ids, then
-  // re-fetching each through the store for a consistent shape. `workflow_runs`
-  // doesn't index by owner alone, but every row here is already scoped by
-  // `workflowId`, which we've just verified is owned.
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, workflowId))
-    .orderBy(desc(workflowRuns.createdAt));
+  const result = await deps.workflowStore.listRuns({
+    workflowIds: [workflowId],
+    limit: clampRunLimit(page.limit),
+    cursor: page.cursor,
+  });
+  return { runs: result.runs.map(toRunSummary), nextCursor: result.nextCursor };
+}
 
-  const runs: WorkflowRunSummary[] = [];
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (!run) continue;
-    const needsApproval =
-      run.status === "parked" &&
-      run.waitingOn.some(
-        (w) => w.kind === "signal" && w.signalType.startsWith("approval:"),
-      );
-    runs.push({
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-      needsApproval: needsApproval || undefined,
-      // Parked only: name the blocking conditions in the list itself, so a
-      // surprising park (e.g. a policy gate on a tool node) is visible
-      // without a per-run detail fetch.
-      waitingOn:
-        run.status === "parked" && run.waitingOn.length > 0
-          ? run.waitingOn.map((w) => ({
-              kind: w.kind,
-              nodeId: w.nodeId,
-              ...(w.kind === "signal" ? { signalType: w.signalType } : {}),
-              ...(w.kind === "timer" ? { wakeAt: w.wakeAt } : {}),
-            }))
-          : undefined,
-    });
+/** Filters the cross-workflow run list accepts, on top of `RunPageOptions`. */
+export interface OwnerRunsFilter extends RunPageOptions {
+  /** Narrows to these workflows. Omit for every workflow the caller may read. */
+  workflowIds?: string[];
+  status?: ListRunsFilter["status"];
+  outcome?: ListRunsFilter["outcome"];
+  /** Children of one run — this is how a batch parent's items come back in one query. */
+  parentRunId?: string;
+  since?: number;
+}
+
+/**
+ * Runs across every workflow the caller may read, newest first. Null when
+ * the caller named a workflow id they cannot read — the route answers 404,
+ * so an unreadable workflow and a missing one stay indistinguishable.
+ *
+ * Each row carries `workflowName`. A cross-workflow list has no per-workflow
+ * heading, so the name must travel with the run or the reader cannot tell
+ * the rows apart. The names come from the same definition read the
+ * authorization check already does, so this costs no extra query.
+ *
+ * Runs of a deleted definition are unreachable here, as they were through
+ * the per-workflow list: they stay reachable by run id.
+ */
+export async function listRunsForOwner(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  filter: OwnerRunsFilter = {},
+): Promise<ListAllWorkflowRunsResponse | null> {
+  const nameById = await ownedWorkflowNames(deps.db, owner);
+  const readable = [...nameById.keys()];
+  let workflowIds = readable;
+  if (filter.workflowIds !== undefined) {
+    if (filter.workflowIds.some((id) => !nameById.has(id))) return null;
+    workflowIds = filter.workflowIds;
   }
-  return runs;
+  if (workflowIds.length === 0) return { runs: [] };
+
+  const result = await deps.workflowStore.listRuns({
+    workflowIds,
+    status: filter.status,
+    outcome: filter.outcome,
+    parentRunId: filter.parentRunId,
+    since: filter.since,
+    limit: clampRunLimit(filter.limit),
+    cursor: filter.cursor,
+  });
+  const runs = result.runs.map((run) => {
+    const summary = toRunSummary(run);
+    // The id is the fallback label: a run whose definition was renamed
+    // between the two reads is still identifiable, and never blank.
+    return { ...summary, workflowName: nameById.get(summary.workflowId) ?? summary.workflowId };
+  });
+  return { runs, nextCursor: result.nextCursor };
+}
+
+/**
+ * Projects one checkpoint for the wire. The interpreter records a session
+ * node's `sessionId` and a workflow node's `childRunId` in the checkpoint's
+ * `effects` bag (`nodes/submission-node.ts`, `nodes/workflow-call.ts`);
+ * both are what turns a run page into a link to the work the node started.
+ * The rest of `effects` (receipts, repair state) is interpreter bookkeeping
+ * and stays off the wire.
+ */
+export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
+  const effects = cp.effects;
+  return {
+    nodeId: cp.nodeId,
+    iteration: cp.iteration,
+    status: cp.status,
+    result: cp.result,
+    error: cp.error,
+    createdAt: cp.createdAt,
+    sessionId: typeof effects?.sessionId === "string" ? effects.sessionId : undefined,
+    childRunId: typeof effects?.childRunId === "string" ? effects.childRunId : undefined,
+  };
 }
 
 /** Owner-gated run lookup shared by cancel/approval below. */
@@ -862,14 +1270,7 @@ export async function getWorkflowRunDetail(
       definition: run.definition,
       params: run.params,
     },
-    checkpoints: checkpoints.map((cp) => ({
-      nodeId: cp.nodeId,
-      iteration: cp.iteration,
-      status: cp.status,
-      result: cp.result,
-      error: cp.error,
-      createdAt: cp.createdAt,
-    })),
+    checkpoints: checkpoints.map(toRunCheckpoint),
     signals: signals.map((s) => ({
       signalId: s.signalId,
       signalType: s.signalType,
@@ -880,35 +1281,3 @@ export async function getWorkflowRunDetail(
   };
 }
 
-export async function listRecentWorkflowRuns(
-  deps: WorkflowServiceDeps,
-  owner: WorkflowOwner,
-  limit = 50,
-): Promise<GlobalWorkflowRunSummary[]> {
-  const defs = await listWorkflowDefinitions(deps, owner);
-  if (defs.length === 0) return [];
-  const nameById = new Map(defs.map((d) => [d.id, d.name]));
-
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(inArray(workflowRuns.workflowId, [...nameById.keys()]))
-    .orderBy(desc(workflowRuns.createdAt))
-    .limit(limit);
-
-  const runs: GlobalWorkflowRunSummary[] = [];
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (!run) continue;
-    runs.push({
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      workflowName: nameById.get(run.params.workflowId) ?? run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-    });
-  }
-  return runs;
-}

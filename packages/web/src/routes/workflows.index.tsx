@@ -11,25 +11,46 @@ import {
   useWorkflowTriggers,
   useWorkflows,
 } from "~/api/workflows";
+import { OwnerBadge } from "~/components/owner-badge";
+import { runCountLabel } from "~/lib/run-count";
+import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
+import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
+import { useListOwner } from "~/lib/use-list-owner";
 
 /**
- * `/workflows` — tabbed hub (Workflows | Runs | Triggers). The Workflows tab
- * preserves the definitions list with trigger badges; Runs shows the global
- * runs feed; Triggers shows the unified `TriggerList`. Tab state lives in the
- * `?tab=` search param so each tab is linkable.
+ * `/workflows` — tabbed hub (Workflows | Runs | Triggers | Templates). The
+ * Workflows tab is the definitions list: each row's name links to
+ * `/workflows/$workflowId` (the visual editor), and "New workflow" opens
+ * `NewWorkflowDialog`, which POSTs the entered name plus a minimal
+ * definition and navigates straight to the editor. Editing an existing
+ * definition happens on its editor page, not here. Runs shows the global
+ * runs feed; Triggers shows the unified `TriggerList`.
+ *
+ * Templates are the fourth tab — one click away, never between somebody and
+ * the twenty workflows they came here to open. The gallery is mounted only
+ * when its tab is shown, so the templates request is never made for a caller
+ * who stays on the list. The Workflows tab shows the gallery inline when the
+ * list is empty: an automation product with no starting points is the
+ * hardest possible first run, so the zero state offers one instead of a
+ * dead end.
+ *
+ * Tab state lives in the `?tab=` search param so each tab is linkable.
  */
 
-type HubTab = "workflows" | "runs" | "triggers";
+type HubTab = "workflows" | "runs" | "triggers" | "templates";
 
 export const Route = createFileRoute("/workflows/")({
   component: WorkflowsIndexPage,
   validateSearch: (search: Record<string, unknown>): { tab?: HubTab } => ({
-    tab: search.tab === "runs" || search.tab === "triggers" ? search.tab : undefined,
+    tab:
+      search.tab === "runs" || search.tab === "triggers" || search.tab === "templates"
+        ? search.tab
+        : undefined,
   }),
 });
 
@@ -37,6 +58,7 @@ const TABS: { id: HubTab; label: string }[] = [
   { id: "workflows", label: "Workflows" },
   { id: "runs", label: "Runs" },
   { id: "triggers", label: "Triggers" },
+  { id: "templates", label: "Templates" },
 ];
 
 export function WorkflowsIndexPage() {
@@ -46,15 +68,21 @@ export function WorkflowsIndexPage() {
   const navigate = useNavigate();
   const tab: HubTab = search.tab ?? "workflows";
   const [newOpen, setNewOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="border-b border-line px-6 pt-4">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold tracking-tight text-ink font-display">Workflows</h1>
-          <Button size="sm" onClick={() => setNewOpen(true)}>
-            New workflow
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setImportOpen(true)}>
+              Import
+            </Button>
+            <Button size="sm" onClick={() => setNewOpen(true)}>
+              New workflow
+            </Button>
+          </div>
         </div>
         <div role="tablist" className="mt-3 flex gap-1">
           {TABS.map((t) => (
@@ -81,18 +109,27 @@ export function WorkflowsIndexPage() {
       </div>
 
       <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
+      <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
 
       <div className="flex-1 overflow-y-auto p-6">
-        {tab === "workflows" && <WorkflowsTab onNew={() => setNewOpen(true)} />}
+        {tab === "workflows" && (
+          <WorkflowsTab onNew={() => setNewOpen(true)} onImport={() => setImportOpen(true)} />
+        )}
         {tab === "runs" && <RunsTab />}
         {tab === "triggers" && <TriggerList />}
+        {tab === "templates" && <TemplateGallery />}
       </div>
     </div>
   );
 }
 
-function WorkflowsTab({ onNew }: { onNew: () => void }) {
-  const { data, isLoading, error } = useWorkflows();
+function WorkflowsTab({ onNew, onImport }: { onNew: () => void; onImport: () => void }) {
+  // The nav's workspace switcher decides which workspace this list is FOR.
+  // Without it the list answers with the caller's own workflows plus every
+  // team's, which is a union that does not change when the switcher does —
+  // so switching appeared to do nothing.
+  const owner = useListOwner();
+  const { data, isLoading, error } = useWorkflows(owner);
   const triggersQ = useWorkflowTriggers();
   const workflows = data?.workflows ?? [];
 
@@ -116,17 +153,31 @@ function WorkflowsTab({ onNew }: { onNew: () => void }) {
     return <div className="text-sm text-danger-500">Failed to load workflows.</div>;
   }
   if (workflows.length === 0) {
+    // The gallery is the zero state, not a pointer to another tab. A person
+    // with nothing to list needs a starting point on the screen they landed
+    // on.
     return (
-      <div className="text-sm text-muted">
-        No workflows yet —{" "}
-        <button
-          type="button"
-          onClick={onNew}
-          className="text-ink underline underline-offset-2 hover:text-moss"
-        >
-          create one
-        </button>
-        .
+      <div className="space-y-4">
+        <p className="text-sm text-muted">
+          No workflows yet. Start from a template, build one from scratch with{" "}
+          <button
+            type="button"
+            onClick={onNew}
+            className="text-ink underline underline-offset-2 hover:text-moss"
+          >
+            New workflow
+          </button>
+          , or{" "}
+          <button
+            type="button"
+            onClick={onImport}
+            className="text-ink underline underline-offset-2 hover:text-moss"
+          >
+            import one you already have
+          </button>
+          .
+        </p>
+        <TemplateGallery />
       </div>
     );
   }
@@ -153,8 +204,10 @@ function DefinitionRow({
   const navigate = useNavigate();
   const runs = runsQ.data?.runs ?? [];
   const runCount = runsQ.data?.runs.length;
+  const countLabel = runCountLabel(runsQ.data);
   const latestRun = runs[0];
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
 
   // A trigger with declared inputs routes through the run dialog; without
@@ -190,30 +243,44 @@ function DefinitionRow({
   }
 
   async function handleDelete() {
-    if (!confirm(`Delete workflow "${workflow.name}"? Settled run history is kept.`)) return;
     setDeleteError(null);
     try {
       await del.mutateAsync(workflow.id);
+      setDeleteOpen(false);
     } catch (err) {
-      // 409 = active runs; surface the server's actionable message.
+      // 409 = active runs; surface the server's actionable message. The
+      // dialog stays open so the message sits beside the button that
+      // caused it, and a retry needs no second trip through the row.
       setDeleteError(err instanceof Error ? err.message : "Delete failed.");
     }
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3">
-      <Link
-        to="/workflows/$workflowId"
-        params={{ workflowId: workflow.id }}
-        className="min-w-0 text-sm font-medium text-ink hover:underline"
-      >
-        {workflow.name}
-        {runCount !== undefined && (
-          <span className="ml-2 text-xs text-muted font-normal">
-            {runCount} run{runCount === 1 ? "" : "s"}
+    // `relative` anchors the name link's stretched hit area below. The whole
+    // row opens the workflow, because a row that looks like one target should
+    // be one: clicking the empty space beside the name did nothing before.
+    <li className="group relative flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
+      {/* The owner badge is a link of its own, so it sits beside the name
+          link, not inside it. Anything interactive here must sit ABOVE the
+          stretched area — nesting it inside the anchor would be invalid and
+          would swallow its own click. */}
+      <div className="flex min-w-0 items-center gap-2">
+        <Link
+          to="/workflows/$workflowId"
+          params={{ workflowId: workflow.id }}
+          className="min-w-0 truncate text-sm font-medium text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
+        >
+          {workflow.name}
+        </Link>
+        <span className="relative z-10">
+          <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
+        </span>
+        {countLabel !== undefined && (
+          <span className="shrink-0 text-xs font-normal text-muted">
+            {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
           </span>
         )}
-      </Link>
+      </div>
       {hasSchema && schema && (
         <RunWorkflowDialog
           workflowId={workflow.id}
@@ -224,7 +291,7 @@ function DefinitionRow({
           onStarted={goToRun}
         />
       )}
-      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+      <div className="relative z-10 flex items-center gap-2 shrink-0 flex-wrap">
         {scheduleCount > 0 && (
           <span
             aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}
@@ -245,19 +312,32 @@ function DefinitionRow({
         {latestRun && (
           <RunStatusChip status={latestRun.status} outcome={latestRun.outcome} needsApproval={false} />
         )}
-        {deleteError && <span className="text-xs text-danger-500">{deleteError}</span>}
         <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
           {startRun.isPending ? "Starting…" : "Run"}
         </Button>
         <Button
           size="sm"
           variant="ghost"
-          onClick={() => void handleDelete()}
+          onClick={() => {
+            setDeleteError(null);
+            setDeleteOpen(true);
+          }}
           disabled={del.isPending}
           aria-label={`Delete ${workflow.name}`}
         >
           <Trash2 className="h-4 w-4" />
         </Button>
+        <ConfirmDialog
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          title={`Delete "${workflow.name}"?`}
+          description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
+          confirmLabel="Delete workflow"
+          pendingLabel="Deleting…"
+          pending={del.isPending}
+          error={deleteError}
+          onConfirm={() => void handleDelete()}
+        />
       </div>
     </li>
   );

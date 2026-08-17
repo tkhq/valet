@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
-import { FlowNode, type FlowXyNode } from "./flow-node";
+import { FlowNode, nodeShellClasses, type FlowXyNode } from "./flow-node";
 
 const nodeTypes = { workflow: FlowNode };
 
@@ -103,5 +103,104 @@ describe("FlowNode", () => {
       data: { label: "Trigger", summary: "…", nodeType: "trigger" },
     });
     expect(screen.queryByTestId("handle-target")).toBeNull();
+  });
+
+  it("carries the node type's mark, which the palette shows on the same type", () => {
+    const { container } = renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "If", summary: "1 condition", nodeType: "if" },
+    });
+    expect(container.querySelector(".lucide-split")).toBeTruthy();
+  });
+
+  it("keeps the whole summary reachable when the card clamps it", () => {
+    const summary = "a prompt long enough that two lines cannot hold all of it, and then some";
+    renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "LLM", summary, nodeType: "llm" },
+    });
+    const line = screen.getByTitle(summary);
+    expect(line.className).toContain("line-clamp-2");
+    expect(line.textContent).toBe(summary);
+  });
+
+  it("shows a run state as a washed pill with its own glyph", () => {
+    renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "Tool", summary: "slack.post", nodeType: "tool", runStatus: "failed" },
+    });
+    const pill = screen.getByTestId("node-run-status");
+    expect(pill.className).toContain("bg-danger-wash");
+    expect(pill.textContent).toContain("✕");
+    expect(pill.textContent).toContain("failed");
+  });
+
+  it("moves only the in-flight glyph, and holds it still under reduced motion", () => {
+    const { container } = renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "Tool", summary: "slack.post", nodeType: "tool", runStatus: "running" },
+    });
+    const moving = container.querySelector(".animate-pulse");
+    expect(moving).toBeTruthy();
+    expect(moving?.className).toContain("motion-reduce:animate-none");
+    // The card itself must not pulse: thirty of those is a flicker.
+    expect(container.querySelector(".flow-node-card")?.className).not.toContain("animate-pulse");
+  });
+
+  it("publishes the run state as data-status, which the hover rule reads", () => {
+    const { container } = renderNode({
+      id: "n1",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { label: "Tool", summary: "slack.post", nodeType: "tool", runStatus: "failed" },
+    });
+    expect(container.querySelector(".flow-node-card")?.getAttribute("data-status")).toBe("failed");
+  });
+
+  it("plays the arrival animation only for a node the canvas marked entering", () => {
+    const data = { label: "Set values", summary: "2 values", nodeType: "set" } as const;
+    const settled = renderNode({ id: "n1", type: "workflow", position: { x: 0, y: 0 }, data });
+    expect(settled.container.querySelector(".flow-node-enter")).toBeNull();
+
+    const arriving = renderNode({
+      id: "n2",
+      type: "workflow",
+      position: { x: 0, y: 0 },
+      data: { ...data, entering: true },
+    });
+    expect(arriving.container.querySelector(".flow-node-enter")).toBeTruthy();
+  });
+});
+
+describe("nodeShellClasses", () => {
+  it("keeps a failed node's border when it is also selected", () => {
+    const classes = nodeShellClasses("failed", true);
+    expect(classes).toContain("border-danger-500");
+    expect(classes).toContain("ring-moss");
+    expect(classes).not.toContain("border-moss");
+  });
+
+  it("lets selection paint the border when there is no run state to hide", () => {
+    const classes = nodeShellClasses(undefined, true);
+    expect(classes).toContain("border-moss");
+    expect(classes).toContain("ring-2");
+  });
+
+  it("separates skipped from the rest without relying on colour", () => {
+    const classes = nodeShellClasses("skipped", false);
+    expect(classes).toContain("border-dashed");
+    expect(classes).toContain("opacity-60");
+  });
+
+  it("leaves an unselected node with no run state on the hairline", () => {
+    expect(nodeShellClasses(undefined, false)).toBe("border-line");
   });
 });

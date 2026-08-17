@@ -5,6 +5,11 @@
  * with `initialDefinition` loaded from `GET /workflows/:id` and `onSave`
  * bound to `useUpdateWorkflow`.
  *
+ * There is one column to the right of the canvas, and it belongs to the
+ * assistant the page passes in (`assistant`). Selecting a step covers that
+ * column with the step's form, which is the hand-editing path — the two
+ * ways to change a workflow share one place instead of competing for two.
+ *
  * Save semantics (plan decision 10, locked): the Save button is disabled
  * when the definition is invalid OR unchanged since the last save/load —
  * `PUT /workflows/:id` 400s on an invalid definition
@@ -14,15 +19,26 @@
  * an invalid definition is otherwise a completely normal in-progress
  * editing state and is never silently discarded.
  */
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
+import { ArrowLeft, MoreHorizontal } from "lucide-react";
 import { ApiError } from "~/api/client";
-import { Button, Label, Textarea } from "~/components/primitives";
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Label,
+  Textarea,
+} from "~/components/primitives";
 import {
   isWorkflowDefinitionShape,
   connect,
   createEdgeId,
   duplicateNode,
+  graphSignature,
+  positionNewNodes,
   removeNode as removeNodeFromDefinition,
   setNodePosition,
   setViewport,
@@ -45,9 +61,25 @@ import { Palette } from "./palette";
 import { errorNodeIdsFrom, ValidationBanner } from "./validation-banner";
 
 export interface EditorProps {
+  /**
+   * The definition as the server currently holds it. It seeds the local
+   * draft at mount and backs Cancel, and the editor also ADOPTS it when it
+   * changes: the assistant panel edits the stored workflow directly through
+   * `workflows.patch_workflow`, and the refetch that follows arrives here.
+   * A draft with edits that are not saved is never overwritten — that case
+   * raises the conflict bar instead.
+   */
   initialDefinition: WorkflowDefinition;
   onSave: (definition: WorkflowDefinition) => Promise<void>;
   saving?: boolean;
+  /**
+   * The conversation that fills the right-hand column. The editor holds
+   * the column and the selection, and the page holds the assistant
+   * session, so the page passes the mounted conversation in rather than
+   * the editor resolving one for itself. A host with no assistant gets the
+   * column back as a plain hint.
+   */
+  assistant?: ReactNode;
   /**
    * Task 11 review fix: the page owns a rename input outside this
    * component (in the editor page's header, replacing the old read-only
@@ -60,17 +92,90 @@ export interface EditorProps {
    */
   externalDirty?: boolean;
   onCancelExternal?: () => void;
+  /**
+   * Reports whether the definition has edits that are not saved. The
+   * definition draft lives here, so the page cannot otherwise tell that
+   * leaving would discard work. Pass a state setter (a stable identity),
+   * not an inline closure.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function Editor({ initialDefinition, onSave, saving, externalDirty, onCancelExternal }: EditorProps) {
+export function Editor({
+  initialDefinition,
+  onSave,
+  saving,
+  assistant,
+  externalDirty,
+  onCancelExternal,
+  onDirtyChange,
+}: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Raised when the stored definition moved while the user has unsaved
+  // edits. Adopting would throw their work away, so the editor asks.
+  const [conflict, setConflict] = useState(false);
+  // The last `initialDefinition` this editor saw. A CHANGE here is the only
+  // evidence the stored definition moved. Comparing the prop against the
+  // draft instead would misread the window after a save, where the query
+  // still holds the pre-save definition until the refetch lands.
+  const lastServerRef = useRef<string>(graphSignature(initialDefinition));
+  // What this editor last wrote. The refetch after a save brings it back,
+  // and the editor must not treat its own write as somebody else's edit.
+  const savedRef = useRef<string | null>(null);
 
   const effectiveDirty = dirty || externalDirty === true;
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  /** Replace the draft with the server's definition. */
+  const adoptServerDefinition = useCallback((next: WorkflowDefinition) => {
+    setDefinition((current) => {
+      // `patch_workflow` carries no `ui`, so a node it added has no saved
+      // position and would fall back to auto-layout coordinates that can
+      // sit on top of a hand-placed node.
+      const placed = positionNewNodes(next);
+      // Keep the camera. The user did not ask to be moved, and the stored
+      // viewport is from whenever the workflow was last saved.
+      const viewport = current.ui?.viewport;
+      return viewport ? setViewport(placed, viewport) : placed;
+    });
+    lastServerRef.current = graphSignature(next);
+    setDirty(false);
+    setConflict(false);
+    setSaveError(null);
+    // Hold the selection when the step survived the edit; a selection
+    // pointing at a removed node would render an inspector for nothing.
+    setSelectedNodeId((id) => (id !== null && next.nodes.some((n) => n.id === id) ? id : null));
+    setSelectedEdgeId((id) =>
+      id !== null &&
+      next.edges.some((edge) => createEdgeId(edge.from, edge.to, edge.fromOutput) === id)
+        ? id
+        : null,
+    );
+  }, []);
+
+  useEffect(() => {
+    const next = graphSignature(initialDefinition);
+    if (next === lastServerRef.current) return;
+    lastServerRef.current = next;
+    // The refetch that follows a save. The draft on screen already IS this
+    // definition, so there is nothing to adopt and nobody to warn about.
+    if (next === savedRef.current) return;
+    // Unsaved work outranks an automatic refresh. The user resolves it with
+    // Reload or Cancel, which both adopt, or with Save, which overwrites.
+    if (effectiveDirty) {
+      setConflict(true);
+      return;
+    }
+    adoptServerDefinition(initialDefinition);
+  }, [initialDefinition, effectiveDirty, adoptServerDefinition]);
 
   const flow = useMemo(() => toFlow(definition), [definition]);
   const validation = useMemo(() => validateWorkflowDefinition(definition), [definition]);
@@ -153,11 +258,15 @@ export function Editor({ initialDefinition, onSave, saving, externalDirty, onCan
   }
 
   function handleCancel() {
-    setDefinition(initialDefinition);
-    setDirty(false);
+    // Cancel reverts to what the SERVER holds, which may now include an
+    // edit the assistant made — so it also clears a conflict.
+    adoptServerDefinition(initialDefinition);
+    // Cancel drops the whole editing context, selection included. Adopting
+    // holds a selection that survived the edit, which is right when the
+    // change came from the assistant and wrong when the user asked to
+    // start over.
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
-    setSaveError(null);
     onCancelExternal?.();
   }
 
@@ -165,7 +274,11 @@ export function Editor({ initialDefinition, onSave, saving, externalDirty, onCan
     setSaveError(null);
     try {
       await onSave(definition);
+      // Record what went to the server, so the refetch that follows does
+      // not come back looking like an edit from somewhere else.
+      savedRef.current = graphSignature(definition);
       setDirty(false);
+      setConflict(false);
     } catch (err) {
       setSaveError(saveErrorMessage(err));
     }
@@ -175,7 +288,33 @@ export function Editor({ initialDefinition, onSave, saving, externalDirty, onCan
     mutate(next);
   }
 
+  function clearSelection() {
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+  }
+
   const saveDisabled = !effectiveDirty || !validation.ok || saving === true;
+
+  // The form for whatever is selected, or null when nothing is. JSON mode
+  // edits the whole definition as text, so a selection made on the canvas
+  // before the switch must not put a second editor for one step on screen.
+  const inspector = jsonMode ? null : selectedNode ? (
+    <Inspector
+      key={selectedNode.id}
+      node={selectedNode}
+      onChange={(patch) => handleNodeChange(selectedNode.id, patch)}
+      onRemove={() => handleRemoveNode(selectedNode.id)}
+      onDuplicate={() => handleDuplicateNode(selectedNode.id)}
+    />
+  ) : selectedEdge && selectedEdgeSourceType ? (
+    <EdgeInspector
+      key={selectedEdge.id}
+      edge={selectedEdge}
+      sourceNodeType={selectedEdgeSourceType}
+      onChange={(patch) => handleEdgeChange(selectedEdge, patch)}
+      onRemove={() => handleRemoveEdge(selectedEdge.id)}
+    />
+  ) : null;
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-editor">
@@ -188,9 +327,26 @@ export function Editor({ initialDefinition, onSave, saving, externalDirty, onCan
               className="inline-block h-2 w-2 rounded-full bg-amber"
             />
           )}
-          <Button variant={jsonMode ? "secondary" : "ghost"} size="sm" onClick={() => setJsonMode((v) => !v)}>
-            {jsonMode ? "Visual editor" : "Edit JSON"}
-          </Button>
+          {/* JSON mode is the escape hatch for a change the assistant
+              cannot express, so it stays — but out of the way. Reaching it
+              takes a menu; leaving it takes one visible button, because
+              nobody should have to hunt for the way back to the canvas. */}
+          {jsonMode ? (
+            <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
+              Visual editor
+            </Button>
+          ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label="More editor actions">
+                  <MoreHorizontal className="h-4 w-4" aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem onSelect={() => setJsonMode(true)}>Edit JSON</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {saveError && (
@@ -207,51 +363,82 @@ export function Editor({ initialDefinition, onSave, saving, externalDirty, onCan
         </div>
       </div>
 
+      {conflict && (
+        <div
+          role="alert"
+          className="flex items-center gap-3 border-b border-amber/40 bg-amber/10 px-3 py-2 text-xs text-ink"
+        >
+          <span className="min-w-0 flex-1">
+            The assistant changed this workflow while you were editing. Your unsaved edits are
+            still on screen. To take the assistant’s version instead, select Reload. To keep
+            yours and overwrite it, select Save.
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => adoptServerDefinition(initialDefinition)}
+          >
+            Reload
+          </Button>
+        </div>
+      )}
+
       <ValidationBanner errors={errors} />
 
-      {jsonMode ? (
-        <div className="flex-1 overflow-y-auto p-3">
-          <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1">
-          <Palette onAdd={handleAddNode} />
-          <div className="min-w-0 flex-1">
-            <Canvas
-              flow={flow}
-              errorNodeIds={errorNodeIds}
-              onNodePositionChange={handleNodePositionChange}
-              onConnect={handleConnect}
-              onSelectNode={handleSelectNode}
-              onSelectEdge={handleSelectEdge}
-              onViewportChange={handleViewportChange}
-              onRemoveNode={handleRemoveNode}
-              onRemoveEdge={handleRemoveEdge}
-            />
+      <div className="flex min-h-0 flex-1">
+        {jsonMode ? (
+          <div className="min-w-0 flex-1 overflow-y-auto p-3">
+            <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
           </div>
-          <div className="w-80 shrink-0 border-l border-line">
-            {selectedNode ? (
-              <Inspector
-                key={selectedNode.id}
-                node={selectedNode}
-                onChange={(patch) => handleNodeChange(selectedNode.id, patch)}
-                onRemove={() => handleRemoveNode(selectedNode.id)}
-                onDuplicate={() => handleDuplicateNode(selectedNode.id)}
+        ) : (
+          <>
+            <Palette onAdd={handleAddNode} />
+            <div className="min-w-0 flex-1">
+              <Canvas
+                flow={flow}
+                errorNodeIds={errorNodeIds}
+                onNodePositionChange={handleNodePositionChange}
+                onConnect={handleConnect}
+                onSelectNode={handleSelectNode}
+                onSelectEdge={handleSelectEdge}
+                onViewportChange={handleViewportChange}
+                onRemoveNode={handleRemoveNode}
+                onRemoveEdge={handleRemoveEdge}
               />
-            ) : selectedEdge && selectedEdgeSourceType ? (
-              <EdgeInspector
-                key={selectedEdge.id}
-                edge={selectedEdge}
-                sourceNodeType={selectedEdgeSourceType}
-                onChange={(patch) => handleEdgeChange(selectedEdge, patch)}
-                onRemove={() => handleRemoveEdge(selectedEdge.id)}
-              />
-            ) : (
+            </div>
+          </>
+        )}
+        {/* ONE right-hand column, not two. It holds the assistant, and the
+            selected step's form takes it over for as long as a step is
+            selected. The conversation stays mounted underneath: it owns a
+            live session socket and whatever is half-typed in its composer,
+            and selecting a step must drop neither. `inert` keeps the
+            covered conversation out of the tab order and out of the
+            accessibility tree, so only one of the two answers a query. */}
+        <div className="relative flex w-[--editor-aside] max-w-full shrink-0 flex-col border-l border-line bg-paper">
+          <div className="flex min-h-0 flex-1 flex-col" inert={inspector !== null}>
+            {assistant ?? (
               <p className="p-3 text-sm text-muted">Select a node or edge to edit its settings.</p>
             )}
           </div>
+          {inspector && (
+            <div className="absolute inset-0 z-10 flex flex-col bg-paper">
+              <div className="border-b border-line px-2 py-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={clearSelection}
+                  title="Back to the assistant"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+                  Assistant
+                </Button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">{inspector}</div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
 import {
   Engine,
@@ -15,7 +13,7 @@ import {
   type SandboxProvider,
   type SandboxStatus,
 } from "@valet/engine";
-import { DockerSandbox, DockerSandboxProvider } from "../src/index.js";
+import { DockerSandbox, DockerSandboxProvider, createSandboxWorkspace } from "../src/index.js";
 
 /**
  * Memoized `docker info` probe (10s timeout) — same idiom as
@@ -157,7 +155,7 @@ describe.skipIf(!(await dockerAvailable()))("docker: kill-container-mid-exec rec
         fauxAssistantMessage("confirmed recovery"),
       ]);
 
-      const workspace = await mkdtemp(join(tmpdir(), "valet-kill-recovery-"));
+      const workspace = await createSandboxWorkspace("valet-kill-recovery-");
       const provider = new CapturingDockerProvider();
       const { engine, bus, events } = makeEngine({ provider, workspace });
 
@@ -248,7 +246,7 @@ describe.skipIf(!(await dockerAvailable()))("docker: kill-container-mid-exec rec
       const faux = registerFauxProvider({ provider: "coldstart-docker" });
       faux.setResponses([fauxAssistantMessage("hello, no tools needed")]);
 
-      const workspace = await mkdtemp(join(tmpdir(), "valet-coldstart-docker-"));
+      const workspace = await createSandboxWorkspace("valet-coldstart-docker-");
       const provider = new DockerSandboxProvider();
       const { engine, bus, events } = makeEngine({ provider, workspace });
 

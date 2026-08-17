@@ -54,6 +54,16 @@ export interface K8sProviderConfig {
    * embed the full `corev1.PodSpec`, which includes `imagePullSecrets`) —
    * this is plain pass-through, not a new CRD capability. */
   imagePullSecrets?: { name: string }[];
+  /** `RuntimeClass` name set on docker-enabled sandbox pods only. Points at
+   * a containerd runtime configured with `cgroup_writable = true`
+   * (containerd >= 2.1), which mounts the pod cgroupfs read-write AND —
+   * under the systemd cgroup driver — owned by the pod's mapped root, so
+   * the in-userns dockerd can create per-container cgroups. Without it
+   * every `docker run` fails: the kubelet-default mount is read-only, and
+   * even remounted rw the cgroup directory is owned by unmapped host root
+   * (EACCES; containerd issue #12182). Unset → field omitted (the daemon
+   * still starts; running containers fails on such clusters). */
+  dockerRuntimeClassName?: string;
 }
 
 /** `corev1.SeccompProfile` subset — only the two profile types the manifest
@@ -150,6 +160,16 @@ export interface SandboxPodSpec {
   containers: SandboxContainer[];
   /** See `PodSecurityContext` — set only for docker-enabled sandboxes. */
   securityContext?: PodSecurityContext;
+  /** `corev1.PodSpec.hostUsers` — false runs the pod in a user namespace.
+   * Set (false) only for docker-enabled sandboxes: k8s >=1.31 validation
+   * requires it for `procMount: Unmasked`, enforced once the ProcMountType
+   * gate is on (default from 1.33). On clusters with UserNamespacesSupport
+   * off the API server drops the field, so it is inert there. */
+  hostUsers?: boolean;
+  /** `corev1.PodSpec.runtimeClassName` — see
+   * `K8sProviderConfig.dockerRuntimeClassName`. Set only for docker-enabled
+   * sandboxes when the provider config names a runtime class. */
+  runtimeClassName?: string;
   restartPolicy?: "Always" | "OnFailure" | "Never";
   /** See `K8sProviderConfig.imagePullSecrets`'s docblock. */
   imagePullSecrets?: { name: string }[];

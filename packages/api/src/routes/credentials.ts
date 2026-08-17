@@ -35,10 +35,17 @@
  * would just be a static allowlist this route has no other reason to own.
  * `DELETE` is idempotent for the same reason — deleting an unconnected
  * service 200s rather than 404ing.
+ *
+ * One service is checked before it is stored: `slack` at `scope: "org"`.
+ * That credential drives the Slack agent surface, whose misconfigurations
+ * are all silent, so the route validates the token and signing secret
+ * against Slack and records the workspace identity. See
+ * `services/slack-connect.ts`.
  */
 import { Hono } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import type {
   CredentialSummary,
   DeleteCredentialResponse,
@@ -139,6 +146,43 @@ credentialsRouter.put("/:service", async (c) => {
     refreshToken: body.type === "oauth2" ? body.refreshToken : undefined,
     metadata: body.metadata,
   };
+
+  // The org Slack credential drives the agent surface, so it is checked
+  // against Slack before it is stored. Every failure this catches is
+  // otherwise invisible: a wrong signing secret only shows up as 401s on an
+  // unauthenticated webhook, and a missing scope only shows up hours later
+  // on one API call. The check also records the workspace identity the rest
+  // of the integration depends on. A user-scoped Slack credential is a
+  // personal token for the action plugin and is not checked here.
+  if (service === "slack" && scope === "org") {
+    const webhookSecret = credential.metadata?.webhookSecret;
+    if (typeof webhookSecret !== "string" || webhookSecret === "") {
+      return c.json(
+        { error: "Slack needs metadata.webhookSecret. Copy the Signing Secret from Basic Information in your Slack app settings." },
+        400,
+      );
+    }
+    // `accessToken` and `apiKey` are already known to be exactly one of the
+    // two at this point.
+    const token = accessToken ?? apiKey ?? "";
+    const check = await verifySlackBotToken(token);
+    if (!check.ok) return c.json({ error: check.error }, 400);
+    const scopeError = requiredScopeError(check.identity.grantedScopes);
+    if (scopeError) return c.json({ error: scopeError }, 400);
+
+    credential.metadata = {
+      ...credential.metadata,
+      // The webhook route answers this workspace and drops every other one.
+      // A shared app's signing secret is valid for every workspace that
+      // installs the app, so this id is the workspace boundary.
+      teamId: check.identity.teamId,
+      teamName: check.identity.teamName,
+      botUserId: check.identity.botUserId,
+    };
+    // Recorded so the setup route can report missing optional scopes without
+    // calling Slack again. `undefined` when Slack sent no scope header.
+    credential.scopes = check.identity.grantedScopes ?? undefined;
+  }
 
   await engineCredentials.save(owner, service, credential);
 

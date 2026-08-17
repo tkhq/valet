@@ -4,3 +4,12 @@ description: Sandbox tunnel management
 icon: "\U0001F517"
 
 v2: true
+
+# Parked. The skill tells the agent to call `register_tunnel`, and to expect a
+# `*.trycloudflare.com` URL. V2 has neither: no tool of that name exists, and
+# no sandbox image ships `cloudflared`. A bundled skill that promises a tool
+# the sandbox does not have costs a whole turn — the agent plans around it,
+# calls it, and only then learns it is absent.
+#
+# Re-enable when the tunnel tool and the cloudflared binary both land.
+enabled: false

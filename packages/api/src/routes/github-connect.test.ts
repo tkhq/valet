@@ -9,6 +9,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { githubInstallations } from "../schema/index.js";
 import type {
+  GetGithubOrgStatusResponse,
   ListCredentialsResponse,
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
@@ -83,6 +84,102 @@ describe("POST /api/me/github/connect", () => {
     expect(url.searchParams.get("client_id")).toBe("fixture-client-id");
     expect(url.searchParams.get("state")).toBeTruthy();
     expect(url.searchParams.get("state")?.split(".")).toHaveLength(2);
+  });
+});
+
+/**
+ * The member-readable projection of the org App. `/integrations` renders
+ * the org half from this, so the states it must tell apart are: no App (the
+ * connect above 409s), an App nobody installed, and a live installation.
+ */
+describe("GET /api/me/github/org-status", () => {
+  async function readStatus(baseUrl: string, headers = HEADERS): Promise<GetGithubOrgStatusResponse> {
+    const res = await fetch(`${baseUrl}/api/me/github/org-status`, { headers });
+    expect(res.status).toBe(200);
+    return (await res.json()) as GetGithubOrgStatusResponse;
+  }
+
+  it("reports no App before an admin sets one up, matching the 409 from /connect", async () => {
+    api = await bootTestApi();
+    expect(await readStatus(api.baseUrl)).toEqual({
+      configured: false,
+      installationCount: 0,
+      suspendedCount: 0,
+    });
+  });
+
+  it("reports an App that nobody installed yet — the state people get stuck in", async () => {
+    api = await bootTestApi();
+    useFixture();
+    await configureOrgApp(api.baseUrl);
+
+    expect(await readStatus(api.baseUrl)).toEqual({
+      configured: true,
+      installationCount: 0,
+      suspendedCount: 0,
+    });
+  });
+
+  it("counts the installations, and how many of them GitHub suspended", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(githubInstallations).values([
+      {
+        id: "ghi_status1",
+        orgId: "local-org",
+        installationId: 601,
+        accountLogin: "octo-org",
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        linkedUserId: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "ghi_status2",
+        orgId: "local-org",
+        installationId: 602,
+        accountLogin: "octouser",
+        accountType: "User",
+        repositorySelection: "selected",
+        suspended: true,
+        linkedUserId: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    const body = await readStatus(api.baseUrl);
+    expect(body.installationCount).toBe(2);
+    expect(body.suspendedCount).toBe(1);
+  });
+
+  it("answers a member, where the detail read is admin-only", async () => {
+    api = await bootTestApi();
+    useFixture();
+    await configureOrgApp(api.baseUrl);
+
+    // Without this route a member had no way to learn that the App they
+    // depend on is missing.
+    expect(await readStatus(api.baseUrl, MEMBER_HEADERS)).toMatchObject({ configured: true });
+
+    const adminRead = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: MEMBER_HEADERS });
+    expect(adminRead.status).toBe(403);
+  });
+
+  it("carries counts only — no app id, slug, install url or account login", async () => {
+    api = await bootTestApi();
+    useFixture();
+    await configureOrgApp(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
+    const body: unknown = await res.json();
+    expect(Object.keys(body as Record<string, unknown>).sort()).toEqual([
+      "configured",
+      "installationCount",
+      "suspendedCount",
+    ]);
   });
 });
 

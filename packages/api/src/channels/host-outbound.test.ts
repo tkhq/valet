@@ -9,7 +9,6 @@ import {
 } from "@mariozechner/pi-ai";
 import {
   VirtualSandboxProvider,
-  orchestratorSessionId,
   type BusEvent,
   type ChannelGatePrompt,
   type ChannelGateResolution,
@@ -29,6 +28,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AttentionEvent } from "../orchestrator/attention.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -182,7 +182,7 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it("ignores message_end on non-channel threads", async () => {
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const thread = session.thread("web:default");
     faux.setResponses([fauxAssistantMessage("web only reply")]);
     await thread.submitPrompt({ text: "hi" }, { dispatchId: `web:${randomUUID()}` });
@@ -193,14 +193,13 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it("does not deliver the same messageId twice", async () => {
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
-    await engineStore.appendEntries(sessionId, threadId, [
+    await engineStore.appendEntries(session.id, threadId, [
       {
         type: "message",
         id: "dup-msg-1",
-        sessionId,
+        sessionId: session.id,
         threadId,
         parentId: null,
         createdAt: Date.now(),
@@ -211,7 +210,7 @@ describe("ChannelHost outbound delivery", () => {
     ]);
 
     const event: BusEvent = {
-      sessionId,
+      sessionId: session.id,
       threadId,
       timestamp: Date.now(),
       event: { type: "message_end", threadId, messageId: "dup-msg-1", reason: "end_turn" },
@@ -228,8 +227,8 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it("delivers a command_result to the channel the command came from", async () => {
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const sessionId = session.id;
     const threadId = session.thread("fake:99").id;
 
     const entry = {
@@ -264,8 +263,8 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it("ignores command_result on non-channel threads", async () => {
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const sessionId = session.id;
     const threadId = session.thread("web:default").id;
 
     const event: BusEvent = {
@@ -302,14 +301,13 @@ describe("ChannelHost outbound delivery", () => {
     // stopReason "end_turn" on the entry itself. A mid-turn entry (no
     // stopReason) paired with a message_end("end_turn") event must not be
     // delivered.
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
-    await engineStore.appendEntries(sessionId, threadId, [
+    await engineStore.appendEntries(session.id, threadId, [
       {
         type: "message",
         id: "mid-turn-msg-1",
-        sessionId,
+        sessionId: session.id,
         threadId,
         parentId: null,
         createdAt: Date.now(),
@@ -322,7 +320,7 @@ describe("ChannelHost outbound delivery", () => {
 
     await eventStream.append(
       {
-        sessionId,
+        sessionId: session.id,
         threadId,
         timestamp: Date.now(),
         event: { type: "message_end", threadId, messageId: "mid-turn-msg-1", reason: "end_turn" },
@@ -337,13 +335,12 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
 
     const gate: DecisionGate = {
       id: `gate-${randomUUID()}`,
-      sessionId,
+      sessionId: session.id,
       threadId,
       queueItemId: "qi-1",
       resumeKey: "rk-1",
@@ -361,7 +358,7 @@ describe("ChannelHost outbound delivery", () => {
     };
 
     await eventStream.append(
-      { sessionId, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
       `gate-open-${randomUUID()}`,
     );
 
@@ -376,12 +373,12 @@ describe("ChannelHost outbound delivery", () => {
     expect(ref).not.toBeNull();
     if (ref) {
       const mapped = host.gateForRef(ref);
-      expect(mapped).toMatchObject({ gateId: gate.id, sessionId });
+      expect(mapped).toMatchObject({ gateId: gate.id, sessionId: session.id });
     }
 
     await eventStream.append(
       {
-        sessionId,
+        sessionId: session.id,
         threadId,
         timestamp: Date.now(),
         event: {
@@ -433,7 +430,7 @@ describe("ChannelHost outbound delivery", () => {
 
     // `pendingDecisionGates` lists every gate row for the session regardless
     // of status; assert on the gate's own status field, not presence.
-    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     expect((await session.pendingDecisionGates()).find((g) => g.id === gateId)?.status).toBe("pending");
 
     await host.handleUpdate(

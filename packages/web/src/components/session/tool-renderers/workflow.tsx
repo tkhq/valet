@@ -5,6 +5,11 @@
  * `call_tool` invocations with `args.tool_id = "workflows.*"` — this
  * renderer claims exactly that subset via the args-aware `matches` form.
  *
+ * A few of those actions are also PINNED as direct tools, and arrive under
+ * the name `workflows__<action>` with the parameters as their own args.
+ * This renderer claims both shapes, because they are the same action and a
+ * user must not see a patch render differently by route.
+ *
  * The Body fetches CURRENT state by id (never trusts the persisted result
  * blob beyond extracting ids): definitions via `useWorkflow`, runs via
  * `useRunDetail` (which already polls until settled). A parked run's
@@ -29,19 +34,35 @@ import { ToolBody } from "./tool-shell";
 
 const WORKFLOW_TOOL_PREFIX = "workflows.";
 
-interface CallToolArgs {
-  tool_id?: unknown;
-  params?: unknown;
-}
+/**
+ * The name prefix of a PINNED workflows action. The host promotes a few
+ * actions to direct tools (`api/src/plugins/pinned-actions.ts`); the engine
+ * maps `workflows.patch_workflow` to `workflows__patch_workflow`, because a
+ * dot is not legal in a tool name. Such a call carries no `tool_id`, and
+ * its args ARE the action's parameters.
+ */
+const WORKFLOW_PINNED_PREFIX = "workflows__";
 
-function callToolArgs(args: unknown): CallToolArgs {
-  return typeof args === "object" && args !== null ? (args as CallToolArgs) : {};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function isWorkflowCallTool(toolName: string, args?: unknown): boolean {
+  if (toolName.startsWith(WORKFLOW_PINNED_PREFIX)) return true;
   if (toolName !== "call_tool") return false;
-  const toolId = callToolArgs(args).tool_id;
+  const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" && toolId.startsWith(WORKFLOW_TOOL_PREFIX);
+}
+
+/**
+ * The parameters one workflows call passed, from either call shape: nested
+ * under `params` for `call_tool`, and the args themselves for a pinned
+ * direct tool.
+ */
+export function workflowParams(args: unknown, toolName: string): Record<string, unknown> {
+  if (toolName.startsWith(WORKFLOW_PINNED_PREFIX)) return isRecord(args) ? args : {};
+  const outer = isRecord(args) ? args : {};
+  return isRecord(outer.params) ? outer.params : {};
 }
 
 export interface WorkflowRefs {
@@ -125,26 +146,30 @@ export function parseLintErrors(text: string | undefined): string[] | null {
 
 /** The definition the agent TRIED to save, from the call's own params —
  * a failed save still deserves its DAG rendered next to the lint errors. */
-export function attemptedDefinition(args: unknown): unknown {
-  const params = callToolArgs(args).params;
-  if (typeof params !== "object" || params === null) return null;
-  return (params as Record<string, unknown>).definition ?? null;
+export function attemptedDefinition(args: unknown, toolName: string): unknown {
+  return workflowParams(args, toolName).definition ?? null;
 }
 
 /** Fallback refs from the call's own params, so an in-flight or failed call
  * can still point at the workflow it targeted. */
-export function workflowRefsFromArgs(args: unknown): WorkflowRefs {
-  const params = callToolArgs(args).params;
-  if (typeof params !== "object" || params === null) return {};
-  const p = params as Record<string, unknown>;
+export function workflowRefsFromArgs(args: unknown, toolName: string): WorkflowRefs {
+  const p = workflowParams(args, toolName);
   const refs: WorkflowRefs = {};
   if (typeof p.workflow_id === "string") refs.workflowId = p.workflow_id;
   if (typeof p.run_id === "string") refs.runId = p.run_id;
   return refs;
 }
 
-function toolIdSuffix(args: unknown): string | undefined {
-  const toolId = callToolArgs(args).tool_id;
+/** The workflows action a call names, without the `workflows.` prefix —
+ * `patch_workflow`, `list_workflows`, and so on. A pinned direct tool
+ * carries the action in its own name; `call_tool` carries it in `tool_id`.
+ * Exported so callers that react to workflow edits (the editor's assistant
+ * panel) narrow through this one parser instead of their own. */
+export function workflowToolSuffix(args: unknown, toolName: string): string | undefined {
+  if (toolName.startsWith(WORKFLOW_PINNED_PREFIX)) {
+    return toolName.slice(WORKFLOW_PINNED_PREFIX.length);
+  }
+  const toolId = isRecord(args) ? args.tool_id : undefined;
   if (typeof toolId !== "string") return undefined;
   return toolId.startsWith(WORKFLOW_TOOL_PREFIX)
     ? toolId.slice(WORKFLOW_TOOL_PREFIX.length)
@@ -348,15 +373,15 @@ function WorkflowListBody({ rows }: { rows: WorkflowListEntry[] }) {
   );
 }
 
-function WorkflowToolBody({ args, result, status, error }: ToolRendererProps) {
-  const refs = { ...workflowRefsFromArgs(args), ...workflowRefsFrom(result) };
+function WorkflowToolBody({ args, result, status, error, toolName }: ToolRendererProps) {
+  const refs = { ...workflowRefsFromArgs(args, toolName), ...workflowRefsFrom(result) };
 
   if (status === "running") {
     return <Skeleton label="Working on the workflow…" />;
   }
 
   // list_workflows → compact linked table, not raw JSON.
-  if (toolIdSuffix(args) === "list_workflows") {
+  if (workflowToolSuffix(args, toolName) === "list_workflows") {
     const rows = workflowListFrom(result);
     if (rows) return <WorkflowListBody rows={rows} />;
   }
@@ -364,7 +389,7 @@ function WorkflowToolBody({ args, result, status, error }: ToolRendererProps) {
   // A save/patch rejected by the linter → attempted DAG + structured list.
   const lintErrors = parseLintErrors(error ?? resultText(result));
   if (lintErrors) {
-    return <LintErrorsBody errors={lintErrors} attempted={attemptedDefinition(args)} />;
+    return <LintErrorsBody errors={lintErrors} attempted={attemptedDefinition(args, toolName)} />;
   }
 
   if (refs.runId) return <RunBody runId={refs.runId} />;
@@ -378,9 +403,9 @@ export const workflowRenderer: ToolRenderer = {
   matches: isWorkflowCallTool,
   category: "write",
   Icon: Workflow,
-  formatTarget: (args) => toolIdSuffix(args),
-  formatSummary: (args, result) => {
-    const refs = { ...workflowRefsFromArgs(args), ...workflowRefsFrom(result) };
+  formatTarget: (args, toolName) => workflowToolSuffix(args, toolName),
+  formatSummary: (args, result, _status, toolName) => {
+    const refs = { ...workflowRefsFromArgs(args, toolName), ...workflowRefsFrom(result) };
     return refs.runId ?? refs.workflowId;
   },
   Body: WorkflowToolBody,

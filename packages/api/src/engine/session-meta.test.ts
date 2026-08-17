@@ -11,7 +11,6 @@
  *                       with collision disambiguation).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { agentSessions, sessionRepos } from "../schema/index.js";

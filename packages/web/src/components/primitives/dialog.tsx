@@ -26,6 +26,16 @@ export const Dialog = RDialog.Root;
 export const DialogTrigger = RDialog.Trigger;
 export const DialogClose = RDialog.Close;
 
+/**
+ * Title and description for dialogs that place their own heading inside the
+ * body rather than in `DialogContent`'s header — a split-pane layout, for
+ * one, whose heading belongs in a column and not above both. Radix still
+ * needs a labelled title in the tree for screen readers, so reach for these
+ * instead of dropping the `title` prop and leaving the dialog unlabelled.
+ */
+export const DialogTitle = RDialog.Title;
+export const DialogDescription = RDialog.Description;
+
 // Omit the native HTML `title` (which expects a string) so we can take a ReactNode.
 interface DialogContentProps
   extends Omit<ComponentPropsWithoutRef<typeof RDialog.Content>, "title"> {
@@ -79,7 +89,7 @@ export const DialogContent = forwardRef<ElementRef<typeof RDialog.Content>, Dial
             <RDialog.Close
               aria-label="Close"
               className={cn(
-                "absolute right-3 top-3 rounded-sm p-1 text-muted hover:text-[--fg]",
+                "absolute right-3 top-3 rounded-sm p-1 text-muted hover:text-[--fg] touch-manipulation",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
               )}
             >

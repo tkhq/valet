@@ -29,15 +29,20 @@ import type {
   PauseSessionResponse,
   ResolveDecisionRequest,
   SandboxJwtResponse,
+  SessionRunState,
   SetNotificationPreferenceRequest,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { useLiveQuery } from "~/lib/use-live-query";
+import { api, type OwnerFilter } from "./client";
 
 // ── Query key factory ────────────────────────────────────────────────────
 
 export const qk = {
-  sessions: () => ["sessions"] as const,
+  /** The owner is a trailing element, so `["sessions"]` stays the prefix
+   * that invalidates every workspace's list at once. */
+  sessions: (owner?: OwnerFilter) =>
+    ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
@@ -53,10 +58,42 @@ export const qk = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useSessions(opts?: UseQueryOptions<ListSessionsResponse>) {
-  return useQuery<ListSessionsResponse>({
-    queryKey: qk.sessions(),
-    queryFn: () => api.listSessions(),
+/**
+ * The run states that keep the sessions list polling.
+ *
+ * `working` changes on its own — that is the whole reason the page is open.
+ * `needs_you` changes when a person answers the gate, and the person can
+ * answer from a chat channel or a second tab, so this page has to follow
+ * that too. The rest are quiet: `failed`, `sleeping` and `idle` only move
+ * when someone sends new work, and every path that sends work already
+ * invalidates this query.
+ */
+const LIVE_SESSION_STATES: ReadonlySet<SessionRunState> = new Set<SessionRunState>([
+  "working",
+  "needs_you",
+]);
+
+/** The "is anything moving?" rule for the sessions list. Exported because
+ * the poll cost of the page depends on it, so it gets its own test. */
+export function sessionsAreLive(data: ListSessionsResponse): boolean {
+  return data.sessions.some((s) => LIVE_SESSION_STATES.has(s.runState));
+}
+
+/**
+ * Polls while any session is working or blocked on a person, and stops when
+ * none are. See `lib/use-live-query.ts` for the policy.
+ */
+/** The sessions of one workspace, or of everything the caller can reach.
+ * `owner` MUST reach the query key, or switching answers from the previous
+ * workspace's cache. */
+export function useSessions(
+  owner?: OwnerFilter,
+  opts?: UseQueryOptions<ListSessionsResponse>,
+) {
+  return useLiveQuery<ListSessionsResponse>({
+    queryKey: qk.sessions(owner),
+    queryFn: () => api.listSessions(owner),
+    isLive: sessionsAreLive,
     ...opts,
   });
 }
@@ -178,21 +215,6 @@ export function useSetSessionModel(sessionId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
-    },
-  });
-}
-
-export function useSetThreadModel(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<
-    PatchThreadResponse,
-    Error,
-    { threadId: string; model: string | null }
-  >({
-    mutationFn: ({ threadId, model }) =>
-      api.patchThread(sessionId, threadId, { model }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
     },
   });
 }

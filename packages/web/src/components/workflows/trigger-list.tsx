@@ -10,7 +10,7 @@ import {
   useWorkflowTriggers,
   useWorkflows,
 } from "~/api/workflows";
-import { Button, Spinner, Switch } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
 import { TriggerDialog } from "./trigger-dialog";
 
 /** Relative "in 2h" formatting for next fire times. */
@@ -44,6 +44,11 @@ export function TriggerList({ workflowId }: { workflowId?: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<WorkflowTriggerItem | undefined>(undefined);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Delete asks first, and keeps its own error: the shared `actionError`
+  // line renders behind the dialog, where the person who pressed Delete
+  // cannot read it.
+  const [removing, setRemoving] = useState<WorkflowTriggerItem | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   const nameById = new Map(
     (workflowsQ.data?.workflows ?? []).map((w) => [w.id, w.name]),
@@ -68,13 +73,17 @@ export function TriggerList({ workflowId }: { workflowId?: string }) {
     );
   }
 
-  function remove(t: WorkflowTriggerItem) {
-    if (!confirm(`Delete trigger "${t.name}"?`)) return;
-    void guarded(() =>
-      t.kind === "schedule"
-        ? deleteSchedule.mutateAsync(t.id)
-        : deleteEvent.mutateAsync(t.id),
-    );
+  async function confirmRemove() {
+    if (!removing) return;
+    setRemoveError(null);
+    try {
+      await (removing.kind === "schedule"
+        ? deleteSchedule.mutateAsync(removing.id)
+        : deleteEvent.mutateAsync(removing.id));
+      setRemoving(null);
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : "Delete failed.");
+    }
   }
 
   return (
@@ -154,7 +163,10 @@ export function TriggerList({ workflowId }: { workflowId?: string }) {
                 size="sm"
                 variant="ghost"
                 aria-label={`Delete ${t.name}`}
-                onClick={() => remove(t)}
+                onClick={() => {
+                  setRemoveError(null);
+                  setRemoving(t);
+                }}
               >
                 <Trash2 className="h-4 w-4" />
               </Button>
@@ -167,6 +179,26 @@ export function TriggerList({ workflowId }: { workflowId?: string }) {
           </li>
         ))}
       </ul>
+
+      {removing && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setRemoving(null);
+          }}
+          title={`Delete trigger "${removing.name}"?`}
+          description={
+            removing.kind === "schedule"
+              ? "The schedule stops firing. Runs it already started are kept."
+              : "These events no longer start a run. Runs already started are kept."
+          }
+          confirmLabel="Delete trigger"
+          pendingLabel="Deleting…"
+          pending={deleteSchedule.isPending || deleteEvent.isPending}
+          error={removeError}
+          onConfirm={() => void confirmRemove()}
+        />
+      )}
 
       <TriggerDialog
         open={dialogOpen}

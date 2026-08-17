@@ -68,7 +68,10 @@ describe("ThreadTree — new thread affordance", () => {
       </TooltipProvider>,
     );
 
-    const button = screen.getByRole("button", { name: /new thread/i });
+    // Exact name, not a regex: an untitled newest thread is itself labelled
+    // "New thread", so its row menu ("Thread menu: New thread") also matches
+    // a loose /new thread/i.
+    const button = screen.getByRole("button", { name: "New thread" });
     await userEvent.click(button);
 
     expect(createThreadMutateAsync).toHaveBeenCalled();

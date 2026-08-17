@@ -15,6 +15,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
 
@@ -213,7 +214,7 @@ describe("buildWorkflowEngineDeps: invokeAction", () => {
 });
 
 describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
-  it("ensures the owner's orchestrator session and admits a followup signal envelope", async () => {
+  it("ensures the owner's DEFAULT assistant session and admits a followup signal envelope", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
     const deps = buildWorkflowEngineDeps({
@@ -235,11 +236,15 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
     });
 
-    expect(receipt.sessionId).toBe(`orchestrator:user:${LOCAL_USER.id}`);
+    // An `orchestrator` node names an owner, so the dispatch lands on that
+    // owner's default assistant — the row `resolveDefaultAssistant` created.
+    const defaultAssistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
+    expect(receipt.sessionId).toBe(defaultAssistant.sessionId);
+    expect(defaultAssistant.isDefault).toBe(true);
     expect(receipt.threadId).toBeTruthy();
     expect(receipt.queueItemId).toBeTruthy();
 
-    // The orchestrator session actually exists and is live.
+    // The assistant session actually exists and is live.
     const session = engineHost.liveSession(receipt.sessionId);
     expect(session).not.toBeNull();
 

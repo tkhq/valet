@@ -9,7 +9,15 @@
 import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
+  CreateAssistantRequest,
+  CreateAssistantResponse,
+  EnsureAssistantSessionResponse,
+  ListAssistantsResponse,
+  PatchAssistantRequest,
+  PatchAssistantResponse,
   CancelWorkflowRunResponse,
+  DeleteWorkflowWebhookResponse,
+  WorkflowWebhookResponse,
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
@@ -37,11 +45,13 @@ import type {
   DeletePolicyOverrideResponse,
   EnsureOrchestratorResponse,
   GetGithubAppResponse,
+  GetGithubOrgStatusResponse,
   GetMemoryTreeResponse,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
   GetPrebuildForRepoResponse,
   GetReposResponse,
+  GetWorkflowImportFileResponse,
   GetSessionResponse,
   GetSkillResponse,
   GetWorkflowResponse,
@@ -80,9 +90,14 @@ import type {
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
+  ListWorkflowTemplatesResponse,
+  InstallWorkflowTemplateRequest,
+  InstallWorkflowTemplateResponse,
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
@@ -104,6 +119,7 @@ import type {
   PauseSessionResponse,
   PatchThreadRequest,
   PatchThreadResponse,
+  PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
@@ -117,8 +133,17 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  CreateEventSubscriptionRequest,
+  CreateEventSubscriptionResponse,
+  GetEventCatalogResponse,
+  GetEventResponse,
+  ListEventsResponse,
+  ListEventSubscriptionsResponse,
+  PatchEventSubscriptionRequest,
+  PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
+  RedeliverEventResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -154,6 +179,45 @@ import type {
 } from "./memory-types";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
+
+/**
+ * One workspace, as the list endpoints take it.
+ *
+ * `undefined` means "do not narrow", which is not the same as the personal
+ * workspace: unnarrowed lists return the caller's own rows AND every team's
+ * they belong to. The personal workspace is `{ ownerType: "user", ownerId:
+ * <the caller's id> }`.
+ */
+export interface OwnerFilter {
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+}
+
+/** The owner pair, encoded, with NO leading separator.
+ *
+ * Split out from `ownerQuery` because two memory endpoints already carry a
+ * query string and need `&`. Serialising them by hand instead skipped
+ * encoding, and would have drifted the moment this format changed. */
+function ownerParams(owner: OwnerFilter | undefined): string {
+  if (!owner) return "";
+  return new URLSearchParams({
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+  }).toString();
+}
+
+/** `?ownerType=&ownerId=`, or empty. The server rejects a half-specified
+ * pair, so both are written or neither is. */
+function ownerQuery(owner: OwnerFilter | undefined): string {
+  const params = ownerParams(owner);
+  return params ? `?${params}` : "";
+}
+
+/** The owner pair appended to a path that ALREADY has a query string. */
+function ownerSuffix(owner: OwnerFilter | undefined): string {
+  const params = ownerParams(owner);
+  return params ? `&${params}` : "";
+}
 
 class ApiError extends Error {
   constructor(public status: number, message: string, public payload?: unknown) {
@@ -204,25 +268,102 @@ async function maybeRedirectToLogin(): Promise<void> {
   window.location.href = "/login";
 }
 
+/**
+ * The deadline every REST call gets.
+ *
+ * `fetch` has no timeout of its own. A request that is lost — the server
+ * stopped mid-response, or a socket that never answers — leaves its promise
+ * pending for the life of the page. That is worse than an error, because a
+ * caller which remembers the in-flight promise to avoid duplicate work then
+ * hands the same dead promise to every later caller and never retries. A
+ * rejection is recoverable. A promise that never settles is not.
+ *
+ * 30s is above the slowest normal call (a cold sandbox start) and far below
+ * a person's patience for a spinner that will never stop.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Status for a request that never reached a response. Distinct from any
+ * HTTP status, because no server replied. */
+const NO_RESPONSE_STATUS = 0;
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: unknown = text;
-    try {
-      payload = JSON.parse(text);
-    } catch {}
-    if (res.status === 401) {
-      void maybeRedirectToLogin();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      // The signal also covers reading the body below, so a response whose
+      // stream stalls part way is cut off on the same deadline.
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let payload: unknown = text;
+      try {
+        payload = JSON.parse(text);
+      } catch {}
+      if (res.status === 401) {
+        void maybeRedirectToLogin();
+      }
+      throw new ApiError(res.status, `${method} ${path} → ${res.status}`, payload);
     }
-    throw new ApiError(res.status, `${method} ${path} → ${res.status}`, payload);
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        NO_RESPONSE_STATUS,
+        `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+}
+
+/** Keyset paging for the run lists. `cursor` is a page's `nextCursor`. */
+export interface WorkflowRunPage {
+  limit?: number;
+  cursor?: string;
+}
+
+/**
+ * What the two Library listings take. Both page the same way — `cursor` is a
+ * page's `nextCursor`, never a value the client builds — and both accept the
+ * owner pin.
+ *
+ * The catalog's own controls ride here too, because the server applies them:
+ * a chip or a search box that filtered the page in hand would answer about
+ * that page while claiming to answer about the library.
+ */
+export interface SkillListQuery {
+  ownerType?: "user" | "team" | "org";
+  ownerId?: string;
+  scope?: "personal" | "team" | "org" | "plugin";
+  kind?: "skill" | "prompt";
+  q?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface SkillSourceListQuery {
+  ownerType?: "user" | "team" | "org";
+  ownerId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** Filters the cross-workflow run list accepts. Array fields match any-of. */
+export interface WorkflowRunFilter extends WorkflowRunPage {
+  workflowIds?: string[];
+  status?: WorkflowRunStatus[];
+  outcome?: WorkflowRunOutcome[];
+  parentRunId?: string;
+  since?: number;
 }
 
 export const api = {
@@ -230,7 +371,10 @@ export const api = {
   getAuthConfig: () => fetchAuthConfig(),
 
   // sessions
-  listSessions: () => request<ListSessionsResponse>("GET", "/sessions"),
+  /** Unscoped lists the caller's own sessions plus every team's they can
+   * reach. `owner` narrows it to one workspace. */
+  listSessions: (owner?: OwnerFilter) =>
+    request<ListSessionsResponse>("GET", `/sessions${ownerQuery(owner)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   createSession: (body: CreateSessionRequest) =>
@@ -269,15 +413,50 @@ export const api = {
       `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
     ),
 
+  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
+  // also how the client learns each assistant's session id, so it replaces
+  // the client-side id derivation the rail used to do.
+  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
+  createAssistant: (body: CreateAssistantRequest) =>
+    request<CreateAssistantResponse>("POST", "/assistants", body),
+  patchAssistant: (id: string, body: PatchAssistantRequest) =>
+    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
+  // Archive, not destroy: the row keeps `archived_at` and the conversation
+  // it held survives. `DELETE` carries it because the wire's
+  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
+  // house convention for a soft remove is the same verb as `deleteTeam`.
+  archiveAssistant: (id: string) =>
+    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
+  /** Get-or-create one assistant's session. Creating an assistant writes no
+   * session, so the chat page calls this before opening the conversation. */
+  ensureAssistantSession: (id: string) =>
+    request<EnsureAssistantSessionResponse>(
+      "POST",
+      `/assistants/${encodeURIComponent(id)}/session`,
+    ),
+
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
-  getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
-  getMemoryDoc: (path: string) =>
-    request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
-  searchMemory: (q: string) =>
-    request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
-  getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
-  writeMemoryDoc: (body: { path: string; content: string }) =>
+  /** Unscoped reads the caller's own memory. `owner` reads one workspace's
+   * — a team's memory is the team's, not a view of yours. */
+  getMemoryTree: (owner?: OwnerFilter) =>
+    request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+  getMemoryDoc: (path: string, owner?: OwnerFilter) =>
+    request<GetMemoryDocResponse>(
+      "GET",
+      `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`,
+    ),
+  searchMemory: (q: string, owner?: OwnerFilter) =>
+    request<SearchMemoryResponse>(
+      "GET",
+      `/memory/search?q=${encodeURIComponent(q)}${ownerSuffix(owner)}`,
+    ),
+  getMemoryGraph: (owner?: OwnerFilter) =>
+    request<MemoryGraphResponse>("GET", `/memory/graph${ownerQuery(owner)}`),
+  // `content` and `pinned` are both optional: the route leaves the body
+  // alone when `content` is absent, which is how the doc view pins a file
+  // without rewriting it.
+  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }) =>
     request<unknown>("PUT", "/memory", body),
   deleteMemoryDoc: (path: string) =>
     request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
@@ -379,11 +558,24 @@ export const api = {
     request<{ ok: true }>("PUT", "/notifications/preferences", body),
 
   // workflows (engine v2 Phase 5 decision 19)
-  listWorkflows: () => request<ListWorkflowsResponse>("GET", "/workflows"),
+  /** Unscoped lists the caller's own workflows PLUS every team's they belong
+   * to. `owner` narrows it to one workspace, which is what the workspace
+   * switcher means. Both parts go together or neither: the server rejects a
+   * half-specified pair rather than guessing. */
+  listWorkflows: (owner?: OwnerFilter) =>
+    request<ListWorkflowsResponse>("GET", `/workflows${ownerQuery(owner)}`),
   getWorkflow: (id: string) =>
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
     request<CreateWorkflowResponse>("POST", "/workflows", body),
+  /** One file out of a PUBLIC GitHub repository, for the import dialog. The
+   * body comes back as text: the dialog parses it with the same parser it
+   * applies to a pasted file. */
+  getWorkflowImportFile: (opts: { repo: string; path: string; ref?: string }) => {
+    const qs = new URLSearchParams({ repo: opts.repo, path: opts.path });
+    if (opts.ref) qs.set("ref", opts.ref);
+    return request<GetWorkflowImportFileResponse>("GET", `/workflows/import/repo-file?${qs}`);
+  },
   updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
     request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
   deleteWorkflow: (id: string) =>
@@ -394,8 +586,36 @@ export const api = {
       `/workflows/${encodeURIComponent(id)}/runs`,
       body,
     ),
-  listWorkflowRuns: (id: string) =>
-    request<ListWorkflowRunsResponse>("GET", `/workflows/${encodeURIComponent(id)}/runs`),
+  listWorkflowRuns: (id: string, opts?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListWorkflowRunsResponse>(
+      "GET",
+      `/workflows/${encodeURIComponent(id)}/runs${tail}`,
+    );
+  },
+  // Cross-workflow run list. `parentRunId` is how a batch parent's child
+  // runs come back in one request.
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+    // An any-of filter with no values matches nothing. A query string cannot
+    // carry an empty repeated field, so an unguarded request would drop the
+    // filter and list every readable run — the opposite of what was asked.
+    for (const values of [opts?.workflowIds, opts?.status, opts?.outcome]) {
+      if (values?.length === 0) return Promise.resolve({ runs: [] });
+    }
+    const qs = new URLSearchParams();
+    for (const workflowId of opts?.workflowIds ?? []) qs.append("workflowId", workflowId);
+    for (const status of opts?.status ?? []) qs.append("status", status);
+    for (const outcome of opts?.outcome ?? []) qs.append("outcome", outcome);
+    if (opts?.parentRunId) qs.set("parentRunId", opts.parentRunId);
+    if (opts?.since !== undefined) qs.set("since", String(opts.since));
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+  },
   listWorkflowVersions: (id: string) =>
     request<ListWorkflowVersionsResponse>("GET", `/workflows/${encodeURIComponent(id)}/versions`),
   getWorkflowVersion: (id: string, version: number) =>
@@ -424,6 +644,49 @@ export const api = {
     request<RetryWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/retry`,
+    ),
+
+  // events (event-system design): org feed, per-event detail with delivery
+  // attempts, the plugin trigger catalog, and subscription CRUD
+  getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
+  listEvents: (params?: { service?: string; key?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.service) qs.set("service", params.service);
+    if (params?.key) qs.set("key", params.key);
+    const q = qs.toString();
+    return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
+  },
+  getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
+  redeliverEvent: (id: string) =>
+    request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
+  listEventSubscriptions: () =>
+    request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
+  createEventSubscription: (body: CreateEventSubscriptionRequest) =>
+    request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
+  patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
+    request<PatchEventSubscriptionResponse>(
+      "PATCH",
+      `/event-subscriptions/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deleteEventSubscription: (id: string) =>
+    request<void>("DELETE", `/event-subscriptions/${encodeURIComponent(id)}`),
+  // workflow webhook URL management. Schedules and event triggers are the
+  // flat trigger surface below, not this per-workflow one.
+  getWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+  mintWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
+  deleteWorkflowWebhook: (id: string) =>
+    request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
+
+  // workflow templates — the starting points the gallery on /workflows offers
+  listWorkflowTemplates: () => request<ListWorkflowTemplatesResponse>("GET", "/templates"),
+  installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
+    request<InstallWorkflowTemplateResponse>(
+      "POST",
+      `/templates/${encodeURIComponent(id)}/install`,
+      body,
     ),
 
   // workflow triggers (spec 2026-08-15)
@@ -532,6 +795,8 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
+  ensureTeamOrchestrator: (id: string) =>
+    request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
@@ -554,7 +819,18 @@ export const api = {
   // repository it was synced from, and the next sync would overwrite an
   // edit made here. A stored skill is addressed by row id because a
   // shadowed skill shares its name with the skill that shadows it.
-  listSkills: () => request<ListSkillsResponse>("GET", "/skills"),
+  listSkills: (opts?: SkillListQuery) => {
+    const qs = new URLSearchParams();
+    if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
+    if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.scope) qs.set("scope", opts.scope);
+    if (opts?.kind) qs.set("kind", opts.kind);
+    if (opts?.q) qs.set("q", opts.q);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListSkillsResponse>("GET", `/skills${tail}`);
+  },
   getSkill: (name: string) =>
     request<GetSkillResponse>("GET", `/skills/${encodeURIComponent(name)}`),
   getStoredSkill: (id: string) =>
@@ -568,7 +844,15 @@ export const api = {
   // skill sources — public GitHub repositories Valet mirrors skills from.
   // Adding one imports it right away, so the create call returns what the
   // first sync did.
-  listSkillSources: () => request<ListSkillSourcesResponse>("GET", "/skills/sources"),
+  listSkillSources: (opts?: SkillSourceListQuery) => {
+    const qs = new URLSearchParams();
+    if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
+    if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListSkillSourcesResponse>("GET", `/skills/sources${tail}`);
+  },
   createSkillSource: (body: CreateSkillSourceRequest) =>
     request<SkillSourceSyncResponse>("POST", "/skills/sources", body),
   syncSkillSource: (id: string) =>
@@ -600,12 +884,19 @@ export const api = {
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
   postGithubAppManifest: (body: PostGithubAppManifestRequest = {}) =>
     request<PostGithubAppManifestResponse>("POST", "/org/github-app/manifest", body),
+  // The second setup path: connect an App that already exists. The reply is
+  // the same state `getGithubApp` returns, so nothing sent here comes back.
+  postGithubAppCredential: (body: PostGithubAppCredentialRequest) =>
+    request<GetGithubAppResponse>("POST", "/org/github-app/credential", body),
   refreshGithubApp: () => request<GetGithubAppResponse>("POST", "/org/github-app/refresh"),
   deleteGithubApp: () => request<undefined>("DELETE", "/org/github-app"),
 
   // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
   connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
   disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
+  // The org App's state, readable by a member — `getGithubApp` above is the
+  // admin-only detail read, so connect surfaces use this instead.
+  getGithubOrgStatus: () => request<GetGithubOrgStatusResponse>("GET", "/me/github/org-status"),
 
   // identity links (channel-link Phase 7): per-user Telegram account linking
   listIdentityLinks: () => request<ListIdentityLinksResponse>("GET", "/me/identity-links"),

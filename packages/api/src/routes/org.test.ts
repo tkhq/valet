@@ -14,7 +14,6 @@ import type { OrgMembersResponse, OrgResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
-const ADMIN_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-admin" };
 
 let api: TestApi | undefined;
 

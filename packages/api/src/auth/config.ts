@@ -15,6 +15,34 @@ export interface AuthConfig {
     clientSecret: string;
     name: string;
     domain: string;
+    /**
+     * Claim that carries the user's full group paths, e.g.
+     * `["/platform/admins", "/research"]`. The team sync mirrors those
+     * groups into teams (`services/team-sync.ts`).
+     */
+    teamClaim: string;
+    /**
+     * Claim whose presence proves the group mapper ran. Any value counts.
+     *
+     * Keycloak sends no group claim at all for a user who is in no groups,
+     * so "in no groups" and "no mapper configured" arrive identical. The
+     * sync must tell them apart: the first empties the user's teams, the
+     * second must change nothing. This marker is the only thing that
+     * separates them.
+     */
+    teamAssertedClaim: string;
+    /** Sub-group name that grants admin on the parent team, e.g. `admins`. */
+    teamAdminGroup: string;
+    /**
+     * Top-level group paths this instance mirrors, e.g. `["/platform"]`.
+     * Undefined means every top-level group the claim carries.
+     *
+     * No environment variable sets this one. It comes from
+     * `auth.sso.teams.groups` in `valet.yaml`, because a list is awkward in
+     * an env var and because the boot validator uses it to reject a group
+     * that would collide with a declared team name.
+     */
+    teamGroups?: string[];
   };
   social: {
     google?: {
@@ -27,6 +55,12 @@ export interface AuthConfig {
     };
   };
   sandboxJwtMaster: string;
+}
+
+/** Reads an optional variable, treating whitespace-only as unset. */
+function trimmedOr(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
 }
 
 /**
@@ -98,12 +132,28 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     const domain = env.AUTH_OIDC_DOMAIN ?? defaultDomain;
     const name = env.AUTH_OIDC_NAME ?? "SSO";
 
+    // Team-sync claim names. The defaults match the mappers in
+    // `docker/keycloak/valet-realm.json`. Nothing here turns the sync on:
+    // a deployment whose provider sends neither claim never reaches a write,
+    // because an absent claim means "no information" (services/team-sync.ts).
+    //
+    // These three reads are the FALLBACK layer. `valet.yaml` is the preferred
+    // home for the mapping (`auth.sso.teams`), and `main.ts` overwrites the
+    // values below with `resolveSsoTeamMapping` when the file declares them.
+    // A deployment that sets both is refused at boot, one field at a time.
+    const teamClaim = trimmedOr(env.AUTH_OIDC_TEAM_CLAIM, "groups");
+    const teamAssertedClaim = trimmedOr(env.AUTH_OIDC_TEAM_ASSERTED_CLAIM, "groups_asserted");
+    const teamAdminGroup = trimmedOr(env.AUTH_OIDC_TEAM_ADMIN_GROUP, "admins");
+
     oidc = {
       issuer: oidcIssuer,
       clientId: oidcClientId,
       clientSecret: oidcClientSecret,
       name,
       domain,
+      teamClaim,
+      teamAssertedClaim,
+      teamAdminGroup,
     };
   } else {
     // Partial OIDC config: invalid

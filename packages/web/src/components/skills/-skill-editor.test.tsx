@@ -10,15 +10,17 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { SkillResponse } from "@valet/api/wire";
 
+const createSkill = vi.fn();
 vi.mock("~/api/skills", () => ({
-  useCreateSkill: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useCreateSkill: () => ({ mutate: createSkill, isPending: false, error: null }),
   useUpdateSkill: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
 
 // Mutable so a test can simulate the org query resolving AFTER first render
-// (the real query is async; a static mock hides initializer-race bugs).
+// (the real query is async; a static mock hides admin-flag race bugs).
 let orgData: { callerRole: string } | undefined = { callerRole: "member" };
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] } }),
@@ -26,9 +28,20 @@ vi.mock("~/api/settings", () => ({
 }));
 
 // The split markdown editor pulls in CodeMirror; a plain textarea stand-in
-// keeps this suite about the form, not the editor internals.
+// keeps this suite about the form, not the editor internals. It is writable,
+// because the form only submits once the playbook holds something.
 vi.mock("~/components/markdown-editor", () => ({
-  MarkdownEditor: ({ value }: { value: string }) => <textarea readOnly value={value} />,
+  MarkdownEditor: ({
+    value,
+    onChange,
+    ariaLabel,
+  }: {
+    value: string;
+    onChange: (next: string) => void;
+    ariaLabel?: string;
+  }) => (
+    <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange(e.target.value)} />
+  ),
 }));
 
 import { previewPromptBody, SkillEditor } from "./skill-editor";
@@ -72,18 +85,31 @@ describe("SkillEditor", () => {
   });
 });
 
-describe("SkillEditor — org scope preselect", () => {
-  it("honors ?scope=org when the admin flag resolves after first render", () => {
-    // First render: org query still in flight → admin unknown → initializer
-    // falls back to "You". The reset effect must pick Org once the flag lands.
+describe("SkillEditor — the org scope", () => {
+  it("honors ?scope=org when the admin flag resolves after first render", async () => {
+    const user = userEvent.setup();
+    createSkill.mockClear();
+    // First render: the org query is still in flight, so the admin flag is
+    // unknown. The owner is read at submit, not at mount, so a slow query
+    // cannot file an org skill as a personal one.
     orgData = undefined;
     const { rerender } = render(<SkillEditor defaultScope="org" onSaved={() => {}} onCancel={() => {}} />);
 
     orgData = { callerRole: "admin" };
     rerender(<SkillEditor defaultScope="org" onSaved={() => {}} onCancel={() => {}} />);
 
-    const select = screen.getByLabelText("Owner") as HTMLSelectElement;
-    expect(select.value).toBe("org");
+    // No Owner field: the page that opened the form said which library this
+    // skill belongs to.
+    expect(screen.queryByLabelText("Owner")).toBeNull();
+
+    await user.type(screen.getByLabelText("Name"), "org-thing");
+    await user.type(screen.getByLabelText("Description"), "An org skill.");
+    await user.type(screen.getByRole("textbox", { name: "Playbook" }), "Do it.");
+    await user.click(screen.getByRole("button", { name: "Create skill" }));
+
+    expect(createSkill).toHaveBeenCalledTimes(1);
+    const [body] = createSkill.mock.calls[0] as [{ ownerType?: string }];
+    expect(body.ownerType).toBe("org");
     orgData = { callerRole: "member" };
   });
 });

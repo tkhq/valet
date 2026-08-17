@@ -1,8 +1,15 @@
 import { mkdtemp, rm, access, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { buildDockerExecArgs, buildDockerRunArgs, credsCheckScript, writeCredsFiles } from "../src/sandbox.js";
+import {
+  buildDockerExecArgs,
+  buildDockerRunArgs,
+  createSandboxWorkspace,
+  credsCheckScript,
+  sandboxWorkspaceRoot,
+  writeCredsFiles,
+} from "../src/sandbox.js";
 
 const baseOpts = {
   containerName: "valet-sandbox-test",
@@ -317,5 +324,31 @@ describe("docker flag (rootless DinD)", () => {
     expect(joined).not.toContain("cap-add");
     expect(joined).not.toContain("SYS_ADMIN");
     expect(joined).not.toContain("NET_ADMIN");
+  });
+});
+
+describe("sandboxWorkspaceRoot (pure — no Docker required)", () => {
+  it("sits under the home directory, which every docker distribution shares", () => {
+    // A docker daemon in a VM shares the home directory by default and
+    // little else. `os.tmpdir()` resolves to /var/folders on macOS, which
+    // Colima does not share: the daemon then mounts an empty directory and
+    // the container reads different bytes than the host writes.
+    const root = sandboxWorkspaceRoot();
+    expect(isAbsolute(root)).toBe(true);
+    expect(root.startsWith(homedir() + "/")).toBe(true);
+    expect(root.startsWith(tmpdir())).toBe(false);
+  });
+
+  it("creates a distinct empty workspace per call", async () => {
+    const a = await createSandboxWorkspace("valet-root-unit-");
+    const b = await createSandboxWorkspace("valet-root-unit-");
+    try {
+      expect(a).not.toBe(b);
+      expect(a.startsWith(sandboxWorkspaceRoot())).toBe(true);
+      expect((await stat(a)).isDirectory()).toBe(true);
+    } finally {
+      await rm(a, { recursive: true, force: true });
+      await rm(b, { recursive: true, force: true });
+    }
   });
 });

@@ -24,18 +24,33 @@ export interface WorkflowEditorState {
     string,
     {
       position: { x: number; y: number };
-      collapsed?: boolean;
     }
   >;
   viewport?: { x: number; y: number; zoom: number };
 }
 
+/**
+ * One declared trigger input.
+ *
+ * `label`, `placeholder` and `hidden` are presentation only. They let a
+ * definition declare each input ONCE, here, and let the run form derive its
+ * fields from the same declaration — without them a template must repeat
+ * its input list somewhere else, and the two copies drift. `hidden` marks a
+ * field that belongs to the invocation contract but is never typed by a
+ * person, such as a value a webhook maps in.
+ */
 export interface WorkflowInputDefinition {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   required?: boolean;
   default?: unknown;
   description?: string;
   enum?: unknown[];
+  /** Field name shown on the run form. Falls back to the schema key. */
+  label?: string;
+  /** Example value shown in the empty field. */
+  placeholder?: string;
+  /** True keeps the field out of the run form. */
+  hidden?: boolean;
 }
 
 export interface WorkflowPolicy {
@@ -44,6 +59,21 @@ export interface WorkflowPolicy {
   maxWaitDurationMs?: number;
   maxForeachItems?: number;
   maxForeachConcurrency?: number;
+  /**
+   * What an unresolved `{{ ... }}` path does to the node that wrote it.
+   *
+   *   - `empty` (the default) renders the path as an empty value and
+   *     records a diagnostic. This is how every definition written before
+   *     this option behaves.
+   *   - `fail` fails the node BEFORE it runs, so a prompt with a hole in
+   *     it is never sent and an action with a null parameter is never
+   *     called. The failure names the path, the field, and the correction.
+   *
+   * `fail` does not apply to `if` conditions or edge `when` predicates.
+   * Those ask whether data is there, so an absent path is a legitimate
+   * answer rather than a mistake. They still produce diagnostics.
+   */
+  onUnresolvedPath?: 'empty' | 'fail';
 }
 
 export interface WorkflowEdge {

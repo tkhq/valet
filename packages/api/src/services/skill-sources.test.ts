@@ -14,10 +14,12 @@ import { addMember, createTeam, deleteTeam } from "./teams.js";
 import { createSkill, type SkillOwner } from "./skills.js";
 import {
   createSkillSource,
+  decodeSkillSourceCursor,
   deleteSkillSource,
   listSkillSources,
   ownedSkillSourceRow,
   parseRepoInput,
+  SKILL_SOURCE_DEFAULT_LIMIT,
   SkillSourceConflictError,
   SkillSourceInputError,
 } from "./skill-sources.js";
@@ -84,6 +86,13 @@ describe("skill sources service", () => {
     await seedUser(db, "u2");
   });
 
+  /** The repositories one caller reaches on the first page, which every case
+   * below stays well inside. */
+  async function repos(userId: string): Promise<string[]> {
+    const page = await listSkillSources(db, owner(userId), undefined, SKILL_SOURCE_DEFAULT_LIMIT, undefined);
+    return page.rows.map((r) => r.repoFullName);
+  }
+
   it("creates a source for the caller and schedules its first sync now", async () => {
     const created = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
 
@@ -119,16 +128,59 @@ describe("skill sources service", () => {
     await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });
     await createSkillSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
 
-    expect((await listSkillSources(db, owner("u1"))).map((r) => r.repoFullName)).toEqual([
-      "tkhq/mine",
-      "tkhq/ours",
-    ]);
-    expect(await listSkillSources(db, owner("u2"))).toEqual([]);
+    expect(await repos("u1")).toEqual(["tkhq/mine", "tkhq/ours"]);
+    expect(await repos("u2")).toEqual([]);
 
     await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
-    expect((await listSkillSources(db, owner("u2"))).map((r) => r.repoFullName)).toEqual([
-      "tkhq/ours",
-    ]);
+    expect(await repos("u2")).toEqual(["tkhq/ours"]);
+  });
+
+  it("pages by repository name, and stops issuing a cursor at the last page", async () => {
+    for (const repo of ["tkhq/a", "tkhq/b", "tkhq/c"]) {
+      await createSkillSource(db, owner("u1"), { repo });
+    }
+
+    const first = await listSkillSources(db, owner("u1"), undefined, 2, undefined);
+    expect(first.rows.map((r) => r.repoFullName)).toEqual(["tkhq/a", "tkhq/b"]);
+    expect(first.nextCursor).toBeDefined();
+
+    const second = await listSkillSources(
+      db,
+      owner("u1"),
+      undefined,
+      2,
+      decodeSkillSourceCursor(first.nextCursor ?? ""),
+    );
+    expect(second.rows.map((r) => r.repoFullName)).toEqual(["tkhq/c"]);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it("walks past two owners tracking the same repository", async () => {
+    // `(repo, subpath)` repeats across owners — the unique index allows it —
+    // so a cursor without the row id would loop on the first of the pair.
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await createSkillSource(db, owner("u1"), { repo: "tkhq/same" });
+    await createSkillSource(db, owner("u1"), { repo: "tkhq/same", teamId: team.id });
+
+    const first = await listSkillSources(db, owner("u1"), undefined, 1, undefined);
+    expect(first.nextCursor).toBeDefined();
+    const second = await listSkillSources(
+      db,
+      owner("u1"),
+      undefined,
+      1,
+      decodeSkillSourceCursor(first.nextCursor ?? ""),
+    );
+
+    expect(second.rows).toHaveLength(1);
+    expect(second.rows[0]?.id).not.toBe(first.rows[0]?.id);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it("refuses a cursor it did not issue", () => {
+    expect(decodeSkillSourceCursor("not-a-cursor")).toBeUndefined();
+    // Well-formed base64url JSON, but not this listing's sort key.
+    expect(decodeSkillSourceCursor(Buffer.from('{"s":1}').toString("base64url"))).toBeUndefined();
   });
 
   it("reports a team the caller does not belong to as not found", async () => {
@@ -174,6 +226,6 @@ describe("skill sources service", () => {
 
     await deleteTeam(db, { teamId: team.id });
 
-    expect(await listSkillSources(db, owner("u1"))).toEqual([]);
+    expect(await repos("u1")).toEqual([]);
   });
 });

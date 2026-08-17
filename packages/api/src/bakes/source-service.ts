@@ -357,7 +357,6 @@ async function resolveApiTokenOrNull(
   }
 }
 
-const NIGHTLY_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
 /** Decay window (spec decision 13): a repo source with no live binding and a
@@ -447,8 +446,8 @@ export class SourceService {
     this.cacheBudgetGb = Number.isFinite(budget) && budget > 0 ? budget : 20;
   }
 
-  /** The wired builder's backend id, or `null` when prebuilds are
-   * unavailable — backs `GET /api/org/prebuilds/meta`. */
+  /** The wired builder's backend id, or `null` when image builds are
+   * unavailable. */
   get builderBackend(): string | null {
     return this.builder?.backend ?? null;
   }

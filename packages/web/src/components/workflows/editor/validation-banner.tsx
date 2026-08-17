@@ -44,8 +44,13 @@ export function ValidationBanner({ errors }: ValidationBannerProps) {
       role="alert"
       className="border-b border-danger-500/40 bg-danger-500/10 px-4 py-2 text-sm text-danger-700 dark:text-danger-400"
     >
+      {/* The consequence, not only the count: `PUT /workflows/:id` rejects
+          an invalid definition, so the editor holds Save off until these
+          are fixed. Somebody who cannot see why a disabled button is
+          disabled reads it as a broken editor. */}
       <p className="font-medium">
-        {errors.length} validation {errors.length === 1 ? "error" : "errors"}
+        {errors.length} validation {errors.length === 1 ? "error" : "errors"} — Save stays off until{" "}
+        {errors.length === 1 ? "it is" : "they are"} fixed.
       </p>
       <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs">
         {errors.map((error, index) => (

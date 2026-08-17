@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
+import { MoreHorizontal } from "lucide-react";
 import { triggerDataSchema, type WorkflowDefinition } from "@valet/workflow";
 import type { ListWorkflowRunsResponse } from "@valet/api/wire";
 import {
@@ -14,10 +15,22 @@ import {
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Editor } from "~/components/workflows/editor/editor";
+import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
+import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
-import { TriggerList } from "~/components/workflows/trigger-list";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
+import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
+import {
+  Button,
+  ConfirmDialog,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+} from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
+import { runCountLabel } from "~/lib/run-count";
 import { cn } from "~/lib/cn";
 
 /**
@@ -79,6 +92,11 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
   );
 }
 
+/** Module scope so the blocker's effect does not re-register on each render.
+ * `disabled` decides whether the blocker runs at all; when it runs, every
+ * departure is blocked. */
+const alwaysBlock = () => true;
+
 function WorkflowEditorPane({
   workflowId,
   initialName,
@@ -100,10 +118,19 @@ function WorkflowEditorPane({
   };
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  // Right-side drawer: runs list / version history. Header buttons toggle
-  // it — the old bottom collapsible was invisible under a full-height
-  // canvas ("no way to view the list of runs").
-  const [drawer, setDrawer] = useState<"runs" | "history" | null>(null);
+  // Right-side drawer: runs list / version history / triggers. Header
+  // buttons toggle it — the old bottom collapsible was invisible under a
+  // full-height canvas ("no way to view the list of runs").
+  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
+  // The assistant is the editor's right-hand column, not one of the overlay
+  // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
+  // its own: describing a change is the primary way to edit a workflow, so
+  // the conversation is on screen from the moment the editor is.
+  const assistant = useWorkflowAssistant(workflowId, initialName);
+  // The one thing that makes a live edit visible: a completed patch in the
+  // panel's conversation refetches the workflow, and `Editor` adopts it.
+  useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
+
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether
   // the name is dirty (`externalDirty`) so a rename rides the same
@@ -115,6 +142,20 @@ function WorkflowEditorPane({
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
+
+  // Unsaved work is only in memory: the rename lives here and the definition
+  // draft lives in `Editor`, so any navigation away drops both. `useBlocker`
+  // catches every route change — the back link, the nav, a run link in the
+  // drawer — and `enableBeforeUnload` (its default) catches a tab close or a
+  // reload. `disabled` keeps the blocker off a clean page, where a
+  // beforeunload prompt would be noise.
+  const [definitionDirty, setDefinitionDirty] = useState(false);
+  const unsaved = nameDirty || definitionDirty;
+  const leaveBlocker = useBlocker({
+    shouldBlockFn: alwaysBlock,
+    disabled: !unsaved,
+    withResolver: true,
+  });
 
   // Run executes the SAVED definition (the api snapshots the stored row),
   // so the run dialog's schema comes from `initialDefinition`, not the
@@ -165,18 +206,34 @@ function WorkflowEditorPane({
             variant={drawer === "runs" ? "secondary" : "ghost"}
             onClick={() => setDrawer((d) => (d === "runs" ? null : "runs"))}
           >
-            Runs{runsQuery.data ? ` (${runsQuery.data.runs.length})` : ""}
+            Runs{runsQuery.data ? ` (${runCountLabel(runsQuery.data)})` : ""}
           </Button>
           <Button
             size="sm"
-            variant={drawer === "history" ? "secondary" : "ghost"}
-            onClick={() => setDrawer((d) => (d === "history" ? null : "history"))}
+            variant={drawer === "triggers" ? "secondary" : "ghost"}
+            onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
-            History
+            Triggers
           </Button>
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant={drawer === "history" ? "secondary" : "ghost"}
+                aria-label="More"
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
+                Version history
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -191,15 +248,35 @@ function WorkflowEditorPane({
         />
       )}
 
-      <div className="relative min-h-0 flex-1">
-        <Editor
-          initialDefinition={initialDefinition}
-          onSave={handleSave}
-          saving={update.isPending}
-          externalDirty={nameDirty}
-          onCancelExternal={handleCancelName}
-        />
+      {/* The assistant is the editor's own right-hand column, so a
+          conversation about changing the diagram never covers the diagram.
+          The three drawers stay overlays, and they dock beside that column
+          (`right-[--editor-aside]`) rather than over it — a runs list is a
+          lookup, and the conversation has to survive one. */}
+      <div className="relative flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Editor
+            initialDefinition={initialDefinition}
+            onSave={handleSave}
+            saving={update.isPending}
+            assistant={
+              <WorkflowAssistantPanel
+                assistant={assistant}
+                definition={initialDefinition}
+                workflowId={workflowId}
+              />
+            }
+            externalDirty={nameDirty}
+            onCancelExternal={handleCancelName}
+            onDirtyChange={setDefinitionDirty}
+          />
+        </div>
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
+        {drawer === "triggers" && (
+          <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
+            <TriggersPanel workflowId={workflowId} />
+          </DrawerShell>
+        )}
         {drawer === "history" && (
           <HistoryDrawer
             workflowId={workflowId}
@@ -210,9 +287,18 @@ function WorkflowEditorPane({
         )}
       </div>
 
-      <div className="border-t border-line px-4 py-3">
-        <TriggerList workflowId={workflowId} />
-      </div>
+      {leaveBlocker.status === "blocked" && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) leaveBlocker.reset();
+          }}
+          title="Leave without saving?"
+          description="This workflow has changes that are not saved. If you leave now, the changes are lost. To keep them, stay on this page and select Save."
+          confirmLabel="Leave without saving"
+          onConfirm={leaveBlocker.proceed}
+        />
+      )}
     </div>
   );
 }
@@ -227,14 +313,16 @@ function DrawerShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="absolute inset-y-0 right-0 z-10 flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
+    <div className="absolute inset-y-0 right-[--editor-aside] z-10 flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <span className="text-sm font-medium text-ink">{title}</span>
         <button type="button" onClick={onClose} aria-label={`Close ${title.toLowerCase()}`} className="text-muted hover:text-ink">
           ✕
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      {/* `overscroll-contain` keeps a scroll that reaches the end of the drawer
+          from continuing into the canvas behind it. */}
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
     </div>
   );
 }
@@ -248,7 +336,10 @@ function RunsDrawer({
 }) {
   const runs = runsQuery.data?.runs ?? [];
   return (
-    <DrawerShell title={`Runs${runsQuery.data ? ` (${runs.length})` : ""}`} onClose={onClose}>
+    <DrawerShell
+      title={`Runs${runsQuery.data ? ` (${runCountLabel(runsQuery.data)})` : ""}`}
+      onClose={onClose}
+    >
       {runsQuery.isLoading && (
         <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted">
           <Spinner size={12} /> Loading runs…
@@ -288,6 +379,13 @@ function RunsDrawer({
           </li>
         ))}
       </ul>
+      {/* The list is one page. Say so — a silent cut reads as "these are all
+          the runs". A paging control belongs with the run-list rebuild. */}
+      {runsQuery.data?.nextCursor && (
+        <div className="px-4 py-3 text-xs text-muted">
+          Newest {runs.length} runs shown. Older runs stay reachable by run id.
+        </div>
+      )}
     </DrawerShell>
   );
 }
@@ -305,13 +403,25 @@ function HistoryDrawer({
 }) {
   const versionsQ = useWorkflowVersions(workflowId);
   const [selected, setSelected] = useState<number | null>(null);
+  // Restore overwrites the live definition and has no undo, so it asks
+  // first. `confirming` holds the version being restored, which is also
+  // what the dialog names.
+  const [confirming, setConfirming] = useState<number | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const versionQ = useWorkflowVersion(workflowId, selected);
   const versions = versionsQ.data?.versions ?? [];
   const latest = versions[0]?.version;
 
   async function restore() {
     if (!versionQ.data) return;
-    await update.mutateAsync({ name: currentName, definition: versionQ.data.definition });
+    setRestoreError(null);
+    try {
+      await update.mutateAsync({ name: currentName, definition: versionQ.data.definition });
+    } catch (err) {
+      setRestoreError(err instanceof Error ? err.message : "Restore failed.");
+      return;
+    }
+    setConfirming(null);
     setSelected(null);
   }
 
@@ -361,7 +471,15 @@ function HistoryDrawer({
                   <div className="text-xs text-muted">Stored definition is not a dag/v1 workflow.</div>
                 )}
                 {v.version !== latest && versionQ.data && (
-                  <Button size="sm" variant="secondary" onClick={() => void restore()} disabled={update.isPending}>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setRestoreError(null);
+                      setConfirming(v.version);
+                    }}
+                    disabled={update.isPending}
+                  >
                     {update.isPending ? "Restoring…" : `Restore v${v.version}`}
                   </Button>
                 )}
@@ -370,6 +488,22 @@ function HistoryDrawer({
           </li>
         ))}
       </ul>
+
+      {confirming !== null && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setConfirming(null);
+          }}
+          title={`Restore v${confirming}?`}
+          description={`The live definition is replaced by v${confirming}. The version it replaces stays in this list, so you can restore it again.`}
+          confirmLabel={`Restore v${confirming}`}
+          pendingLabel="Restoring…"
+          pending={update.isPending}
+          error={restoreError}
+          onConfirm={() => void restore()}
+        />
+      )}
     </DrawerShell>
   );
 }

@@ -173,6 +173,57 @@ describe("GET /api/skills/sources", () => {
   });
 });
 
+describe("GET /api/skills/sources — paging", () => {
+  async function page(baseUrl: string, query: string): Promise<ListSkillSourcesResponse> {
+    const res = await fetch(`${baseUrl}/api/skills/sources${query}`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as ListSkillSourcesResponse;
+  }
+
+  it("walks the whole set with the cursor it hands back", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    for (const repo of ["tkhq/a", "tkhq/b", "tkhq/c"]) await post(api.baseUrl, { repo });
+
+    const first = await page(api.baseUrl, "?limit=2");
+    expect(first.sources.map((s) => s.repo)).toEqual(["tkhq/a", "tkhq/b"]);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = await page(api.baseUrl, `?limit=2&cursor=${encodeURIComponent(first.nextCursor ?? "")}`);
+    expect(second.sources.map((s) => s.repo)).toEqual(["tkhq/c"]);
+    // The last page says so, which is what disables the pager's Next.
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("counts the skills of the sources on the page, not of every source", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    for (const repo of ["tkhq/a", "tkhq/b"]) await post(api.baseUrl, { repo });
+
+    const first = await page(api.baseUrl, "?limit=1");
+    expect(first.sources).toHaveLength(1);
+    expect(first.sources[0]?.skillCount).toBe(1);
+  });
+
+  it("400s a limit that is not a whole number, and names the fix", async () => {
+    api = await bootTestApi();
+
+    for (const bad of ["0", "-3", "two", "1.5"]) {
+      const res = await fetch(`${api.baseUrl}/api/skills/sources?limit=${bad}`);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("Remove it to take the default");
+    }
+  });
+
+  it("400s a cursor it did not issue rather than restarting at page one", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/skills/sources?cursor=nonsense`);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("start at the first page");
+  });
+});
+
 describe("POST /api/skills/sources/:id/sync", () => {
   it("re-reads the repository and applies what changed", async () => {
     const repo: RepoState = { sha: "commit-1", names: ["deploy"] };

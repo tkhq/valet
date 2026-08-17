@@ -1,7 +1,8 @@
 import { PGlite } from "@electric-sql/pglite";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { teamMembers, teams, workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
 import { scheduledRunId } from "./scheduler.js";
 
@@ -100,7 +101,7 @@ describe("createWorkflowSchedule authorization", () => {
     expect(result.error).toContain("wf_1");
   });
 
-  it("allows the actual owner to schedule their own workflow", async () => {
+  it("allows the actual owner to schedule their own workflow, stamped with the OWNER's id, not necessarily the creator's", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
 
     const result = await createWorkflowSchedule(
@@ -110,9 +111,14 @@ describe("createWorkflowSchedule authorization", () => {
     );
 
     expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.schedule).toBeDefined();
+    const rows = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, result.schedule.scheduleId));
+    expect(rows[0]?.ownerType).toBe("user");
+    expect(rows[0]?.ownerId).toBe("owner-user");
   });
 
-  it("allows a team member (not just the workflow's creator) to schedule a team-owned workflow", async () => {
+  it("allows a team member (not just the workflow's creator) to schedule a team-owned workflow, and stamps the schedule to the TEAM — not the creating member, and no longer the whole org", async () => {
     await db.insert(teams).values({ id: "team_1", orgId: "org-1", name: "Platform", createdAt: 1_000 });
     await db.insert(teamMembers).values({ teamId: "team_1", userId: "member-user", role: "member" });
     await db.insert(workflowDefinitions).values({
@@ -133,6 +139,40 @@ describe("createWorkflowSchedule authorization", () => {
     );
 
     expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The schedule follows its workflow's owner exactly. This asserted
+    // `org` while `owner_type` could not hold a team; that widened a team's
+    // schedule to the whole org, which on an orchestrator target would
+    // deliver a team's prompt to the org assistant. The original intent —
+    // never the creating member — is unchanged and still pinned below. Run
+    // billing is unaffected either way: a workflow-target run always bills
+    // `def.ownerType`/`ownerId` directly (`scheduler.ts`'s `fire()`), never
+    // this field.
+    const rows = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, result.schedule.scheduleId));
+    expect(rows[0]?.ownerType).toBe("team");
+    expect(rows[0]?.ownerId).toBe("team_1");
+    expect(rows[0]?.ownerId).not.toBe("member-user");
+  });
+
+  it("rejects scheduling an org-owned workflow — org-owned definitions aren't authorized for anyone yet (matches services/skills.ts's identical, documented gap: nothing creates one)", async () => {
+    await db.insert(workflowDefinitions).values({
+      id: "wf_1",
+      orgId: "org-1",
+      ownerType: "org",
+      ownerId: "org-1",
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    const result = await createWorkflowSchedule(
+      db,
+      { id: "any-org-member", orgId: "org-1" },
+      { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
+    );
+
+    expect(result.ok).toBe(false);
   });
 
   it("rejects scheduling a team-owned workflow for a non-member", async () => {

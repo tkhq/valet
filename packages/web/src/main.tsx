@@ -4,11 +4,16 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
-import { applyStoredTheme } from "./lib/theme";
+import { applyStoredPalette, applyStoredTheme } from "./lib/theme";
 
-// Apply the persisted theme choice (Settings → Appearance) before the first
-// paint so a returning `dark`/`light` user doesn't see a light-mode flash.
+// Apply the persisted appearance choices (Settings → Appearance) before the
+// first React paint. The inline script in `index.html` has normally done
+// this already; these two calls repeat it because that script is a
+// best-effort fast path that a storage error can skip, and because they are
+// the only step that CLEARS a stale attribute when the stored value is
+// invalid.
 applyStoredTheme();
+applyStoredPalette();
 
 const queryClient = new QueryClient({
   defaultOptions: {

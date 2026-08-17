@@ -130,5 +130,3 @@ usageRouter.get("/summary", async (c) => {
 
   return c.json(body);
 });
-
-export type UsageRouter = typeof usageRouter;

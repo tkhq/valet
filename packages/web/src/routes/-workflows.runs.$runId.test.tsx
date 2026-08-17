@@ -8,7 +8,14 @@
  * mocking.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import type { WorkflowPendingGate, WorkflowRunDetail } from "@valet/api/wire";
 import { RunDetailBody } from "./workflows.runs.$runId";
 
@@ -46,6 +53,27 @@ function baseRun(
     signals: [],
     pendingGates,
   };
+}
+
+/** Router context, needed only by the checkpoint-link case: `Link` reads the
+ * router store, and the rest of this file renders `RunDetailBody` bare. */
+function renderInRouter(ui: React.ReactElement) {
+  const rootRoute = createRootRoute({ component: () => ui });
+  const sessionRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/sessions/$sessionId",
+    component: () => null,
+  });
+  const runRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/workflows/runs/$runId",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([sessionRoute, runRoute]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  return render(<RouterProvider router={router} />);
 }
 
 describe("RunDetailBody", () => {
@@ -94,6 +122,46 @@ describe("RunDetailBody", () => {
     const data = baseRun({ status: "running" });
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+  });
+
+  it("asks before cancelling, and only cancels once confirmed", async () => {
+    const onCancel = vi.fn();
+    const data = baseRun({ status: "running" });
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={onCancel} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(onCancel).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel run" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the pending action on the run controls rather than only disabling them", () => {
+    const { unmount } = render(
+      <RunDetailBody
+        runId="wfrun_1"
+        data={baseRun({ status: "running" })}
+        onCancel={vi.fn()}
+        cancelPending
+        onRetry={vi.fn()}
+        retryPending={false}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Cancelling…" })).toBeTruthy();
+    unmount();
+
+    render(
+      <RunDetailBody
+        runId="wfrun_1"
+        data={baseRun({ status: "settled", outcome: "failed" })}
+        onCancel={vi.fn()}
+        cancelPending={false}
+        onRetry={vi.fn()}
+        retryPending
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeTruthy();
   });
 
   it("hides the Cancel button once the run has settled", () => {
@@ -147,6 +215,38 @@ describe("RunDetailBody", () => {
     }
   });
 
+  it("links a checkpoint to the session it drove and the child run it started", async () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [
+      {
+        nodeId: "ask",
+        iteration: 0,
+        status: "failed",
+        error: "session failed",
+        sessionId: "s_abc",
+        createdAt: Date.now(),
+      },
+      { nodeId: "sub", iteration: 0, status: "completed", childRunId: "wfrun_sub_1", createdAt: Date.now() },
+      { nodeId: "set1", iteration: 0, status: "completed", createdAt: Date.now() },
+    ];
+    renderInRouter(
+      <RunDetailBody
+        runId="wfrun_1"
+        data={data}
+        onCancel={vi.fn()}
+        cancelPending={false}
+        onRetry={vi.fn()}
+        retryPending={false}
+      />,
+    );
+    expect((await screen.findByText("Open session")).getAttribute("href")).toBe("/sessions/s_abc");
+    expect(screen.getByText("Open child run").getAttribute("href")).toBe(
+      "/workflows/runs/wfrun_sub_1",
+    );
+    // A checkpoint carrying neither id gets no link row.
+    expect(screen.getAllByText("Open session")).toHaveLength(1);
+  });
+
   it("renders checkpoints with status and a result preview", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     data.checkpoints = [
@@ -183,6 +283,90 @@ describe("RunDetailBody", () => {
     );
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("Needs approval")).toBeTruthy();
+  });
+
+  it("puts a settled run's stop message and output above the steps", () => {
+    const data = baseRun({
+      status: "settled",
+      outcome: "completed",
+      definition: {
+        version: "dag/v1",
+        nodes: [{ id: "done", type: "stop" }],
+        edges: [],
+      },
+    });
+    data.checkpoints = [
+      {
+        nodeId: "done",
+        iteration: 0,
+        status: "completed",
+        result: { outcome: "success", message: "Opened 3 issues.", output: { count: 3 } },
+        createdAt: Date.now(),
+      },
+    ];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+
+    const panel = screen.getByRole("region", { name: "Run result" });
+    expect(within(panel).getByText("Opened 3 issues.")).toBeTruthy();
+    expect(within(panel).getByText(/"count"/)).toBeTruthy();
+
+    // The panel must come before the checkpoint list in document order, so
+    // the answer is the first thing on the page.
+    const list = screen.getByText("Checkpoints");
+    expect(panel.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("promotes a failed run's reason and does not repeat it open in the step row", () => {
+    const data = baseRun({
+      status: "settled",
+      outcome: "failed",
+      definition: { version: "dag/v1", nodes: [{ id: "done", type: "stop" }], edges: [] },
+    });
+    data.checkpoints = [
+      {
+        nodeId: "done",
+        iteration: 0,
+        status: "failed",
+        error: "The pull request has no reviewer.",
+        result: { outcome: "failure", message: "The pull request has no reviewer." },
+        createdAt: Date.now(),
+      },
+    ];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+
+    const panel = screen.getByRole("region", { name: "Run result" });
+    expect(within(panel).getByText("Failure reason")).toBeTruthy();
+    expect(within(panel).getByText("The pull request has no reviewer.")).toBeTruthy();
+    // The step row keeps its result collapsed: the panel already shows it.
+    expect(screen.getByText("Result").closest("details")?.open).toBe(false);
+  });
+
+  it("shows no result panel while the run is still in flight", () => {
+    const data = baseRun({ status: "running" });
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.queryByRole("region", { name: "Run result" })).toBeNull();
+  });
+
+  it("keeps timings subordinate to the result and only claims a duration once settled", () => {
+    const running = baseRun({ status: "running", createdAt: 1_000, updatedAt: 5_000 });
+    running.checkpoints = [{ nodeId: "a", iteration: 0, status: "completed", createdAt: 2_000 }];
+    const { unmount } = render(
+      <RunDetailBody runId="wfrun_1" data={running} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />,
+    );
+    expect(screen.getByText(/1 checkpoint/)).toBeTruthy();
+    expect(screen.queryByText(/Ran for/)).toBeNull();
+    unmount();
+
+    const settled = baseRun({
+      status: "settled",
+      outcome: "completed",
+      createdAt: 1_000,
+      updatedAt: 5_200,
+    });
+    render(
+      <RunDetailBody runId="wfrun_1" data={settled} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />,
+    );
+    expect(screen.getByText(/Ran for 4\.2s/)).toBeTruthy();
   });
 
   it("renders 'Denied by' line for a checkpoint with policyDenied=true in the result", () => {

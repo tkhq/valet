@@ -3,9 +3,11 @@ import type { MessagePart } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
+import { CopyButton } from "./tool-renderers/tool-shell";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
 import { ToolBody } from "./tool-renderers/tool-shell";
+import { Thinking } from "./tool-renderers/thinking";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
@@ -18,6 +20,7 @@ export function MessageItem({
   suppressEmptyPlaceholder?: boolean;
 }) {
   const isUser = message.role === "user";
+  const copyText = messageCopyText(message);
   return (
     <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
       {/* Row background spans full width; the content column is capped at a
@@ -44,6 +47,13 @@ export function MessageItem({
               </span>
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
+            {copyText && (
+              <CopyButton
+                getText={() => copyText}
+                label="Copy message"
+                className="ml-auto opacity-0 group-hover:opacity-100"
+              />
+            )}
           </div>
           <div className="space-y-2">
             {message.parts.length === 0 && message.content && (
@@ -81,9 +91,31 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
   );
 }
 
+/**
+ * The clipboard payload for a message's copy button: the visible prose —
+ * text parts joined by blank lines, or the legacy `content` field when a
+ * message has no parts. Thinking and tool-call parts stay out; the debug
+ * transcript (session header) covers those. Empty string means no button.
+ * Exported for tests.
+ */
+export function messageCopyText(message: StreamMessage): string {
+  const texts = message.parts
+    .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")
+    .map((p) => p.text.trim())
+    .filter(Boolean);
+  if (texts.length > 0) return texts.join("\n\n");
+  return message.content?.trim() ?? "";
+}
+
 function PartView({ part }: { part: MessagePart }) {
-  if (part.kind === "text") return <TextBlock text={part.text} />;
-  return <ToolCallBlock part={part} />;
+  switch (part.kind) {
+    case "text":
+      return <TextBlock text={part.text} />;
+    case "thinking":
+      return <Thinking text={part.text} />;
+    case "tool_call":
+      return <ToolCallBlock part={part} />;
+  }
 }
 
 function TextBlock({ text }: { text: string }) {
@@ -97,9 +129,9 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
   // formatTarget/formatSummary would compute from partial, jagged args
   // (truncated paths, churning line counts) the renderer never opted to see.
   const live = showsLiveBody(renderer, part.status);
-  const target = live ? renderer.formatTarget(part.args) : undefined;
+  const target = live ? renderer.formatTarget(part.args, part.toolName) : undefined;
   const summary = live
-    ? renderer.formatSummary?.(part.args, part.result, part.status)
+    ? renderer.formatSummary?.(part.args, part.result, part.status, part.toolName)
     : undefined;
   const Body = renderer.Body;
 
@@ -118,6 +150,7 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
           result={part.result}
           status={part.status}
           error={part.error}
+          toolName={part.toolName}
         />
       ) : (
         // Args are still streaming and this renderer didn't opt in — hold

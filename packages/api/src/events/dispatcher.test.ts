@@ -36,10 +36,11 @@ function fakeRunHost(overrides: Partial<RunHost> = {}): RunHost {
 
 interface SeedOpts {
   target: unknown;
-  ownerType?: "user" | "org";
+  ownerType?: "user" | "team" | "org";
   attempts?: number;
   status?: "pending" | "failed";
   eventKey?: string;
+  ownerId?: string;
 }
 
 describe("EventDispatcher", () => {
@@ -72,7 +73,7 @@ describe("EventDispatcher", () => {
       id: subscriptionId,
       orgId: ORG,
       ownerType: opts.ownerType ?? "user",
-      ownerId: "user-1",
+      ownerId: opts.ownerId ?? "user-1",
       name: "test sub",
       eventKeys: ["github.issues.*"],
       filters: [],
@@ -408,5 +409,105 @@ describe("EventDispatcher", () => {
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
     expect(row.attempts).toBe(1);
+  });
+});
+
+/**
+ * A team-owned subscription must reach the TEAM's default assistant. The
+ * dispatcher is owner-agnostic — it forwards the subscription's principal
+ * straight through — so these pin the two values that are easy to get wrong.
+ *
+ * `actorUserId` is the one that was wrong: it used to be `ownerId`, which is
+ * a real user id only on a personal subscription. On a team or org one it
+ * handed a team/org id to `ensureDefaultAssistantSession`, which writes it to
+ * `agent_sessions.user_id` — a user column. Nobody is at a keyboard when an
+ * event fires, so the subscription's author is the only real user available.
+ */
+describe("EventDispatcher — team-owned subscriptions", () => {
+  let tdb: TestPgDb;
+
+  beforeEach(async () => {
+    tdb = await freshTestPgDb();
+  });
+
+  async function deliverWith(ownerType: "user" | "team" | "org", ownerId: string) {
+    const db = tdb.appDb;
+    const now = Date.now();
+    const subscriptionId = randomUUID();
+    const eventId = randomUUID();
+    const deliveryId = randomUUID();
+    await db.insert(events).values({
+      id: eventId,
+      orgId: ORG,
+      service: "github",
+      eventKey: "github.issues.opened",
+      dedupeKey: randomUUID(),
+      refs: { repo: "acme/site" },
+      summary: "Issue #7 opened",
+      payload: { action: "opened" },
+      occurredAt: now - 5_000,
+      receivedAt: now,
+    });
+    await db.insert(eventSubscriptions).values({
+      id: subscriptionId,
+      orgId: ORG,
+      ownerType,
+      ownerId,
+      name: "test sub",
+      eventKeys: ["github.issues.*"],
+      filters: [],
+      target: { kind: "orchestrator" },
+      enabled: true,
+      createdBy: "author-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(eventDeliveries).values({
+      id: deliveryId,
+      eventId,
+      subscriptionId,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: now - 1_000,
+      createdAt: now,
+    });
+
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    await new EventDispatcher({
+      db,
+      workflowRunHost: fakeRunHost(),
+      workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: deliver,
+    }).pollOnce();
+    return deliver;
+  }
+
+  it("forwards the team principal unchanged", async () => {
+    const deliver = await deliverWith("team", "team_1");
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const args = deliver.mock.calls[0][0];
+    expect(args.ownerType).toBe("team");
+    expect(args.ownerId).toBe("team_1");
+  });
+
+  it("acts as the subscription's author, never as the team id", async () => {
+    const deliver = await deliverWith("team", "team_1");
+    const args = deliver.mock.calls[0][0];
+    expect(args.actorUserId).toBe("author-user");
+    expect(args.actorUserId).not.toBe("team_1");
+  });
+
+  it("acts as the author on an org subscription too — the same bug, one owner type over", async () => {
+    const deliver = await deliverWith("org", ORG);
+    const args = deliver.mock.calls[0][0];
+    expect(args.actorUserId).toBe("author-user");
+    expect(args.actorUserId).not.toBe(ORG);
+  });
+
+  it("still acts as the owner on a personal subscription, where owner and author are the same person", async () => {
+    const deliver = await deliverWith("user", "author-user");
+    const args = deliver.mock.calls[0][0];
+    expect(args.ownerId).toBe("author-user");
+    expect(args.actorUserId).toBe("author-user");
   });
 });

@@ -231,12 +231,15 @@ async function computeResult(
   }
   if (!action) return unknownAction(req);
 
-  // Policy enforcement (action-policies plan, Task 3): a workflow tool node
-  // runs with no live gate, so `deny` and `require_approval` both fail the
-  // node — the latter with instructive text pointing at the two ways to make
-  // it pass (an approval node, or a runtime grant). An exec-scoped grant is
-  // consulted transparently by `resolveActionPolicy` (grant rung), so a
-  // covered action resolves straight to `allow`. The policy-facing actionId
+  // Policy enforcement (action-policies plan, Task 3): `deny` fails the
+  // node. `require_approval` does NOT — it returns `requiresApproval`, and
+  // the tool executor parks the run on an `approval:{nodeId}` signal until
+  // a person resolves it (`@valet/workflow`'s `nodes/tool.ts`). Read that
+  // as a warning for anything unattended: a scheduled run that reaches a
+  // gated action waits, without a deadline, unless the node declares
+  // `approvalTimeout`. An exec-scoped grant is consulted transparently by
+  // `resolveActionPolicy` (grant rung), so a covered action resolves
+  // straight to `allow`. The policy-facing actionId
   // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
   // canonical id matches both the session and workflow paths.
   const policyActionId = qualifiedActionId(req.service, action);

@@ -7,6 +7,7 @@ import {
   loadInstanceConfig,
   parseInstanceConfig,
   resolveAllowedEmailDomains,
+  resolveSsoTeamMapping,
 } from "./instance-config.js";
 
 // The illustrative example from the design spec — used verbatim as fixture.
@@ -376,5 +377,194 @@ describe("resolveAllowedEmailDomains", () => {
       AUTH_ALLOWED_EMAIL_DOMAINS: "example.com",
     };
     expect(resolveAllowedEmailDomains(null, env, ["example.com"])).toEqual(["example.com"]);
+  });
+});
+
+describe("auth.sso.teams validation", () => {
+  const configPath = "config/valet.test.yaml";
+
+  function parse(yaml: string) {
+    return parseInstanceConfig(yaml, configPath);
+  }
+
+  it("reads the whole mapping", () => {
+    const cfg = parse(`
+version: 1
+auth:
+  sso:
+    teams:
+      claim: groups
+      assertedClaim: groups_asserted
+      adminSubGroup: admins
+      groups:
+        - /platform
+        - /research
+`);
+    expect(cfg.auth?.sso?.teams).toEqual({
+      claim: "groups",
+      assertedClaim: "groups_asserted",
+      adminSubGroup: "admins",
+      groups: ["/platform", "/research"],
+    });
+  });
+
+  it("accepts a mapping with no groups allowlist", () => {
+    const cfg = parse("version: 1\nauth:\n  sso:\n    teams:\n      adminSubGroup: leads");
+    expect(cfg.auth?.sso?.teams).toEqual({ adminSubGroup: "leads" });
+  });
+
+  it("rejects the same name for the group claim and the marker claim", () => {
+    // The sync tells "in no groups" from "no mapper" by reading one when the
+    // other is absent. One name collapses the test.
+    expect(() =>
+      parse("version: 1\nauth:\n  sso:\n    teams:\n      claim: groups\n      assertedClaim: groups"),
+    ).toThrow(/claim and auth\.sso\.teams\.assertedClaim are both "groups"/);
+  });
+
+  it("rejects a slash in adminSubGroup", () => {
+    expect(() =>
+      parse('version: 1\nauth:\n  sso:\n    teams:\n      adminSubGroup: "platform/admins"'),
+    ).toThrow(/adminSubGroup must not contain "\/"/);
+  });
+
+  it("rejects a group path the sync does not mirror", () => {
+    expect(() =>
+      parse("version: 1\nauth:\n  sso:\n    teams:\n      groups:\n        - /platform/leads"),
+    ).toThrow(/groups\[0\] must be a top-level group path/);
+    expect(() =>
+      parse("version: 1\nauth:\n  sso:\n    teams:\n      groups:\n        - platform"),
+    ).toThrow(/groups\[0\] must be a top-level group path/);
+  });
+
+  it("rejects an empty claim name", () => {
+    expect(() => parse('version: 1\nauth:\n  sso:\n    teams:\n      claim: "  "')).toThrow(
+      /claim must not be empty/,
+    );
+  });
+
+  it("rejects an unknown key", () => {
+    expect(() => parse("version: 1\nauth:\n  sso:\n    teams:\n      claimName: groups")).toThrow(
+      /unknown key "auth\.sso\.teams\.claimName"/,
+    );
+    expect(() => parse("version: 1\nauth:\n  sso:\n    groups: []")).toThrow(
+      /unknown key "auth\.sso\.groups"/,
+    );
+  });
+
+  it("rejects a declared team and a mirrored group that name the same team", () => {
+    expect(() =>
+      parse(`
+version: 1
+auth:
+  sso:
+    teams:
+      groups: [/platform]
+teams:
+  - name: platform
+`),
+    ).toThrow(/both name team "platform"/);
+  });
+
+  it("rejects the same collision when only the case differs", () => {
+    // `teams_org_name` is case-sensitive, so these would NOT collide in
+    // Postgres — they would make two rows that read as one team in the list.
+    // A near-collision nobody can see is worse than one that fails loudly.
+    expect(() =>
+      parse(`
+version: 1
+auth:
+  sso:
+    teams:
+      groups: [/platform]
+teams:
+  - name: Platform
+`),
+    ).toThrow(/both name team "platform"/);
+  });
+
+  it("allows a declared team and a group with different names", () => {
+    const cfg = parse(`
+version: 1
+auth:
+  sso:
+    teams:
+      groups: [/research]
+teams:
+  - name: platform
+`);
+    expect(cfg.teams).toEqual([{ name: "platform" }]);
+    expect(cfg.auth?.sso?.teams?.groups).toEqual(["/research"]);
+  });
+});
+
+describe("resolveSsoTeamMapping", () => {
+  const configPath = "config/valet.test.yaml";
+  const envDefaults = {
+    claim: "groups",
+    assertedClaim: "groups_asserted",
+    adminSubGroup: "admins",
+  };
+
+  it("throws per field when env and config both set it", () => {
+    const cfg = parseInstanceConfig(
+      "version: 1\nauth:\n  sso:\n    teams:\n      adminSubGroup: leads",
+      configPath,
+    );
+    const env: NodeJS.ProcessEnv = { AUTH_OIDC_TEAM_ADMIN_GROUP: "leads", VALET_CONFIG: configPath };
+    expect(() => resolveSsoTeamMapping(cfg, env, envDefaults)).toThrow(
+      `AUTH_OIDC_TEAM_ADMIN_GROUP is set and ${configPath} declares auth.sso.teams.adminSubGroup. Remove one.`,
+    );
+  });
+
+  it("guards each of the three fields independently", () => {
+    const cfg = parseInstanceConfig(
+      "version: 1\nauth:\n  sso:\n    teams:\n      claim: g\n      assertedClaim: ga",
+      configPath,
+    );
+    expect(() =>
+      resolveSsoTeamMapping(cfg, { AUTH_OIDC_TEAM_CLAIM: "g", VALET_CONFIG: configPath }, envDefaults),
+    ).toThrow(/AUTH_OIDC_TEAM_CLAIM is set/);
+    expect(() =>
+      resolveSsoTeamMapping(
+        cfg,
+        { AUTH_OIDC_TEAM_ASSERTED_CLAIM: "ga", VALET_CONFIG: configPath },
+        envDefaults,
+      ),
+    ).toThrow(/AUTH_OIDC_TEAM_ASSERTED_CLAIM is set/);
+  });
+
+  it("lets an operator set only the env var the file leaves undeclared", () => {
+    // The three are independent, so a per-section guard would reject this
+    // legitimate split.
+    const cfg = parseInstanceConfig(
+      "version: 1\nauth:\n  sso:\n    teams:\n      claim: realm_groups",
+      configPath,
+    );
+    const env: NodeJS.ProcessEnv = { AUTH_OIDC_TEAM_ADMIN_GROUP: "leads", VALET_CONFIG: configPath };
+    expect(resolveSsoTeamMapping(cfg, env, { ...envDefaults, adminSubGroup: "leads" })).toEqual({
+      claim: "realm_groups",
+      assertedClaim: "groups_asserted",
+      adminSubGroup: "leads",
+    });
+  });
+
+  it("returns the env-parsed values when the file declares nothing", () => {
+    const cfg = parseInstanceConfig("version: 1", configPath);
+    expect(resolveSsoTeamMapping(cfg, {}, envDefaults)).toEqual(envDefaults);
+  });
+
+  it("returns the env-parsed values when there is no config file", () => {
+    expect(resolveSsoTeamMapping(null, {}, envDefaults)).toEqual(envDefaults);
+  });
+
+  it("passes the groups allowlist through, since no env var sets it", () => {
+    const cfg = parseInstanceConfig(
+      "version: 1\nauth:\n  sso:\n    teams:\n      groups: [/platform]",
+      configPath,
+    );
+    expect(resolveSsoTeamMapping(cfg, {}, envDefaults)).toEqual({
+      ...envDefaults,
+      groups: ["/platform"],
+    });
   });
 });

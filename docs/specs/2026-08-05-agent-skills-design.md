@@ -119,12 +119,24 @@ A skill is written in the product, or mirrored from a repository. The two paths 
 
 A person writes a skill on the web Skills tab. `/skills/new` opens an empty editor, and `/skills/stored/$skillId` reads a stored skill and edits or removes it. The body is written in the split markdown editor the memory explorer uses, so the rendering sits beside the text. The three fields are the whole skill: `name` and `description` are its frontmatter, and the body is the markdown the agent reads. A new skill belongs to the author, or to a team they are on. The repositories panel above the grid points Valet at a repository to mirror; it never edits a skill.
 
+The repositories panel sits on `/skills`, over the skills it produces, and lists every source the caller reaches — personal, team, and org — with the scope on each row's badge. A new source goes to the workspace the nav switcher names. Settings keeps one more repositories panel, on `/settings/organization/library`: it pins the org, so an admin reads and changes the library every member gets. There is no third page for personal sources; a row's scope is a badge, so a page per scope bought nothing but a question about which page to open.
+
 The tab addresses a stored skill by row id rather than by name, because a shadowed skill shares its name with the skill that shadows it — only the id reaches it. `/skills/$skillName` reads a skill by name, which is how a plugin skill is opened.
 
 A `repo` skill is read-only on that page: no Edit, no Delete. The next sync would overwrite an edit made here, so the page says where to change it instead. That is the same rule `SkillNotLocalError` enforces in the service, so the page and the API never disagree.
 
 - **HTTP.** `POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name, for the shadowing reason above. `POST`, `GET`, and `DELETE /api/skills/sources` add, list, and remove a tracked repository, and `POST /api/skills/sources/:id/sync` re-reads one now.
 - **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions.
+
+### Paging both listings
+
+`GET /api/skills` and `GET /api/skills/sources` are keyset-paginated, in the shape the action log set (`packages/api/src/policies/admin.ts`): `?limit=` with a default and a cap, an opaque `?cursor=` a client only ever passes back, and `nextCursor: null` on the last page. Keyset, not `OFFSET`, so a skill written while somebody reads page two never shifts a row onto a page already read or off one not yet read. The catalog sorts on `(owner rank, name, id)`, where the rank is the delivery precedence — plugin, then personal, then team, then org — so a page boundary cannot break the order the session build uses. Plugin skills live in memory and rank first, and `routes/skills.ts` merges them into the same cursor walk.
+
+The Library's three controls are applied on the server, not in the browser: `?scope=` for one library scope, `?kind=skill|prompt` for the chips, and `?q=` for the search box. A control that filtered the page in hand would answer about that page while claiming to answer about the library — a search would report no match for a skill sitting on the next page. `?scope=` names a class of owners where `?ownerType=&ownerId=` pins one owner by id, so sending both answers 400.
+
+The `shadowed` flag stays a property of the caller's WHOLE reach, never of the page: `listSkillNamesInReach` reads names and ids alone for that judgement, so a page request never pulls every skill body to answer it.
+
+The client keeps each list's cursor stack in the route's search params (`packages/web/src/lib/cursor-stack.ts`), so a page is a real history entry: Back pages back instead of leaving Skills, and a link to page three opens page three.
 
 Three write surfaces exist, and they share one implementation:
 

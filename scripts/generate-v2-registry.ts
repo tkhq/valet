@@ -9,6 +9,14 @@
  * with a static import per included plugin, sorted by package name for
  * deterministic output.
  *
+ * The generated file also carries `pluginIconSlugs` — each manifest's
+ * `iconSlug`, keyed by plugin name. `plugin.yaml` is the only place a
+ * plugin declares its brand slug, and nothing reads `plugin.yaml` at
+ * runtime, so the slug reaches `routes/plugins.ts` (and from there the
+ * connect UI) through this file. The `icon` field beside it in the same
+ * manifest is an emoji the FROZEN legacy worker registry reads; v2 reads
+ * `iconSlug` alone.
+ *
  * Run: pnpm tsx scripts/generate-v2-registry.ts   (from repo root)
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
@@ -26,6 +34,8 @@ interface PluginYaml {
   version?: string;
   v2?: boolean;
   enabled?: boolean;
+  /** Stable brand slug the client maps to a brand mark, e.g. "github". */
+  iconSlug?: string;
 }
 
 interface PackageJson {
@@ -39,6 +49,15 @@ interface IncludedPlugin {
   importName: string;
 }
 
+/** One `"plugin-name": "slug",` line per manifest that declares `iconSlug`,
+ * sorted by plugin name for deterministic output. */
+function iconSlugLines(slugs: Map<string, string>): string {
+  return [...slugs.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, slug]) => `  ${JSON.stringify(name)}: ${JSON.stringify(slug)},`)
+    .join("\n");
+}
+
 function main(): void {
   const pluginDirs = readdirSync(packagesDir, { withFileTypes: true })
     .filter((d) => d.isDirectory() && d.name.startsWith("plugin-"))
@@ -46,6 +65,7 @@ function main(): void {
     .sort();
 
   const included: IncludedPlugin[] = [];
+  const iconSlugs = new Map<string, string>();
 
   for (const dirName of pluginDirs) {
     const dirPath = resolve(packagesDir, dirName);
@@ -79,6 +99,15 @@ function main(): void {
     }
 
     included.push({ pkgName: pkgJson.name, importName: "" });
+
+    // Keyed by the MANIFEST name (`ValetPlugin.name`), not the package name —
+    // that is what `routes/plugins.ts` holds when it looks a slug up.
+    if (typeof manifest.iconSlug === "string" && manifest.iconSlug.length > 0) {
+      if (typeof manifest.name !== "string" || manifest.name.length === 0) {
+        throw new Error(`${dirName}: plugin.yaml declares iconSlug but has no "name" field`);
+      }
+      iconSlugs.set(manifest.name, manifest.iconSlug);
+    }
   }
 
   included.sort((a, b) => a.pkgName.localeCompare(b.pkgName));
@@ -96,6 +125,13 @@ function main(): void {
 import type { ValetPlugin } from "@valet/engine";
 ${importLines.length > 0 ? `${importLines}\n` : ""}
 export const bundledPlugins: ValetPlugin[] = [${arrayBody}];
+
+/** Brand slug per plugin, from each manifest's \`iconSlug\`. The connect UI
+ * maps a slug to a brand mark; a plugin with no entry keeps the fallback
+ * monogram. */
+export const pluginIconSlugs: Record<string, string> = {
+${iconSlugLines(iconSlugs)}
+};
 `;
 
   writeFileSync(outFile, contents);

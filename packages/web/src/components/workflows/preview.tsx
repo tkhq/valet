@@ -4,9 +4,25 @@
  * chat tool renderer and the run detail page. Non-interactive by design —
  * every gesture (pan/zoom/drag/connect) is disabled; the surrounding surface
  * provides an "Open" link into the real editor for interaction.
+ *
+ * The node data reaches `FlowNode` unedited. An earlier form deleted
+ * `sourceOutputs` here to keep the `true`/`false` words off a card at
+ * preview scale, which also deleted the two source handles those words sit
+ * on — and an edge whose `sourceHandle` names a handle that does not exist
+ * is not drawn. Every branch out of an `if` or `approval` node was missing
+ * from this diagram. The words are hidden in CSS now
+ * (`styles/react-flow.css`), where hiding a label costs no handle.
  */
 import { useMemo } from "react";
-import { Background, BackgroundVariant, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import {
+  Background,
+  BackgroundVariant,
+  MarkerType,
+  ReactFlow,
+  type Edge,
+  type EdgeMarker,
+  type Node,
+} from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { toFlow, type WorkflowDefinition } from "./editor-model";
 import { FlowNode, type NodeRunStatus } from "./editor/flow-node";
@@ -14,6 +30,10 @@ import { FlowNode, type NodeRunStatus } from "./editor/flow-node";
 export type { NodeRunStatus };
 
 const nodeTypes = { workflow: FlowNode };
+
+/** The same arrowhead the editor canvas draws (`editor/canvas.tsx`), so a
+ * workflow reads the same way in chat, on a run, and under the cursor. */
+const ARROW_END: EdgeMarker = { type: MarkerType.ArrowClosed };
 
 /**
  * How the preview renders for a given node count: below 2 nodes there is
@@ -69,29 +89,22 @@ export function WorkflowPreview({
   const flow = useMemo(() => {
     if (mode !== "canvas") return null;
     const state = toFlow(definition);
-    const nodes: Node[] = state.nodes.map((n) => {
-      // Preview mode strips the labeled `true`/`false` source handles from
-      // if/approval nodes — the badge overhang looks bad at card scale and
-      // the branch structure is already visible from the edges. The full
-      // editor keeps them; open it for authoring.
-      const { sourceOutputs, ...restData } = n.data;
-      void sourceOutputs;
-      return {
-        ...n,
-        draggable: false,
-        connectable: false,
-        selectable: false,
-        data: {
-          ...restData,
-          ...(statusByNodeId?.[n.id] ? { runStatus: statusByNodeId[n.id] } : {}),
-          ...(badgeByNodeId?.[n.id] ? { runBadge: badgeByNodeId[n.id] } : {}),
-        },
-      };
-    });
+    const nodes: Node[] = state.nodes.map((n) => ({
+      ...n,
+      draggable: false,
+      connectable: false,
+      selectable: false,
+      data: {
+        ...n.data,
+        ...(statusByNodeId?.[n.id] ? { runStatus: statusByNodeId[n.id] } : {}),
+        ...(badgeByNodeId?.[n.id] ? { runBadge: badgeByNodeId[n.id] } : {}),
+      },
+    }));
     const edges: Edge[] = state.edges.map((e) => ({
       ...e,
       ...(e.data.when ? { label: e.data.when } : {}),
       animated: statusByNodeId?.[e.target] === "running",
+      markerEnd: ARROW_END,
     }));
     return { nodes, edges };
   }, [definition, mode, statusByNodeId, badgeByNodeId]);
@@ -141,9 +154,13 @@ export function WorkflowPreview({
         zoomOnDoubleClick={false}
         preventScrolling={false}
         edgesFocusable={false}
+        // Markers carry an inline fill that outranks the stylesheet, so
+        // without this the library's hardcoded light grey follows them
+        // into dark mode.
+        defaultMarkerColor="var(--muted)"
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--line)" />
+        <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
       </ReactFlow>
     </div>
   );

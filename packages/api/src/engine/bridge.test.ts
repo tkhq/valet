@@ -46,13 +46,16 @@ describe("engineToWireParts", () => {
     ]);
   });
 
-  it("drops thinking, attachment, error parts", () => {
+  it("forwards thinking parts, drops attachment and error", () => {
     const parts: EngineMessagePart[] = [
       { type: "text", text: "hi" },
-      { type: "thinking", text: "..." },
+      { type: "thinking", text: "let me consider..." },
       { type: "error", message: "x" },
     ];
-    expect(engineToWireParts(parts)).toEqual([{ kind: "text", text: "hi" }]);
+    expect(engineToWireParts(parts)).toEqual([
+      { kind: "text", text: "hi" },
+      { kind: "thinking", text: "let me consider..." },
+    ]);
   });
 
   it("returns [] for missing parts", () => {

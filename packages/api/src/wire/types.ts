@@ -52,13 +52,44 @@ export type SessionStatus = "active" | "hibernated" | "archived" | "deleted";
  * interactive sessions may request "full". */
 export type SandboxProfile = "headless" | "full";
 
+/**
+ * What a session is DOING right now. `SessionStatus` is the lifecycle of the
+ * row; this is the run state the Sessions surface reads at a glance.
+ *
+ * Exactly one value applies. When several are true at once, the highest of
+ * this order wins:
+ *
+ *   1. `needs_you` — a decision gate is pending. The session is blocked on a
+ *      person and stays blocked until somebody answers.
+ *   2. `working`   — a submission is in flight (queued, collecting, or running).
+ *   3. `failed`    — the last turn settled with an error.
+ *   4. `sleeping`  — the row status is `hibernated`.
+ *   5. `idle`      — nothing is queued and nothing needs a person.
+ *
+ * See `sessions/run-state.ts` for the derivation and for which signals the
+ * server can read without a per-session query.
+ */
+export type SessionRunState = "needs_you" | "working" | "failed" | "sleeping" | "idle";
+
 export interface SessionSummary {
   id: string;
   workspace: string;
   status: SessionStatus;
+  /** What the session is doing. See `SessionRunState` for the precedence. */
+  runState: SessionRunState;
   title?: string;
   createdAt: number;
   updatedAt: number;
+  /** Epoch ms of the last event in this session: the later of the row's
+   * `updatedAt` and the newest unsettled submission's `updatedAt`. Queue
+   * work does not touch the session row, so `updatedAt` alone reads stale
+   * during a long turn. */
+  lastActivityAt: number;
+  /** Who the session belongs to. Present so a list can be read per
+   * workspace and a row can name its owner — without it the client cannot
+   * tell a personal session from a team's, and every session looked
+   * personal because that is all one could create. */
+  owner: AssistantOwner;
 }
 
 /** A single repo bound to a session (GitHub/repo integration plan, Task 2).
@@ -89,6 +120,11 @@ export interface SessionDetail extends SessionSummary {
 export interface CreateSessionRequest {
   workspace: string;
   title?: string;
+  /** Create as a team-owned session instead of personal. Caller must be a
+   * current member of the team; a non-member or unknown id 404s, same as
+   * any other cross-owner access. Mirrors `CreateWorkflowRequest.teamId` —
+   * one spelling for "make this the team's, not mine". */
+  teamId?: string;
   /** Optional first user prompt; if set, server enqueues immediately after creation. */
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
@@ -131,13 +167,75 @@ export interface EnsureOrchestratorResponse {
   sessionId: string;
 }
 
-/** GET /api/orchestrator — probes without creating. */
+/** GET /api/orchestrator — probes without creating. `sessionId` is null
+ * while the caller has no default assistant: an assistant addresses its
+ * session by its own id, so a caller that owns none has no id to report. */
 export interface GetOrchestratorResponse {
-  sessionId: string;
+  sessionId: string | null;
   exists: boolean;
 }
 
 export type OrchestratorPresence = "idle" | "thinking" | "working";
+
+// ── REST: assistants ──────────────────────────────────────────────────────
+//
+// An assistant is a named agent a principal owns, with its own session. A
+// principal — you, or a team — owns any number. See
+// `docs/specs/2026-08-13-assistants-design.md`.
+
+/** Who owns an assistant. The owner is its scope, not its identity: two
+ * assistants owned by the same team are different assistants. */
+export interface AssistantOwner {
+  type: "user" | "team" | "org";
+  id: string;
+}
+
+export interface AssistantSummary {
+  id: string;
+  owner: AssistantOwner;
+  /** Absent until someone names it. The UI shows a placeholder rather than
+   * inventing a name the user never chose. */
+  name?: string;
+  /** `assistant:{id}` — every assistant, default included. Carried here so
+   * listing assistants is also how the client learns their session ids, and
+   * opening one still creates nothing until the conversation starts. */
+  sessionId: string;
+  /** The one machine-driven paths use when nobody chose: workflow
+   * orchestrator nodes, event subscriptions, channel bindings. Exactly one
+   * per owner. */
+  isDefault: boolean;
+  createdAt: number;
+}
+
+export interface ListAssistantsResponse {
+  assistants: AssistantSummary[];
+}
+
+/** `POST /api/assistants`. Omit `owner` for one of your own. Creating a
+ * team's assistant follows the same rule as administering one. */
+export interface CreateAssistantRequest {
+  name?: string;
+  owner?: AssistantOwner;
+}
+
+export type CreateAssistantResponse = AssistantSummary;
+
+/** `PATCH /api/assistants/:id`. `isDefault: true` promotes this one and
+ * demotes the previous default in the same write — a principal is never
+ * left with none, which would strand every automation that targets it. */
+export interface PatchAssistantRequest {
+  name?: string;
+  isDefault?: true;
+}
+
+export type PatchAssistantResponse = AssistantSummary;
+
+/** `POST /api/assistants/:id/session` — get-or-create this assistant's
+ * session. Creating an assistant writes no session, so the client calls this
+ * before opening the conversation. Idempotent. */
+export interface EnsureAssistantSessionResponse {
+  sessionId: string;
+}
 
 /** GET /api/orchestrator/info — assistant identity + presence (assistant-
  * centered web UI decision 4). Never creates the engine session. */
@@ -149,8 +247,9 @@ export interface GetOrchestratorInfoResponse {
   activeChildren: number;
 }
 
-/** PATCH /api/orchestrator/info — `name` upserts `orchestrator_identities.handle`;
- * `personality` writes the `assistant/personality.md` memory file (decision 5). */
+/** PATCH /api/orchestrator/info — `name` sets `assistants.name` on the
+ * caller's default assistant; `personality` writes the
+ * `assistant/personality.md` memory file (decision 5). */
 export interface PatchOrchestratorInfoRequest {
   name?: string;
   personality?: string;
@@ -236,9 +335,9 @@ export type MessageRole = "user" | "assistant" | "tool" | "system";
 
 /**
  * Discriminated union for message parts. Mirrors the engine's MessagePart
- * one-to-one for `text` and `tool_call` so the bridge is mechanical.
- * `thinking` and `attachment` parts from the engine are dropped on the wire
- * (the UI doesn't render them in the agent loop).
+ * one-to-one for `text`, `tool_call`, and `thinking` so the bridge is
+ * mechanical. `attachment` and `error` parts from the engine are still
+ * dropped on the wire (the UI doesn't render them in the agent loop).
  */
 export type MessagePart =
   | { kind: "text"; text: string }
@@ -256,7 +355,8 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
-    };
+    }
+  | { kind: "thinking"; text: string };
 
 /**
  * Trimmed projection of engine `MessageEntry.signal` (plan decision 2).
@@ -656,12 +756,36 @@ export interface ForceSettleResponse {
 
 export type TeamRole = "admin" | "member";
 
+/**
+ * Where a team came from. `local` teams are created in Valet and Valet owns
+ * them. `idp` teams mirror an identity-provider group: the client shows them
+ * as read-only, and the API refuses to mutate them.
+ *
+ * A `config` team is declared in `valet.yaml`. It sits between the two: the
+ * file asserts its declared members at every boot but never removes anybody,
+ * so the client keeps the member controls and warns that a boot puts the
+ * declared members back. Delete is refused, because the next boot would
+ * recreate the team empty.
+ */
+export type TeamOrigin = "local" | "config" | "idp";
+
 export interface TeamSummary {
   id: string;
   orgId: string;
   name: string;
+  origin: TeamOrigin;
+  /**
+   * The identity-provider group path this team mirrors, e.g. `/platform`.
+   * Null for a `local` and for a `config` team. The client shows it, so a
+   * reader knows which group to change.
+   */
+  externalId: string | null;
   createdAt: number;
   memberCount: number;
+  /** The caller's role on this team; null when the caller is not a member
+   * (org admins see every team in the org). The UI gates admin-only
+   * controls on this plus the caller's org role. */
+  callerRole: "admin" | "member" | null;
 }
 
 export interface TeamMemberSummary {
@@ -754,7 +878,9 @@ export interface MemoryTreeEntry {
 
 // ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────
 //
-// Own-rows-only, same owner-scoping convention as sessions (decision 18).
+// Owner-scoped exactly like sessions (decision 18): the list returns the
+// caller's own rows plus their teams', `?ownerType=&ownerId=` narrows it to
+// one owner, and an owner the caller cannot reach 404s.
 
 export interface WorkflowDefinitionSummary {
   id: string;
@@ -793,6 +919,25 @@ export interface ListWorkflowsResponse {
   workflows: WorkflowDefinitionSummary[];
 }
 
+/**
+ * `GET /api/workflows/import/repo-file` — one file out of a PUBLIC GitHub
+ * repository, so the import dialog can read a definition that lives in
+ * version control.
+ *
+ * The body is returned as text, not as a parsed definition, because the
+ * import client already owns the parser it applies to a pasted file. One
+ * parser reads both sources, so the two cannot accept different shapes.
+ */
+export interface GetWorkflowImportFileResponse {
+  /** `owner/repo`, as resolved from what the caller typed. */
+  repo: string;
+  path: string;
+  /** The ref that was read. Empty means the repository default branch. */
+  ref: string;
+  /** The file, decoded as UTF-8 text. */
+  content: string;
+}
+
 export interface StartWorkflowRunRequest {
   input?: Record<string, unknown>;
 }
@@ -819,10 +964,18 @@ export interface WorkflowRunSummary {
    * Same conditions `GetWorkflowRunResponse.run.waitingOn` carries.
    */
   waitingOn?: Array<{ kind: string; nodeId: string; signalType?: string; wakeAt?: number }>;
+  // Set when a `workflow` node in another run started this one (batch
+  // fan-out): the parent run, the node that called it, and which foreach
+  // item it belongs to. Absent on a top-level run.
+  parentRunId?: string;
+  parentNodeId?: string;
+  parentIteration?: number;
 }
 
 export interface ListWorkflowRunsResponse {
   runs: WorkflowRunSummary[];
+  /** Pass back as `cursor` for the next page. Absent on the last page. */
+  nextCursor?: string;
 }
 
 // Version history: one immutable snapshot per definition-changing save
@@ -849,6 +1002,11 @@ export interface WorkflowRunCheckpoint {
   result?: unknown;
   error?: string;
   createdAt: number;
+  /** The session a session/orchestrator node drove. Present on a failed
+   * node too — that is where the failure is readable. */
+  sessionId?: string;
+  /** The run a `workflow` node started. */
+  childRunId?: string;
 }
 
 /** One pending approval gate on a parked workflow run. */
@@ -915,6 +1073,126 @@ export interface RetryWorkflowRunResponse {
   runId: string;
 }
 
+// ── Node preview (dry run) ────────────────────────────────────────────────
+//
+// `POST /api/workflows/:id/preview` resolves every `{{ ... }}` path in a
+// definition against real data and reports what each node would receive. A
+// template path that does not resolve renders as an empty value and the run
+// still reports success, so a preview that only showed outputs would hide
+// the failure it exists to find. Two rules keep it honest:
+//
+//   1. A node is either EXECUTED or DESCRIBED, never faked. Only pure node
+//      types run (`trigger`, `set`, `if`, `stop`). Everything with a side
+//      effect — a model call, an action, a session, a child run — is
+//      described from its declared shape and never invoked.
+//   2. Every value says where it came from: a real run, this preview's own
+//      pure execution, or the sample input the caller typed.
+
+export interface PreviewWorkflowRequest {
+  /**
+   * Preview an unsaved definition. Omit to preview the stored one. The
+   * editor sends the definition in hand, which is the whole point: the
+   * paths a person is fixing are not saved yet.
+   */
+  definition?: unknown;
+  /** Sample trigger fields. They override the sample run's `trigger.data`. */
+  input?: Record<string, unknown>;
+  /**
+   * Where node results come from. `last_run` (the default) reads the
+   * newest run of this workflow; `none` previews against the sample input
+   * alone, which is what a workflow that has never run has.
+   */
+  sample?: "last_run" | "none";
+  /** Preview one node. Omit for every node in the definition. */
+  nodeId?: string;
+}
+
+/**
+ * `executed` — the node really ran and `output` is its real output.
+ * `described` — nothing ran; `outputShape` says what a real run produces.
+ */
+export type PreviewFidelity = "executed" | "described";
+
+/** One templated field on a node, and what it resolves to. */
+export interface PreviewField {
+  /** Dotted field path inside the node, e.g. `prompt` or `params.title`. */
+  field: string;
+  /** The template exactly as written. */
+  source: string;
+  /** What the template renders to against the sample data. */
+  resolved: unknown;
+  /** Paths in this field that did not resolve. Empty is the normal case. */
+  unresolvedPaths: string[];
+}
+
+/** One `{{ ... }}` path that resolved to nothing. */
+export interface PreviewUnresolvedPath {
+  /** The path exactly as written, e.g. `nodes.draft.result.response`. */
+  path: string;
+  /** The node field the path was written in. */
+  field: string;
+  /** The longest leading part of `path` that does hold a value. */
+  resolvedPrefix: string;
+  /** Keys present at `resolvedPrefix`. This is the list to pick from. */
+  availableKeys: string[];
+  /** The finding in one line, ready to show. */
+  message: string;
+}
+
+/**
+ * Where the shape came from. `observed` is read off a real result in the
+ * sample run and is therefore exact. `declared` comes from the node's own
+ * `outputSchema`. `known` is the node type's documented result. `unknown`
+ * means only the caller of the action can say.
+ */
+export type PreviewShapeOrigin = "observed" | "declared" | "known" | "unknown";
+
+export interface PreviewOutputShape {
+  origin: PreviewShapeOrigin;
+  /** An example value of this shape. Absent when nothing is known. */
+  example?: unknown;
+  /** Paths a downstream node can read, e.g. `nodes.draft.result.text`. */
+  paths: string[];
+  /** What the reader must know about this shape. */
+  note?: string;
+}
+
+export interface PreviewNode {
+  nodeId: string;
+  /** The node's `type` field, verbatim. */
+  type: string;
+  fidelity: PreviewFidelity;
+  /** Why the node was described instead of executed. Absent when executed. */
+  describedReason?: string;
+  fields: PreviewField[];
+  unresolved: PreviewUnresolvedPath[];
+  /** The node's real output. Present only when `fidelity` is `executed`. */
+  output?: unknown;
+  outputShape: PreviewOutputShape;
+  /** Facts that change what this node does, e.g. a foreach truncation. */
+  warnings: string[];
+  /** Set when the node could not be previewed at all, e.g. a broken template. */
+  error?: string;
+}
+
+export interface PreviewSample {
+  /** `last_run` when run data was found; `sample_only` when there was none. */
+  kind: "last_run" | "sample_only";
+  runId?: string;
+  runCreatedAt?: number;
+  /** Node ids whose values came from that run. */
+  fromRun: string[];
+  /** Node ids whose values this preview computed by executing a pure node. */
+  fromPreview: string[];
+  /** Trigger input that does not satisfy the declared `dataSchema`. */
+  inputErrors: Array<{ field: string; message: string }>;
+}
+
+export interface PreviewWorkflowResponse {
+  sample: PreviewSample;
+  nodes: PreviewNode[];
+}
+
 // Arbitrary-URL webhook triggers (overhaul design decision 5). `hookId` is
 // the bearer secret in `POST /api/hooks/workflows/:workflowId/:hookId` —
 // minting/rotating returns it once; `GetWorkflowWebhookResponse` also
@@ -923,6 +1201,10 @@ export interface RetryWorkflowRunResponse {
 export interface WorkflowWebhookResponse {
   workflowId: string;
   hookId: string;
+  /** The full trigger URL, built server-side (see `workflowWebhookUrl`) —
+   * the client renders it verbatim rather than reconstructing it, since
+   * the public origin can differ from the browser's own origin. */
+  url: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -931,12 +1213,161 @@ export interface DeleteWorkflowWebhookResponse {
   deleted: boolean;
 }
 
+// Workflow schedules (cron triggers), nested under one workflow at
+// `/api/workflows/:id/schedules`. `schedule-service.ts` also supports
+// orchestrator-prompt schedules; this surface manages only the
+// workflow-scoped kind, so `workflowId` is always set. The flat trigger
+// surface below manages both kinds and is what the UI calls.
+export interface WorkflowScheduleWire {
+  scheduleId: string;
+  workflowId: string;
+  name: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  lastFiredAt: number | null;
+  nextFireAt: number;
+}
+
+export interface ListWorkflowSchedulesResponse {
+  schedules: WorkflowScheduleWire[];
+}
+
+/**
+ * Body of `POST /api/workflows/:id/schedules`. The target discriminator that
+ * the flat `CreateWorkflowScheduleRequest` carries is implied by the path
+ * here, so this body omits it — hence the separate name.
+ */
+export interface CreateScheduleOnWorkflowRequest {
+  name: string;
+  /** 5-field cron expression (minute hour day-of-month month day-of-week). */
+  cron: string;
+  /** IANA timezone name; defaults to UTC. */
+  timezone?: string;
+  /** Run input passed to the workflow's trigger node on each fire. */
+  input?: Record<string, unknown>;
+}
+
+export type CreateWorkflowScheduleResponse = WorkflowScheduleWire;
+
+export interface DeleteWorkflowScheduleResponse {
+  deleted: boolean;
+}
+
+// ── REST: workflow templates ─────────────────────────────────────────────
+//
+// A template is a workflow definition a plugin ships, plus the copy the
+// gallery needs to explain it BEFORE it is installed. Install publishes a
+// normal workflow owned by the caller, through the same create path every
+// other definition takes, so an installed template is editable, runnable,
+// and deletable like any other workflow.
+//
+// The summary is deliberately presentation-shaped: `steps`, `schedule`, and
+// `requires` answer the three questions a person asks of a card — what does
+// it do, when does it run, and what must I connect first.
+
+/**
+ * A service the template's tool nodes call, with the caller's connection
+ * state. `connected: false` blocks install: a workflow tool node reads the
+ * credential of the run's owner, so the first run would fail on a missing
+ * token. A template that fails on its first run is worse than one the
+ * gallery refuses to install.
+ */
+export interface WorkflowTemplateRequirement {
+  /** Credential service key, matching `PluginServiceSummary.service`. */
+  service: string;
+  connected: boolean;
+  /**
+   * Set when the plugin resolves its actions at run time (an MCP-backed
+   * service). The action NAMES this template calls are then unverifiable
+   * when the definition is saved, and can still fail on the first run.
+   */
+  dynamic?: true;
+}
+
+/**
+ * One field the installer fills in. Derived server-side from the template's
+ * trigger `dataSchema`: `hidden` entries are dropped, and `label` falls back
+ * to the field name, so the gallery never shows a raw field id.
+ */
+export interface WorkflowTemplateInput {
+  name: string;
+  type: "string" | "number" | "boolean";
+  label: string;
+  placeholder?: string;
+  description?: string;
+  required: boolean;
+  default?: string | number | boolean;
+}
+
+/** The cron a template arms at install. Null when it only runs on demand. */
+export interface WorkflowTemplateSchedule {
+  /** 5-field cron expression, as `workflow_schedules.cron` stores it. */
+  cron: string;
+  /** IANA timezone name. */
+  timezone: string;
+}
+
+export interface WorkflowTemplateSummary {
+  id: string;
+  name: string;
+  /** One sentence, in the words of the person who wants the outcome. */
+  description: string;
+  /** What the workflow does, one plain-language line per step. */
+  steps: string[];
+  schedule: WorkflowTemplateSchedule | null;
+  requires: WorkflowTemplateRequirement[];
+  inputs: WorkflowTemplateInput[];
+  /**
+   * Limits the installer must know BEFORE installing — a step whose action
+   * name resolves only at run time, an action an org policy can gate into a
+   * parked run, a batch-size cap. Shown in the install dialog.
+   */
+  caveats: string[];
+}
+
+export interface ListWorkflowTemplatesResponse {
+  templates: WorkflowTemplateSummary[];
+}
+
+export interface InstallWorkflowTemplateRequest {
+  /**
+   * Values for `WorkflowTemplateSummary.inputs`, written into the installed
+   * definition. A scheduled run applies no `dataSchema` defaults, so a
+   * parameter the schedule needs is baked in here rather than read from the
+   * trigger at run time.
+   */
+  inputs?: Record<string, unknown>;
+  /**
+   * Install into a team workspace instead of the caller's own, exactly as
+   * `CreateWorkflowRequest.teamId` does. The caller must be a current
+   * member; a non-member or an unknown id is not found.
+   *
+   * A team install is refused for a SCHEDULED template that calls any tool
+   * action: a scheduled run acts as the workflow's owner, and a team owner
+   * has no connected account, so every such step would fail on every run.
+   */
+  teamId?: string;
+}
+
+export interface InstallWorkflowTemplateResponse {
+  workflowId: string;
+  /** The installed name. A repeat install of one template is numbered. */
+  workflowName: string;
+  /** Present when the template armed a cron schedule. */
+  scheduleId?: string;
+}
+
+/** A run row read outside one workflow's page, where the reader has no
+ * heading to tell them which workflow it belongs to. */
 export interface GlobalWorkflowRunSummary extends WorkflowRunSummary {
   workflowName: string;
 }
 
 export interface ListAllWorkflowRunsResponse {
   runs: GlobalWorkflowRunSummary[];
+  /** Absent on the last page, exactly as `ListWorkflowRunsResponse`. */
+  nextCursor?: string;
 }
 
 // ── Workflow triggers (spec 2026-08-15) ──────────────────────────────────
@@ -1055,14 +1486,28 @@ export interface GetMemoryTreeResponse {
 
 export type CredentialKind = "oauth2" | "api_key" | "bot_token" | "service_account";
 
-/** One statically-declared action, for the org-policy admin UI's target
- *  picker (action-policies plan, Task 4) — `id` is the fully-qualified
- *  action id (`"github.create_issue"`), matching what `action_policies.
- *  action_id` / `action_policy_overrides.action_id` store. */
+/**
+ * One statically-declared action, reduced to what two surfaces need: the
+ * org-policy admin UI's target picker, and the connect UI's statement of
+ * what a credential unlocks. Names, ids and risk only — parameter schemas
+ * and descriptions stay server-side.
+ */
 export interface PluginActionSummary {
+  /** The fully-qualified action id (`"github.create_issue"`), matching what
+   * `action_policies.action_id` / `action_policy_overrides.action_id` store,
+   * so a policy row created here matches at resolution time. */
   id: string;
+  /** Human-readable label, the same string the approval gate shows. */
   name: string;
   riskLevel: RiskLevelWire;
+  /**
+   * True when the engine's approval gate stops this action and asks the user
+   * before it runs. Resolved server-side through the engine's own
+   * `approvalModeForAction`, never re-derived from `riskLevel` by a client:
+   * a plugin may pin `defaultApprovalMode` and override risk entirely, and a
+   * client that guessed would promise a gate that never fires.
+   */
+  requiresApproval: boolean;
 }
 
 export interface PluginServiceSummary {
@@ -1086,8 +1531,47 @@ export interface PluginServiceSummary {
    * declarations report "manual" when their client env vars are unset so
    * the UI never renders a Connect button that would 503. */
   connect: "oauth" | "manual";
-  /** Statically-declared actions for this service (empty when the plugin
-   * only declares `resolveActions` dynamic discovery, or none at all). */
+  /** Stable slug the client maps to a brand mark, e.g. "github", "gmail".
+   * Absent when the plugin declares none — the UI falls back to initials.
+   * A slug, not an image: the mark ships with the client so a service icon
+   * costs no request and cannot break when a vendor moves its asset. */
+  iconSlug?: string;
+  /**
+   * Whether the stored credential still works, for the CONNECTED case.
+   * `connected` alone is set membership in the credential store, so a
+   * revoked or expired token reads as connected while the agent silently
+   * drops the service from its tool list. These say otherwise.
+   */
+  health?: {
+    /** Epoch ms the access token expires, when the grant reports one. */
+    expiresAt?: number;
+    /** The connected account, e.g. an email or login handle. Shown so a
+     * user with two accounts knows which one is wired up. */
+    login?: string;
+    /** The last refresh attempt failed — the connection needs re-auth and
+     * will not recover on its own. */
+    refreshFailed?: boolean;
+    /** The grant carries identity only, with none of the scopes the
+     * service's actions need. */
+    identityOnly?: boolean;
+  };
+  /**
+   * The actions THIS credential unlocks, for the connect UI to state what a
+   * user is about to hand over before they hand it over.
+   *
+   * Joined on the key the runtime actually reads — `credentialService ??
+   * service` on each `ActionPlugin`, the same expression `invokeAction` uses
+   * to scope a credential provider. The join is deliberate, not incidental:
+   * it makes the list true by construction. When a plugin's credential
+   * declaration and its `ActionPlugin` disagree about the key (they do for
+   * google-calendar, which writes "google-calendar" and reads
+   * "google_calendar"), this array comes back EMPTY rather than borrowing
+   * the plugin's actions — an empty array is the honest report that this
+   * token unlocks nothing, and the UI says so instead of inventing a list.
+   *
+   * Always empty for a `dynamic` service: its actions do not exist until a
+   * credential is connected and the upstream server is asked.
+   */
   actions: PluginActionSummary[];
 }
 
@@ -1172,8 +1656,32 @@ export interface StoredSkillSummary extends SkillSummaryBase {
 
 export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
 
+/**
+ * `GET /api/skills`, optionally filtered to one workspace with
+ * `?ownerType=&ownerId=`. Send both parameters or neither; an owner the
+ * caller cannot reach answers 404, the same as an owner that does not exist.
+ *
+ * A filtered listing carries that owner's stored skills only. Plugin skills
+ * belong to no owner, so they appear in the unfiltered listing alone.
+ *
+ * The Library's own controls narrow the catalog through three more
+ * parameters, and the server applies all three so a control answers about
+ * the catalog and not about the page in hand:
+ *   - `?scope=personal|team|org|plugin` — one library scope. It names a CLASS
+ *     of owners where `ownerType`/`ownerId` pin ONE owner by id, so sending
+ *     both answers 400.
+ *   - `?kind=skill|prompt` — prompts run their body; plain skills load it as
+ *     context. A plugin skill is always a plain skill.
+ *   - `?q=` — case-insensitive substring over name and description.
+ *
+ * Keyset-paginated with `?limit=` (default 24, maximum 100) and `?cursor=`.
+ * `cursor` is opaque: pass back a `nextCursor` this listing returned, and
+ * never build one. `nextCursor` is `null` on the last page. Plugin skills
+ * sort ahead of every stored row, so they fill the first page.
+ */
 export interface ListSkillsResponse {
   skills: SkillSummary[];
+  nextCursor: string | null;
 }
 
 /** A skill plus its markdown body, with the frontmatter already removed.
@@ -1273,8 +1781,18 @@ export interface SkillSourceSummary {
   lastMessage: string | null;
 }
 
+/**
+ * `GET /api/skills/sources`, taking the same `?ownerType=&ownerId=` filter
+ * `ListSkillsResponse` documents, with the same rules: both parameters or
+ * neither, and 404 for an owner the caller cannot reach.
+ *
+ * Keyset-paginated the same way, with `?limit=` (default 20, maximum 100)
+ * and an opaque `?cursor=`. Sources sort by repository name, then
+ * subdirectory. `nextCursor` is `null` on the last page.
+ */
 export interface ListSkillSourcesResponse {
   sources: SkillSourceSummary[];
+  nextCursor: string | null;
 }
 
 export interface CreateSkillSourceRequest {
@@ -1702,6 +2220,12 @@ export interface GetGithubAppResponse {
   app?: GithubAppInfo;
   installations: GithubAppInstallationSummary[];
   webhook: { mode: "public" | "manual" };
+  /** When this org's installations were last read from GitHub, in epoch ms.
+   * `null` when none has been read yet. It lets the settings page say how
+   * fresh the list is, so "it is not updating" is answerable without a log.
+   * Derived from the newest installation row, so it also moves when the
+   * manual button or a webhook writes. */
+  installationsCheckedAt: number | null;
 }
 
 export interface PostGithubAppManifestRequest {
@@ -1750,6 +2274,30 @@ export interface PostGithubAppManifestResponse {
   state: string;
 }
 
+/**
+ * Body of `POST /api/org/github-app/credential` — the second setup path, for
+ * an admin whose GitHub App already exists. An App name is global on GitHub,
+ * so a second creation attempt with the same name is refused on GitHub's own
+ * page, which the manifest flow cannot explain. This path connects the App
+ * that is already there instead.
+ *
+ * The response is `GetGithubAppResponse`, which carries no secret material —
+ * nothing sent here is ever readable back through the API.
+ */
+export interface PostGithubAppCredentialRequest {
+  appId: string;
+  /** The app's PEM private key, raw or base64-encoded. */
+  privateKey: string;
+  /** Both are read from GitHub when omitted — `GET /app` reports them. */
+  appSlug?: string;
+  oauthClientId?: string;
+  /** Needed only for per-user GitHub sign-in. GitHub never reports it, so it
+   * cannot be filled in for the admin. */
+  oauthClientSecret?: string;
+  /** Needed only for webhook event delivery. */
+  webhookSecret?: string;
+}
+
 // ── REST: user GitHub connect (App-OAuth, GitHub/repo integration plan
 // Task 6) ────────────────────────────────────────────────────────────────
 // `/api/me/github` — a signed-in user's own App-OAuth connection, distinct
@@ -1760,6 +2308,30 @@ export interface PostGithubConnectResponse {
   /** `{github}/login/oauth/authorize?...` — where the browser should
    * navigate to start the App-OAuth authorize flow. */
   url: string;
+}
+
+/**
+ * The org App's state, readable by any org member.
+ *
+ * `GET /api/org/github-app` answers the same question in much more detail,
+ * but it is org-admin-only — so a member had no way to learn that the App
+ * they depend on is missing or uninstalled. This is the projection a
+ * connect surface needs and nothing more: no app id, no slug, no
+ * installation logins, no secrets.
+ */
+export interface GetGithubOrgStatusResponse {
+  /** The org has a GitHub App — its own credential row, or the
+   * deployment-wide `GITHUB_APP_*` fallback. This is the same read
+   * `POST /api/me/github/connect` makes, so `false` means that call 409s. */
+  configured: boolean;
+  /** GitHub accounts the App is installed on. Counts the same rows the
+   * admin page tables, so the two surfaces never disagree. Zero with
+   * `configured: true` is the created-but-never-installed state. */
+  installationCount: number;
+  /** How many of `installationCount` GitHub suspended. A suspended
+   * installation reaches no repository, so a count equal to
+   * `installationCount` means the App reaches nothing. */
+  suspendedCount: number;
 }
 
 // ── REST: repo listing (GitHub/repo integration plan, Task 7)
@@ -1785,6 +2357,12 @@ export interface GetReposResponse {
 // git credential helper / `gh` shim POST `{host, owner?, repo?, purpose?}`;
 // the route resolves the session's bound repo — or, for an unbound owner,
 // org-level `auto` resolution — to a usable git credential.
+//
+// `PostSandboxGitCredentialRequest` has no TypeScript importer on purpose.
+// Its producer is the POSIX `sh` helper that `engine/git-credential-helper.ts`
+// generates, and the route hand-parses the body as `Record<string, unknown>`.
+// This interface is the only machine-readable statement of that contract.
+// Do not delete it as unused.
 
 export interface PostSandboxGitCredentialRequest {
   /** Git host from the credential request (e.g. `github.com`). For a bound
@@ -1834,8 +2412,6 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 // read — deliberately narrow (see `GetPrebuildForRepoResponse`).
 //
 // SourceSummary mirrors the `image_sources` row; BakeSummary mirrors `bakes`.
-// The legacy types below (ImageCatalogEntryWire, PrebuildConfigWire, etc.)
-// are kept while web components migrate in Task 18.
 
 // ── New unified types (/api/org/sources) ────────────────────────────────────
 
@@ -1896,119 +2472,7 @@ export interface TriggerBakeResponse {
   bake: BakeSummary;
 }
 
-// ── Legacy types kept for web-component backward compatibility (Task 18 migrates) ──
-
-// `image_sources` row (kind='external') — replaces the old image_catalog
-// entry. `externalRef` is the image URI that was previously `ref`.
-export interface ImageCatalogEntryWire {
-  id: string;
-  orgId: string;
-  kind: "external";
-  name: string;
-  externalRef: string | null;
-  pullSecretName: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ListImageCatalogResponse {
-  images: ImageCatalogEntryWire[];
-}
-
-export interface CreateImageCatalogRequest {
-  name: string;
-  ref: string;
-  pullSecretName?: string;
-}
-
-export interface CreateImageCatalogResponse {
-  image: ImageCatalogEntryWire;
-}
-
-export type PrebuildScheduleWire = "nightly" | "off";
-
-// `image_sources` row (kind='repo') — replaces the old prebuild_configs entry.
-// `parentId` is the linked base/external source id (previously `baseImageId`).
-export interface PrebuildConfigWire {
-  id: string;
-  orgId: string;
-  kind: "repo";
-  parentId: string | null;
-  name: string;
-  repoHost: string | null;
-  repoFullName: string | null;
-  cloneUrl: string | null;
-  schedule: PrebuildScheduleWire;
-  enabled: boolean;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ListPrebuildConfigsResponse {
-  configs: PrebuildConfigWire[];
-}
-
-export interface CreatePrebuildConfigRequest {
-  repoFullName: string;
-  cloneUrl: string;
-  repoHost?: string;
-  /** Linked base/external source id. Previously `baseImageId`. */
-  baseImageId?: string | null;
-  schedule?: PrebuildScheduleWire;
-  enabled?: boolean;
-}
-
-export interface CreatePrebuildConfigResponse {
-  config: PrebuildConfigWire;
-}
-
-export interface PatchPrebuildConfigRequest {
-  cloneUrl?: string;
-  /** Linked base/external source id. Previously `baseImageId`. */
-  baseImageId?: string | null;
-  schedule?: PrebuildScheduleWire;
-  enabled?: boolean;
-}
-
-export interface PatchPrebuildConfigResponse {
-  config: PrebuildConfigWire;
-}
-
-export type PrebuildStatusWire = "queued" | "building" | "pushed" | "failed";
-
-// `bakes` row — replaces the old prebuilds entry.
-// `sourceId` is the linked image_sources id (previously `configId`).
-export interface PrebuildWire {
-  id: string;
-  sourceId: string;
-  identityHash: string;
-  commitSha: string | null;
-  imageRef: string;
-  status: PrebuildStatusWire;
-  builderBackend: string | null;
-  error: string | null;
-  logTail: string | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-  createdAt: number;
-}
-
-export interface RebuildPrebuildResponse {
-  prebuild: PrebuildWire;
-}
-
-export interface ListPrebuildBuildsResponse {
-  builds: PrebuildWire[];
-}
-
-export interface GetPrebuildsMetaResponse {
-  /** `null` when no `ImageBuilder` is wired for this deployment — the
-   * settings page shows the "unavailable on this deployment" banner but
-   * keeps the image catalog usable regardless. */
-  builder: string | null;
-}
-
-/** `GET /api/prebuilds/for-repo?fullName=owner/repo` — any authed org
+/** `GET /api/sources/for-repo?fullName=owner/repo` — any authed org
  * member. The newest `pushed` build for the caller's org + repo, or
  * `null`. Deliberately narrow (no `imageRef`/`error`/`logTail`) — this is
  * the one prebuild read a non-admin member can hit. */
@@ -2045,12 +2509,15 @@ export interface EventSubscriptionFilterWire {
 // validator rejects it — see routes/events.ts TARGET_KINDS.
 export type EventSubscriptionTargetWire =
   | { kind: "workflow"; workflowId: string }
-  | { kind: "orchestrator"; orchestrator?: "user" | "org" };
+  /** `teamId` is required when `orchestrator` is `"team"`, and refused
+   * otherwise — the two fields are one choice, and a `teamId` alongside
+   * `"user"` would name a team the delivery never reaches. */
+  | { kind: "orchestrator"; orchestrator?: "user" | "team" | "org"; teamId?: string };
 
 export interface EventSubscriptionWire {
   id: string;
   name: string;
-  ownerType: "user" | "org";
+  ownerType: "user" | "team" | "org";
   ownerId: string;
   eventKeys: string[];
   filters: EventSubscriptionFilterWire[];
@@ -2139,6 +2606,24 @@ export interface EventDeliveryWire {
   attempts: number;
   lastError: string | null;
   deliveredAt: number | null;
+  /** Epoch ms of the next scheduled retry, while one is still coming. The
+   * column is already selected server-side; without it on the wire a
+   * failing delivery and a dead one look identical, and "retries in 8
+   * minutes" is the sentence that stops someone escalating. */
+  nextAttemptAt?: number | null;
+  /** The subscription's display name, so a delivery row can say what it
+   * was trying to reach without a second request. */
+  subscriptionName?: string;
+}
+
+/** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event
+ * whose earlier attempts failed or were given up on. Always writes NEW
+ * delivery rows: the workflow dispatcher derives a run id from the delivery
+ * id and returns early when that run exists, so reusing an id would report
+ * success and start nothing. */
+export interface RedeliverEventResponse {
+  /** Delivery rows created, one per currently-enabled matching subscription. */
+  created: number;
 }
 
 export interface GetEventResponse {
@@ -2363,4 +2848,77 @@ export interface DeleteGrantRequest {
 
 export interface DeleteGrantResponse {
   ok: true;
+}
+
+// ── REST: Slack agent app setup ──────────────────────────────────────────
+//
+// `GET /api/org/slack` — org-admin only. Returns the app manifest an
+// operator pastes into Slack's app-creation form, plus the connection state
+// of the org's Slack credential. Slack's `apps.manifest.create` needs an
+// app-configuration token this deployment does not hold, so the flow is
+// paste-in rather than API-driven.
+//
+// The manifest targets Slack's agent messaging experience: the feature key
+// is `agent_view`, and the app subscribes `app_home_opened` /
+// `app_context_changed` / `message.im`. See `services/slack-app.ts`.
+
+/** Slack's app-manifest schema — only the fields this flow sets.
+ * https://docs.slack.dev/reference/app-manifest/ */
+export interface SlackAppManifestWire {
+  display_information: {
+    /** Maximum 35 characters; Slack rejects the whole manifest above that. */
+    name: string;
+    /** Maximum 140 characters. */
+    description?: string;
+    background_color?: string;
+  };
+  features: {
+    /** The agent messaging experience. The older `assistant_view` is
+     * deprecated, and its `assistant_description` is renamed here. */
+    agent_view: {
+      /** Maximum 300 characters. */
+      agent_description: string;
+      suggested_prompts: { title: string; message: string }[];
+    };
+    app_home: {
+      home_tab_enabled: boolean;
+      messages_tab_enabled: boolean;
+      /** Must be false. True disables the composer, and the user cannot
+       * type to the agent at all. */
+      messages_tab_read_only_enabled: boolean;
+    };
+    bot_user: { display_name: string; always_online: boolean };
+  };
+  oauth_config: { scopes: { bot: string[] } };
+  settings: {
+    /** `request_url` is omitted in Socket Mode. */
+    event_subscriptions: { request_url?: string; bot_events: string[] };
+    interactivity: { is_enabled: boolean; request_url?: string };
+    org_deploy_enabled: boolean;
+    socket_mode_enabled: boolean;
+    token_rotation_enabled: boolean;
+  };
+}
+
+export interface GetSlackAppResponse {
+  /** `webhook` when this deployment has a public URL Slack can reach;
+   * `socket_mode` otherwise, which is the local-development path. */
+  ingress: "webhook" | "socket_mode";
+  /** The events + interactivity URL in the manifest. `null` in Socket Mode. */
+  requestUrl: string | null;
+  /** Where the operator pastes the manifest. */
+  createUrl: string;
+  manifest: SlackAppManifestWire;
+  /** Scopes the connection refuses to save without. */
+  requiredScopes: string[];
+  /** Scopes the manifest requests; each missing one costs one feature. */
+  optionalScopes: string[];
+  /** An org Slack credential exists. */
+  connected: boolean;
+  /** Workspace the credential belongs to, recorded at connect time. */
+  teamName?: string;
+  teamId?: string;
+  /** Requested scopes the installed app did not grant, from the scope list
+   * recorded at connect time. Empty when nothing is missing. */
+  missingScopes: string[];
 }

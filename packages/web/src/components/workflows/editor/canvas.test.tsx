@@ -8,8 +8,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import type { NodeChange, EdgeChange, Edge } from "@xyflow/react";
-import { Canvas, routeNodeChanges, routeEdgeChanges } from "./canvas";
-import { toFlow, type WorkflowDefinition } from "../editor-model";
+import { Canvas, enteringNodeIds, routeNodeChanges, routeEdgeChanges } from "./canvas";
+import { toFlow, type WorkflowDefinition, type WorkflowFlowState } from "../editor-model";
 import type { FlowXyNode } from "./flow-node";
 
 const definition: WorkflowDefinition = {
@@ -79,6 +79,112 @@ describe("Canvas", () => {
     // measurement pass completes (see src/test/setup.ts); that fires on a
     // microtask, so the label shows up a tick after the initial render.
     await waitFor(() => expect(screen.getByText("approved")).toBeTruthy());
+  });
+
+  it("points every edge at its target with an arrowhead", async () => {
+    const { container } = render(
+      <Canvas
+        flow={toFlow(definition)}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={noop}
+      />,
+    );
+    await waitFor(() => expect(container.querySelector(".react-flow__arrowhead")).toBeTruthy());
+    const path = container.querySelector(".react-flow__edge-path");
+    expect(path?.getAttribute("marker-end")).toContain("arrowclosed");
+  });
+
+  it("animates nothing at rest", async () => {
+    const { container } = render(
+      <Canvas
+        flow={toFlow(definition)}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={noop}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("approved")).toBeTruthy());
+    // Opening a workflow draws it; it does not perform it. The arrival
+    // animation is for what the assistant adds afterwards, and the
+    // travelling dash belongs to a run overlay this canvas never gets.
+    expect(container.querySelector(".flow-node-enter")).toBeNull();
+    expect(container.querySelector(".react-flow__edge.animated")).toBeNull();
+  });
+
+  it("brings in a node that arrives after the first snapshot, and only that node", async () => {
+    const withStep: WorkflowDefinition = {
+      ...definition,
+      nodes: [...definition.nodes, { id: "notify", type: "llm", model: "m", prompt: "p" }],
+      edges: [...definition.edges, { from: "check", to: "notify", fromOutput: "false" }],
+      ui: { nodes: { ...definition.ui?.nodes, notify: { position: { x: 520, y: 140 } } } },
+    };
+
+    const { container, rerender } = render(
+      <Canvas
+        flow={toFlow(definition)}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={noop}
+      />,
+    );
+    rerender(
+      <Canvas
+        flow={toFlow(withStep)}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={noop}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("LLM")).toBeTruthy());
+    const arriving = container.querySelectorAll(".flow-node-enter");
+    expect(arriving.length).toBe(1);
+    expect(arriving[0]?.textContent).toContain("LLM");
+  });
+});
+
+describe("enteringNodeIds", () => {
+  function flowWith(ids: string[]): WorkflowFlowState {
+    return {
+      nodes: ids.map((id) => ({
+        id,
+        type: "workflow" as const,
+        position: { x: 0, y: 0 },
+        data: {
+          node: { id, type: "set" as const, values: {} },
+          nodeType: "set" as const,
+          label: "Set values",
+          description: "",
+          summary: "",
+        },
+      })),
+      edges: [],
+    };
+  }
+
+  it("answers the ids that were not in the previous snapshot", () => {
+    expect([...enteringNodeIds(flowWith(["a", "b"]), new Set(["a"]))]).toEqual(["b"]);
+  });
+
+  it("answers nothing when the snapshot holds the same nodes", () => {
+    expect(enteringNodeIds(flowWith(["a", "b"]), new Set(["a", "b"])).size).toBe(0);
+  });
+
+  it("brings a restored node in again", () => {
+    // The canvas rebuilds its set per snapshot rather than adding to it,
+    // which is what lets an undone delete arrive the way the add did.
+    const present = flowWith(["a", "b"]);
+    const deleted = flowWith(["a"]);
+    let drawn: ReadonlySet<string> = new Set(["a", "b"]);
+
+    expect(enteringNodeIds(deleted, drawn).size).toBe(0);
+    drawn = new Set(deleted.nodes.map((node) => node.id));
+    expect([...enteringNodeIds(present, drawn)]).toEqual(["b"]);
   });
 });
 

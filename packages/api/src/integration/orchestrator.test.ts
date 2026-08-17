@@ -1,8 +1,8 @@
 /**
- * Integration test: orchestrator lifecycle (Phase 4 Task 7).
+ * Integration test: the caller's default assistant (Phase 4 Task 7).
  *
  *   - POST /api/orchestrator is idempotent: two calls, one engine session
- *     row, one `orchestrator_identities` row.
+ *     row, one `assistants` row.
  *   - GET /api/orchestrator probes without creating.
  *   - The ensured session is `queueMode: 'steer'` (user principal, decision
  *     17) and its `systemContext` carries the assembled memory snapshot —
@@ -19,7 +19,7 @@ import { bootTestApi, type TestApi } from "./_setup.js";
 import { driveTurn } from "./_test-utils.js";
 import { EngineHost } from "../engine/host.js";
 import { internalToken } from "../lib/internal-auth.js";
-import { agentSessions, orchestratorIdentities } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import type { EnsureOrchestratorResponse, GetOrchestratorResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -29,23 +29,30 @@ afterEach(async () => {
   api = undefined;
 });
 
-describe("api integration: orchestrator lifecycle", () => {
-  it("GET /api/orchestrator before any ensure reports exists: false", async () => {
+describe("api integration: default assistant lifecycle", () => {
+  // The probe reports no session id at all before the first ensure. The id
+  // used to be derivable from the caller; it no longer is, because an
+  // assistant addresses its session by its OWN id.
+  it("GET /api/orchestrator before any ensure reports exists: false and a null sessionId", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/orchestrator`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetOrchestratorResponse;
     expect(body.exists).toBe(false);
-    expect(body.sessionId).toBe("orchestrator:user:local-user");
+    expect(body.sessionId).toBeNull();
+
+    // The probe creates nothing, the assistant row included.
+    const assistantRows = await api.providers.db.select().from(assistants);
+    expect(assistantRows).toHaveLength(0);
   });
 
-  it("POST /api/orchestrator is idempotent — two calls, one session row, one identity row", async () => {
+  it("POST /api/orchestrator is idempotent — two calls, one session row, one assistant row", async () => {
     api = await bootTestApi();
 
     const first = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
     expect(first.status).toBe(200);
     const firstBody = (await first.json()) as EnsureOrchestratorResponse;
-    expect(firstBody.sessionId).toBe("orchestrator:user:local-user");
+    expect(firstBody.sessionId).toMatch(/^assistant:asst_/);
 
     const second = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
     expect(second.status).toBe(200);
@@ -59,11 +66,17 @@ describe("api integration: orchestrator lifecycle", () => {
     expect(sessionRows[0]?.ownerType).toBe("user");
     expect(sessionRows[0]?.ownerId).toBe("local-user");
 
-    const identityRows = await db
+    // One assistant, and it is the caller's default: the row a second
+    // ensure resolves to instead of creating another.
+    const assistantRows = await db
       .select()
-      .from(orchestratorIdentities)
-      .where(eq(orchestratorIdentities.sessionId, firstBody.sessionId));
-    expect(identityRows).toHaveLength(1);
+      .from(assistants)
+      .where(eq(assistants.sessionId, firstBody.sessionId));
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.isDefault).toBe(true);
+    expect(assistantRows[0]?.ownerType).toBe("user");
+    expect(assistantRows[0]?.ownerId).toBe("local-user");
+    expect(await db.select().from(assistants)).toHaveLength(1);
 
     const probe = await fetch(`${api.baseUrl}/api/orchestrator`);
     const probeBody = (await probe.json()) as GetOrchestratorResponse;
@@ -74,7 +87,7 @@ describe("api integration: orchestrator lifecycle", () => {
   it("ensured session is queueMode 'steer' with the memory snapshot in systemContext", async () => {
     api = await bootTestApi();
 
-    // Seed a pinned memory file before ensuring the orchestrator, so the
+    // Seed a pinned memory file before ensuring the assistant, so the
     // snapshot fragment isn't just the empty-memory default — proves the
     // real assembleMemorySnapshot ran, not a stub.
     const writeRes = await fetch(`${api.baseUrl}/api/memory`, {
@@ -113,11 +126,11 @@ describe("api integration: orchestrator lifecycle", () => {
     expect(session?.options.systemPrompt).toContain("mem_search");
   });
 
-  it("restoring an orchestrator id through the generic sessionFor chokepoint still wakes the full orchestrator config", async () => {
+  it("restoring an assistant id through the generic sessionFor chokepoint still wakes the full assistant config", async () => {
     api = await bootTestApi();
 
-    // Create the orchestrator via the real ensure path first (so an engine
-    // row + identity row exist to restore from).
+    // Create the assistant via the real ensure path first (so an engine row
+    // + assistant row exist to restore from).
     const ensureRes = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
     expect(ensureRes.status).toBe(200);
     const { sessionId } = (await ensureRes.json()) as EnsureOrchestratorResponse;
@@ -126,8 +139,8 @@ describe("api integration: orchestrator lifecycle", () => {
     // stores/db, with a cold in-process cache. `main.ts`'s boot-restore
     // loop (and messages.ts/ws.ts/sessions.ts) all call plain `sessionFor`
     // with generic { userId, orgId, workspace } — never
-    // `orchestratorSessionFor` directly — so the regression this guards
-    // against is `sessionFor` rehydrating an orchestrator id through the
+    // `assistantSessionFor` directly — so the regression this guards
+    // against is `sessionFor` rehydrating an assistant id through the
     // generic `buildSession` path (no persona/snapshot/mem tools/steer).
     const restoreHost = new EngineHost({
       engineStore: api.providers.engineStore,
@@ -166,7 +179,7 @@ describe("api integration: orchestrator lifecycle", () => {
 // ── Sandbox-less wake (key-gated: real Anthropic call) ──────────────────────
 
 /** Counts `create()` calls while delegating everything else to a real
- * `VirtualSandboxProvider` — proves the orchestrator turn below never
+ * `VirtualSandboxProvider` — proves the assistant turn below never
  * provisions a sandbox. */
 class CreateCountingSandboxProvider implements SandboxProvider {
   creates = 0;
@@ -192,7 +205,7 @@ class CreateCountingSandboxProvider implements SandboxProvider {
 
 const describeIfKey = process.env.ANTHROPIC_API_KEY ? describe : describe.skip;
 
-describeIfKey("api integration: orchestrator sandbox-less wake", () => {
+describeIfKey("api integration: assistant sandbox-less wake", () => {
   it(
     "answers a prompt with zero sandboxProvider.create calls",
     async () => {

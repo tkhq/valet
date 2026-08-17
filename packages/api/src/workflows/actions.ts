@@ -14,14 +14,17 @@ import type {
   PluginActionResult,
 } from "@valet/engine";
 import {
+  addAggregateNode,
   cancelWorkflowRun,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
+  isRunStatus,
+  listRunsForOwner,
   listWorkflowDefinitions,
-  listWorkflowRuns,
   resolveWorkflowApproval,
+  RUN_STATUS_VALUES,
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
@@ -47,19 +50,10 @@ import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
+  workflowWebhookUrl,
 } from "./webhook-service.js";
 import { publicUrlFromEnv } from "../channels/host.js";
-import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
-
-/** `POST /api/hooks/workflows/:workflowId/:hookId`'s path, absolute when a
- * public origin is configured (same `VALET_PUBLIC_URL`/`BETTER_AUTH_URL`
- * resolution `ChannelHost` uses), else path-only so the agent can still
- * report to the user with an "attach your deployment's origin" caveat. */
-function webhookUrl(workflowId: string, hookId: string): string {
-  const path = `/api/hooks/workflows/${workflowId}/${hookId}`;
-  const origin = publicUrlFromEnv(process.env);
-  return origin ? `${origin}${path}` : path;
-}
+import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
  * emit dozens of errors on a badly-shaped definition; the first ~20 are
@@ -290,27 +284,60 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             iteration: cp.iteration,
             status: cp.status,
             error: cp.error,
+            // The session a session node drove, and the run a workflow node
+            // started — how the agent reaches a failed node's actual output.
+            sessionId: cp.sessionId,
+            childRunId: cp.childRunId,
           })),
         },
       };
     },
   });
 
-  const listRuns = action(Type.Object({ workflow_id: Type.String() }))({
+  const listRuns = action(
+    Type.Object({
+      workflow_id: Type.Optional(Type.String()),
+      parent_run_id: Type.Optional(Type.String()),
+      status: Type.Optional(Type.Array(Type.String())),
+      limit: Type.Optional(Type.Number()),
+      cursor: Type.Optional(Type.String()),
+    }),
+  )({
     id: "workflows.list_runs",
     name: "List workflow runs",
     description:
-      "List a workflow's runs (runId, status, outcome, timestamps), newest first. " +
-      "Parked runs also carry waitingOn — the node and signal/timer each is blocked on " +
-      "(signalType approval:<nodeId> = an approval node OR a policy gate on a tool node). " +
-      "Use to find parked/pending runs before cancelling or checking approvals.",
+      "List runs (runId, status, outcome, timestamps), newest first. Omit workflow_id " +
+      "for every workflow you can reach. Pass parent_run_id to track one batch's child " +
+      "runs. Parked runs also carry waitingOn — the node and signal/timer each is blocked " +
+      "on (signalType approval:<nodeId> = an approval node OR a policy gate on a tool " +
+      "node). Use to find parked/pending runs before cancelling or checking approvals. " +
+      "Paginated: pass the returned nextCursor back as cursor for the next page.",
     riskLevel: "low",
-    execute: async ({ workflow_id }, ctx) => {
+    execute: async ({ workflow_id, parent_run_id, status, limit, cursor }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const runs = await listWorkflowRuns(getDeps(), owner, workflow_id);
-      if (!runs) return { success: false, error: `workflow not found: ${workflow_id}` };
-      return { success: true, data: { workflowId: workflow_id, runs } };
+      const badStatus = status?.filter((s) => !isRunStatus(s));
+      if (badStatus && badStatus.length > 0) {
+        return {
+          success: false,
+          error: `unknown run status ${badStatus.join(", ")} — use one of: ${RUN_STATUS_VALUES.join(", ")}`,
+        };
+      }
+      let page;
+      try {
+        page = await listRunsForOwner(getDeps(), owner, {
+          workflowIds: workflow_id === undefined ? undefined : [workflow_id],
+          status: status?.filter(isRunStatus),
+          parentRunId: parent_run_id,
+          limit,
+          cursor,
+        });
+      } catch (err) {
+        if (err instanceof WorkflowCursorError) return { success: false, error: err.message };
+        throw err;
+      }
+      if (!page) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: workflow_id, ...page } };
     },
   });
 
@@ -459,6 +486,55 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           name: updated.name,
           nodes: patched.definition.nodes.length,
           edges: patched.definition.edges.length,
+        },
+      };
+    },
+  });
+
+  const addAggregate = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      mode: Type.Optional(Type.Union([Type.Literal("collect"), Type.Literal("summarize")])),
+      model: Type.Optional(Type.String()),
+      node_id: Type.Optional(Type.String()),
+      sources: Type.Optional(Type.Array(Type.String())),
+      instructions: Type.Optional(Type.String()),
+    }),
+  )({
+    id: "workflows.add_aggregate",
+    name: "Add aggregation node",
+    description:
+      "Append a node that combines several parallel branches into one result, wired with the " +
+      "correct template path for each branch's node type (an llm branch reads result.text, a " +
+      "session branch result.response, a branch with an outputSchema result.output). " +
+      'mode "collect" (default) writes a set node with one field per branch; mode "summarize" ' +
+      "writes an llm node and needs `model`. Omit `sources` to take every branch with no " +
+      "outgoing edge. The node is an ordinary node afterwards — editable and removable like any other.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, mode, model, node_id, sources, instructions }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const result = await addAggregateNode(
+        deps,
+        owner,
+        workflow_id,
+        { mode, model, nodeId: node_id, sources, instructions },
+        buildValidateEnvironment(deps.actionPluginByService),
+      );
+      if (!result.ok) {
+        if (result.reason === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
+        // Two failure shapes: a lint list, or one sentence naming the fix.
+        if ("errors" in result) return { success: false, error: formatLintErrors(result.errors) };
+        return { success: false, error: result.message };
+      }
+      return {
+        success: true,
+        data: {
+          workflowId: result.definition.id,
+          nodeId: result.nodeId,
+          sources: result.sources,
+          updatedAt: result.definition.updatedAt,
         },
       };
     },
@@ -797,7 +873,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!result.ok) return { success: false, error: result.error };
       return {
         success: true,
-        data: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) },
+        data: { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId) },
       };
     },
   });
@@ -815,7 +891,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!result.webhook) return { success: true, data: { webhook: null } };
       return {
         success: true,
-        data: { webhook: { ...result.webhook, url: webhookUrl(result.webhook.workflowId, result.webhook.hookId) } },
+        data: { webhook: { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId) } },
       };
     },
   });
@@ -843,6 +919,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getWorkflow,
       saveWorkflow,
       patchWorkflow,
+      addAggregate,
       deleteWorkflow,
       startRun,
       getRun,

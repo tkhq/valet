@@ -22,11 +22,47 @@
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
+/**
+ * Sink for paths that do not resolve, attached to a context under
+ * {@link TEMPLATE_MISS_RECORDER}.
+ *
+ * A miss is invisible by design in this language: `{{nodes.x.result.text}}`
+ * renders as null or "" and the run reports success with wrong output. The
+ * recorder is how the interpreter sees those misses without every executor
+ * reporting them itself. It is passive — recording never changes what a
+ * template renders to.
+ *
+ * `ctx` is the context the miss happened in, which is NOT always the
+ * context the recorder was attached to: a `foreach` body renders against
+ * the same context plus its `item`/`index` aliases. Diagnostics must read
+ * the keys in scope AT THE MISS, so the reader is passed the real one.
+ */
+export interface TemplateMissRecorder {
+  record(segments: string[], ctx: TemplateContext): void;
+}
+
+/**
+ * Key for the optional {@link TemplateMissRecorder} on a context.
+ *
+ * A symbol, for two reasons. Path resolution walks string segments, so no
+ * template can read or shadow it. Object spread copies own enumerable
+ * symbol keys, so it survives `resolveTemplateContext`'s alias merge and
+ * reaches a `foreach` body without the body executor knowing about it.
+ */
+export const TEMPLATE_MISS_RECORDER: unique symbol = Symbol('valet.workflow.templateMissRecorder');
+
 export interface TemplateContext {
   trigger?: unknown;
   nodes?: unknown;
+  /** Set by the interpreter; see {@link TEMPLATE_MISS_RECORDER}. */
+  [TEMPLATE_MISS_RECORDER]?: TemplateMissRecorder;
   /** Aliases set by foreach iteration bodies (e.g. `item`, `index`). */
   [alias: string]: unknown;
+}
+
+/** A context that reports its unresolved paths to `recorder`. */
+export function withMissRecorder(ctx: TemplateContext, recorder: TemplateMissRecorder): TemplateContext {
+  return { ...ctx, [TEMPLATE_MISS_RECORDER]: recorder };
 }
 
 export class TemplateParseError extends Error {
@@ -366,14 +402,69 @@ function inMembership(needle: unknown, haystack: unknown): boolean {
 
 // ─── Path resolution ────────────────────────────────────────────────────────
 
-function readPath(ctx: TemplateContext, segments: string[]): unknown {
+/**
+ * Why a path did not resolve, and where. `container` is the object the
+ * failed segment was looked up in — the source of "what keys WERE
+ * available at that point" — and is absent only when the walk ran into a
+ * non-object.
+ *
+ *   - `missing_key`   — the container has no such key.
+ *   - `not_an_object` — the value before this segment cannot be indexed
+ *                       (a string, a number, null).
+ *   - `no_value`      — the key exists and holds `undefined`.
+ */
+export type PathResolution =
+  | { ok: true; value: unknown }
+  | {
+      ok: false;
+      failedIndex: number;
+      reason: 'missing_key' | 'not_an_object' | 'no_value';
+      container?: Record<string, unknown>;
+    };
+
+/**
+ * Walk `segments` and report exactly where the walk stopped.
+ *
+ * {@link readPath} is this function with the detail thrown away, so the two
+ * can never disagree about what "resolves" means.
+ */
+export function resolvePath(ctx: TemplateContext, segments: string[]): PathResolution {
   let cur: unknown = ctx;
-  for (const seg of segments) {
-    if (cur === null || cur === undefined) return undefined;
-    if (typeof cur !== 'object') return undefined;
-    cur = (cur as Record<string, unknown>)[seg];
+  let container: Record<string, unknown> | undefined;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]!;
+    if (cur === null || cur === undefined || typeof cur !== 'object') {
+      return { ok: false, failedIndex: i, reason: 'not_an_object' };
+    }
+    container = cur as Record<string, unknown>;
+    // `in`, not a truth test: a key holding `null` or `false` resolved
+    // correctly, and reporting it as missing would send the author hunting
+    // for a typo that is not there.
+    if (!(seg in container)) {
+      return { ok: false, failedIndex: i, reason: 'missing_key', container };
+    }
+    cur = container[seg];
   }
-  return cur;
+  if (cur === undefined) {
+    // An empty `segments` cannot reach here — the context itself is an
+    // object — so `failedIndex` always names a real segment.
+    return { ok: false, failedIndex: segments.length - 1, reason: 'no_value', container };
+  }
+  return { ok: true, value: cur };
+}
+
+/**
+ * The value at `segments`, or `undefined` when the path does not resolve.
+ *
+ * Reports every miss to the context's {@link TemplateMissRecorder} when one
+ * is attached. The returned value is the same either way: recording a miss
+ * must never change what a workflow renders.
+ */
+function readPath(ctx: TemplateContext, segments: string[]): unknown {
+  const resolved = resolvePath(ctx, segments);
+  if (resolved.ok) return resolved.value;
+  ctx[TEMPLATE_MISS_RECORDER]?.record(segments, ctx);
+  return undefined;
 }
 
 function readPathExists(ctx: TemplateContext, segments: string[]): boolean {
@@ -538,6 +629,20 @@ function collectAstValuePaths(node: ExprNode, out: string[][]): void {
  * parse errors are the validator's job, not this diagnostic's.
  */
 export function collectUnresolvedTemplatePaths(source: string, ctx: TemplateContext): string[] {
+  return collectTemplateValuePaths(source)
+    .filter((p) => !resolvePath(ctx, p).ok)
+    .map((p) => p.join('.'));
+}
+
+/**
+ * Every value path in `source`'s `{{ ... }}` expressions, as segment
+ * arrays. `exists(...)` paths are excluded — probing a possibly-missing
+ * path is that function's purpose, not a mistake.
+ *
+ * Returns [] for an unparseable source. A parse error is the validator's
+ * job to report; a diagnostic that re-reports it would double the noise.
+ */
+export function collectTemplateValuePaths(source: string): string[][] {
   let segments: TemplateSegment[];
   try {
     segments = parseTemplate(source).segments;
@@ -548,7 +653,18 @@ export function collectUnresolvedTemplatePaths(source: string, ctx: TemplateCont
   for (const seg of segments) {
     if (seg.kind === 'expr' && seg.ast) collectAstValuePaths(seg.ast, paths);
   }
-  return paths.filter((p) => readPath(ctx, p) === undefined).map((p) => p.join('.'));
+  return paths;
+}
+
+/** Bare-expression counterpart of {@link collectTemplateValuePaths} (an `if` condition's `left`, an edge's `when`). */
+export function collectExpressionValuePaths(source: string): string[][] {
+  const paths: string[][] = [];
+  try {
+    collectAstValuePaths(parseExpression(source), paths);
+  } catch {
+    return [];
+  }
+  return paths;
 }
 
 /**

@@ -13,8 +13,10 @@ export const Route = createFileRoute("/memory/graph")({
 
 function MemoryGraphPage() {
   return (
-    <main className="flex flex-1 min-h-0 flex-col">
+    // A plain `div`, not `main`: the app shell already renders the page's one
+    // `main` landmark, and this route paints inside it.
+    <div className="flex flex-1 min-h-0 flex-col">
       <MemoryGraphCanvas />
-    </main>
+    </div>
   );
 }

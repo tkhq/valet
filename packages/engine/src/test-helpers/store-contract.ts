@@ -4,7 +4,6 @@ import type {
   MessageEntry,
   QueueItem,
   SessionData,
-  SessionEntry,
   SessionStore,
   SuspendedTurnState,
   ThreadData,

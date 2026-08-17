@@ -19,12 +19,28 @@ import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowWebhooks } from "../schema/index.js";
 import { newWorkflowId, ownedDefinitionRow, type WorkflowOwner } from "./service.js";
+import { publicUrlFromEnv } from "../channels/host.js";
 
 export interface WorkflowWebhookSummary {
   workflowId: string;
   hookId: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * `POST /api/hooks/workflows/:workflowId/:hookId`'s absolute URL: the
+ * configured public origin (same `VALET_PUBLIC_URL`/`BETTER_AUTH_URL`
+ * resolution `ChannelHost` uses) when set, else `fallbackOrigin` (an HTTP
+ * route's own request origin), else path-only — every caller of this
+ * builder (the agent-facing `workflow_webhook` action, the HTTP management
+ * routes) must go through it rather than reconstruct the path, so the
+ * origin resolution never drifts between them.
+ */
+export function workflowWebhookUrl(workflowId: string, hookId: string, fallbackOrigin?: string): string {
+  const path = `/api/hooks/workflows/${workflowId}/${hookId}`;
+  const origin = publicUrlFromEnv(process.env) ?? fallbackOrigin;
+  return origin ? `${origin}${path}` : path;
 }
 
 export interface WorkflowWebhookTarget {

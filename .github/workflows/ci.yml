@@ -25,18 +25,26 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - uses: oven-sh/setup-bun@v2
-
       - run: pnpm install --frozen-lockfile
 
-      - name: Generate plugin registries
-        run: cd packages/worker && bun scripts/generate-plugin-registry.ts
+      # Two steps used to run here and covered the frozen V1 stack only.
+      #
+      # "Generate plugin registries" ran the worker's generator, which writes
+      # into `packages/worker/src/**` and nothing else. V2's registry
+      # (`packages/api/src/plugins/registry.gen.ts`) is committed and that
+      # script never touches it, so the step produced output no later step
+      # read. Removing it also removes the need for bun on the runner.
+      #
+      # "Typecheck client" ran `tsc` over the V1 React SPA. The root
+      # tsconfig does not reference `packages/client`, so no V2 package
+      # depends on it compiling.
+      #
+      # Run either by hand if you ever need to touch V1:
+      #   cd packages/worker && bun scripts/generate-plugin-registry.ts
+      #   cd packages/client && npx tsc --noEmit
 
       - name: Typecheck
         run: pnpm typecheck
-
-      - name: Typecheck client
-        run: cd packages/client && npx tsc --noEmit
 
       - name: Test
         run: pnpm test

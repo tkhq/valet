@@ -2,10 +2,12 @@
  * GitHub App core service tests (GitHub/repo integration plan, Task 3).
  * Covers: JWT claims + signature (verified with the keypair's own public
  * half), config round-trip through the shared `credentials` row, discovery
- * upsert/removal/linkedUserId matching, and installation-token cache
- * behavior at the 5-minute margin (incl. re-mint + suspended exclusion).
+ * upsert/removal/linkedUserId matching, installation-token cache behavior at
+ * the 5-minute margin (incl. re-mint + suspended exclusion), and
+ * webhook-URL sync (incl. the guard that leaves an environment-supplied app
+ * alone).
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, verify } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
@@ -15,13 +17,18 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
+  buildAppConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
   mintAppJwt,
   mintInstallationToken,
+  parsePrivateKeyPem,
   resolveGithubAppEnvConfig,
   saveAppConfig,
+  syncAllAppWebhookUrls,
+  syncAppWebhookUrl,
+  verifyAppCredential,
   type GithubAppConfig,
   type GithubAppDeps,
 } from "./github-app.js";
@@ -202,6 +209,111 @@ describe("github-app service", () => {
       const env = { ...fullEnv, GITHUB_APP_PRIVATE_KEY: "not-a-key" };
       expect(() => resolveGithubAppEnvConfig(env)).toThrowError(/GITHUB_APP_PRIVATE_KEY/);
     });
+
+    it("builds the same config as buildAppConfig does from the same parts", () => {
+      // One assembler serves both config paths. If they ever diverge, an app
+      // connected through the admin route stores a shape the env path cannot
+      // read, and only production finds out.
+      expect(resolveGithubAppEnvConfig(fullEnv)).toEqual(
+        buildAppConfig(
+          {
+            appId: "654321",
+            appSlug: "valet-env-app",
+            oauthClientId: "Iv1.env123",
+            oauthClientSecret: "env-client-secret",
+            webhookSecret: "env-webhook-secret",
+            privateKeyPem,
+          },
+          {},
+        ),
+      );
+    });
+  });
+
+  describe("parsePrivateKeyPem", () => {
+    it("passes a raw PEM through and decodes a base64 one", () => {
+      expect(parsePrivateKeyPem(privateKeyPem)).toBe(privateKeyPem);
+      expect(parsePrivateKeyPem(Buffer.from(privateKeyPem, "utf8").toString("base64"))).toBe(privateKeyPem);
+    });
+
+    it("returns null for anything that is neither", () => {
+      expect(parsePrivateKeyPem("not-a-key")).toBeNull();
+      expect(parsePrivateKeyPem("")).toBeNull();
+      // Valid base64 that decodes to something which is not a PEM.
+      expect(parsePrivateKeyPem(Buffer.from("hello there", "utf8").toString("base64"))).toBeNull();
+    });
+  });
+
+  describe("verifyAppCredential", () => {
+    const credential = { appId: "4242", privateKeyPem };
+
+    it("reports the app GitHub answers for, authenticating with the App JWT", async () => {
+      fixture = startGithubFixture({
+        getApp: () => ({
+          body: { id: 4242, slug: "existing-app", client_id: "Iv1.existing", html_url: "https://github.com/apps/existing-app", installations_count: 2 },
+        }),
+      });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check).toEqual({
+        ok: true,
+        app: {
+          appId: "4242",
+          appSlug: "existing-app",
+          htmlUrl: "https://github.com/apps/existing-app",
+          oauthClientId: "Iv1.existing",
+          installationsCount: 2,
+        },
+      });
+      expect(fixture.calls.find((c) => c.path === "/app")?.authHeader).toMatch(/^Bearer /);
+    });
+
+    it("names the fix when GitHub refuses the credential", async () => {
+      fixture = startGithubFixture({ getApp: () => ({ status: 401, body: { message: "Bad credentials" } }) });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("GitHub rejected this App ID and private key");
+    });
+
+    it("reports a server-side GitHub failure as retryable, not as a bad credential", async () => {
+      fixture = startGithubFixture({ getApp: () => ({ status: 503, body: { message: "unavailable" } }) });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("503");
+      expect(check.error).toContain("try again");
+    });
+
+    it("never throws when GitHub is unreachable", async () => {
+      const check = await verifyAppCredential(
+        { apiUrl: "http://127.0.0.1:1", fetchImpl: () => Promise.reject(new Error("connect ECONNREFUSED")) },
+        credential,
+      );
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("Could not reach GitHub");
+    });
+
+    it("never throws on a private key that is a PEM but not an RSA key", async () => {
+      fixture = startGithubFixture();
+      const check = await verifyAppCredential(
+        { apiUrl: fixture.url },
+        { appId: "4242", privateKeyPem: "-----BEGIN PRIVATE KEY-----\nnonsense\n-----END PRIVATE KEY-----\n" },
+      );
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("Generate a new private key");
+      // Refused locally — GitHub was never asked.
+      expect(fixture.calls).toHaveLength(0);
+    });
+
+    it("refuses an app record with no app id", async () => {
+      fixture = startGithubFixture({ getApp: () => ({ body: { slug: "no-id-here" } }) });
+      const check = await verifyAppCredential({ apiUrl: fixture.url }, credential);
+      expect(check.ok).toBe(false);
+      if (check.ok) throw new Error("expected the check to fail");
+      expect(check.error).toContain("no app id");
+    });
   });
 
   describe("loadAppConfig env fallback", () => {
@@ -371,6 +483,118 @@ describe("github-app service", () => {
 
       const rows = await discoverInstallations(deps(), orgId);
       expect(rows[0].linkedUserId).toBe("user1");
+    });
+  });
+
+  describe("syncAppWebhookUrl", () => {
+    const publicUrl = "https://tunnel-abc.trycloudflare.com";
+    const expectedHookUrl = `${publicUrl}/webhooks/github-app`;
+    const deadHookUrl = "https://tunnel-dead.trycloudflare.com/webhooks/github-app";
+
+    /** A `GITHUB_APP_*` app supplied by a deployment or shared by a team —
+     * the config source this must never sync. */
+    const sharedEnvApp: NodeJS.ProcessEnv = {
+      GITHUB_APP_ID: "654321",
+      GITHUB_APP_SLUG: "valet-shared-dev",
+      GITHUB_APP_CLIENT_ID: "Iv1.env123",
+      GITHUB_APP_CLIENT_SECRET: "env-client-secret",
+      GITHUB_APP_WEBHOOK_SECRET: "env-webhook-secret",
+      GITHUB_APP_PRIVATE_KEY: privateKeyPem,
+    };
+
+    /** `deps()` with an EMPTY env, so a `GITHUB_APP_*` value in the
+     * developer's own environment cannot change the config source under
+     * test. */
+    function syncDeps(env: NodeJS.ProcessEnv = {}): GithubAppDeps {
+      return deps({ env });
+    }
+
+    function patchCalls(f: GithubFixture) {
+      return f.calls.filter((c) => c.method === "PATCH" && c.path === "/app/hook/config");
+    }
+
+    it("patches the webhook URL when GitHub holds a different one, with App JWT auth", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, publicUrl);
+
+      const patches = patchCalls(fixture);
+      expect(patches).toHaveLength(1);
+      expect(patches[0].body).toEqual({ url: expectedHookUrl });
+      // App-JWT auth, not an installation token — decode and check `iss`.
+      const jwt = patches[0].authHeader?.slice("Bearer ".length) ?? "";
+      expect(decodeJwtPart(jwt.split(".")[1]).iss).toBe(baseConfig.appId);
+    });
+
+    it("sets the URL on an app created with no webhook at all", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      // A manifest built without `hook_attributes` (no public URL at
+      // creation) leaves GitHub reporting `url: null`.
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: null } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(1);
+      expect(patchCalls(fixture)[0].body).toEqual({ url: expectedHookUrl });
+    });
+
+    it("does nothing for an app that came from the environment — another instance owns it", async () => {
+      // No credential row for the org, so the config resolves to the
+      // `GITHUB_APP_*` fallback and the source is "environment". Syncing it
+      // would steal the team's shared app on every local boot.
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(sharedEnvApp), orgId, publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(0);
+      expect(fixture.calls).toHaveLength(0); // not even the read
+    });
+
+    it("makes no write when GitHub already holds this instance's URL", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: expectedHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(0);
+      expect(fixture.calls).toHaveLength(1); // the read, and nothing else
+    });
+
+    it("does nothing, and never clears the URL, when this instance has no public URL", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAppWebhookUrl(syncDeps(), orgId, undefined);
+
+      expect(fixture.calls).toHaveLength(0);
+    });
+
+    it("logs and continues when the PATCH fails", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({
+        getHookConfig: () => ({ body: { url: deadHookUrl } }),
+        updateHookConfig: () => ({ status: 422, body: { message: "Hook url is not supported" } }),
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      try {
+        await expect(syncAppWebhookUrl(syncDeps(), orgId, publicUrl)).resolves.toBeUndefined();
+        expect(errors).toHaveBeenCalledTimes(1);
+      } finally {
+        errors.mockRestore();
+      }
+      expect(patchCalls(fixture)).toHaveLength(1);
+    });
+
+    it("syncAllAppWebhookUrls covers every org that owns an app row", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({ getHookConfig: () => ({ body: { url: deadHookUrl } }) });
+
+      await syncAllAppWebhookUrls(syncDeps(), publicUrl);
+
+      expect(patchCalls(fixture)).toHaveLength(1);
+      expect(patchCalls(fixture)[0].body).toEqual({ url: expectedHookUrl });
     });
   });
 

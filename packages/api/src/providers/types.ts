@@ -44,8 +44,8 @@ export interface Providers {
   /** Prebuild orchestration (Task 3) — service, routes, and scheduler.
    * `start()`/`stop()` are called from `main.ts` alongside `workflowRunHost`.
    * Every method treats `imageBuilder: null` as "prebuilds unavailable"
-   * internally; routes don't need to branch on `imageBuilder` themselves
-   * except for `GET /api/org/prebuilds/meta`. */
+   * internally, so routes do not branch on `imageBuilder` themselves. Read
+   * `builderBackend` when a route must report whether builds are wired. */
   prebuildService: SourceService;
 
   // Per-process Engine cache. Lives only on the server, not in engine.

@@ -66,6 +66,55 @@ if (typeof document !== "undefined") {
     get: () => 40,
   });
 
+  // vitest 4's jsdom environment does not provide `localStorage`, though it
+  // provides `window` and a real origin. The workspace scope persists there
+  // (`lib/workspace-scope.tsx`), and its provider reads it during the first
+  // render, so without this every test that renders a scoped surface fails
+  // before asserting anything. Same class of gap as the shims above: jsdom
+  // is missing a browser API this app legitimately uses.
+  //
+  // The guard probes behavior, not existence: Node >= 22.4 defines a
+  // built-in `localStorage` global that is inert without a valid
+  // `--localstorage-file` (reads warn, `clear` is missing), so an
+  // existence check leaves that broken object in place and every test
+  // touching persisted state fails under newer Node.
+  //
+  // Per-file, not shared: each test file gets its own jsdom global, so this
+  // starts empty for every file and needs no reset between them.
+  const localStorageWorks = (() => {
+    try {
+      const ls = globalThis.localStorage;
+      if (typeof ls === "undefined" || typeof ls.clear !== "function") return false;
+      ls.setItem("__vitest_probe__", "1");
+      try {
+        return ls.getItem("__vitest_probe__") === "1";
+      } finally {
+        // Unconditional: if `getItem` throws, the key must not survive in
+        // a store that turns out to be real and persisted.
+        ls.removeItem("__vitest_probe__");
+      }
+    } catch {
+      return false;
+    }
+  })();
+  if (!localStorageWorks) {
+    const store = new Map<string, string>();
+    const storage: Storage = {
+      get length() {
+        return store.size;
+      },
+      key: (i) => [...store.keys()][i] ?? null,
+      getItem: (k) => store.get(k) ?? null,
+      setItem: (k, v) => void store.set(k, String(v)),
+      removeItem: (k) => void store.delete(k),
+      clear: () => store.clear(),
+    };
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+    if (typeof window !== "undefined") {
+      Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+    }
+  }
+
   // Edge labels ("when" badges) measure their own text via SVG's `getBBox`,
   // which jsdom doesn't implement at all (not even as a zero-returning
   // stub) and throws instead. A fixed box is enough for the label to mount.

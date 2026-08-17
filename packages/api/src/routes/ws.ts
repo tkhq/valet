@@ -17,12 +17,14 @@
  */
 import type { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import type { ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
+import { deriveRunFields } from "../sessions/run-state.js";
+import { canViewSession } from "../services/session-access.js";
+import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
 
 const PING_INTERVAL_MS = 30_000;
@@ -68,14 +70,16 @@ export function registerWsRoutes(
           // process, killing every other live session. We instead emit an
           // error frame and close the socket gracefully.
           try {
-            // Verify session ownership before subscribing.
+            // Verify view access before subscribing — direct ownership, or
+            // team membership for a team's orchestrator session (see
+            // `services/session-access.ts`).
             const rows = await providers.db
               .select()
               .from(agentSessions)
-              .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.userId, userId)))
+              .where(eq(agentSessions.id, sessionId))
               .limit(1);
             const row = rows[0];
-            if (!row) {
+            if (!row || !(await canViewSession(providers.db, row, userId))) {
               ws.close(4040, "session not found");
               return;
             }
@@ -98,15 +102,28 @@ export function registerWsRoutes(
             );
             await engineSession.ensureDefaultThread();
 
+            // Run state at handshake time, from the same derivation the REST
+            // routes use (`sessions/run-state.ts`). Later changes arrive as
+            // their own frames (`queue.state`, `decision_gate`,
+            // `submission.settled`); this only seeds the opening view.
+            const unsettled = await providers.engineStore.listUnsettledSubmissions(sessionId);
+            const run = deriveRunFields(
+              { status: row.status as SessionStatus, updatedAt: row.updatedAt },
+              unsettled,
+            );
+
             send(ws, {
               type: "init",
               session: {
                 id: row.id,
                 workspace: row.workspace,
                 status: row.status as SessionStatus,
+                runState: run.runState,
+                owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
                 title: row.title ?? undefined,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
+                lastActivityAt: run.lastActivityAt,
                 // Reserved field; populating accurately requires a count
                 // query and the UI doesn't currently render this number.
                 messageCount: 0,

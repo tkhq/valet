@@ -36,13 +36,6 @@ export class DecisionGateExpiredError extends Error {
   }
 }
 
-export class DecisionGateConflictError extends Error {
-  constructor(public readonly gateId: string, public readonly currentStatus: string) {
-    super(`decision gate ${gateId} not pending (status=${currentStatus})`);
-    this.name = "DecisionGateConflictError";
-  }
-}
-
 interface PendingGate {
   gate: DecisionGate;
   resolve: (resolution: DecisionResolution) => void;

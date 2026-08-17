@@ -22,13 +22,14 @@
  * behind `requireOrgAdmin`.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
+import { resolveReturnOrigin } from "./credential-connect.js";
 import { createLinearService, resolveLinearOauthUrl, type LinearService } from "../services/linear.js";
 import { linearInstallations } from "../schema/index.js";
 
@@ -42,16 +43,20 @@ interface ConnectState {
   orgId: string;
   nonce: string;
   exp: number;
+  /** Origin to return the browser to. Captured at mint time, because the
+   * callback's referer is the provider. Empty when same-origin, which is
+   * the deployed shape. */
+  returnTo?: string;
 }
 
 function verifyConnectState(state: string, key: Buffer, nowMs: number): ConnectState | null {
   return verifyState<ConnectState>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, orgId, nonce, exp } = payload;
+    const { userId, orgId, nonce, exp, returnTo } = payload;
     if (typeof userId !== "string" || typeof orgId !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (exp < nowMs) return null;
-    return { userId, orgId, nonce, exp };
+    return { userId, orgId, nonce, exp, returnTo: typeof returnTo === "string" ? returnTo : "" };
   });
 }
 
@@ -94,11 +99,13 @@ linearConnectRouter.post("/connect", async (c) => {
 
   const user = c.var.user;
   const key = deriveSecretKey(c.var.providers.encryptionKey);
+  const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
   const statePayload: ConnectState = {
     userId: user.id,
     orgId: user.orgId,
     nonce: randomBytes(16).toString("hex"),
     exp: Date.now() + STATE_TTL_MS,
+    ...(returnTo ? { returnTo } : {}),
   };
   const state = signState(statePayload, key);
 
@@ -228,7 +235,7 @@ linearConnectRouter.get("/callback", async (c) => {
     .set({ webhookId, updatedAt: Date.now() })
     .where(eq(linearInstallations.id, installId));
 
-  return c.redirect("/settings/organization/linear?setup=ok", 302);
+  return c.redirect(`${verified.returnTo ?? ""}/settings/organization/linear?setup=ok`, 302);
 });
 
 linearConnectRouter.get("/", async (c) => {

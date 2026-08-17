@@ -10,7 +10,7 @@
 import { Hono } from "hono";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import type { ValidateEnvironment } from "@valet/workflow";
+import { WorkflowCursorError, type ValidateEnvironment } from "@valet/workflow";
 import {
   cancelWorkflowRun,
   createWorkflowDefinition,
@@ -18,6 +18,10 @@ import {
   getWorkflowDefinition,
   getWorkflowRunDetail,
   getWorkflowVersion,
+  isAuthorizedForOwner,
+  isRunOutcome,
+  isRunStatus,
+  listRunsForOwner,
   listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowVersions,
@@ -26,20 +30,45 @@ import {
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
+  RUN_OUTCOME_VALUES,
+  RUN_PAGE_LIMIT_MAX,
+  RUN_STATUS_VALUES,
   type WorkflowOwner,
+  type WorkflowOwnerRef,
+  type WorkflowOwnerType,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
+  workflowWebhookUrl,
 } from "../workflows/webhook-service.js";
+import {
+  createWorkflowSchedule,
+  deleteWorkflowSchedule,
+  listWorkflowSchedules,
+  type WorkflowScheduleSummary,
+} from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import { parseRepoInput, SkillSourceInputError } from "../services/skill-sources.js";
+import {
+  PublicSkillRepoReader,
+  SkillRepoReadError,
+  SkillRepoTimeoutError,
+} from "../services/skill-repo-reader.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  GetWorkflowImportFileResponse,
+  ListAllWorkflowRunsResponse,
+  CreateScheduleOnWorkflowRequest,
+  CreateWorkflowScheduleResponse,
+  DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
+  ListWorkflowSchedulesResponse,
+  WorkflowScheduleWire,
   GetWorkflowResponse,
   GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
@@ -57,6 +86,23 @@ import type {
 
 export const workflowsRouter = new Hono<AppEnv>();
 
+/** An empty query value means "not set": a client that always sends the
+ * field must not get a 400 for leaving it blank. */
+function blankToUndefined(value: string | undefined): string | undefined {
+  return value === undefined || value === "" ? undefined : value;
+}
+
+/** Parses `?limit=` for the run lists. Both list handlers share the range. */
+function parseRunLimit(raw: string | undefined): { limit?: number } | { error: string } {
+  const value = blankToUndefined(raw);
+  if (value === undefined) return {};
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > RUN_PAGE_LIMIT_MAX) {
+    return { error: `limit must be an integer from 1 to ${RUN_PAGE_LIMIT_MAX}` };
+  }
+  return { limit };
+}
+
 function serviceCtx(c: {
   var: { providers: WorkflowServiceDeps; user: { id: string; orgId: string } };
 }): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
@@ -66,6 +112,30 @@ function serviceCtx(c: {
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId },
     env: buildValidateEnvironment(actionPluginByService),
   };
+}
+
+const OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
+
+function isWorkflowOwnerType(value: string): value is WorkflowOwnerType {
+  return OWNER_TYPES.has(value);
+}
+
+/** The `?ownerType=&ownerId=` filter, or undefined when absent. Returns an
+ * error string when one half is present and the other is not — the same
+ * shape `GET /api/assistants` and `GET /api/sessions` take, so one client
+ * builds one query for all three. */
+function readOwnerFilter(
+  ownerType: string | undefined,
+  ownerId: string | undefined,
+): { scope?: WorkflowOwnerRef; error?: string } {
+  if (ownerType === undefined && ownerId === undefined) return {};
+  if (ownerType === undefined || ownerId === undefined) {
+    return { error: "Filter by owner with both ownerType and ownerId, or send neither." };
+  }
+  if (!isWorkflowOwnerType(ownerType)) {
+    return { error: "ownerType must be 'user', 'team' or 'org'." };
+  }
+  return { scope: { ownerType, ownerId } };
 }
 
 // ── Definitions ───────────────────────────────────────────────────────────
@@ -108,9 +178,193 @@ workflowsRouter.post("/", async (c) => {
   return c.json(resp, 201);
 });
 
+/**
+ * Without a filter this returns every workflow the caller can reach: their
+ * own, plus every team they belong to. `?ownerType=&ownerId=` narrows that
+ * to one owner, for a client that shows one workspace at a time.
+ */
 workflowsRouter.get("/", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const resp: ListWorkflowsResponse = { workflows: await listWorkflowDefinitions(deps, owner) };
+
+  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+  // The same check `GET /api/workflows/:id` runs, asked of the owner instead
+  // of a row, and answered here rather than in the query — an id from a
+  // query string never reaches SQL unchecked. 404 because a filter the
+  // caller may not use must read exactly like a filter that matches
+  // nothing. An `ownerType=org` filter always lands here: no rule admits
+  // anybody to an org-owned workflow, so one is no more listable than it is
+  // openable.
+  if (filter.scope && !(await isAuthorizedForOwner(deps.db, owner, filter.scope))) {
+    return c.json({ error: "owner not found" }, 404);
+  }
+
+  const resp: ListWorkflowsResponse = {
+    workflows: await listWorkflowDefinitions(deps, owner, filter.scope),
+  };
+  return c.json(resp);
+});
+
+// ── Cross-workflow run list ───────────────────────────────────────────────
+//
+// Registration order is load-bearing: `GET /:id` below also matches the
+// single segment `/runs`, and the router picks the route registered first.
+// Keep this handler above it. (`GET /runs/:runId` further down is safe at
+// any position — two segments never collide with `/:id`.)
+
+workflowsRouter.get("/runs", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+
+  const limit = parseRunLimit(c.req.query("limit"));
+  if ("error" in limit) return c.json({ error: limit.error }, 400);
+
+  // A whole number, not merely finite: `created_at` is an integer column, and
+  // a fractional or out-of-range value reaches the driver as a syntax error.
+  const rawSince = blankToUndefined(c.req.query("since"));
+  const since = rawSince === undefined ? undefined : Number(rawSince);
+  if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) {
+    return c.json({ error: "since must be a whole millisecond timestamp, 0 or greater" }, 400);
+  }
+
+  // `status`, `outcome` and `workflowId` are repeatable and match any-of.
+  const rawStatus = c.req.queries("status");
+  const status = rawStatus?.filter(isRunStatus);
+  if (rawStatus && status && status.length !== rawStatus.length) {
+    return c.json({ error: `status must be one of: ${RUN_STATUS_VALUES.join(", ")}` }, 400);
+  }
+  const rawOutcome = c.req.queries("outcome");
+  const outcome = rawOutcome?.filter(isRunOutcome);
+  if (rawOutcome && outcome && outcome.length !== rawOutcome.length) {
+    return c.json({ error: `outcome must be one of: ${RUN_OUTCOME_VALUES.join(", ")}` }, 400);
+  }
+
+  let page;
+  try {
+    page = await listRunsForOwner(deps, owner, {
+      workflowIds: c.req.queries("workflowId"),
+      status,
+      outcome,
+      parentRunId: blankToUndefined(c.req.query("parentRunId")),
+      since,
+      limit: limit.limit,
+      cursor: blankToUndefined(c.req.query("cursor")),
+    });
+  } catch (err) {
+    if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  // Same convention as every other handler here: a workflow the caller
+  // cannot read is indistinguishable from one that does not exist.
+  if (!page) return c.json({ error: "workflow not found" }, 404);
+
+  // Rows carry `workflowName`: this list mixes workflows, so the hub's Runs
+  // tab has no heading to name them from.
+  const resp: ListAllWorkflowRunsResponse = page;
+  return c.json(resp);
+});
+
+// ── Import ────────────────────────────────────────────────────────────────
+
+/**
+ * Reads one file out of a PUBLIC GitHub repository, so the import dialog can
+ * take a definition that lives in version control.
+ *
+ * PUBLIC REPOSITORIES ONLY, through the tokenless `PublicSkillRepoReader`.
+ * The reason is the one its module comment gives for skill sources, and it
+ * applies here word for word: a token resolved on this path would be the
+ * organization GitHub App's, which reaches every repository the App is
+ * installed on, and nothing in this codebase yet checks that the caller may
+ * read the repository they typed. Until such a check exists, the App's reach
+ * must not sit behind a box that takes a repository name.
+ *
+ * The file is returned as TEXT. The client owns the one parser that reads
+ * both a pasted file and this response, so the two sources cannot drift into
+ * accepting different shapes, and the definition is validated where every
+ * other definition is validated — `POST /` below, with the full environment
+ * hooks that reject an unknown service.
+ */
+workflowsRouter.get("/import/repo-file", async (c) => {
+  const repo = blankToUndefined(c.req.query("repo"));
+  const path = blankToUndefined(c.req.query("path"));
+  if (repo === undefined) {
+    return c.json({ error: "Enter a repository. Write it as owner/repo, or paste its GitHub URL." }, 400);
+  }
+  if (path === undefined) {
+    return c.json(
+      { error: "Enter the path of the workflow file in the repository, such as workflows/deploy.json." },
+      400,
+    );
+  }
+
+  // `parseRepoInput` is the address parser the skill sources form already
+  // uses. It reads `owner/repo` out of a bare name or a GitHub URL, and it
+  // refuses a ref or a path that leaves the repository.
+  let parsed;
+  try {
+    parsed = parseRepoInput(repo, { ref: blankToUndefined(c.req.query("ref")), subpath: path });
+  } catch (err) {
+    if (err instanceof SkillSourceInputError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  if (parsed.subpath === "") {
+    return c.json(
+      { error: "Enter the path of the workflow file in the repository, such as workflows/deploy.json." },
+      400,
+    );
+  }
+
+  const at = parsed.ref === "" ? "" : ` at ${parsed.ref}`;
+  let content: string | null;
+  try {
+    // Constructed per request so the GitHub base URL is read now, not at
+    // module load — the same rule `repos/github-host.ts` follows.
+    content = await new PublicSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
+  } catch (err) {
+    // The reader words its own messages for the skill sync sweep, which
+    // tells the reader to wait for the next poll. An import has a person in
+    // front of it, so the action named here is the one they can take now.
+    if (err instanceof SkillRepoTimeoutError) {
+      return c.json(
+        { error: `GitHub did not answer for ${parsed.repoFullName}. Try the import again.` },
+        504,
+      );
+    }
+    if (err instanceof SkillRepoReadError) {
+      return c.json(
+        {
+          error: `GitHub refused to serve ${parsed.repoFullName}/${parsed.subpath}. Valet reads public repositories without a credential, and GitHub limits that to 60 requests each hour. Wait, then try the import again.`,
+        },
+        502,
+      );
+    }
+    throw err;
+  }
+
+  // One message covers every miss: unauthenticated, a private repository, a
+  // wrong branch, a misspelled path and a directory all answer the same way.
+  if (content === null) {
+    return c.json(
+      {
+        error: `Valet found no file at ${parsed.subpath} in ${parsed.repoFullName}${at}. Valet reads public repositories only, so a private repository, a wrong branch and a misspelled path look the same here. Check the repository, the path and the branch, and make the repository public.`,
+      },
+      404,
+    );
+  }
+  if (content.trim() === "") {
+    return c.json(
+      {
+        error: `${parsed.subpath} in ${parsed.repoFullName}${at} is empty, or larger than the 1 MB GitHub serves inline. Point the path at the exported definition file.`,
+      },
+      400,
+    );
+  }
+
+  const resp: GetWorkflowImportFileResponse = {
+    repo: parsed.repoFullName,
+    path: parsed.subpath,
+    ref: parsed.ref,
+    content,
+  };
   return c.json(resp);
 });
 
@@ -164,6 +418,10 @@ workflowsRouter.delete("/:id", async (c) => {
 });
 
 // ── Runs ──────────────────────────────────────────────────────────────────
+// The owner filter stops at the list above. Every per-workflow route below
+// — runs, versions, webhook, schedules — already resolves one workflow id
+// and checks its owner, and a workflow has exactly one owner, so an owner
+// filter on those could only restate what the path already says.
 
 workflowsRouter.post("/:id/runs", async (c) => {
   const { deps, owner } = serviceCtx(c);
@@ -195,9 +453,23 @@ workflowsRouter.post("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/runs", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const runs = await listWorkflowRuns(deps, owner, c.req.param("id"));
-  if (!runs) return c.json({ error: "workflow not found" }, 404);
-  const resp: ListWorkflowRunsResponse = { runs };
+
+  const limit = parseRunLimit(c.req.query("limit"));
+  if ("error" in limit) return c.json({ error: limit.error }, 400);
+
+  let page;
+  try {
+    page = await listWorkflowRuns(deps, owner, c.req.param("id"), {
+      limit: limit.limit,
+      cursor: blankToUndefined(c.req.query("cursor")),
+    });
+  } catch (err) {
+    if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  if (!page) return c.json({ error: "workflow not found" }, 404);
+
+  const resp: ListWorkflowRunsResponse = page;
   return c.json(resp);
 });
 
@@ -231,7 +503,10 @@ workflowsRouter.post("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await mintOrRotateWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, 404);
-  const resp: WorkflowWebhookResponse = result.webhook;
+  const resp: WorkflowWebhookResponse = {
+    ...result.webhook,
+    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  };
   return c.json(resp);
 });
 
@@ -240,7 +515,10 @@ workflowsRouter.get("/:id/webhook", async (c) => {
   const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: "workflow not found" }, 404);
   if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
-  const resp: WorkflowWebhookResponse = result.webhook;
+  const resp: WorkflowWebhookResponse = {
+    ...result.webhook,
+    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  };
   return c.json(resp);
 });
 
@@ -249,6 +527,89 @@ workflowsRouter.delete("/:id/webhook", async (c) => {
   const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
   const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
+  return c.json(resp);
+});
+
+// ── Schedules (cron triggers) ─────────────────────────────────────────────
+// Owner-scoped like the webhook routes above: every route resolves the
+// workflow through `getWorkflowDefinition` first, so an unowned workflow
+// 404s identically to a missing one. The schedule service also carries
+// orchestrator-prompt schedules; this surface manages only the
+// workflow-scoped kind, so every row it returns has a `workflowId`.
+
+function toScheduleWire(s: WorkflowScheduleSummary, workflowId: string): WorkflowScheduleWire {
+  return {
+    scheduleId: s.scheduleId,
+    workflowId: s.workflowId ?? workflowId,
+    name: s.name,
+    cron: s.cron,
+    timezone: s.timezone,
+    enabled: s.enabled,
+    lastFiredAt: s.lastFiredAt,
+    nextFireAt: s.nextFireAt,
+  };
+}
+
+workflowsRouter.get("/:id/schedules", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  const schedules = await listWorkflowSchedules(deps.db, owner.orgId, id);
+  const resp: ListWorkflowSchedulesResponse = {
+    schedules: schedules.map((s) => toScheduleWire(s, id)),
+  };
+  return c.json(resp);
+});
+
+workflowsRouter.post("/:id/schedules", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+
+  let body: CreateScheduleOnWorkflowRequest;
+  try {
+    body = (await c.req.json()) as CreateScheduleOnWorkflowRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ error: "name must be a non-empty string" }, 400);
+  }
+  if (!body.cron || typeof body.cron !== "string") {
+    return c.json({ error: "cron must be a 5-field cron expression string" }, 400);
+  }
+  if (body.timezone !== undefined && typeof body.timezone !== "string") {
+    return c.json({ error: "timezone must be an IANA timezone string" }, 400);
+  }
+  if (
+    body.input !== undefined &&
+    (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))
+  ) {
+    return c.json({ error: "input must be a JSON object" }, 400);
+  }
+
+  const result = await createWorkflowSchedule(
+    deps.db,
+    { id: owner.userId, orgId: owner.orgId },
+    { workflowId: id, name, cron: body.cron, timezone: body.timezone, input: body.input },
+  );
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  const resp: CreateWorkflowScheduleResponse = toScheduleWire(result.schedule, id);
+  return c.json(resp, 201);
+});
+
+workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const scheduleId = c.req.param("scheduleId");
+  const summary = await getWorkflowDefinition(deps, owner, id);
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  const result = await deleteWorkflowSchedule(deps.db, owner.orgId, scheduleId, id);
+  if (result === "not_found") return c.json({ error: "schedule not found" }, 404);
+  const resp: DeleteWorkflowScheduleResponse = { deleted: true };
   return c.json(resp);
 });
 
@@ -350,5 +711,3 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   const resp: RetryWorkflowRunResponse = { runId: result.runId };
   return c.json(resp, 201);
 });
-
-export type WorkflowsRouter = typeof workflowsRouter;

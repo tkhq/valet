@@ -10,7 +10,10 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { agentSessions, childWatches } from "../schema/index.js";
-import type { GetOrchestratorChildrenResponse } from "../wire/types.js";
+import type {
+  GetOrchestratorChildrenResponse,
+  GetOrchestratorInfoResponse,
+} from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -19,10 +22,19 @@ afterEach(async () => {
   api = undefined;
 });
 
-const ORCH_SESSION_ID = "orchestrator:user:local-user";
+/** The caller's default assistant session id. An assistant addresses its
+ * session by its own generated id, so no test can spell it as a literal —
+ * ask the API for it, then seed the watch row against it. */
+async function assistantSessionIdFor(target: TestApi): Promise<string> {
+  const res = await fetch(`${target.baseUrl}/api/orchestrator/info`);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as GetOrchestratorInfoResponse;
+  return body.sessionId;
+}
 
 async function insertChild(opts: { id: string; settled: boolean }): Promise<void> {
   const { db } = api!.providers;
+  const parentSessionId = await assistantSessionIdFor(api!);
   const now = Date.now();
   await db.insert(agentSessions).values({
     id: opts.id,
@@ -39,7 +51,7 @@ async function insertChild(opts: { id: string; settled: boolean }): Promise<void
   await db.insert(childWatches).values({
     childSessionId: opts.id,
     queueItemId: `qi-${opts.id}`,
-    parentSessionId: ORCH_SESSION_ID,
+    parentSessionId,
     parentThreadId: "th-1",
     actorUserId: "local-user",
     orgId: "local-org",

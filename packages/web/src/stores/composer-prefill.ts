@@ -21,6 +21,12 @@ interface ComposerPrefillState {
    * counter instead of a boolean so repeated requests always re-trigger
    * the subscriber effect. */
   focusNonce: number;
+  /** Monotonic counter bumped by every `set()`, for the same reason
+   * `focusNonce` exists: the workflow editor's assistant panel keeps its
+   * Composer mounted beside the canvas, so a suggestion pressed while the
+   * panel is open has no mount to seed. The Composer watches this counter
+   * and consumes on a bump. */
+  prefillNonce: number;
   set: (text: string) => void;
   /** Reads and clears in one step — a second call returns `null`. */
   consume: () => string | null;
@@ -30,7 +36,8 @@ interface ComposerPrefillState {
 export const useComposerPrefillStore = create<ComposerPrefillState>((set, get) => ({
   text: null,
   focusNonce: 0,
-  set: (text) => set({ text }),
+  prefillNonce: 0,
+  set: (text) => set((s) => ({ text, prefillNonce: s.prefillNonce + 1 })),
   consume: () => {
     const current = get().text;
     if (current !== null) set({ text: null });

@@ -10,12 +10,14 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "@valet/api/wire";
 
 const createManifestMutateAsync = vi.fn();
+const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
 const deleteAppMutate = vi.fn();
 
 let githubAppData: GetGithubAppResponse | undefined;
 let isLoading = false;
 let isError = false;
+let saveCredentialError: Error | null = null;
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -29,11 +31,17 @@ vi.mock("~/api/settings", async (importOriginal) => {
       isPending: false,
       error: null,
     }),
+    useSaveGithubAppCredential: () => ({
+      mutateAsync: saveCredentialMutateAsync,
+      isPending: false,
+      error: saveCredentialError,
+    }),
     useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
     useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false }),
   };
 });
 
+import { ApiError } from "~/api/client";
 import { GithubAppSection } from "./github-app-section";
 
 describe("GithubAppSection", () => {
@@ -42,6 +50,7 @@ describe("GithubAppSection", () => {
     githubAppData = undefined;
     isLoading = false;
     isError = false;
+    saveCredentialError = null;
     vi.stubGlobal("confirm", vi.fn(() => true));
   });
 
@@ -58,7 +67,7 @@ describe("GithubAppSection", () => {
   });
 
   it("not configured: shows Create GitHub App, then renders the manifest form on click", async () => {
-    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
     const manifestResponse: PostGithubAppManifestResponse = {
       url: "https://github.com/settings/apps/new",
       manifest: {
@@ -91,7 +100,7 @@ describe("GithubAppSection", () => {
   });
 
   it("org toggle gates the button until a name is entered and sends target org:{login}", async () => {
-    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
     createManifestMutateAsync.mockResolvedValue({
       url: "https://github.com/organizations/acme/settings/apps/new",
       manifest: {
@@ -121,7 +130,7 @@ describe("GithubAppSection", () => {
   });
 
   it("advanced picker sends the FULL permission map (deselections stick) and chosen events", async () => {
-    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
     createManifestMutateAsync.mockResolvedValue({
       url: "https://github.com/settings/apps/new",
       manifest: {
@@ -160,6 +169,128 @@ describe("GithubAppSection", () => {
     expect(body.permissions.contents).toBe("read");
   });
 
+  // ── The second setup path: connect an App that already exists ──────────
+
+  const NOT_CONFIGURED: GetGithubAppResponse = {
+    configured: false,
+    installations: [],
+    webhook: { mode: "manual" },
+    installationsCheckedAt: null,
+  };
+
+  /** Opens the second path and fills the two fields the server requires. */
+  function openExistingAppForm(): void {
+    fireEvent.click(screen.getByRole("button", { name: "I already have a GitHub App" }));
+    fireEvent.change(screen.getByLabelText("App ID"), { target: { value: " 4242 " } });
+    fireEvent.change(screen.getByLabelText("Private key"), {
+      target: { value: "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----" },
+    });
+  }
+
+  it("not configured: offers the second path alongside the manifest flow, not instead of it", () => {
+    githubAppData = NOT_CONFIGURED;
+    render(<GithubAppSection />);
+
+    // Creating an App stays the default and keeps working.
+    expect(screen.getByRole("button", { name: "Create GitHub App" })).toBeTruthy();
+    // The second path starts collapsed, so it does not compete with it.
+    expect(screen.getByRole("button", { name: "I already have a GitHub App" })).toBeTruthy();
+    expect(screen.queryByLabelText("App ID")).toBeNull();
+  });
+
+  it("existing App: Connect is gated until both required fields are filled", () => {
+    githubAppData = NOT_CONFIGURED;
+    render(<GithubAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "I already have a GitHub App" }));
+    const connect = screen.getByRole("button", { name: "Connect App" }) as HTMLButtonElement;
+    expect(connect.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("App ID"), { target: { value: "4242" } });
+    expect(connect.disabled).toBe(true); // no key yet
+
+    fireEvent.change(screen.getByLabelText("Private key"), {
+      target: { value: "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----" },
+    });
+    expect(connect.disabled).toBe(false);
+  });
+
+  it("existing App: sends the trimmed app id and the key, and omits every field left blank", async () => {
+    githubAppData = NOT_CONFIGURED;
+    saveCredentialMutateAsync.mockResolvedValue(NOT_CONFIGURED);
+    render(<GithubAppSection />);
+
+    openExistingAppForm();
+    fireEvent.click(screen.getByRole("button", { name: "Connect App" }));
+
+    await waitFor(() => expect(saveCredentialMutateAsync).toHaveBeenCalled());
+    expect(saveCredentialMutateAsync).toHaveBeenCalledWith({
+      appId: "4242",
+      privateKey: "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----",
+    });
+  });
+
+  it("existing App: sends the optional secrets and overrides only when they are filled", async () => {
+    githubAppData = NOT_CONFIGURED;
+    saveCredentialMutateAsync.mockResolvedValue(NOT_CONFIGURED);
+    render(<GithubAppSection />);
+
+    openExistingAppForm();
+    fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: "the-client-secret" } });
+    fireEvent.change(screen.getByLabelText("Webhook secret"), { target: { value: "the-webhook-secret" } });
+    fireEvent.change(screen.getByLabelText("App slug"), { target: { value: "my-app" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect App" }));
+
+    await waitFor(() => expect(saveCredentialMutateAsync).toHaveBeenCalled());
+    const body = saveCredentialMutateAsync.mock.calls[0][0] as Record<string, string>;
+    expect(body.oauthClientSecret).toBe("the-client-secret");
+    expect(body.webhookSecret).toBe("the-webhook-secret");
+    expect(body.appSlug).toBe("my-app");
+    // Left blank, so it is not sent — the server reads it from GitHub.
+    expect(body.oauthClientId).toBeUndefined();
+  });
+
+  it("existing App: shows the server's refusal message, which names the fix", async () => {
+    githubAppData = NOT_CONFIGURED;
+    const refusal = new ApiError(400, "POST /org/github-app/credential → 400", {
+      error: "GitHub rejected this App ID and private key. Check the App ID at the top of the app's settings page.",
+    });
+    saveCredentialMutateAsync.mockRejectedValue(refusal);
+    saveCredentialError = refusal;
+    render(<GithubAppSection />);
+
+    openExistingAppForm();
+    fireEvent.click(screen.getByRole("button", { name: "Connect App" }));
+
+    // The server's own text is rendered, not the "POST … → 400" transport line.
+    expect(await screen.findByText(/GitHub rejected this App ID and private key/)).toBeTruthy();
+    expect(screen.queryByText(/→ 400/)).toBeNull();
+  });
+
+  it("existing App: says the server takes over the webhook URL before anything is pasted", () => {
+    githubAppData = NOT_CONFIGURED;
+    render(<GithubAppSection />);
+    fireEvent.click(screen.getByRole("button", { name: "I already have a GitHub App" }));
+    expect(screen.getByText(/takes over the App's webhook URL/)).toBeTruthy();
+  });
+
+  it("configured: the second path is gone — there is nothing left to connect", () => {
+    githubAppData = {
+      configured: true,
+      app: {
+        appId: "123",
+        appSlug: "valet-acme",
+        htmlUrl: "https://github.com/apps/valet-acme",
+        installUrl: "https://github.com/apps/valet-acme/installations/new",
+      },
+      installations: [],
+      webhook: { mode: "manual" },
+    installationsCheckedAt: null,
+    };
+    render(<GithubAppSection />);
+    expect(screen.queryByRole("button", { name: "I already have a GitHub App" })).toBeNull();
+  });
+
   it("configured: renders the app card, installations table, and webhook badge", () => {
     githubAppData = {
       configured: true,
@@ -190,6 +321,7 @@ describe("GithubAppSection", () => {
         },
       ],
       webhook: { mode: "public" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
 
@@ -224,6 +356,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
 
@@ -247,6 +380,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
     fireEvent.click(screen.getByRole("button", { name: "Refresh installations" }));
@@ -264,6 +398,7 @@ describe("GithubAppSection", () => {
       },
       installations: [],
       webhook: { mode: "manual" },
+    installationsCheckedAt: null,
     };
     render(<GithubAppSection />);
     fireEvent.click(screen.getByRole("button", { name: "Remove App" }));

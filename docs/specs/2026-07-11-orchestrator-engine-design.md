@@ -6,7 +6,7 @@
 
 This spec covers:
 
-- Orchestrator identity: user, team, and org orchestrators as Principals, well-known session IDs
+- Orchestrator identity: user, team, and org principals own assistants, each with its own session ID
 - Lifecycle on the engine: lazy creation, instant wake, sandbox-less default
 - Channel bindings: the tenancy-resolution model the engine's ingress pipeline delegates to
 - Routing policy: DMs vs team-bound surfaces vs org surfaces, unbound events
@@ -28,7 +28,11 @@ This spec covers:
 
 ## Identity
 
-Ownership everywhere is a **Principal** — `{ type: 'user' | 'team' | 'org'; id }`, serialized `${type}:${id}`. Orchestrator session IDs are `orchestrator:{type}:{id}`, produced and parsed only through the shared principal helpers (`orchestratorSessionId` / `parseOrchestratorSessionId`) — never ad-hoc prefix checks. Colon-free URL aliases exist per kind (`orchestrator`, `team-orchestrator-{teamId}`).
+Ownership everywhere is a **Principal** — `{ type: 'user' | 'team' | 'org'; id }`, serialized `${type}:${id}`.
+
+A principal owns any number of **assistants**, and an assistant, not the principal, holds the session. Assistant session IDs are `assistant:{assistantId}`, produced and parsed only through the shared helpers (`assistantSessionId` / `parseAssistantSessionId`) — never ad-hoc prefix checks. The principal is the assistant's owner and scope; it is no longer the session's address. `docs/specs/2026-08-13-assistants-design.md` supersedes the one-orchestrator-per-principal model this section originally described, and is the contract for the `assistants` table, the default assistant and the routes.
+
+The word "orchestrator" in the rest of this document means an assistant session — `purpose: 'orchestrator'` on the engine session, and the routes that still carry the name.
 
 Session rows carry `owner: Principal` **plus an actor** (`userId` = the human whose action created or triggered the work). For team/org-owned sessions, owner says who the work belongs to; actor preserves per-human attribution on every prompt, memory write, and credential use.
 
@@ -36,13 +40,17 @@ Three orchestrator kinds, all full engine sessions with `purpose: 'orchestrator'
 
 | | User orchestrator | Team orchestrator | Org orchestrator |
 |---|---|---|---|
-| Session ID | `orchestrator:user:{userId}` | `orchestrator:team:{teamId}` | `orchestrator:org:{orgId}` |
+| Session ID | `assistant:{assistantId}` | `assistant:{assistantId}` | `assistant:{assistantId}` |
 | Steered by | owner only | any team member; team admins get owner-level lifecycle | org admins; members converse via bound surfaces |
 | Receives | DMs, personal schedules, signals addressed to the user | team channel bindings, team schedules, team workflow dispatch | org-wide surfaces, unattributed events, org automation |
 | Memory scope | `user:{userId}` | `team:{teamId}` | `org:{orgId}` |
 | Default queue mode | `steer` | `followup` | `followup` |
 
-Session IDs are stable and permanent — one durable identity per orchestrator, never rotated. `orchestrator_identities` rows are unique on `(orgId, ownerType, ownerId)`; handles are unique per org. The orchestrator persona is owner-kind-aware: a team orchestrator's persona states that it serves multiple people and attributes statements to actors; it is not a personal persona with a different name.
+Session IDs are stable and permanent — one durable identity per assistant, never rotated. `assistants` rows are unique on `session_id`, and a PARTIAL unique index on `(org_id, owner_type, owner_id) WHERE is_default` holds exactly one default per principal. The default is what a caller that named only a principal means: a workflow `orchestrator` node, an event subscription and a channel binding all resolve principal → default assistant, because none of them has a basis for choosing between several. A human picks; automation gets a stable target.
+
+Every path that turns a principal into a session goes through `resolveDefaultAssistant` (`packages/api/src/assistants/service.ts`), which creates the default on first use. Nothing derives a session ID from a principal.
+
+The assistant persona is owner-kind-aware: a team assistant's persona states that it serves multiple people and attributes statements to actors; it is not a personal persona with a different name.
 
 **Teams** are the org's membership structure: `teams` (names unique per org) + `team_members` (`role: 'admin' | 'member'`), with atomic last-admin guards on role change and removal, creator auto-admitted as admin, and deletion blocked while team-owned workflows exist. Team membership is the sole access path to team-owned resources (sessions, memory, credentials, workflows).
 
@@ -52,7 +60,7 @@ The org orchestrator is the org's chief of staff — the responder for org-wide 
 
 ### Lazy creation
 
-An orchestrator session is created on first demand — first channel binding, first web visit to the orchestrator UI, first scheduled dispatch. Creation is idempotent by well-known ID (`engine.createSession({ id })` returns the existing session). There is no onboarding step that must succeed before events can flow; an event arriving for a not-yet-created orchestrator creates it inline.
+An assistant session is created on first demand — first channel binding, first web visit to the assistant UI, first scheduled dispatch. Each of those names a principal, so each resolves that principal's default assistant first (creating the row if this is the first use), then creates the session idempotently by the assistant's own ID (`engine.createSession({ id })` returns the existing session). There is no onboarding step that must succeed before events can flow; an event arriving for a not-yet-created assistant creates it inline.
 
 ### Instant wake
 
@@ -77,7 +85,7 @@ Consequences worth stating:
 
 ### Health
 
-The engine's submission machinery replaces the orchestrator-specific reconcile/backoff apparatus. A crashed turn is reconciled by the submission decision tree; a stuck sandbox is a failed tool call plus background re-provision. The remaining application-level check is a reconcile sweep that verifies every `orchestrator_identities` row has a live session row, and re-creates lazily on drift.
+The engine's submission machinery replaces the orchestrator-specific reconcile/backoff apparatus. A crashed turn is reconciled by the submission decision tree; a stuck sandbox is a failed tool call plus background re-provision. The remaining application-level check is a reconcile sweep that verifies every live `assistants` row has a session row, and re-creates lazily on drift.
 
 ## Channel Bindings and Routing
 
@@ -92,7 +100,7 @@ interface ChannelBinding {
   channelType: string;          // 'slack' | 'telegram' | ...
   conversationKey: string;      // transport codec output, e.g. slack:v1:{team}:{channel}[:{threadTs}]
   owner: Principal;             // user:{id} | team:{id} | org:{id}
-  sessionId: string;            // orchestrator:{type}:{id} | a specific session
+  sessionId: string;            // assistant:{assistantId} | a specific session
   threadKeyTemplate: string;    // how external threads map to engine thread keys
   queueMode: QueueMode;         // default per owner kind: user 'steer', team/org 'followup'
   triggerMode: 'mention' | 'all';  // shared surfaces: respond only when mentioned (or in an active thread) vs everything
@@ -208,7 +216,7 @@ Team-owned sessions resolve credentials by **reference, not copy**: a team crede
 
 Membership is the only access path to team-owned resources — no creator shortcut, no participant grants, no org-visible fallback:
 
-- **Team sessions**: current membership grants `collaborator` (view + prompt); team `admin` grants `owner` (hibernate/delete/restart/bindings). Non-members receive not-found, indistinguishable from a nonexistent session.
+- **Team sessions**: current membership grants `collaborator` (view + prompt); team `admin` grants `owner` (hibernate/delete/restart/bindings). Non-members receive not-found, indistinguishable from a nonexistent session. The `user_id` stamped on a team session's row records the member who opened it first; it is actor provenance, and it grants that member nothing. One narrow exception to the no-org-fallback rule above: an org admin holds the same owner-level authority on a team session. This is the recovery path the team mutation routes already give them, so a team whose last admin left the org is never stranded.
 - **Eligibility is re-checked at action time**, not delivery time: a decision-gate resolution or prompt from a forwarded card is validated against *current* membership at click. Removal from a team breaks the member's sourced credentials and evicts them from live team-session connections immediately.
 - **User orchestrators** are visible and steerable only by their owner. **Org orchestrators** are readable by members, steerable by admins.
 - Decision gates route to actors authorized to resolve them: child-session gates to the parent's audience (team members for team-owned parents, the owner for personal), org-orchestrator gates to admins or an automation rule's designated approvers.

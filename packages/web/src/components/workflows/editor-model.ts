@@ -279,6 +279,48 @@ export function createEdgeId(from: string, to: string, fromOutput?: 'true' | 'fa
   return `${from}${fromOutput ? `:${fromOutput}` : ''}->${to}`;
 }
 
+/**
+ * The graph alone, as a string two definitions can be compared by.
+ *
+ * The editor uses it to tell an edit made somewhere else — the assistant
+ * panel patches the stored workflow directly — from its own re-renders.
+ * Two of those re-renders would otherwise read as a change. `ui` moves on
+ * every frame of a pan or a node drag, so it is left out. And a definition
+ * that has been through the `jsonb` column comes back with its keys in the
+ * database's order rather than the order this client wrote them in, so key
+ * order is removed as well: without that, a plain Save followed by more
+ * typing raises the "somebody changed this workflow" bar with nobody on the
+ * other end.
+ */
+export function graphSignature(definition: WorkflowDefinition): string {
+  return stableJson({
+    nodes: definition.nodes,
+    edges: definition.edges,
+    policy: definition.policy ?? null,
+  });
+}
+
+/** `JSON.stringify` with object keys in sorted order. Array order is kept:
+ * in a DAG the node and edge order is content, not formatting. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    const items: unknown[] = value;
+    return `[${items.map(stableJson).join(',')}]`;
+  }
+  if (typeof value === 'object' && value !== null) {
+    // The same narrowing the shape guards below use: `typeof` proves the
+    // object-ness, and the cast only names the index signature.
+    const fields = Object.entries(value as Record<string, unknown>)
+      .filter(([, field]) => field !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, field]) => `${JSON.stringify(key)}:${stableJson(field)}`);
+    return `{${fields.join(',')}}`;
+  }
+  // `JSON.stringify` answers undefined for a bare undefined, which cannot
+  // appear inside an object here but can be passed in directly.
+  return JSON.stringify(value) ?? 'null';
+}
+
 export function workflowEdgeToFlowEdge(edge: WorkflowEdge): WorkflowFlowEdge {
   return {
     id: createEdgeId(edge.from, edge.to, edge.fromOutput),
@@ -516,20 +558,6 @@ export function setNodePosition(
   };
 }
 
-/** Batch form of `setNodePosition` for e.g. drag-end over multiple selected nodes. */
-export function applyPositions(
-  definition: WorkflowDefinition,
-  positions: Record<string, FlowPosition>,
-): WorkflowDefinition {
-  const knownIds = new Set(definition.nodes.map((node) => node.id));
-  const nextNodes = { ...(definition.ui?.nodes ?? {}) };
-  for (const [nodeId, position] of Object.entries(positions)) {
-    if (!knownIds.has(nodeId)) continue;
-    nextNodes[nodeId] = { ...(nextNodes[nodeId] ?? {}), position };
-  }
-  return { ...definition, ui: { ...definition.ui, nodes: nextNodes } };
-}
-
 export function setViewport(definition: WorkflowDefinition, viewport: FlowViewport): WorkflowDefinition {
   return { ...definition, ui: { nodes: definition.ui?.nodes ?? {}, viewport } };
 }
@@ -559,7 +587,7 @@ export function autoLayout(definition: WorkflowDefinition): Record<string, FlowP
     outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
   }
 
-  const depths = computeBfsDepths(definition.nodes, incoming, outgoing);
+  const { depths } = computeBfsDepths(definition.nodes, incoming, outgoing);
 
   const nodesByDepth = new Map<number, string[]>();
   for (const node of definition.nodes) {
@@ -576,11 +604,61 @@ export function autoLayout(definition: WorkflowDefinition): Record<string, FlowP
   return positions;
 }
 
+/**
+ * Give a saved position to every node that has none, in a free column to
+ * the right of the placed ones.
+ *
+ * The assistant edits a definition through `workflows.patch_workflow`,
+ * whose patch shape carries no `ui` field, so a node it adds arrives with
+ * no entry in `ui.nodes`. `toFlow` then falls back to `autoLayout` for that
+ * one id, and auto-layout coordinates have no relation to hand-dragged
+ * ones — the new node can land on top of a node the user placed. The
+ * client closes the gap when it adopts a patched definition.
+ *
+ * Returns the definition unchanged when every node already has a position,
+ * and also when NO node has one. A definition with no `ui.nodes` at all is
+ * the normal shape for a workflow the agent wrote or a template installed,
+ * and `toFlow` lays that out with `autoLayout`, which reads the edges.
+ * Nothing is hand-placed there, so nothing can be covered — writing
+ * coordinates would only replace a graph-shaped layout with one flat
+ * column.
+ */
+export function positionNewNodes(definition: WorkflowDefinition): WorkflowDefinition {
+  const saved = definition.ui?.nodes ?? {};
+  const xs = Object.values(saved).map((entry) => entry.position.x);
+  if (xs.length === 0) return definition;
+  const unplaced = definition.nodes.filter((node) => saved[node.id] === undefined);
+  if (unplaced.length === 0) return definition;
+
+  const column = Math.max(...xs) + LAYOUT_COLUMN_GAP;
+  const placed: Record<string, { position: FlowPosition }> = { ...saved };
+  unplaced.forEach((node, row) => {
+    placed[node.id] = { position: { x: column, y: row * LAYOUT_ROW_GAP } };
+  });
+
+  return { ...definition, ui: { ...definition.ui, nodes: placed } };
+}
+
+interface BfsDepths {
+  /** Longest path from a root to each node, in edges. */
+  depths: Map<string, number>;
+  /**
+   * The reached nodes in topological order. A node in a cycle, or one whose
+   * every predecessor is in a cycle, is absent — it never entered the queue.
+   */
+  order: string[];
+}
+
+/**
+ * `nodes` is widened to "anything with an id" because the concurrency
+ * analysis below runs over flow nodes, and the layout above runs over
+ * definition nodes. Only the id and the array order are read.
+ */
 function computeBfsDepths(
-  nodes: WorkflowNode[],
+  nodes: ReadonlyArray<{ id: string }>,
   incoming: Map<string, string[]>,
   outgoing: Map<string, string[]>,
-): Map<string, number> {
+): BfsDepths {
   const depths = new Map<string, number>();
   const remainingIncoming = new Map(nodes.map((node) => [node.id, incoming.get(node.id)?.length ?? 0]));
   const queue: string[] = nodes.filter((node) => (remainingIncoming.get(node.id) ?? 0) === 0).map((node) => node.id);
@@ -604,19 +682,181 @@ function computeBfsDepths(
     if (!depths.has(node.id)) depths.set(node.id, index);
   }
 
-  return depths;
+  return { depths, order: queue };
 }
 
-/** Overwrites every node's saved position with the auto-layout result; keeps the viewport. */
-export function applyAutoLayout(definition: WorkflowDefinition): WorkflowDefinition {
-  const positions = autoLayout(definition);
-  return {
-    ...definition,
-    ui: {
-      ...definition.ui,
-      nodes: Object.fromEntries(definition.nodes.map((node) => [node.id, { position: positions[node.id] ?? { x: 0, y: 0 } }])),
-    },
-  };
+// ─── concurrency (which steps run at the same time) ──────────────────────────
+
+/**
+ * What the graph shape says about one node's concurrency.
+ *
+ * The interpreter runs a node when every incoming edge has resolved, so all
+ * nodes at one depth become runnable in the same pass — see `driveLoop` and
+ * `computeRunnable` in `@valet/workflow`'s `interpreter.ts`. That depth is
+ * the `wave`.
+ */
+export interface NodeConcurrency {
+  /** 0-based wave index. */
+  wave: number;
+  /** Steps that leave this node on ONE output and become ready together. */
+  parallelOut: number;
+  /** Outputs that leave this node, of which a run takes exactly one. */
+  exclusiveOut: number;
+  /** Edges that arrive here. The node waits for every one of them. */
+  fanIn: number;
+}
+
+/** Two or more nodes that the graph allows to be in flight at once. */
+export interface ConcurrencyGroup {
+  /** Stable across renders of the same graph, so it can key a React list. */
+  id: string;
+  /** 0-based wave index the group belongs to. */
+  wave: number;
+  nodeIds: string[];
+}
+
+export interface ConcurrencyModel {
+  byNode: Record<string, NodeConcurrency>;
+  groups: ConcurrencyGroup[];
+}
+
+/**
+ * Which output an edge leaves its source on. An empty string is the single
+ * unlabeled output that every node except `if` and `approval` has. The
+ * precedence matches `flowEdgeToWorkflowEdge`.
+ */
+function edgeOutput(edge: WorkflowFlowEdge): string {
+  return edge.data.fromOutput ?? edge.sourceHandle ?? '';
+}
+
+/**
+ * Group the nodes that the graph allows to run at the same time, and count
+ * each node's fan-in and fan-out.
+ *
+ * Sharing a wave is not enough to be concurrent. The two sides of an `if`
+ * can land at the same depth, and only one of them ever runs — the other is
+ * skipped. So each node also carries the branch decisions every path to it
+ * must take (`requiredBranches`), and two nodes that need opposite outputs
+ * of the same branch node never share a group.
+ *
+ * Grouping is a greedy pass in node order rather than an exact partition.
+ * It can therefore split a set that could have been one group, but it never
+ * puts two exclusive nodes together. Under-reporting is the safe direction:
+ * a group that is drawn is always true.
+ */
+export function analyzeConcurrency(
+  flow: Pick<WorkflowFlowState, 'nodes' | 'edges'>,
+): ConcurrencyModel {
+  const nodeIds = new Set(flow.nodes.map((node) => node.id));
+  const edges = flow.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+  const incomingEdges = new Map<string, WorkflowFlowEdge[]>();
+  // source node -> output name -> how many targets leave on that output.
+  const outputs = new Map<string, Map<string, number>>();
+
+  for (const edge of edges) {
+    incoming.set(edge.target, [...(incoming.get(edge.target) ?? []), edge.source]);
+    outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
+    incomingEdges.set(edge.target, [...(incomingEdges.get(edge.target) ?? []), edge]);
+    const byOutput = outputs.get(edge.source) ?? new Map<string, number>();
+    const output = edgeOutput(edge);
+    byOutput.set(output, (byOutput.get(output) ?? 0) + 1);
+    outputs.set(edge.source, byOutput);
+  }
+
+  const { depths, order } = computeBfsDepths(flow.nodes, incoming, outgoing);
+  const required = requiredBranches(order, incomingEdges, outputs);
+
+  const byNode: Record<string, NodeConcurrency> = {};
+  for (const node of flow.nodes) {
+    const byOutput = outputs.get(node.id);
+    byNode[node.id] = {
+      wave: depths.get(node.id) ?? 0,
+      parallelOut: byOutput ? Math.max(...byOutput.values()) : 0,
+      exclusiveOut: byOutput ? byOutput.size : 0,
+      fanIn: incoming.get(node.id)?.length ?? 0,
+    };
+  }
+
+  const byWave = new Map<number, string[]>();
+  for (const node of flow.nodes) {
+    const wave = byNode[node.id]?.wave ?? 0;
+    byWave.set(wave, [...(byWave.get(wave) ?? []), node.id]);
+  }
+
+  const groups: ConcurrencyGroup[] = [];
+  for (const wave of [...byWave.keys()].sort((a, b) => a - b)) {
+    const cliques: string[][] = [];
+    for (const id of byWave.get(wave) ?? []) {
+      const clique = cliques.find((members) =>
+        members.every((member) => !isExclusive(required.get(id), required.get(member))),
+      );
+      if (clique) clique.push(id);
+      else cliques.push([id]);
+    }
+    cliques.forEach((ids, index) => {
+      if (ids.length > 1) groups.push({ id: `wave-${wave}-${index}`, wave, nodeIds: ids });
+    });
+  }
+
+  return { byNode, groups };
+}
+
+/**
+ * For each node, the branch decisions that EVERY path to it takes, as
+ * `branch node id -> output`.
+ *
+ * A path picks up a decision when it leaves a node that has more than one
+ * output wired. A node with a single wired output makes no choice, so it
+ * contributes nothing. Where a node is reachable by several paths, the
+ * intersection of those paths is kept: a decision that only some paths take
+ * is not required.
+ */
+function requiredBranches(
+  order: string[],
+  incomingEdges: Map<string, WorkflowFlowEdge[]>,
+  outputs: Map<string, Map<string, number>>,
+): Map<string, Map<string, string>> {
+  const required = new Map<string, Map<string, string>>();
+  // `order` is topological, so every source below already has its answer.
+  for (const id of order) {
+    const arriving = incomingEdges.get(id) ?? [];
+    let merged: Map<string, string> | null = null;
+    for (const edge of arriving) {
+      const path = new Map(required.get(edge.source) ?? []);
+      if ((outputs.get(edge.source)?.size ?? 0) > 1) path.set(edge.source, edgeOutput(edge));
+      merged = merged === null ? path : intersectBranches(merged, path);
+    }
+    required.set(id, merged ?? new Map());
+  }
+  return required;
+}
+
+function intersectBranches(
+  left: Map<string, string>,
+  right: Map<string, string>,
+): Map<string, string> {
+  const shared = new Map<string, string>();
+  for (const [branchNode, output] of left) {
+    if (right.get(branchNode) === output) shared.set(branchNode, output);
+  }
+  return shared;
+}
+
+/** True when the two nodes need opposite outputs of the same branch node,
+ * which means one of them is always skipped. */
+function isExclusive(
+  left: Map<string, string> | undefined,
+  right: Map<string, string> | undefined,
+): boolean {
+  if (!left || !right) return false;
+  for (const [branchNode, output] of left) {
+    const other = right.get(branchNode);
+    if (other !== undefined && other !== output) return true;
+  }
+  return false;
 }
 
 // ─── node summaries ────────────────────────────────────────────────────────────
@@ -663,114 +903,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function trimSummary(value: string): string {
   return value.length > 80 ? `${value.slice(0, 77)}...` : value;
-}
-
-// ─── EditorModel: stateful wrapper with dirty tracking ───────────────────────
-
-/**
- * Thin stateful wrapper over the pure functions above, for Tasks 9-10's
- * presentation layer: holds the current `WorkflowDefinition`, tracks
- * whether it has changed since the last `markSaved()`, and exposes the
- * same operations as mutating calls instead of definition-in/definition-out
- * functions. Every mutating method is a one-line call into a pure
- * function above — the pure functions remain independently testable and
- * are the ones exercised by most of this file's test suite.
- */
-export class EditorModel {
-  private definition: WorkflowDefinition;
-  private dirtyFlag = false;
-
-  constructor(definition: WorkflowDefinition) {
-    this.definition = definition;
-  }
-
-  get dirty(): boolean {
-    return this.dirtyFlag;
-  }
-
-  toFlow(): WorkflowFlowState {
-    return toFlow(this.definition);
-  }
-
-  connect(params: ConnectParams): ConnectResult {
-    const result = connect(this.definition, params);
-    if (result.ok && result.definition !== this.definition) {
-      this.definition = result.definition;
-      this.dirtyFlag = true;
-    }
-    return result;
-  }
-
-  addNode(type: AddableDagNodeType, options?: { position?: FlowPosition }): string {
-    const result = addNode(this.definition, type, options);
-    this.definition = result.definition;
-    this.dirtyFlag = true;
-    return result.nodeId;
-  }
-
-  removeNode(nodeId: string): void {
-    const next = removeNode(this.definition, nodeId);
-    if (next !== this.definition) {
-      this.definition = next;
-      this.dirtyFlag = true;
-    }
-  }
-
-  duplicateNode(nodeId: string): string | null {
-    const result = duplicateNode(this.definition, nodeId);
-    if (!result) return null;
-    this.definition = result.definition;
-    this.dirtyFlag = true;
-    return result.nodeId;
-  }
-
-  updateNode(nodeId: string, patch: Record<string, unknown>): void {
-    this.definition = updateNode(this.definition, nodeId, patch);
-    this.dirtyFlag = true;
-  }
-
-  updateEdge(match: EdgeMatch, patch: EdgePatch): void {
-    this.definition = updateEdge(this.definition, match, patch);
-    this.dirtyFlag = true;
-  }
-
-  setNodePosition(nodeId: string, position: FlowPosition): void {
-    this.definition = setNodePosition(this.definition, nodeId, position);
-    this.dirtyFlag = true;
-  }
-
-  applyPositions(positions: Record<string, FlowPosition>): void {
-    this.definition = applyPositions(this.definition, positions);
-    this.dirtyFlag = true;
-  }
-
-  setViewport(viewport: FlowViewport): void {
-    this.definition = setViewport(this.definition, viewport);
-    this.dirtyFlag = true;
-  }
-
-  applyAutoLayout(): void {
-    this.definition = applyAutoLayout(this.definition);
-    this.dirtyFlag = true;
-  }
-
-  /** Replaces the whole definition (e.g. the "Edit JSON" toggle round-trip). Marks dirty. */
-  replace(definition: WorkflowDefinition): void {
-    this.definition = definition;
-    this.dirtyFlag = true;
-  }
-
-  validate(): ReturnType<typeof validateWorkflowDefinition> {
-    return validateWorkflowDefinition(this.definition);
-  }
-
-  serialize(): WorkflowDefinition {
-    return this.definition;
-  }
-
-  markSaved(): void {
-    this.dirtyFlag = false;
-  }
 }
 
 // ─── minimal starter definition ───────────────────────────────────────────────

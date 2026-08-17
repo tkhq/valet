@@ -80,8 +80,8 @@ describe("GET /api/plugins", () => {
         dynamic: true,
         connect: "manual",
         actions: [
-          { id: "fixture.ping", name: "fixture.ping", riskLevel: "low" },
-          { id: "fixture.pong", name: "fixture.pong", riskLevel: "low" },
+          { id: "fixture.ping", name: "fixture.ping", riskLevel: "low", requiresApproval: false },
+          { id: "fixture.pong", name: "fixture.pong", riskLevel: "low", requiresApproval: false },
         ],
       },
     ]);
@@ -162,6 +162,74 @@ describe("GET /api/plugins", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+describe("GET /api/plugins iconSlug", () => {
+  it("carries the bundled manifest's slug, and nothing for a plugin that declares none", async () => {
+    // "github" is a real bundled plugin name, so it has an entry in the
+    // generated slug map; "fixture-plugin" never will.
+    const plugins: ValetPlugin[] = [
+      { name: "github", version: "0.1.0", credentials: [{ type: "oauth2", configKeys: ["accessToken"] }] },
+      FIXTURE_PLUGIN,
+    ];
+    api = await bootTestApi({ plugins });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    expect(summaries.find((p) => p.name === "github")?.services[0]?.iconSlug).toBe("github");
+    expect(summaries.find((p) => p.name === "fixture-plugin")?.services[0]?.iconSlug).toBeUndefined();
+  });
+});
+
+describe("GET /api/plugins health", () => {
+  const OWNER = { type: "user", id: "local-user" } as const;
+
+  it("reports no health while the service is disconnected", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    expect(plugins.find((p) => p.name === "fixture-plugin")?.services[0]?.health).toBeUndefined();
+  });
+
+  it("reports the account, the expiry, the refresh failure, and the identity-only grant", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    const expiresAt = Date.now() - 60_000;
+    await api.providers.engineCredentials.save(OWNER, "fixture", {
+      type: "oauth2",
+      accessToken: "stale-token-xyz",
+      expiresAt,
+      metadata: { login: "someone@example.com", refreshFailedAt: 1_700_000_000_000, identityOnly: true },
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const service = plugins.find((p) => p.name === "fixture-plugin")?.services[0];
+    expect(service?.connected).toBe(true);
+    expect(service?.health).toEqual({
+      expiresAt,
+      login: "someone@example.com",
+      refreshFailed: true,
+      identityOnly: true,
+    });
+    // Health never carries token material.
+    expect(JSON.stringify(plugins)).not.toContain("stale-token-xyz");
+  });
+
+  it("reports an empty health object for a healthy credential with no metadata", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    await fetch(`${api.baseUrl}/api/credentials/fixture`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const service = plugins.find((p) => p.name === "fixture-plugin")?.services[0];
+    // An API key reports no expiry and no login — "nothing known", which is
+    // NOT the same as "expired".
+    expect(service?.health).toEqual({});
   });
 });
 
@@ -273,5 +341,119 @@ describe("GET /api/plugins toolCount (connected dynamic services)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListPluginsResponse;
     expect(body.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+  });
+});
+
+/**
+ * The per-service `actions` array backs the connect screen's central claim —
+ * "your assistant gets these tools, and these ones stop to ask you first".
+ * These pin the two properties that make the claim safe to print: the
+ * approval flag comes from the engine's rule, and the join is the credential
+ * key the runtime reads, so a mismatch under-reports instead of inventing.
+ */
+describe("GET /api/plugins — actions a credential unlocks", () => {
+  function riskyAction(id: string, riskLevel: PluginAction["riskLevel"]): PluginAction {
+    return { ...pingAction(id), riskLevel };
+  }
+
+  it("reports each action's risk and whether the approval gate stops it", async () => {
+    const plugin: ValetPlugin = {
+      name: "mixed",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "mixed",
+          actions: [
+            riskyAction("mixed.read", "low"),
+            riskyAction("mixed.update", "medium"),
+            riskyAction("mixed.send", "high"),
+            riskyAction("mixed.purge", "critical"),
+          ],
+        },
+      ],
+      credentials: [{ service: "mixed", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const actions = plugins.find((p) => p.name === "mixed")?.services[0]?.actions ?? [];
+
+    expect(actions).toHaveLength(4);
+    expect(actions.map((a) => a.name)).toEqual([
+      "mixed.read",
+      "mixed.update",
+      "mixed.send",
+      "mixed.purge",
+    ]);
+    // low/medium run; high/critical ask first.
+    expect(actions.map((a) => a.requiresApproval)).toEqual([false, false, true, true]);
+  });
+
+  it("honours a plugin's defaultApprovalMode over its actions' risk levels", async () => {
+    const plugin: ValetPlugin = {
+      name: "trusted",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "trusted",
+          // Pinned "allow" outranks risk. A client re-deriving the flag from
+          // `riskLevel` alone would promise a gate that never fires.
+          defaultApprovalMode: "allow",
+          actions: [riskyAction("trusted.purge", "critical")],
+        },
+      ],
+      credentials: [{ service: "trusted", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const actions = plugins.find((p) => p.name === "trusted")?.services[0]?.actions ?? [];
+
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.riskLevel).toBe("critical");
+    expect(actions[0]?.requiresApproval).toBe(false);
+  });
+
+  it("reports no actions when the credential key the tools read differs from the one declared", async () => {
+    // The google-calendar shape: the connect UI writes the declaration's key
+    // while the actions read `credentialService`. Connecting the declared key
+    // unlocks nothing, so the row must not borrow the plugin's action list.
+    const plugin: ValetPlugin = {
+      name: "skewed",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "skewed",
+          credentialService: "skewed_underscored",
+          actions: [pingAction("skewed.list")],
+        },
+      ],
+      credentials: [{ service: "skewed", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const skewed = plugins.find((p) => p.name === "skewed");
+
+    // The plugin still counts its action at the plugin level…
+    expect(skewed?.actionCount).toBe(1);
+    // …but the credential a user can actually connect unlocks none of it.
+    expect(skewed?.services[0]?.actions).toEqual([]);
+  });
+
+  it("reports no actions for a dynamic service, whose tools resolve only after connecting", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const fixture = plugins.find((p) => p.name === "fixture-plugin")?.services[0];
+
+    expect(fixture?.dynamic).toBe(true);
+    // Static actions still list; `resolveActions`' extra tool is not among
+    // them, because it does not exist until a credential is connected.
+    expect(fixture?.actions.map((a) => a.name)).toEqual(["fixture.ping", "fixture.pong"]);
   });
 });

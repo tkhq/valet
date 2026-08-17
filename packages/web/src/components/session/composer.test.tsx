@@ -9,10 +9,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { WireQueueState } from "@valet/api/wire";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
+const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
+const addUserMessage = vi.fn(() => "user-opt-1");
+const setMessageQueueItemId = vi.fn();
+
+// Per-test queue state for the active thread. Held in a container so the
+// hoisted `vi.mock` factory closes over a stable binding and each test can
+// swap the value the composer reads.
+const queueStateRef: { current: WireQueueState | undefined } = { current: undefined };
+
+function queueState(mode: WireQueueState["mode"]): WireQueueState {
+  return {
+    mode,
+    status: "running",
+    activeItemId: "q-0",
+    pendingIds: [],
+    collectingIds: [],
+  };
+}
 
 // importOriginal: see -new-session-dialog.test.tsx for why a bare
 // replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -20,7 +39,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
-    useSendPrompt: () => ({ isPending: false, mutateAsync: vi.fn() }),
+    useSendPrompt: () => ({ isPending: false, mutateAsync: sendMutateAsync }),
     useAbortThread: () => ({
       isPending: false,
       mutateAsync: abortMutateAsync,
@@ -31,8 +50,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
 
 vi.mock("~/stores/stream", () => ({
   useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ addUserMessage: vi.fn(), setMessageQueueItemId: vi.fn() }),
-  useQueueStateForThread: () => undefined,
+    selector({ addUserMessage, setMessageQueueItemId }),
+  useQueueStateForThread: () => queueStateRef.current,
 }));
 
 vi.mock("~/hooks/use-commands", () => ({
@@ -74,6 +93,13 @@ function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
   );
 }
 
+beforeEach(() => {
+  queueStateRef.current = undefined;
+  useComposerPrefillStore.setState({ text: null });
+  sendMutateAsync.mockClear();
+  abortMutateAsync.mockClear();
+});
+
 describe("Composer — prefill consumption", () => {
   it("seeds the textarea from the prefill store and clears the store", () => {
     useComposerPrefillStore.getState().set("Update memory file journal/2026-07-13.md: ");
@@ -100,11 +126,12 @@ describe("Composer — stop button", () => {
     expect(screen.getByRole("button", { name: /send/i })).toBeDefined();
   });
 
-  it("shows Stop instead of Send while the agent is busy, and aborts the active thread on click", async () => {
+  it("shows Stop next to the submit button while the agent works, and aborts the active thread on click", async () => {
     useComposerPrefillStore.setState({ text: null });
     const { default: userEvent } = await import("@testing-library/user-event");
     renderComposer("streaming");
 
+    // "Send" is an idle-only label — a mid-turn message steers or queues.
     expect(screen.queryByRole("button", { name: /^send$/i })).toBeNull();
     const stopButton = screen.getByRole("button", { name: /stop/i }) as HTMLButtonElement;
     expect(stopButton.disabled).toBe(false);
@@ -147,13 +174,107 @@ describe("Composer — Escape interrupts the running turn", () => {
   it("dismisses an open command popup instead of aborting", async () => {
     const { default: userEvent } = await import("@testing-library/user-event");
     renderComposer("streaming");
-    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    // Mid-turn the placeholder names the queue/steer action, not "Send a
+    // message" — address the textarea by role so this stays about Escape.
+    const textarea = screen.getByRole("textbox");
     await userEvent.type(textarea, "/sta");
     expect(screen.getByRole("listbox")).toBeTruthy();
 
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(abortMutate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The submit affordance follows the thread's live queue mode. `steer` means
+ * the engine stops the running turn for this message; `followup` means it
+ * waits for that turn to end. The composer must not promise the first when
+ * the engine does the second.
+ */
+describe("Composer — mid-turn submit affordance", () => {
+  async function type(text: string) {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    const textarea = screen.getByRole("textbox");
+    await userEvent.type(textarea, text);
+  }
+
+  it("labels the button Send and shows no queue hint while the agent is idle", () => {
+    renderComposer("idle");
+    expect(screen.getByRole("button", { name: /^send$/i })).toBeDefined();
+    expect(screen.queryByText(/current turn/i)).toBeNull();
+  });
+
+  it("labels the button Steer and says the current turn stops, in steer mode", () => {
+    queueStateRef.current = queueState("steer");
+    renderComposer("streaming");
+
+    expect(screen.getByRole("button", { name: /^steer$/i })).toBeDefined();
+    expect(screen.getByText(/steer stops the current turn/i)).toBeDefined();
+  });
+
+  it("labels the button Queue and says the turn completes first, in followup mode", () => {
+    queueStateRef.current = queueState("followup");
+    renderComposer("streaming");
+
+    expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
+    expect(screen.getByText(/completes the current turn/i)).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
+  });
+
+  it("falls back to Queue when the queue mode is not known yet", () => {
+    queueStateRef.current = undefined;
+    renderComposer("streaming");
+
+    expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
+  });
+
+  it("falls back to Queue in collect mode, where the message waits for the window", () => {
+    queueStateRef.current = queueState("collect");
+    renderComposer("streaming");
+
+    expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
+  });
+
+  it("sends a steer message while the agent works", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("steer");
+    renderComposer("streaming");
+
+    await type("stop and read the failing test first");
+    const steerButton = screen.getByRole("button", { name: /^steer$/i }) as HTMLButtonElement;
+    expect(steerButton.disabled).toBe(false);
+
+    await userEvent.click(steerButton);
+    await waitFor(() =>
+      expect(sendMutateAsync).toHaveBeenCalledWith({
+        text: "stop and read the failing test first",
+        threadId: "thread-1",
+      }),
+    );
+  });
+
+  it("sends a followup message while the agent works", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("followup");
+    renderComposer("streaming");
+
+    await type("also update the runbook");
+    await userEvent.click(screen.getByRole("button", { name: /^queue$/i }));
+    await waitFor(() =>
+      expect(sendMutateAsync).toHaveBeenCalledWith({
+        text: "also update the runbook",
+        threadId: "thread-1",
+      }),
+    );
+  });
+
+  it("keeps the submit button disabled while the agent works and the box is empty", () => {
+    queueStateRef.current = queueState("followup");
+    renderComposer("streaming");
+    const queueButton = screen.getByRole("button", { name: /^queue$/i }) as HTMLButtonElement;
+    expect(queueButton.disabled).toBe(true);
   });
 });
 

@@ -1,6 +1,6 @@
 /**
- * DB-backed tests for `deleteWorkflowDefinition` trigger cleanup and
- * `listRecentWorkflowRuns`. Uses the same PGlite harness as the other
+ * DB-backed tests for `deleteWorkflowDefinition` trigger cleanup and the
+ * cross-workflow run list. Uses the same PGlite harness as the other
  * workflow service tests.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ import { eq } from "drizzle-orm";
 import {
   createWorkflowDefinition,
   deleteWorkflowDefinition,
-  listRecentWorkflowRuns,
+  listRunsForOwner,
 } from "./service.js";
 import { createWorkflowSchedule } from "./schedule-service.js";
 import { createWorkflowTrigger } from "./trigger-service.js";
@@ -155,11 +155,11 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
   });
 });
 
-describe("listRecentWorkflowRuns", () => {
+describe("listRunsForOwner", () => {
   it("returns [] when there are no workflow definitions", async () => {
     // Use a fresh owner with no definitions
     const emptyOwner: WorkflowOwner = { userId: "user_empty", orgId: "org_empty" };
-    const runs = await listRecentWorkflowRuns(deps, emptyOwner);
-    expect(runs).toEqual([]);
+    const page = await listRunsForOwner(deps, emptyOwner);
+    expect(page?.runs).toEqual([]);
   });
 });

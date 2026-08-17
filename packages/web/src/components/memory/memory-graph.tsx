@@ -41,7 +41,8 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { api } from "~/api/client";
-import { useMemoryDoc, useMemoryTree } from "~/api/memory";
+import { qkMemory, useMemoryDoc, useMemoryTree } from "~/api/memory";
+import { useListOwner } from "~/lib/use-list-owner";
 import type { MemoryGraphEdge, MemoryGraphNode, MemoryGraphResponse } from "~/api/memory-types";
 import { Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -354,7 +355,11 @@ function MemoryHoverCard({
   meta?: { updatedAt: number; pinned: boolean; type: string };
   inLinks: number;
 }) {
-  const docQ = useMemoryDoc(node.path ?? "", { enabled: node.path !== undefined, staleTime: 60_000 });
+  const docOwner = useListOwner();
+  const docQ = useMemoryDoc(node.path ?? "", docOwner, {
+    enabled: node.path !== undefined,
+    staleTime: 60_000,
+  });
   const preview =
     docQ.data?.file?.content !== undefined
       ? stripMarkdown(docQ.data.file.content).slice(0, 280)
@@ -416,7 +421,11 @@ const SPOTLIGHT_CSS = `
 
 export function MemoryGraphCanvas() {
   const navigate = useNavigate();
-  const graphQ = useQuery({ queryKey: ["memory", "graph"], queryFn: () => api.getMemoryGraph() });
+  const graphOwner = useListOwner();
+  const graphQ = useQuery({
+    queryKey: qkMemory.graph(graphOwner),
+    queryFn: () => api.getMemoryGraph(graphOwner),
+  });
   const [filters, setFilters] = useState<GraphFilters>({ journal: false, folders: true });
   // Timestamp of the last viewport move, not a boolean: programmatic moves
   // (the initial fitView) can fire onMoveStart without a matching
@@ -430,7 +439,7 @@ export function MemoryGraphCanvas() {
   // memoized node/edge arrays don't depend on it, so showing/hiding it
   // never re-renders the canvas contents.
   const [hoverCard, setHoverCard] = useState<{ node: MemoryGraphNode; x: number; y: number } | null>(null);
-  const treeQ = useMemoryTree();
+  const treeQ = useMemoryTree(graphOwner);
 
   const filtered = useMemo(
     () => (graphQ.data ? filterGraph(graphQ.data, filters) : { nodes: [], edges: [] }),
@@ -649,7 +658,11 @@ export function MemoryGraphCanvas() {
         />
       )}
 
-      <div className="absolute right-3 top-3 rounded-md border border-line bg-paper/95 px-3 py-2 text-xs shadow-sm">
+      {/* `bg-paper`, not `bg-paper/95`: `paper` is a plain `var(--paper)`
+          string, so Tailwind emits NO rule for the slash form and this
+          panel floated with no background at all over the graph. See the
+          opacity-modifier trap in theme.css. */}
+      <div className="absolute right-3 top-3 rounded-md border border-line bg-paper px-3 py-2 text-xs shadow-sm">
         <div className="mb-1.5 text-muted">
           {conceptCount} files · {linkCount} links
         </div>
@@ -671,7 +684,7 @@ export function MemoryGraphCanvas() {
         </label>
       </div>
 
-      <div className="absolute bottom-3 left-3 max-h-64 overflow-y-auto rounded-md border border-line bg-paper/95 px-3 py-2 text-xs shadow-sm">
+      <div className="absolute bottom-3 left-3 max-h-64 overflow-y-auto rounded-md border border-line bg-paper px-3 py-2 text-xs shadow-sm">
         <div className="space-y-1">
           {legendDirs.map((dir) => (
             <div key={dir} className="flex items-center gap-1.5">

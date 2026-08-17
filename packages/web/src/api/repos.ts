@@ -10,7 +10,12 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
-import type { GetPrebuildForRepoResponse, GetReposResponse, PostGithubConnectResponse } from "@valet/api/wire";
+import type {
+  GetGithubOrgStatusResponse,
+  GetPrebuildForRepoResponse,
+  GetReposResponse,
+  PostGithubConnectResponse,
+} from "@valet/api/wire";
 import { api } from "./client";
 import { qkIntegrations } from "./integrations";
 import { qkSettings } from "./settings";
@@ -18,6 +23,7 @@ import { qkSettings } from "./settings";
 export const qkRepos = {
   list: () => ["repos"] as const,
   prebuildForRepo: (fullName: string) => ["repos", "prebuild", fullName] as const,
+  githubOrgStatus: () => ["repos", "githubOrgStatus"] as const,
 };
 
 /** `GET /api/repos` — the new-session repo picker's source. A short
@@ -29,6 +35,20 @@ export function useRepos(opts?: UseQueryOptions<GetReposResponse>) {
     queryFn: () => api.getRepos(),
     staleTime: 60_000,
     ...opts,
+  });
+}
+
+/** `GET /api/me/github/org-status` — whether the org has a GitHub App, and
+ * how far it reaches. Member-readable, unlike `useGithubApp()`, so
+ * `/integrations` can state the org half to the people most likely to be
+ * blocked by it. `enabled` keeps every other service's card from firing it;
+ * the shared key means the row and its connect screen cost one request. */
+export function useGithubOrgStatus(enabled = true) {
+  return useQuery<GetGithubOrgStatusResponse>({
+    queryKey: qkRepos.githubOrgStatus(),
+    queryFn: () => api.getGithubOrgStatus(),
+    enabled,
+    staleTime: 60_000,
   });
 }
 
