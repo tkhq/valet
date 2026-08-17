@@ -584,6 +584,58 @@ describe("policyResolver seam: invocation record discriminators", () => {
   });
 });
 
+// ── resumeKey size bound ────────────────────────────────────────────
+//
+// The resumeKey is embedded in the deterministic gate id, which is the text
+// primary key of engine_decision_gates, and in the action_invocations audit
+// PK. Postgres btree index rows cap at ~2704 bytes, so an unbounded key made
+// any gated tool call with large args (e.g. a full skill body) fail with
+// "index row size ... exceeds btree version 4 maximum". Large args must hash
+// into a bounded key; small args keep the raw JSON (pinned literally above).
+describe("policyResolver seam: resumeKey size bound", () => {
+  const bigParamAction = () =>
+    makeAction({
+      id: "github.create_skill",
+      parameters: Type.Object({ content: Type.String() }),
+    });
+
+  it("large args produce a bounded resumeKey, deterministic per args and distinct across args", async () => {
+    const { resolver, invocations } = makeResolver();
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(bigParamAction())] });
+    const big = "x".repeat(10_000);
+    const ctx = () => makeCtx({ policyResolver: resolver });
+    await callTool.execute({ tool_id: "github.create_skill", params: { content: big }, summary: "s" }, ctx());
+    await callTool.execute({ tool_id: "github.create_skill", params: { content: big }, summary: "s" }, ctx());
+    await callTool.execute({ tool_id: "github.create_skill", params: { content: `${big}y` }, summary: "s" }, ctx());
+    expect(invocations).toHaveLength(3);
+    expect(invocations[0].resumeKey.length).toBeLessThanOrEqual(512);
+    expect(invocations[0].resumeKey.startsWith("github.create_skill:")).toBe(true);
+    expect(invocations[0].resumeKey).toBe(invocations[1].resumeKey);
+    expect(invocations[2].resumeKey).not.toBe(invocations[0].resumeKey);
+  });
+
+  it("the gate request carries the same bounded resumeKey as the audit record", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(bigParamAction())] });
+    await callTool.execute(
+      { tool_id: "github.create_skill", params: { content: "x".repeat(10_000) }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async (req) => {
+          gateReq = req;
+          return { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now(), gateOrdinal: 0 };
+        },
+      }),
+    );
+    expect(gateReq?.resumeKey).toBeDefined();
+    expect(gateReq?.resumeKey?.length).toBeLessThanOrEqual(512);
+    expect(invocations[0].resumeKey).toBe(gateReq?.resumeKey);
+  });
+});
+
 // ── Reserved gate action ids ────────────────────────────────────────
 
 describe("policyResolver seam: reserved extraGateActions ids", () => {

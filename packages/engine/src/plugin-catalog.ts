@@ -360,8 +360,11 @@ export async function invokeAction(
   // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
   // to ctx.requestDecision when a gate opens for this call. Recorded on every
   // audit record (even allow/deny, which never open a gate) so a host sink
-  // can correlate all records for one (tool, args) pair.
-  const resumeKey = `${qualifiedId(entry)}:${stableJson(args ?? {})}`;
+  // can correlate all records for one (tool, args) pair. Large args hash into
+  // a bounded suffix: the key is embedded in the engine_decision_gates and
+  // action_invocations primary keys, and Postgres btree index rows cap at
+  // ~2704 bytes.
+  const resumeKey = `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`;
 
   // ── Decision phase ────────────────────────────────────────────
   // Absent resolver: byte-identical to pre-policy behavior — derive the
@@ -1259,4 +1262,32 @@ function stableJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+// Args JSON at or under this length passes through raw, so small keys stay
+// human-readable and byte-identical to the pre-bound format. The threshold
+// keeps the worst-case UTF-8 gate id well under the ~2704-byte btree cap.
+const RESUME_KEY_ARGS_MAX_CHARS = 256;
+
+/**
+ * Returns the args portion of a resumeKey, bounded in length. JSON longer
+ * than the threshold is replaced with its UTF-8 byte length plus a 64-bit
+ * FNV-1a hash over the UTF-8 bytes — deterministic, so restart replay
+ * re-derives the identical key. TextEncoder is a web-standard global (no
+ * node:crypto): the engine stays portable.
+ */
+function boundedArgsKey(json: string): string {
+  if (json.length <= RESUME_KEY_ARGS_MAX_CHARS) return json;
+  const bytes = new TextEncoder().encode(json);
+  return `fnv1a64:${bytes.length}:${fnv1a64Hex(bytes)}`;
+}
+
+function fnv1a64Hex(bytes: Uint8Array): string {
+  const mask = 0xffffffffffffffffn;
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
