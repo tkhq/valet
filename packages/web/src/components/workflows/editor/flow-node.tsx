@@ -6,10 +6,15 @@
  * current validation result, and a status pill when a run overlay
  * (`preview.tsx`) supplies one.
  *
- * The card is a FIXED 220px wide. `LAYOUT_COLUMN_GAP` in `editor-model.ts`
- * places columns 260px apart, so one width for every node makes the graph
- * read as a grid with an even 40px channel between columns, instead of
- * ragged cards whose left edges line up and right edges do not.
+ * The card is a FIXED 220px wide (`NODE_CARD_WIDTH`). `LAYOUT_COLUMN_GAP` in
+ * `editor-model.ts` places columns 260px apart, so one width for every node
+ * makes the graph read as a grid with an even 40px channel between columns,
+ * instead of ragged cards whose left edges line up and right edges do not.
+ *
+ * The optional bottom row reports concurrency: where paths join here, where
+ * the node splits into exclusive branches, and where it starts several steps
+ * that have no order between them. `canvas.tsx` supplies the counts, because
+ * a node cannot see its own edges.
  *
  * Hover lives in `styles/react-flow.css`, not in a Tailwind `hover:`
  * variant here. This component renders on the editor canvas AND inside the
@@ -28,9 +33,23 @@
  *     `stop` renders one unlabeled source handle; `stop` renders none.
  */
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import { GitBranch, GitFork, Merge, type LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
 import type { DagNodeType } from "../editor-model";
 import { NODE_ICON } from "./node-icon";
+
+/**
+ * The card's drawn size, which `canvas.tsx` needs to place the wave bands
+ * behind a group of cards. Width is applied from here rather than through a
+ * `w-[220px]` class so the two cannot drift apart.
+ *
+ * Height is an UPPER bound, not a measurement: the summary is clamped to two
+ * lines and the concurrency row below it is optional, so a card is between
+ * about 58 and 98 tall. The bands add their own padding on top, so an
+ * over-estimate only makes a band slightly tall.
+ */
+export const NODE_CARD_WIDTH = 220;
+export const NODE_CARD_MAX_HEIGHT = 100;
 
 export type NodeRunStatus =
   | "pending"
@@ -39,6 +58,66 @@ export type NodeRunStatus =
   | "failed"
   | "skipped"
   | "waiting";
+
+/**
+ * One node's concurrency counts, taken from `analyzeConcurrency` in
+ * `editor-model.ts`. `wave` is 1-based here so the card and the canvas band
+ * label say the same number.
+ */
+export interface NodeParallelism {
+  wave: number;
+  parallelOut: number;
+  exclusiveOut: number;
+  fanIn: number;
+}
+
+/** One badge on the card's concurrency row. */
+export interface ConcurrencyCue {
+  key: "join" | "branch" | "parallel";
+  count: number;
+  /** The sentence the badge carries for a pointer and for a screen reader. */
+  label: string;
+}
+
+/**
+ * The badges a node's counts earn, in reading order: what arrives, then what
+ * leaves. A count of 1 says nothing a reader cannot see from the single edge
+ * itself, so only counts above 1 produce a badge.
+ */
+export function concurrencyCues(parallel: NodeParallelism | undefined): ConcurrencyCue[] {
+  if (!parallel) return [];
+  const cues: ConcurrencyCue[] = [];
+  if (parallel.fanIn > 1) {
+    cues.push({
+      key: "join",
+      count: parallel.fanIn,
+      label: `Joins ${parallel.fanIn} paths. This step waits for all of them.`,
+    });
+  }
+  if (parallel.exclusiveOut > 1) {
+    cues.push({
+      key: "branch",
+      count: parallel.exclusiveOut,
+      label: `Splits into ${parallel.exclusiveOut} branches. A run takes one of them.`,
+    });
+  }
+  if (parallel.parallelOut > 1) {
+    cues.push({
+      key: "parallel",
+      count: parallel.parallelOut,
+      label: `Starts ${parallel.parallelOut} steps that have no order between them.`,
+    });
+  }
+  return cues;
+}
+
+/** A mark per cue. None of the three repeats a node-type mark from
+ * `NODE_ICON`, so a badge never reads as a second type label. */
+const CUE_ICON: Record<ConcurrencyCue["key"], LucideIcon> = {
+  join: Merge,
+  branch: GitBranch,
+  parallel: GitFork,
+};
 
 export interface FlowNodeData extends Record<string, unknown> {
   label: string;
@@ -56,6 +135,12 @@ export interface FlowNodeData extends Record<string, unknown> {
    * know its own history.
    */
   entering?: boolean;
+  /**
+   * What the graph shape says about this node's concurrency. Set by
+   * `canvas.tsx`; a read-only surface that passes no flow analysis simply
+   * draws no concurrency row.
+   */
+  parallel?: NodeParallelism;
 }
 
 /**
@@ -127,8 +212,10 @@ export const RUN_STATUS_GLYPH: Record<NodeRunStatus, string> = {
 export type FlowXyNode = Node<FlowNodeData, "workflow">;
 
 export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
-  const { label, summary, hasError, sourceOutputs, nodeType, runStatus, runBadge, entering } = data;
+  const { label, summary, hasError, sourceOutputs, nodeType, runStatus, runBadge, entering, parallel } =
+    data;
   const Icon = NODE_ICON[nodeType];
+  const cues = concurrencyCues(parallel);
 
   return (
     <div
@@ -137,8 +224,10 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
       // of a failed node under the cursor would drop the one cue that says
       // it failed.
       data-status={runStatus ?? "none"}
+      data-wave={parallel?.wave}
+      style={{ width: NODE_CARD_WIDTH }}
       className={cn(
-        "flow-node-card w-[220px] rounded-md border bg-paper px-3 py-2 shadow-sm",
+        "flow-node-card rounded-md border bg-paper px-3 py-2 shadow-sm",
         nodeShellClasses(runStatus, !!selected),
         entering && "flow-node-enter",
       )}
@@ -193,6 +282,31 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
       <div className="mt-1 line-clamp-2 break-words text-sm leading-snug text-ink" title={summary}>
         {summary}
       </div>
+
+      {/* The concurrency row. It carries a mark, a count and a sentence,
+          never a colour, so it survives greyscale and every palette. Nodes
+          with nothing to report draw no row at all — in a typical graph
+          that is most of them, and a badge on every card would stop
+          meaning anything. */}
+      {cues.length > 0 && (
+        <div data-testid="node-parallelism" className="mt-1.5 flex flex-wrap items-center gap-1">
+          {cues.map((cue) => {
+            const CueIcon = CUE_ICON[cue.key];
+            return (
+              <span
+                key={cue.key}
+                data-testid={`node-cue-${cue.key}`}
+                title={cue.label}
+                className="inline-flex items-center gap-0.5 rounded bg-ink-wash px-1 py-0.5 text-[9px] font-medium leading-none text-muted"
+              >
+                <CueIcon className="h-3 w-3 shrink-0" aria-hidden />
+                {cue.count}
+                <span className="sr-only">{cue.label}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {sourceOutputs ? (
         sourceOutputs.map((output, index) => (

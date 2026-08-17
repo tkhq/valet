@@ -28,6 +28,7 @@ import { memoryRouter } from "./routes/memory.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { workflowPreviewRouter } from "./routes/workflow-preview.js";
 import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
@@ -231,6 +232,9 @@ export function createApp(
   // Trigger routes first: workflowsRouter's `GET /:id` would otherwise
   // swallow `/triggers` and `/runs` as workflow ids.
   app.route("/api/workflows", workflowTriggersRouter);
+  // Preview before the CRUD router for the same reason: `POST /:id/preview`
+  // must not be read as a path under one of its routes.
+  app.route("/api/workflows", workflowPreviewRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/templates", templatesRouter);
   app.route("/api/plugins", pluginsRouter);

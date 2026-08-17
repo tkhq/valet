@@ -15,6 +15,8 @@ import {
   type TriggerInputError,
   type ValidateEnvironment,
   type WorkflowDefinition,
+  type WorkflowEdge,
+  type WorkflowNode,
   type WorkflowRunListItem,
   type WorkflowStore,
   type WorkflowTriggerPayload,
@@ -426,6 +428,237 @@ export async function updateWorkflowDefinition(
     ownerType: row.ownerType === "team" ? "team" : "user",
     ownerId: row.ownerId,
   };
+}
+
+// ─── Aggregation node ────────────────────────────────────────────────────────
+//
+// A fan-out graph ends in several branch tips, and the reader almost always
+// wants one result. Writing that join node by hand is where the template
+// path contract bites hardest: an `llm` branch exposes its text at
+// `result.text`, a `session` branch at `result.response`, and a branch with
+// an `outputSchema` puts its fields under `result.output`. A path written
+// against the wrong family resolves to nothing, and the run then SUCCEEDS
+// with a hole where the branch output should be.
+//
+// This inserts the join node instead of asking a person to type it. Two
+// properties are deliberate:
+//
+//   1. It is an ORDINARY node in `definition.nodes` — a `set` or an `llm` —
+//      appended with one edge per branch. It appears on the canvas, it can
+//      be renamed, re-prompted, rewired, or deleted like any other node,
+//      and its behaviour is fully described by the saved definition. It is
+//      NOT a flag that makes the interpreter build a hidden node at run
+//      time: a hidden node cannot be seen in the editor, cannot be edited,
+//      and would make the graph a person reads differ from the graph that
+//      ran.
+//   2. It never rewires the existing graph. Edges are only added, never
+//      moved or removed, so this can never silently change what the
+//      workflow already did.
+
+/** How the aggregate node combines its branches. */
+export type AggregateMode = "collect" | "summarize";
+
+export interface AggregateNodeInput {
+  /** Id for the new node. A taken id gets a numeric suffix. Default `aggregate`. */
+  nodeId?: string;
+  /** Branches to combine. Default: every node with no outgoing edge. */
+  sources?: string[];
+  /** `collect` (default) writes a `set` node; `summarize` writes an `llm` node. */
+  mode?: AggregateMode;
+  /** Required for `summarize`. */
+  model?: string;
+  /** Appended to the summarize prompt, in the author's own words. */
+  instructions?: string;
+}
+
+export type AddAggregateNodeResult =
+  | { ok: true; definition: WorkflowDefinitionSummary; nodeId: string; sources: string[] }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "stored_definition_invalid" | "would_be_invalid"; errors: string[] }
+  | { ok: false; reason: "no_branches" | "unknown_sources" | "model_required"; message: string };
+
+/**
+ * The template path that reads what a node produced.
+ *
+ * Every shape here is the checkpoint `result` its executor writes:
+ * `llm.ts` returns `{ text, output? }`, `session.ts` and `orchestrator.ts`
+ * return `{ sessionId, response, output? }`, `workflow-call.ts` returns
+ * `{ runId, output }`, and `foreach.ts` returns the `ForeachResult`
+ * aggregate. A node with an `outputSchema` is read at its structured
+ * `output`, because that is the field the author declared.
+ */
+export function aggregateSourcePath(node: WorkflowNode): string {
+  const base = `nodes.${node.id}.result`;
+  switch (node.type) {
+    case "llm":
+      return node.outputSchema !== undefined ? `${base}.output` : `${base}.text`;
+    case "session":
+    case "orchestrator":
+      return node.outputSchema !== undefined ? `${base}.output` : `${base}.response`;
+    case "workflow":
+      return `${base}.output`;
+    case "foreach":
+      return `${base}.items`;
+    default:
+      // `tool` returns the action's own response, `set` returns its rendered
+      // values, and neither has a documented sub-field to prefer.
+      return base;
+  }
+}
+
+/** Every node id the definition uses, foreach body ids included — a new id must miss all of them. */
+function usedNodeIds(definition: WorkflowDefinition): Set<string> {
+  const ids = new Set<string>();
+  for (const node of definition.nodes) {
+    ids.add(node.id);
+    if (node.type === "foreach") ids.add(node.body.id);
+  }
+  return ids;
+}
+
+function uniqueNodeId(definition: WorkflowDefinition, preferred: string): string {
+  const taken = usedNodeIds(definition);
+  if (!taken.has(preferred)) return preferred;
+  for (let n = 2; ; n++) {
+    const candidate = `${preferred}_${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * Branch tips: nodes with no outgoing edge, minus the node types that
+ * cannot be a branch result. A `trigger` with no outgoing edge is a broken
+ * graph, not a branch, and a `stop` node ends the run rather than producing
+ * a value for somebody else to read.
+ */
+function branchTips(definition: WorkflowDefinition): WorkflowNode[] {
+  const hasOutgoing = new Set(definition.edges.map((e) => e.from));
+  return definition.nodes.filter(
+    (n) => !hasOutgoing.has(n.id) && n.type !== "stop" && n.type !== "trigger",
+  );
+}
+
+/** The `set` node body: one field per branch, named after the branch. */
+function collectValues(sources: WorkflowNode[]): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const source of sources) values[source.id] = `{{ ${aggregateSourcePath(source)} }}`;
+  return values;
+}
+
+/** The `llm` node prompt: each branch under its own heading, so the model can tell them apart. */
+function summarizePrompt(sources: WorkflowNode[], instructions?: string): string {
+  const lines: string[] = [];
+  for (const source of sources) {
+    lines.push(`## ${source.id}`, `{{ ${aggregateSourcePath(source)} }}`, "");
+  }
+  lines.push(
+    instructions && instructions.trim().length > 0
+      ? instructions.trim()
+      : "Write one combined summary. Keep every point that appears in only one section. Say where two sections disagree. Add nothing they did not say.",
+  );
+  return lines.join("\n");
+}
+
+/** Places the new node to the right of its branches, vertically centred on them. */
+function placeAggregate(
+  definition: WorkflowDefinition,
+  nodeId: string,
+  sources: WorkflowNode[],
+): WorkflowDefinition["ui"] {
+  const ui = definition.ui;
+  if (!ui) return undefined;
+  const points = sources.map((s) => ui.nodes[s.id]?.position).filter((p): p is { x: number; y: number } => !!p);
+  if (points.length === 0) return ui;
+  const x = Math.max(...points.map((p) => p.x)) + 260;
+  const y = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+  return { ...ui, nodes: { ...ui.nodes, [nodeId]: { position: { x, y } } } };
+}
+
+/**
+ * Appends an aggregation node that reads every branch, and saves the result
+ * as a new version. `env` is the same validator environment the save routes
+ * use, so a definition that would not pass a normal save is not written by
+ * this path either.
+ */
+export async function addAggregateNode(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  workflowId: string,
+  input: AggregateNodeInput = {},
+  env?: ValidateEnvironment,
+): Promise<AddAggregateNodeResult> {
+  const row = await ownedDefinitionRow(deps.db, owner, workflowId);
+  if (!row) return { ok: false, reason: "not_found" };
+
+  const parsed = validateDefinitionInput(row.definition, env);
+  if (!parsed.ok) return { ok: false, reason: "stored_definition_invalid", errors: parsed.errors };
+  const definition = parsed.definition;
+
+  const mode: AggregateMode = input.mode ?? "collect";
+  if (mode === "summarize" && (input.model === undefined || input.model.length === 0)) {
+    return {
+      ok: false,
+      reason: "model_required",
+      message: 'mode "summarize" writes an llm node. Name the model to use, or use mode "collect".',
+    };
+  }
+
+  const byId = new Map(definition.nodes.map((n) => [n.id, n]));
+  let sources: WorkflowNode[];
+  if (input.sources !== undefined) {
+    const unknown = input.sources.filter((id) => !byId.has(id));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        reason: "unknown_sources",
+        message: `no node in this workflow has the id ${unknown.join(", ")}. Name ids from the workflow's own nodes.`,
+      };
+    }
+    sources = input.sources.map((id) => {
+      const node = byId.get(id);
+      if (!node) throw new Error(`node ${id} vanished between the check and the read`);
+      return node;
+    });
+  } else {
+    sources = branchTips(definition);
+  }
+
+  if (sources.length < 2) {
+    return {
+      ok: false,
+      reason: "no_branches",
+      message:
+        "an aggregation node needs at least two branches to combine. Add the parallel branches first, or name the source nodes explicitly.",
+    };
+  }
+
+  const nodeId = uniqueNodeId(definition, input.nodeId ?? "aggregate");
+  const aggregateNode: WorkflowNode =
+    mode === "summarize"
+      ? {
+          id: nodeId,
+          type: "llm",
+          // Checked above; the narrowing is for the type, not the value.
+          model: input.model ?? "",
+          system: "You merge several separate analyses into one. Use only what they say.",
+          prompt: summarizePrompt(sources, input.instructions),
+        }
+      : { id: nodeId, type: "set", values: collectValues(sources) };
+
+  const edges: WorkflowEdge[] = sources.map((source) => ({ from: source.id, to: nodeId }));
+  const next: WorkflowDefinition = {
+    ...definition,
+    nodes: [...definition.nodes, aggregateNode],
+    edges: [...definition.edges, ...edges],
+    ui: placeAggregate(definition, nodeId, sources),
+  };
+
+  const checked = validateDefinitionInput(next, env);
+  if (!checked.ok) return { ok: false, reason: "would_be_invalid", errors: checked.errors };
+
+  const saved = await updateWorkflowDefinition(deps, owner, workflowId, { definition: next });
+  if (!saved) return { ok: false, reason: "not_found" };
+  return { ok: true, definition: saved, nodeId, sources: sources.map((s) => s.id) };
 }
 
 export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";

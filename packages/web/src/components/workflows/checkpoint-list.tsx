@@ -69,20 +69,39 @@ function deniedResult(result: unknown): { resolvedBy?: string } | null {
  * with many successful nodes doesn't bury the one that needs attention
  * under walls of JSON.
  */
-export function CheckpointList({ checkpoints }: { checkpoints: CheckpointLike[] }) {
+export function CheckpointList({
+  checkpoints,
+  promotedNodeId,
+}: {
+  checkpoints: CheckpointLike[];
+  /** The node whose result is already displayed above the list (the run
+   * result panel). Its row keeps the result collapsed, so the same body is
+   * not opened twice on one screen. */
+  promotedNodeId?: string;
+}) {
   if (checkpoints.length === 0) {
     return <p className="text-sm text-muted">No checkpoints yet.</p>;
   }
   return (
     <ul className="space-y-2">
       {checkpoints.map((cp) => (
-        <CheckpointRow key={`${cp.nodeId}:${cp.iteration}`} checkpoint={cp} />
+        <CheckpointRow
+          key={`${cp.nodeId}:${cp.iteration}`}
+          checkpoint={cp}
+          promoted={cp.nodeId === promotedNodeId}
+        />
       ))}
     </ul>
   );
 }
 
-function CheckpointRow({ checkpoint }: { checkpoint: CheckpointLike }) {
+function CheckpointRow({
+  checkpoint,
+  promoted = false,
+}: {
+  checkpoint: CheckpointLike;
+  promoted?: boolean;
+}) {
   const status = toRunStatus(checkpoint.status);
   const denied = deniedResult(checkpoint.result);
   const hasBody = checkpoint.error != null || checkpoint.result !== undefined;
@@ -132,7 +151,7 @@ function CheckpointRow({ checkpoint }: { checkpoint: CheckpointLike }) {
           The line above already states it, so showing the raw JSON too
           would report the same fact twice. */}
       {checkpoint.result !== undefined && hasBody && !denied && (
-        <details className="mt-2 pl-6" open={status === "failed"}>
+        <details className="mt-2 pl-6" open={status === "failed" && !promoted}>
           <summary className="cursor-pointer text-xs text-muted hover:text-ink">Result</summary>
           <pre className="mt-1 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
             {jsonPreview(checkpoint.result)}

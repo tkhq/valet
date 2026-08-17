@@ -59,6 +59,21 @@ export interface WorkflowPolicy {
   maxWaitDurationMs?: number;
   maxForeachItems?: number;
   maxForeachConcurrency?: number;
+  /**
+   * What an unresolved `{{ ... }}` path does to the node that wrote it.
+   *
+   *   - `empty` (the default) renders the path as an empty value and
+   *     records a diagnostic. This is how every definition written before
+   *     this option behaves.
+   *   - `fail` fails the node BEFORE it runs, so a prompt with a hole in
+   *     it is never sent and an action with a null parameter is never
+   *     called. The failure names the path, the field, and the correction.
+   *
+   * `fail` does not apply to `if` conditions or edge `when` predicates.
+   * Those ask whether data is there, so an absent path is a legitimate
+   * answer rather than a mistake. They still produce diagnostics.
+   */
+  onUnresolvedPath?: 'empty' | 'fail';
 }
 
 export interface WorkflowEdge {

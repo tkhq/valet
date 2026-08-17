@@ -37,8 +37,11 @@ import {
   parseExpression,
   TemplateEvalError,
   TemplateParseError,
+  withMissRecorder,
   type TemplateContext,
 } from './dag/expression.js';
+import { auditNodeTemplates } from './dag/node-templates.js';
+import { createMissRecorder, type TemplatePathDiagnostic } from './dag/path-diagnostics.js';
 import type { WorkflowNode } from './dag/nodes.js';
 import type { WorkflowDefinition, WorkflowEdge } from './dag/shape.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
@@ -96,6 +99,36 @@ export interface RunSettledInfo {
  */
 export type OnRunSettled = (info: RunSettledInfo) => Promise<void> | void;
 
+/**
+ * Template paths that did not resolve during one drive segment.
+ *
+ * A run reaches this hook whether or not the misses failed anything: under
+ * the default `policy.onUnresolvedPath: "empty"` the nodes completed, with
+ * an empty value where the author expected data. That is exactly the case
+ * nothing else reports, so the host should persist these against the run
+ * and show them next to the run's nodes.
+ */
+export interface TemplateDiagnosticsReport {
+  runId: string;
+  workflowId: string;
+  /** The attempt that observed them. */
+  attempt: number;
+  /** Deduplicated by (node, field, path). Never empty. */
+  diagnostics: TemplatePathDiagnostic[];
+  /** True when `policy.onUnresolvedPath: "fail"` made these fail their nodes. */
+  enforced: boolean;
+}
+
+/**
+ * Template-diagnostics sink, fired once per wave that produced findings.
+ *
+ * Best-effort and non-blocking by contract: the interpreter swallows a
+ * throw, because losing a diagnostic must never abandon a drive lease. The
+ * handler must be idempotent — a reclaimed attempt re-drives the same wave
+ * and reports the same findings again.
+ */
+export type OnTemplateDiagnostics = (report: TemplateDiagnosticsReport) => Promise<void> | void;
+
 export interface InterpreterDeps {
   store: WorkflowStore;
   engine: WorkflowEngineDeps;
@@ -106,6 +139,8 @@ export interface InterpreterDeps {
   onGateResolved?: OnGateResolved;
   /** Fired once per settle finalization — see `OnRunSettled`. */
   onRunSettled?: OnRunSettled;
+  /** Fired for each wave that read a template path which did not resolve — see `OnTemplateDiagnostics`. */
+  onTemplateDiagnostics?: OnTemplateDiagnostics;
   /**
    * Host-only extension point (Phase 5 plan decision 20): invoked
    * synchronously right after `store.beginTerminalize` succeeds, before
@@ -182,6 +217,9 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
   // correlate the error.
   let workflowIdKnown = false;
 
+  /** Every template finding this drive segment has seen, for the span attributes. */
+  const driveDiagnostics: TemplatePathDiagnostic[] = [];
+
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
@@ -241,6 +279,30 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // own outcome. Nodes with `onError: "continue"` are exempt.
     let sawFailure = hasDominatingFailure(cpAll, graph);
 
+    // Audit every runnable node's templates against the context it is
+    // about to render with. Two products come out of one pass: the
+    // findings the host reports (always), and — under
+    // `policy.onUnresolvedPath: "fail"` — the set of nodes that must not
+    // run at all. Auditing BEFORE the wave is what makes strict mode
+    // meaningful: a node that has already sent a prompt or called an
+    // action cannot be un-run, and its checkpoint is already terminal.
+    const strict = definition.policy?.onUnresolvedPath === 'fail';
+    const findings: TemplatePathDiagnostic[] = [];
+    const blocked = new Map<string, TemplatePathDiagnostic[]>();
+    for (const node of runnable) {
+      const audit = auditNodeTemplates(node, templateContext);
+      if (audit.length === 0) continue;
+      findings.push(...audit);
+      if (!strict) continue;
+      const enforceable = audit.filter((d) => d.enforceable);
+      if (enforceable.length > 0) blocked.set(node.id, enforceable);
+    }
+
+    const blockedOutcomes = new Map<string, NodeExecuteResult>();
+    for (const [nodeId, diagnostics] of blocked) {
+      blockedOutcomes.set(nodeId, await failUnresolvedPaths(store, run, nodeId, attempt, clock, diagnostics));
+    }
+
     // Execute the wave's runnable nodes concurrently, bounded (batch-fanout
     // design decision 2). Same-wave nodes never feed each other — the
     // template context and runnable set were computed before the wave, and
@@ -248,23 +310,51 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // changes wall-clock, not semantics. Outcomes are aggregated in
     // definition order below, preserving the sequential loop's
     // deterministic terminate selection.
-    const outcomes = await executeWave(runnable, executors, (node) => ({
+    //
+    // Each node renders against its OWN copy of the context, carrying a
+    // recorder that reports the paths it read and did not resolve. That is
+    // how a `foreach` body's misses surface: the body renders with the
+    // foreach node's context plus per-iteration aliases, which the audit
+    // above cannot see.
+    const toExecute = runnable.filter((node) => !blocked.has(node.id));
+    const recorded = new Map<string, TemplatePathDiagnostic[]>();
+    const executed = await executeWave(toExecute, executors, (node) => {
+      const { recorder, diagnostics } = createMissRecorder(node.id);
+      recorded.set(node.id, diagnostics);
+      return {
+        run,
+        attempt,
+        iteration: ITERATION,
+        templateContext: withMissRecorder(templateContext, recorder),
+        existingCheckpoint: cpAll.get(node.id),
+        store,
+        clock,
+        engine,
+        onApprovalPending,
+        onApprovalGrant,
+        onGateResolved,
+      };
+    });
+
+    const outcomeById = new Map<string, NodeExecuteResult>();
+    for (let i = 0; i < toExecute.length; i++) outcomeById.set(toExecute[i].id, executed[i]);
+    for (const [nodeId, outcome] of blockedOutcomes) outcomeById.set(nodeId, outcome);
+
+    await reportDiagnostics(
+      deps,
       run,
       attempt,
-      iteration: ITERATION,
-      templateContext,
-      existingCheckpoint: cpAll.get(node.id),
-      store,
-      clock,
-      engine,
-      onApprovalPending,
-      onApprovalGrant,
-      onGateResolved,
-    }));
+      span,
+      mergeDiagnostics(findings, recorded),
+      strict,
+      driveDiagnostics,
+    );
 
-    for (let i = 0; i < runnable.length; i++) {
-      const node = runnable[i];
-      const outcome = outcomes[i];
+    for (const node of runnable) {
+      // Every runnable node either executed or was blocked by the audit
+      // above, so this lookup always finds an outcome.
+      const outcome = outcomeById.get(node.id);
+      if (outcome === undefined) continue;
 
       if (outcome.status === 'failed' && !graph.tolerateFailure.has(node.id)) sawFailure = true;
 
@@ -521,6 +611,114 @@ async function executeWave(
   const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
   if (rejected) throw rejected.reason;
   return outcomes;
+}
+
+// ─── Template diagnostics ────────────────────────────────────────────────────
+
+/**
+ * Fail a node whose templates read paths that do not resolve, under
+ * `policy.onUnresolvedPath: "fail"`.
+ *
+ * Writes the same intent-then-terminal pair an executor would, so the node
+ * has an ordinary `failed` checkpoint: failure dominance, `onError:
+ * "continue"`, and the run list all keep working without knowing why it
+ * failed. The node's own executor never runs, so nothing was sent with a
+ * hole in it.
+ */
+async function failUnresolvedPaths(
+  store: WorkflowStore,
+  run: WorkflowRun,
+  nodeId: string,
+  attempt: number,
+  clock: () => number,
+  diagnostics: TemplatePathDiagnostic[],
+): Promise<NodeExecuteResult> {
+  const error =
+    `unresolved template path(s); this workflow sets policy.onUnresolvedPath to "fail":\n` +
+    diagnostics.map((d) => `- ${d.message}`).join('\n');
+  await store.putIntent({
+    runId: run.runId,
+    nodeId,
+    iteration: ITERATION,
+    status: 'intent',
+    attempt,
+    createdAt: clock(),
+  });
+  const terminal: NodeCheckpoint = {
+    runId: run.runId,
+    nodeId,
+    iteration: ITERATION,
+    status: 'failed',
+    error,
+    attempt,
+    createdAt: clock(),
+  };
+  await store.completeCheckpoint(run.runId, nodeId, ITERATION, attempt, terminal);
+  return { status: 'failed', error };
+}
+
+/**
+ * One list from the pre-wave audit and the executors' own recorders.
+ *
+ * The audit sees a node's fields; a recorder sees whatever the node
+ * actually rendered, including a `foreach` body's templates. They overlap
+ * on ordinary nodes, so a path already reported with its field name wins —
+ * the field is the part an author needs to find the text to edit.
+ */
+function mergeDiagnostics(
+  audited: TemplatePathDiagnostic[],
+  recorded: Map<string, TemplatePathDiagnostic[]>,
+): TemplatePathDiagnostic[] {
+  const merged = [...audited];
+  const seen = new Set(audited.map((d) => `${d.nodeId}|${d.path}`));
+  for (const diagnostics of recorded.values()) {
+    for (const diagnostic of diagnostics) {
+      const key = `${diagnostic.nodeId}|${diagnostic.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(diagnostic);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Put the wave's findings where someone can read them: on the drive span
+ * for anyone reading traces, and through `onTemplateDiagnostics` for the
+ * host that persists them against the run.
+ *
+ * The span attributes are cumulative for the whole drive, so a later wave
+ * never overwrites an earlier wave's finding with a shorter list.
+ */
+async function reportDiagnostics(
+  deps: InterpreterDeps,
+  run: WorkflowRun,
+  attempt: number,
+  span: Span,
+  diagnostics: TemplatePathDiagnostic[],
+  enforced: boolean,
+  driveTotal: TemplatePathDiagnostic[],
+): Promise<void> {
+  if (diagnostics.length === 0) return;
+  driveTotal.push(...diagnostics);
+  span.setAttribute('valet.workflow.template.unresolved', driveTotal.length);
+  span.setAttribute(
+    'valet.workflow.template.unresolved_paths',
+    [...new Set(driveTotal.map((d) => `${d.nodeId}.${d.field ?? '*'}:${d.path}`))],
+  );
+  if (deps.onTemplateDiagnostics === undefined) return;
+  try {
+    await deps.onTemplateDiagnostics({
+      runId: run.runId,
+      workflowId: run.params.workflowId,
+      attempt,
+      diagnostics,
+      enforced,
+    });
+  } catch {
+    // Best-effort by contract: a reporting failure must not abandon the
+    // drive's lease. The findings stay on the span either way.
+  }
 }
 
 // ─── Executor dispatch ───────────────────────────────────────────────────────

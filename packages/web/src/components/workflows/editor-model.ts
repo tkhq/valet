@@ -587,7 +587,7 @@ export function autoLayout(definition: WorkflowDefinition): Record<string, FlowP
     outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
   }
 
-  const depths = computeBfsDepths(definition.nodes, incoming, outgoing);
+  const { depths } = computeBfsDepths(definition.nodes, incoming, outgoing);
 
   const nodesByDepth = new Map<number, string[]>();
   for (const node of definition.nodes) {
@@ -639,11 +639,26 @@ export function positionNewNodes(definition: WorkflowDefinition): WorkflowDefini
   return { ...definition, ui: { ...definition.ui, nodes: placed } };
 }
 
+interface BfsDepths {
+  /** Longest path from a root to each node, in edges. */
+  depths: Map<string, number>;
+  /**
+   * The reached nodes in topological order. A node in a cycle, or one whose
+   * every predecessor is in a cycle, is absent — it never entered the queue.
+   */
+  order: string[];
+}
+
+/**
+ * `nodes` is widened to "anything with an id" because the concurrency
+ * analysis below runs over flow nodes, and the layout above runs over
+ * definition nodes. Only the id and the array order are read.
+ */
 function computeBfsDepths(
-  nodes: WorkflowNode[],
+  nodes: ReadonlyArray<{ id: string }>,
   incoming: Map<string, string[]>,
   outgoing: Map<string, string[]>,
-): Map<string, number> {
+): BfsDepths {
   const depths = new Map<string, number>();
   const remainingIncoming = new Map(nodes.map((node) => [node.id, incoming.get(node.id)?.length ?? 0]));
   const queue: string[] = nodes.filter((node) => (remainingIncoming.get(node.id) ?? 0) === 0).map((node) => node.id);
@@ -667,7 +682,181 @@ function computeBfsDepths(
     if (!depths.has(node.id)) depths.set(node.id, index);
   }
 
-  return depths;
+  return { depths, order: queue };
+}
+
+// ─── concurrency (which steps run at the same time) ──────────────────────────
+
+/**
+ * What the graph shape says about one node's concurrency.
+ *
+ * The interpreter runs a node when every incoming edge has resolved, so all
+ * nodes at one depth become runnable in the same pass — see `driveLoop` and
+ * `computeRunnable` in `@valet/workflow`'s `interpreter.ts`. That depth is
+ * the `wave`.
+ */
+export interface NodeConcurrency {
+  /** 0-based wave index. */
+  wave: number;
+  /** Steps that leave this node on ONE output and become ready together. */
+  parallelOut: number;
+  /** Outputs that leave this node, of which a run takes exactly one. */
+  exclusiveOut: number;
+  /** Edges that arrive here. The node waits for every one of them. */
+  fanIn: number;
+}
+
+/** Two or more nodes that the graph allows to be in flight at once. */
+export interface ConcurrencyGroup {
+  /** Stable across renders of the same graph, so it can key a React list. */
+  id: string;
+  /** 0-based wave index the group belongs to. */
+  wave: number;
+  nodeIds: string[];
+}
+
+export interface ConcurrencyModel {
+  byNode: Record<string, NodeConcurrency>;
+  groups: ConcurrencyGroup[];
+}
+
+/**
+ * Which output an edge leaves its source on. An empty string is the single
+ * unlabeled output that every node except `if` and `approval` has. The
+ * precedence matches `flowEdgeToWorkflowEdge`.
+ */
+function edgeOutput(edge: WorkflowFlowEdge): string {
+  return edge.data.fromOutput ?? edge.sourceHandle ?? '';
+}
+
+/**
+ * Group the nodes that the graph allows to run at the same time, and count
+ * each node's fan-in and fan-out.
+ *
+ * Sharing a wave is not enough to be concurrent. The two sides of an `if`
+ * can land at the same depth, and only one of them ever runs — the other is
+ * skipped. So each node also carries the branch decisions every path to it
+ * must take (`requiredBranches`), and two nodes that need opposite outputs
+ * of the same branch node never share a group.
+ *
+ * Grouping is a greedy pass in node order rather than an exact partition.
+ * It can therefore split a set that could have been one group, but it never
+ * puts two exclusive nodes together. Under-reporting is the safe direction:
+ * a group that is drawn is always true.
+ */
+export function analyzeConcurrency(
+  flow: Pick<WorkflowFlowState, 'nodes' | 'edges'>,
+): ConcurrencyModel {
+  const nodeIds = new Set(flow.nodes.map((node) => node.id));
+  const edges = flow.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+  const incomingEdges = new Map<string, WorkflowFlowEdge[]>();
+  // source node -> output name -> how many targets leave on that output.
+  const outputs = new Map<string, Map<string, number>>();
+
+  for (const edge of edges) {
+    incoming.set(edge.target, [...(incoming.get(edge.target) ?? []), edge.source]);
+    outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
+    incomingEdges.set(edge.target, [...(incomingEdges.get(edge.target) ?? []), edge]);
+    const byOutput = outputs.get(edge.source) ?? new Map<string, number>();
+    const output = edgeOutput(edge);
+    byOutput.set(output, (byOutput.get(output) ?? 0) + 1);
+    outputs.set(edge.source, byOutput);
+  }
+
+  const { depths, order } = computeBfsDepths(flow.nodes, incoming, outgoing);
+  const required = requiredBranches(order, incomingEdges, outputs);
+
+  const byNode: Record<string, NodeConcurrency> = {};
+  for (const node of flow.nodes) {
+    const byOutput = outputs.get(node.id);
+    byNode[node.id] = {
+      wave: depths.get(node.id) ?? 0,
+      parallelOut: byOutput ? Math.max(...byOutput.values()) : 0,
+      exclusiveOut: byOutput ? byOutput.size : 0,
+      fanIn: incoming.get(node.id)?.length ?? 0,
+    };
+  }
+
+  const byWave = new Map<number, string[]>();
+  for (const node of flow.nodes) {
+    const wave = byNode[node.id]?.wave ?? 0;
+    byWave.set(wave, [...(byWave.get(wave) ?? []), node.id]);
+  }
+
+  const groups: ConcurrencyGroup[] = [];
+  for (const wave of [...byWave.keys()].sort((a, b) => a - b)) {
+    const cliques: string[][] = [];
+    for (const id of byWave.get(wave) ?? []) {
+      const clique = cliques.find((members) =>
+        members.every((member) => !isExclusive(required.get(id), required.get(member))),
+      );
+      if (clique) clique.push(id);
+      else cliques.push([id]);
+    }
+    cliques.forEach((ids, index) => {
+      if (ids.length > 1) groups.push({ id: `wave-${wave}-${index}`, wave, nodeIds: ids });
+    });
+  }
+
+  return { byNode, groups };
+}
+
+/**
+ * For each node, the branch decisions that EVERY path to it takes, as
+ * `branch node id -> output`.
+ *
+ * A path picks up a decision when it leaves a node that has more than one
+ * output wired. A node with a single wired output makes no choice, so it
+ * contributes nothing. Where a node is reachable by several paths, the
+ * intersection of those paths is kept: a decision that only some paths take
+ * is not required.
+ */
+function requiredBranches(
+  order: string[],
+  incomingEdges: Map<string, WorkflowFlowEdge[]>,
+  outputs: Map<string, Map<string, number>>,
+): Map<string, Map<string, string>> {
+  const required = new Map<string, Map<string, string>>();
+  // `order` is topological, so every source below already has its answer.
+  for (const id of order) {
+    const arriving = incomingEdges.get(id) ?? [];
+    let merged: Map<string, string> | null = null;
+    for (const edge of arriving) {
+      const path = new Map(required.get(edge.source) ?? []);
+      if ((outputs.get(edge.source)?.size ?? 0) > 1) path.set(edge.source, edgeOutput(edge));
+      merged = merged === null ? path : intersectBranches(merged, path);
+    }
+    required.set(id, merged ?? new Map());
+  }
+  return required;
+}
+
+function intersectBranches(
+  left: Map<string, string>,
+  right: Map<string, string>,
+): Map<string, string> {
+  const shared = new Map<string, string>();
+  for (const [branchNode, output] of left) {
+    if (right.get(branchNode) === output) shared.set(branchNode, output);
+  }
+  return shared;
+}
+
+/** True when the two nodes need opposite outputs of the same branch node,
+ * which means one of them is always skipped. */
+function isExclusive(
+  left: Map<string, string> | undefined,
+  right: Map<string, string> | undefined,
+): boolean {
+  if (!left || !right) return false;
+  for (const [branchNode, output] of left) {
+    const other = right.get(branchNode);
+    if (other !== undefined && other !== output) return true;
+  }
+  return false;
 }
 
 // ─── node summaries ────────────────────────────────────────────────────────────
