@@ -525,6 +525,10 @@ describe('autoLayout (BFS depth layering)', () => {
     expect(positions.a!.x - positions.trigger!.x).toBe(positions.b!.x - positions.a!.x);
   });
 
+  it('returns an empty layout for a zero-node definition', () => {
+    expect(autoLayout({ version: 'dag/v1', nodes: [], edges: [] })).toEqual({});
+  });
+
   it('caps how far a single pathological label can stretch a column', () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',
