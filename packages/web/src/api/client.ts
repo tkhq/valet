@@ -51,6 +51,7 @@ import type {
   GetOrchestratorInfoResponse,
   GetPrebuildForRepoResponse,
   GetReposResponse,
+  GetSlackAppResponse,
   GetWorkflowImportFileResponse,
   GetSessionResponse,
   GetSkillResponse,
@@ -807,10 +808,12 @@ export const api = {
       `/credentials/${encodeURIComponent(service)}`,
       body,
     ),
-  deleteCredential: (service: string) =>
+  // The server defaults a missing `scope` to `"user"`; sending it whenever
+  // the caller states one keeps the request self-describing either way.
+  deleteCredential: (service: string, opts?: { scope?: "user" | "org" }) =>
     request<DeleteCredentialResponse>(
       "DELETE",
-      `/credentials/${encodeURIComponent(service)}`,
+      `/credentials/${encodeURIComponent(service)}${opts?.scope ? `?scope=${opts.scope}` : ""}`,
     ),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
@@ -890,6 +893,15 @@ export const api = {
     request<GetGithubAppResponse>("POST", "/org/github-app/credential", body),
   refreshGithubApp: () => request<GetGithubAppResponse>("POST", "/org/github-app/refresh"),
   deleteGithubApp: () => request<undefined>("DELETE", "/org/github-app"),
+
+  // org Slack app setup — admin-gated. `name` renames the app in the
+  // generated manifest, for a deployment that runs beside another Valet in
+  // the same workspace.
+  getSlackApp: (name?: string) =>
+    request<GetSlackAppResponse>(
+      "GET",
+      `/org/slack${name ? `?name=${encodeURIComponent(name)}` : ""}`,
+    ),
 
   // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
   connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
