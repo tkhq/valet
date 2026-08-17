@@ -3,7 +3,7 @@
  * `useWorkflowAssistant` — the session and thread the editor's right-hand
  * column talks to.
  *
- * The panel shows "Opening the assistant…" until BOTH ids are set, so every
+ * The panel shows a stage-naming spinner until BOTH ids are set, so every
  * test here is about one question: does the panel reach that state, and does
  * it say something when it cannot? A hook that resolves neither id and
  * reports no error leaves a spinner on screen forever, which is what a
@@ -218,7 +218,7 @@ describe("useWorkflowAssistant", () => {
     // The spinner claims work in progress. Nothing is in flight here and
     // nothing retries, so the panel must not show one.
     expect(result.current.opening).toBe(false);
-    expect(result.current.error).toContain("Reload the page");
+    expect(result.current.error).toContain("Retry");
     expect(createThread).not.toHaveBeenCalled();
   });
 
@@ -273,10 +273,10 @@ describe("WorkflowAssistantPanel", () => {
     }
     render(<Panel />, { wrapper });
 
-    expect(screen.getByText(/Opening the assistant/)).toBeTruthy();
+    expect(screen.getByText(/Opening your assistant|Starting the conversation/)).toBeTruthy();
     await waitFor(() =>
       expect(screen.getByTestId("session-view").textContent).toBe(`${SESSION} thread_1`),
     );
-    expect(screen.queryByText(/Opening the assistant/)).toBeNull();
+    expect(screen.queryByText(/Opening your assistant|Starting the conversation/)).toBeNull();
   });
 });
