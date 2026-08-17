@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { admitSignal, SignalEdgeDeniedError, type AdmitSignalDeps } from "./signals.js";
 import { eventDropLog } from "../schema/index.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 let api: TestApi | undefined;
 
@@ -97,11 +98,11 @@ describe("admitSignal edge ACL", () => {
 
   it("org -> user orchestrator (same org) is allowed", async () => {
     api = await bootTestApi();
-    const org = await api.providers.engineHost.orchestratorSessionFor(
+    const org = await defaultAssistantSessionFor(api.providers, 
       { type: "org", id: "org-a" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    const user = await api.providers.engineHost.orchestratorSessionFor(
+    const user = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -118,11 +119,11 @@ describe("admitSignal edge ACL", () => {
 
   it("user -> user orchestrator (same org) is denied and drop-logged", async () => {
     api = await bootTestApi();
-    const user1 = await api.providers.engineHost.orchestratorSessionFor(
+    const user1 = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    const user2 = await api.providers.engineHost.orchestratorSessionFor(
+    const user2 = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "user-2" },
       { actorUserId: "user-2", orgId: "local-org" },
     );
@@ -148,11 +149,11 @@ describe("admitSignal edge ACL", () => {
 
   it("cross-org orchestrator signal is denied and drop-logged", async () => {
     api = await bootTestApi();
-    const orgA = await api.providers.engineHost.orchestratorSessionFor(
+    const orgA = await defaultAssistantSessionFor(api.providers, 
       { type: "org", id: "org-a" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    const orgB = await api.providers.engineHost.orchestratorSessionFor(
+    const orgB = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "user-3" },
       { actorUserId: "user-3", orgId: "other-org" },
     );

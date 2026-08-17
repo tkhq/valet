@@ -45,7 +45,3 @@ export interface IdentityProvider {
   getAuthUrl?(config: ProviderConfig, callbackUrl: string, state: string): string;
   handleCallback(config: ProviderConfig, callbackData: CallbackData): Promise<IdentityResult>;
 }
-
-export interface IdentityProviderPackage {
-  provider: IdentityProvider;
-}

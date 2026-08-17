@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { NotificationKind } from "@valet/api/wire";
 import { useNotificationPreferences, useSetNotificationPreference } from "~/api/queries";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Spinner, Switch } from "~/components/primitives";
+import { isAttentionSoundEnabled, setAttentionSoundEnabled } from "~/lib/use-attention-ping";
+import { playAttentionChime } from "~/lib/notification-sound";
 
 /**
  * `/settings/notifications` — You · Notifications. Per-kind web delivery
@@ -38,11 +41,32 @@ const KIND_DESCRIPTION: Record<NotificationKind, string> = {
 export function NotificationsPage() {
   const prefsQ = useNotificationPreferences();
   const setPref = useSetNotificationPreference();
+  // Device-local on purpose. Whether a machine may make noise depends on
+  // where it is — a desk, a meeting room, a laptop in a cafe — not on who
+  // is signed in, so this does not belong on the account.
+  const [sound, setSound] = useState(() => isAttentionSoundEnabled());
 
   const byKind = new Map(prefsQ.data?.preferences.map((p) => [p.kind, p.web]));
 
   return (
     <Section title="Notifications" description="Choose which updates reach you here.">
+      <FieldRow
+        label="Sound"
+        hint="Play a short chime when your assistant is blocked and waiting on you. Updates stay silent. This device only."
+      >
+        <Switch
+          checked={sound}
+          onCheckedChange={(next) => {
+            setAttentionSoundEnabled(next);
+            setSound(next);
+            // Play it on the way ON so the choice is audible, and because
+            // the click doubles as the gesture that unblocks audio.
+            if (next) playAttentionChime();
+          }}
+          aria-label="Attention sound"
+        />
+      </FieldRow>
+
       {prefsQ.isLoading && (
         <div className="flex items-center gap-2 py-4 text-sm text-muted">
           <Spinner size={14} /> Loading…

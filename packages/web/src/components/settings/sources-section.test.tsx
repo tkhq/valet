@@ -10,7 +10,6 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { BakeSummary, ListBakesResponse, ListSourcesResponse, SourceSummary } from "~/api/sources";
 
-const saveMutate = vi.fn();
 const bakeMutate = vi.fn();
 const patchMutate = vi.fn();
 const deleteMutate = vi.fn();

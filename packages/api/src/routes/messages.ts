@@ -12,7 +12,7 @@
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
 import { Hono, type Context } from "hono";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { dispatchCommand } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -40,19 +40,27 @@ import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engi
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { isOrgAdmin } from "../services/org.js";
+import type { Providers } from "../providers/types.js";
+import { canViewSession } from "../services/session-access.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
+/**
+ * Every route in this file (threads, messages, decisions) shares this one
+ * check — view access, not just direct ownership, so a team's orchestrator
+ * session works the same way here as `GET /api/sessions/:id` does (see
+ * `services/session-access.ts`). Session lifecycle routes (delete, pause,
+ * model change — in `routes/sessions.ts`) are NOT widened by this; talking
+ * to a team's orchestrator is not the same decision as reconfiguring it.
+ */
 async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
-  return rows[0] ?? null;
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
+  const row = rows[0];
+  if (!row || !(await canViewSession(db, row, userId))) return null;
+  return row;
 }
 
 export function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
@@ -342,11 +350,59 @@ messagesRouter.get("/:id/messages", async (c) => {
 
 // ── Messages: send prompt ─────────────────────────────────────────────────
 
+/**
+ * Queue one user prompt on a session's thread and touch the session row so
+ * list ordering reflects recency. This is the whole submit path: the route
+ * below wraps it in authorization and HTTP, and `POST /api/sessions` calls it
+ * to honour `CreateSessionRequest.initialPrompt`. Slash commands live here
+ * for that reason — an initial prompt that starts with "/" must dispatch the
+ * same way a typed one does.
+ *
+ * Returns null when `threadId` names no thread of this session. The caller
+ * must have authorized the session already — this function does not.
+ */
+export async function submitSessionPrompt(
+  providers: Pick<Providers, "db" | "engineHost">,
+  row: typeof agentSessions.$inferSelect,
+  text: string,
+  threadId?: string,
+): Promise<SendPromptResponse | null> {
+  const { db, engineHost } = providers;
+  const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+
+  await engineSession.ensureDefaultThread();
+  const thread = resolveThread(engineSession, threadId);
+  if (!thread) return null;
+
+  // Resolve "/"-text against the registry BEFORE choosing a path. Every
+  // path targets the REQUESTED thread — never silently rerouted:
+  // - execute-kind (builtin/plugin) → `session.prompt()` with the resolved
+  //   thread id, so the command_result lands where the client is watching.
+  // - expand-kind (skill/template) → expand here, then submit the expanded
+  //   text to the requested thread like any prompt.
+  // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
+  //   requested thread, text unchanged.
+  const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
+  const receipt =
+    outcome && outcome.kind === "execute"
+      ? await engineSession.prompt(text, { threadId: thread.id })
+      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : text, {});
+
+  await db
+    .update(agentSessions)
+    .set({ updatedAt: Date.now() })
+    .where(eq(agentSessions.id, row.id));
+
+  return {
+    // Commands take no queue item; "" would read as a real (broken) id.
+    messageId: receipt.queueItemId || null,
+    threadId: receipt.threadId,
+  };
+}
+
 messagesRouter.post("/:id/messages", async (c) => {
-  const result = await loadEngineSession(c);
-  if ("error" in result) return result.error;
-  const { session, engineSession } = result;
-  const { db } = c.var.providers;
+  const row = await loadOwnedSession(c);
+  if (!row) return c.json({ error: "session not found" }, 404);
 
   let body: SendPromptRequest;
   try {
@@ -358,37 +414,8 @@ messagesRouter.post("/:id/messages", async (c) => {
     return c.json({ error: "text is required" }, 400);
   }
 
-  await engineSession.ensureDefaultThread();
-  const thread = resolveThread(engineSession, body.threadId);
-  if (!thread) return c.json({ error: "thread not found" }, 404);
-
-  // Resolve "/"-text against the registry BEFORE choosing a path. Every
-  // path targets the REQUESTED thread — never silently rerouted:
-  // - execute-kind (builtin/plugin) → `session.prompt()` with the resolved
-  //   thread id, so the command_result lands where the client is watching.
-  // - expand-kind (skill/template) → expand here, then submit the expanded
-  //   text to the requested thread like any prompt.
-  // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
-  //   requested thread, text unchanged.
-  const outcome = body.text.startsWith("/")
-    ? dispatchCommand(body.text, engineSession.commandRegistry())
-    : null;
-  const receipt =
-    outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(body.text, { threadId: thread.id })
-      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : body.text, {});
-
-  // Touch the session row so list ordering reflects recency.
-  await db
-    .update(agentSessions)
-    .set({ updatedAt: Date.now() })
-    .where(eq(agentSessions.id, session.id));
-
-  const resp: SendPromptResponse = {
-    // Commands take no queue item; "" would read as a real (broken) id.
-    messageId: receipt.queueItemId || null,
-    threadId: receipt.threadId,
-  };
+  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId);
+  if (!resp) return c.json({ error: "thread not found" }, 404);
   return c.json(resp, 202);
 });
 

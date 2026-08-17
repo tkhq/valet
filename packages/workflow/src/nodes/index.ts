@@ -95,7 +95,12 @@ export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
    * an open index signature for exactly this purpose.
    */
   aliases?: Record<string, unknown>;
-  /** `{ trigger, nodes }` — `nodes.<id>.output` is each resolved node's checkpoint result. */
+  /**
+   * `{ trigger, nodes }` — `nodes.<id>.output` is each completed node's
+   * checkpoint result. A node that failed under `onError: "continue"`
+   * carries `nodes.<id>.error` instead of an output (batch-fanout design
+   * decision 3); a node that failed under the default policy is absent.
+   */
   templateContext: TemplateContext;
   /** This node's checkpoint row from the current drive pass, if one already exists (resumption). */
   existingCheckpoint?: NodeCheckpoint;

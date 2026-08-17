@@ -9,10 +9,13 @@ import {
   resolveTriggerInput,
   triggerDataSchema,
   validateWorkflowDefinition,
+  type ListRunsFilter,
+  type NodeCheckpoint,
   type RunParams,
   type TriggerInputError,
   type ValidateEnvironment,
   type WorkflowDefinition,
+  type WorkflowRunListItem,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
@@ -41,8 +44,13 @@ import {
 import type {
   GetWorkflowRunResponse,
   GlobalWorkflowRunSummary,
+  ListAllWorkflowRunsResponse,
+  ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
+  WorkflowRunCheckpoint,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
   WorkflowRunSummary,
 } from "../wire/types.js";
 
@@ -62,6 +70,18 @@ export interface WorkflowServiceDeps {
 export interface WorkflowOwner {
   userId: string;
   orgId: string;
+}
+
+/** The owner types `workflow_definitions.owner_type` holds. Read off the
+ * column so the two can never drift. */
+export type WorkflowOwnerType = (typeof workflowDefinitions.$inferSelect)["ownerType"];
+
+/** One owner, in the `{owner_type, owner_id}` shape every workflow row
+ * carries. `listWorkflowDefinitions` takes one to narrow its result to a
+ * single owner. */
+export interface WorkflowOwnerRef {
+  ownerType: WorkflowOwnerType;
+  ownerId: string;
 }
 
 export function newWorkflowId(prefix: string): string {
@@ -127,8 +147,15 @@ async function isAuthorizedFor(
  * `getWorkflowRunDetail` below) — a run started against a team-owned
  * workflow carries the SAME `{ownerType, ownerId}` shape (scheduler.ts /
  * events/dispatcher.ts copy it straight from the definition row at start
- * time), so both need the identical direct-or-team-member check. */
-async function isAuthorizedForOwner(
+ * time), so both need the identical direct-or-team-member check.
+ *
+ * Exported for the list route's `?ownerType=&ownerId=` filter, which asks
+ * this same question about an owner named in a query string before it
+ * narrows to it. Sharing the check is what keeps "which workflows may I
+ * list" and "which workflow may I open" from drifting apart. An org owner
+ * is false here: no rule admits anybody to an org-owned workflow yet, so
+ * one is neither listable nor openable. */
+export async function isAuthorizedForOwner(
   db: AppDb,
   owner: WorkflowOwner,
   target: { ownerType: string; ownerId: string },
@@ -155,21 +182,63 @@ export async function ownedDefinitionRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
-export async function listWorkflowDefinitions(
-  deps: WorkflowServiceDeps,
-  owner: WorkflowOwner,
-): Promise<WorkflowDefinitionSummary[]> {
-  const myTeams = await listTeamsForUser(deps.db, owner.userId);
+/** The "definitions this caller may read" predicate — their own, plus every
+ * team they are a live member of. Shared by the definitions list and
+ * `ownedWorkflowIds` so the two can never disagree about reach. Membership
+ * is re-read on every call for the same reason `isAuthorizedFor` does. */
+async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner) {
+  const myTeams = await listTeamsForUser(db, owner.userId);
   const teamIds = myTeams.map((t) => t.id);
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, teamIds))
       : undefined;
+  return teamMatch ? or(ownerMatch, teamMatch) : ownerMatch;
+}
+
+/** Ids of every workflow the caller may read. The cross-workflow run list
+ * scopes on these: `WorkflowStore.listRuns` takes no owner filter, so
+ * authorization stays here in application code (batch-fanout design
+ * decision 5). */
+export async function ownedWorkflowIds(db: AppDb, owner: WorkflowOwner): Promise<string[]> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(await ownedDefinitionFilter(db, owner));
+  return rows.map((r) => r.id);
+}
+
+/** The same read as `ownedWorkflowIds`, with the display name each id needs
+ * when the rows leave their own workflow's page. */
+async function ownedWorkflowNames(db: AppDb, owner: WorkflowOwner): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id, name: workflowDefinitions.name })
+    .from(workflowDefinitions)
+    .where(await ownedDefinitionFilter(db, owner));
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
+
+/**
+ * The caller's own workflows unioned with every team they belong to.
+ * `scope` narrows that to one owner — a workspace picker asking for one
+ * team's workflows. It carries no authorization: the caller has already
+ * checked the user may reach that owner (`isAuthorizedForOwner`), because
+ * an id that arrives in a query string is a request, not a permission.
+ */
+export async function listWorkflowDefinitions(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  scope?: WorkflowOwnerRef,
+): Promise<WorkflowDefinitionSummary[]> {
+  // A scoped list reads one owner, so it never needs the team roster.
+  const where = scope
+    ? and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId))
+    : await ownedDefinitionFilter(deps.db, owner);
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(teamMatch ? or(ownerMatch, teamMatch) : ownerMatch)
+    .where(where)
     .orderBy(desc(workflowDefinitions.updatedAt));
   return rows.map(rowToDefinition);
 }
@@ -376,14 +445,12 @@ export async function deleteWorkflowDefinition(
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return "not_found";
 
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, id));
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (run && run.status !== "settled") return "has_active_runs";
-  }
+  const active = await deps.workflowStore.listRuns({
+    workflowIds: [id],
+    status: ["pending", "running", "parked", "terminalizing"],
+    limit: 1,
+  });
+  if (active.runs.length > 0) return "has_active_runs";
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
@@ -410,6 +477,11 @@ export async function deleteWorkflowDefinition(
   // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
   // which is now gone) but never actually removed.
   await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
+  // Same reasoning as webhooks: workflow_schedules.workflow_id is a plain
+  // text column with no cascade, and the scheduler sweeps ALL enabled rows
+  // regardless of owner reachability — an orphan keeps firing forever
+  // against a workflow that no longer exists.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
   return "deleted";
 }
 
@@ -451,58 +523,161 @@ export async function startWorkflowRun(
   return { runId };
 }
 
+/** Page size when the caller names none, and the ceiling it is clamped to.
+ * Exported so callers can name the accepted range in their error message. */
+export const RUN_PAGE_LIMIT_DEFAULT = 50;
+export const RUN_PAGE_LIMIT_MAX = 200;
+
+/** The run filter values callers may pass, and their guards. Defined once
+ * here so the HTTP route and the agent action reject the same set. */
+export const RUN_STATUS_VALUES = ["pending", "running", "parked", "terminalizing", "settled"] as const;
+export const RUN_OUTCOME_VALUES = ["completed", "failed", "cancelled"] as const;
+
+export function isRunStatus(value: string): value is WorkflowRunStatus {
+  return RUN_STATUS_VALUES.some((v) => v === value);
+}
+
+export function isRunOutcome(value: string): value is WorkflowRunOutcome {
+  return RUN_OUTCOME_VALUES.some((v) => v === value);
+}
+
+function clampRunLimit(limit: number | undefined): number {
+  if (limit === undefined) return RUN_PAGE_LIMIT_DEFAULT;
+  return Math.min(Math.max(Math.trunc(limit), 1), RUN_PAGE_LIMIT_MAX);
+}
+
+function toRunSummary(item: WorkflowRunListItem): WorkflowRunSummary {
+  const parked = item.status === "parked";
+  return {
+    runId: item.runId,
+    workflowId: item.workflowId,
+    status: item.status,
+    outcome: item.outcome,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    needsApproval:
+      (parked &&
+        item.waitingOn.some((w) => w.kind === "signal" && w.signalType.startsWith("approval:"))) ||
+      undefined,
+    // Parked only: name the blocking conditions in the list itself, so a
+    // surprising park (e.g. a policy gate on a tool node) is visible
+    // without a per-run detail fetch. The list query carries `waiting_on`
+    // for exactly this — reading it here costs no extra round trip.
+    waitingOn:
+      parked && item.waitingOn.length > 0
+        ? item.waitingOn.map((w) => ({
+            kind: w.kind,
+            nodeId: w.nodeId,
+            ...(w.kind === "signal" ? { signalType: w.signalType } : {}),
+            ...(w.kind === "timer" ? { wakeAt: w.wakeAt } : {}),
+          }))
+        : undefined,
+    parentRunId: item.parentRunId,
+    parentNodeId: item.parentNodeId,
+    parentIteration: item.parentIteration,
+  };
+}
+
+/** Paging controls every run list shares. */
+export interface RunPageOptions {
+  limit?: number;
+  cursor?: string;
+}
+
+/** One workflow's runs, newest first. Null when the workflow isn't owned. */
 export async function listWorkflowRuns(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
-): Promise<WorkflowRunSummary[] | null> {
+  page: RunPageOptions = {},
+): Promise<ListWorkflowRunsResponse | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
-  // `WorkflowStore` has no "list runs by workflowId" method — it's a small,
-  // portable port (decision 6) and this is an API-only read concern, so the
-  // list is built by asking the app db for the definition's run ids, then
-  // re-fetching each through the store for a consistent shape. `workflow_runs`
-  // doesn't index by owner alone, but every row here is already scoped by
-  // `workflowId`, which we've just verified is owned.
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, workflowId))
-    .orderBy(desc(workflowRuns.createdAt));
+  const result = await deps.workflowStore.listRuns({
+    workflowIds: [workflowId],
+    limit: clampRunLimit(page.limit),
+    cursor: page.cursor,
+  });
+  return { runs: result.runs.map(toRunSummary), nextCursor: result.nextCursor };
+}
 
-  const runs: WorkflowRunSummary[] = [];
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (!run) continue;
-    const needsApproval =
-      run.status === "parked" &&
-      run.waitingOn.some(
-        (w) => w.kind === "signal" && w.signalType.startsWith("approval:"),
-      );
-    runs.push({
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-      needsApproval: needsApproval || undefined,
-      // Parked only: name the blocking conditions in the list itself, so a
-      // surprising park (e.g. a policy gate on a tool node) is visible
-      // without a per-run detail fetch.
-      waitingOn:
-        run.status === "parked" && run.waitingOn.length > 0
-          ? run.waitingOn.map((w) => ({
-              kind: w.kind,
-              nodeId: w.nodeId,
-              ...(w.kind === "signal" ? { signalType: w.signalType } : {}),
-              ...(w.kind === "timer" ? { wakeAt: w.wakeAt } : {}),
-            }))
-          : undefined,
-    });
+/** Filters the cross-workflow run list accepts, on top of `RunPageOptions`. */
+export interface OwnerRunsFilter extends RunPageOptions {
+  /** Narrows to these workflows. Omit for every workflow the caller may read. */
+  workflowIds?: string[];
+  status?: ListRunsFilter["status"];
+  outcome?: ListRunsFilter["outcome"];
+  /** Children of one run — this is how a batch parent's items come back in one query. */
+  parentRunId?: string;
+  since?: number;
+}
+
+/**
+ * Runs across every workflow the caller may read, newest first. Null when
+ * the caller named a workflow id they cannot read — the route answers 404,
+ * so an unreadable workflow and a missing one stay indistinguishable.
+ *
+ * Each row carries `workflowName`. A cross-workflow list has no per-workflow
+ * heading, so the name must travel with the run or the reader cannot tell
+ * the rows apart. The names come from the same definition read the
+ * authorization check already does, so this costs no extra query.
+ *
+ * Runs of a deleted definition are unreachable here, as they were through
+ * the per-workflow list: they stay reachable by run id.
+ */
+export async function listRunsForOwner(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  filter: OwnerRunsFilter = {},
+): Promise<ListAllWorkflowRunsResponse | null> {
+  const nameById = await ownedWorkflowNames(deps.db, owner);
+  const readable = [...nameById.keys()];
+  let workflowIds = readable;
+  if (filter.workflowIds !== undefined) {
+    if (filter.workflowIds.some((id) => !nameById.has(id))) return null;
+    workflowIds = filter.workflowIds;
   }
-  return runs;
+  if (workflowIds.length === 0) return { runs: [] };
+
+  const result = await deps.workflowStore.listRuns({
+    workflowIds,
+    status: filter.status,
+    outcome: filter.outcome,
+    parentRunId: filter.parentRunId,
+    since: filter.since,
+    limit: clampRunLimit(filter.limit),
+    cursor: filter.cursor,
+  });
+  const runs = result.runs.map((run) => {
+    const summary = toRunSummary(run);
+    // The id is the fallback label: a run whose definition was renamed
+    // between the two reads is still identifiable, and never blank.
+    return { ...summary, workflowName: nameById.get(summary.workflowId) ?? summary.workflowId };
+  });
+  return { runs, nextCursor: result.nextCursor };
+}
+
+/**
+ * Projects one checkpoint for the wire. The interpreter records a session
+ * node's `sessionId` and a workflow node's `childRunId` in the checkpoint's
+ * `effects` bag (`nodes/submission-node.ts`, `nodes/workflow-call.ts`);
+ * both are what turns a run page into a link to the work the node started.
+ * The rest of `effects` (receipts, repair state) is interpreter bookkeeping
+ * and stays off the wire.
+ */
+export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
+  const effects = cp.effects;
+  return {
+    nodeId: cp.nodeId,
+    iteration: cp.iteration,
+    status: cp.status,
+    result: cp.result,
+    error: cp.error,
+    createdAt: cp.createdAt,
+    sessionId: typeof effects?.sessionId === "string" ? effects.sessionId : undefined,
+    childRunId: typeof effects?.childRunId === "string" ? effects.childRunId : undefined,
+  };
 }
 
 /** Owner-gated run lookup shared by cancel/approval below. */
@@ -862,14 +1037,7 @@ export async function getWorkflowRunDetail(
       definition: run.definition,
       params: run.params,
     },
-    checkpoints: checkpoints.map((cp) => ({
-      nodeId: cp.nodeId,
-      iteration: cp.iteration,
-      status: cp.status,
-      result: cp.result,
-      error: cp.error,
-      createdAt: cp.createdAt,
-    })),
+    checkpoints: checkpoints.map(toRunCheckpoint),
     signals: signals.map((s) => ({
       signalId: s.signalId,
       signalType: s.signalType,
@@ -880,35 +1048,3 @@ export async function getWorkflowRunDetail(
   };
 }
 
-export async function listRecentWorkflowRuns(
-  deps: WorkflowServiceDeps,
-  owner: WorkflowOwner,
-  limit = 50,
-): Promise<GlobalWorkflowRunSummary[]> {
-  const defs = await listWorkflowDefinitions(deps, owner);
-  if (defs.length === 0) return [];
-  const nameById = new Map(defs.map((d) => [d.id, d.name]));
-
-  const runRows = await deps.db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(inArray(workflowRuns.workflowId, [...nameById.keys()]))
-    .orderBy(desc(workflowRuns.createdAt))
-    .limit(limit);
-
-  const runs: GlobalWorkflowRunSummary[] = [];
-  for (const r of runRows) {
-    const run = await deps.workflowStore.getRun(r.id);
-    if (!run) continue;
-    runs.push({
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      workflowName: nameById.get(run.params.workflowId) ?? run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-    });
-  }
-  return runs;
-}

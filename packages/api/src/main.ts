@@ -26,10 +26,13 @@ import { buildAuth } from "./auth/index.js";
 import {
   loadInstanceConfig,
   resolveAllowedEmailDomains,
+  resolveSsoTeamMapping,
   InstanceConfigError,
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { syncAllAppWebhookUrls } from "./services/github-app.js";
+import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -170,10 +173,12 @@ try {
 // URL it needs at session-provision time — not after boot.
 const authConfig = loadAuthConfig(process.env);
 
-// Both-set guard + merge for allowedEmailDomains. Must run after authConfig
-// is loaded (we need the env-parsed domains) and after instanceConfig
-// (we need the config-declared domains). Throws InstanceConfigError with
-// the corrective-action message if both sources are set simultaneously.
+// Both-set guard + merge for allowedEmailDomains and for the sso team
+// mapping. Must run after authConfig is loaded (we need the env-parsed
+// values) and after instanceConfig (we need the config-declared ones), and
+// before `buildAuth` below, which reads `oidc.teamClaim` to declare the extra
+// claim fields the sso plugin passes through. Throws InstanceConfigError with
+// the corrective-action message if both sources set the same field.
 if (authConfig) {
   try {
     authConfig.allowedEmailDomains = resolveAllowedEmailDomains(
@@ -181,6 +186,19 @@ if (authConfig) {
       process.env,
       authConfig.allowedEmailDomains,
     );
+
+    const oidc = authConfig.oidc;
+    if (oidc) {
+      const mapping = resolveSsoTeamMapping(instanceConfig, process.env, {
+        claim: oidc.teamClaim,
+        assertedClaim: oidc.teamAssertedClaim,
+        adminSubGroup: oidc.teamAdminGroup,
+      });
+      oidc.teamClaim = mapping.claim;
+      oidc.teamAssertedClaim = mapping.assertedClaim;
+      oidc.teamAdminGroup = mapping.adminSubGroup;
+      oidc.teamGroups = mapping.groups;
+    }
   } catch (e) {
     if (e instanceof InstanceConfigError) {
       console.error(e.message);
@@ -282,6 +300,21 @@ await providers.channelHost.start().catch((err) => {
 });
 console.log("channel host started");
 
+// GitHub App webhook URL: point every app this instance OWNS at this
+// instance's public URL. A developer behind an ephemeral tunnel gets a new
+// hostname on every restart, and the URL baked into the app at creation goes
+// stale, so inbound deliveries stop with no error anywhere. Apps supplied
+// through `GITHUB_APP_*` belong to another instance and are never touched —
+// see `syncAppWebhookUrl`'s doc comment for that guard.
+//
+// Deliberately NOT awaited: this makes up to two GitHub round trips, and a
+// slow or unreachable GitHub must not hold up the port. The function
+// swallows every failure, so the floating promise cannot reject.
+void syncAllAppWebhookUrls(
+  { db: providers.db, credentials: providers.engineCredentials },
+  publicUrlFromEnv(process.env),
+);
+
 // Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
@@ -330,7 +363,10 @@ if (instanceConfig) {
   // no admin, or duplicate skill sources). Fail boot with the
   // corrective-action message only — no stack spam. Rethrow anything else.
   try {
-    await reconcileInstanceConfig({ db: providers.db, sourceService: providers.prebuildService }, instanceConfig);
+    await reconcileInstanceConfig(
+      { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
+      instanceConfig,
+    );
   } catch (e) {
     if (e instanceof InstanceConfigError) {
       console.error(e.message);
@@ -352,6 +388,7 @@ const authWiring: AuthWiring = authConfig
           cfg: authConfig,
           credentialStore: providers.engineCredentials,
           instanceConfig,
+          configPath: process.env.VALET_CONFIG,
           sourceService: providers.prebuildService,
         }),
       }),
@@ -371,7 +408,7 @@ const webDistDir = webDistPath();
 const adapter = await selectServerAdapter();
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
-const { app, startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
+const { startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
 // silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.

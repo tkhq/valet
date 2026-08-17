@@ -3,9 +3,7 @@ import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import {
   VirtualSandboxProvider,
-  orchestratorSessionId,
   type ChannelTransport,
-  type GatePromptRef,
   type InboundChannelEvent,
   type OutboundChannelMessage,
   type ValetPlugin,
@@ -18,6 +16,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { eventDropLog, userIdentityLinks } from "../schema/index.js";
 import { linkIdentity, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -48,6 +47,51 @@ class FakeTransport implements ChannelTransport {
   }
 }
 
+/**
+ * A transport whose conversationKey holds more than the thread key does, the
+ * way Slack's holds the workspace id. It owns both directions of the mapping
+ * and refuses a key from another workspace, so a host that skips the hooks
+ * fails here instead of posting somewhere plausible.
+ */
+class KeyedTransport implements ChannelTransport {
+  readonly channelType = "keyed";
+  readonly realm = "R1";
+  sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
+  opened: string[] = [];
+  verifyWebhook(): null {
+    return null;
+  }
+  parseUpdate(): null {
+    return null;
+  }
+  threadKeyFromConversationKey(conversationKey: string): string {
+    return `keyed:${conversationKey.split(":")[2] ?? ""}`;
+  }
+  conversationKeyFromThreadKey(threadKey: string): string | null {
+    const id = threadKey.slice("keyed:".length);
+    if (!threadKey.startsWith("keyed:") || id === "" || id.includes(":")) return null;
+    return `keyed:${this.realm}:${id}`;
+  }
+  async openDirectConversation(externalId: string): Promise<string> {
+    this.opened.push(externalId);
+    return `keyed:${this.realm}:D-${externalId}`;
+  }
+  async send(conversationKey: string, message: OutboundChannelMessage) {
+    if (!conversationKey.startsWith(`keyed:${this.realm}:`)) {
+      throw new Error(`refusing a key this transport did not mint: "${conversationKey}"`);
+    }
+    this.sent.push({ conversationKey, message });
+    return { conversationKey, messageId: String(this.sent.length) };
+  }
+  async sendMedia(conversationKey: string) {
+    return { conversationKey, messageId: "m" };
+  }
+  async sendGatePrompt(conversationKey: string) {
+    return { conversationKey, messageId: "g" };
+  }
+  async updateGatePrompt() {}
+}
+
 function inbound(overrides: Partial<InboundChannelEvent> = {}): InboundChannelEvent {
   return {
     dispatchId: `fake:${Math.floor(Math.random() * 1e9)}`,
@@ -65,6 +109,7 @@ describe("ChannelHost.handleUpdate", () => {
   let engineHost: EngineHost;
   let host: ChannelHost;
   let fakeTransport: FakeTransport;
+  let keyedTransport: KeyedTransport;
   let faux: FauxProviderRegistration;
 
   beforeEach(async () => {
@@ -90,16 +135,22 @@ describe("ChannelHost.handleUpdate", () => {
     const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
 
     fakeTransport = new FakeTransport();
+    keyedTransport = new KeyedTransport();
     const fakePlugin: ValetPlugin = {
       name: "fake",
       version: "0",
-      transports: [{ channelType: "fake", create: () => fakeTransport }],
+      transports: [
+        { channelType: "fake", create: () => fakeTransport },
+        { channelType: "keyed", create: () => keyedTransport },
+      ],
     };
 
-    await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
-      type: "bot_token",
-      accessToken: "fake-bot-token",
-    });
+    for (const service of ["fake", "keyed"]) {
+      await engineCredentials.save({ type: "org", id: ORG_ID }, service, {
+        type: "bot_token",
+        accessToken: "fake-bot-token",
+      });
+    }
 
     engineHost = new EngineHost({
       engineStore,
@@ -158,8 +209,8 @@ describe("ChannelHost.handleUpdate", () => {
     await host.handleUpdate("fake", ev);
     await host.handleUpdate("fake", { ...ev }); // duplicate dispatchId
 
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
       { type: "user", id: USER_ID },
       { actorUserId: USER_ID, orgId: ORG_ID },
     );
@@ -169,7 +220,7 @@ describe("ChannelHost.handleUpdate", () => {
     // returns) — poll briefly instead of asserting immediately.
     let userEntries: Awaited<ReturnType<typeof session.providers.store.getEntries>> = [];
     for (let i = 0; i < 50; i++) {
-      const entries = await session.providers.store.getEntries(sessionId, threadId);
+      const entries = await session.providers.store.getEntries(session.id, threadId);
       userEntries = entries.filter((e) => e.type === "message" && e.role === "user");
       if (userEntries.length > 0) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -192,5 +243,48 @@ describe("ChannelHost.handleUpdate", () => {
     expect(fakeTransport.answered[0]).toMatchObject({ callbackId: "cb9" });
     const drops = await testDb.appDb.select().from(eventDropLog);
     expect(drops.some((d) => d.reason === "unsupported_kind" && d.detail.includes("unknown_gate_ref"))).toBe(true);
+  });
+
+  // ── conversationKey ⇄ threadKey round trip ────────────────────────────
+  //
+  // Outbound delivery reads a stored thread key and has to rebuild the
+  // conversationKey from it. The default rebuild assumes the whole address
+  // fits in the thread key. When it does not, every gate prompt, command
+  // result and attention DM for that transport is addressed with a key it
+  // never minted.
+
+  it("keeps the telegram-shaped default for a transport that owns no key mapping", () => {
+    expect(host.channelThreadFor("fake:99")).toEqual({
+      channelType: "fake",
+      conversationKey: "fake:dm:99",
+    });
+  });
+
+  it("rebuilds the conversationKey through the transport when it owns the mapping", () => {
+    // The inbound half must produce exactly the key the outbound half reads.
+    const inboundKey = "keyed:R1:D100";
+    const threadKey = keyedTransport.threadKeyFromConversationKey(inboundKey);
+    expect(threadKey).toBe("keyed:D100");
+    expect(host.channelThreadFor(threadKey)).toEqual({
+      channelType: "keyed",
+      conversationKey: inboundKey,
+    });
+  });
+
+  it("stops rather than guess when the transport disowns the thread key", () => {
+    expect(host.channelThreadFor("keyed:a:b")).toBeNull();
+  });
+
+  it("addresses attention DMs through the transport's own direct conversation", async () => {
+    await linkIdentity(testDb.appDb, { provider: "keyed", externalId: "U77", userId: USER_ID });
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      title: "Needs you",
+      body: "a gate is waiting",
+    });
+    // A sender id is not an address: the transport had to open the DM first.
+    expect(keyedTransport.opened).toEqual(["U77"]);
+    expect(keyedTransport.sent[0]?.conversationKey).toBe("keyed:R1:D-U77");
   });
 });

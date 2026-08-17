@@ -187,6 +187,55 @@ describe('workflow node (sub-workflow call)', () => {
     expect(callCp?.error).toContain('child exploded');
   });
 
+  it('keeps the parent running when the call node carries onError "continue"', async () => {
+    // The batch shape: one child run per item, a tail node that reports what
+    // broke, and a parent that still settles `completed`.
+    const failing: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'ct', type: 'trigger' },
+        { id: 'cs', type: 'stop', outcome: 'failure', message: 'child exploded' },
+      ],
+      edges: [{ from: 'ct', to: 'cs' }],
+    };
+    const parent: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'call', type: 'workflow', workflowId: 'wf-child', onError: 'continue' },
+        { id: 'notify', type: 'set', values: { text: 'child failed: {{nodes.call.error}}' } },
+        { id: 's', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'call' },
+        { from: 'call', to: 'notify' },
+        { from: 'notify', to: 's' },
+      ],
+    };
+    const store = new InMemoryWorkflowStore();
+    const engine = resolvingEngine(failing);
+    await store.createRun('wfrun_p3b', parentParams(), parent, 'v1');
+
+    const park = await drive(store, engine, 'wfrun_p3b');
+    const wait = park.waitingOn[0];
+    if (wait.kind !== 'run') throw new Error('expected a run wait');
+    await drive(store, engine, wait.runId);
+
+    const finalPark = await drive(store, engine, 'wfrun_p3b');
+    expect(finalPark.status).toBe('settled');
+    expect(finalPark.outcome).toBe('completed'); // the tolerated child failure does not dominate
+
+    const byNode = new Map((await store.getCheckpoints('wfrun_p3b')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('call')?.status).toBe('failed'); // the failure is still recorded
+    expect(byNode.get('notify')?.status).toBe('completed');
+    const notified = byNode.get('notify')?.result;
+    if (!notified || typeof notified !== 'object' || !('text' in notified)) {
+      throw new Error(`notify wrote no text: ${JSON.stringify(notified)}`);
+    }
+    expect(String(notified.text)).toContain('child failed: ');
+    expect(String(notified.text)).toContain('child exploded'); // `nodes.call.error` reached the template
+  });
+
   it('fails loudly when the reference does not resolve', async () => {
     const store = new InMemoryWorkflowStore();
     const engine = resolvingEngine();

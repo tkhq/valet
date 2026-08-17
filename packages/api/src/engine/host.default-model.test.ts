@@ -15,6 +15,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users } from "../schema/index.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 describe("EngineHost default model", () => {
   let api: TestApi | undefined;
@@ -30,7 +31,7 @@ describe("EngineHost default model", () => {
 
     await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -42,7 +43,7 @@ describe("EngineHost default model", () => {
     api = await bootTestApi();
     const { engineHost } = api.providers;
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -105,7 +106,7 @@ describe("EngineHost default model", () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
 
-    const session = await engineHost.orchestratorSessionFor(
+    const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
@@ -116,7 +117,7 @@ describe("EngineHost default model", () => {
 
     await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
 
-    const restored = await engineHost.orchestratorSessionFor(
+    const restored = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );

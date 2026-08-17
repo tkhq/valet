@@ -43,8 +43,16 @@ const MAX_BODY_EXCERPT_CHARS = 4_000;
 export interface OrchestratorDeliverFn {
   (args: {
     orgId: string;
-    ownerType: "user" | "org";
+    ownerType: "user" | "team" | "org";
     ownerId: string;
+    /**
+     * The human the delivery acts for. NOT `ownerId`: on a team or org
+     * subscription the owner is a team/org id, and this value is written to
+     * `agent_sessions.user_id`, which holds a user. The subscription's
+     * author is the only real user an event delivery has — nobody is at a
+     * keyboard when it fires.
+     */
+    actorUserId: string;
     signal: SignalContent;
     dispatchId: string;
   }): Promise<void>;
@@ -54,7 +62,7 @@ export interface EventDispatcherDeps {
   db: AppDb;
   workflowRunHost: RunHost;
   workflowStore: WorkflowStore;
-  /** Seam over `ensureOrchestratorSession` + `thread("events").submitPrompt` — see `orchestrator-target.ts`. */
+  /** Seam over `ensureDefaultAssistantSession` + `thread("events").submitPrompt` — see `orchestrator-target.ts`. */
   deliverToOrchestrator: OrchestratorDeliverFn;
 }
 
@@ -157,6 +165,7 @@ export class EventDispatcher {
           orgId: event.orgId,
           ownerType: sub.ownerType,
           ownerId: sub.ownerId,
+          actorUserId: sub.createdBy,
           signal: {
             kind: "signal",
             signalType: event.eventKey,

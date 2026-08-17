@@ -21,7 +21,7 @@ const MENU_BASE =
   "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0";
 
 const ITEM_BASE =
-  "relative flex select-none items-center gap-2 rounded px-2 py-1.5 outline-none " +
+  "relative flex select-none items-center gap-2 rounded px-2 py-1.5 outline-none touch-manipulation " +
   "data-[highlighted]:bg-neutral-100 dark:data-[highlighted]:bg-neutral-800 " +
   "data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
 

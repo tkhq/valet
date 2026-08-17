@@ -196,30 +196,47 @@ export async function readableSkillRow(
  * and reach the member's sessions, but `isAuthorizedFor` still returns false
  * for a non-admin org write, so `ownedSkillRow` (and every write path built
  * on it) never treats an org row as the caller's to edit.
+ *
+ * `scope` narrows the answer to ONE owner, for a client that shows one
+ * workspace at a time. It replaces the union rather than adding to it: a
+ * person who asks for a team's skills must not also get their own, and a
+ * person who asks for the org library gets the org rows alone. The caller
+ * decides whether `scope` may be reached BEFORE calling this — an ownerId off
+ * a query string proves nothing, so `routes/skills.ts` runs it through
+ * `readOwnerScope` first.
  */
-export async function listSkills(db: AppDb, owner: SkillOwner): Promise<SkillRow[]> {
-  const teamIds = (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
+export async function listSkills(
+  db: AppDb,
+  owner: SkillOwner,
+  scope?: Principal,
+): Promise<SkillRow[]> {
+  // No team read when `scope` already names the one owner to list.
+  const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
   const ownerMatch = and(eq(skills.ownerType, "user"), eq(skills.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
       ? and(eq(skills.ownerType, "team"), inArray(skills.ownerId, teamIds))
       : undefined;
+  // Every org row in the caller's own org, because the org library is
+  // readable by every member. The `orgId` predicate below is what bounds it.
   const orgMatch = eq(skills.ownerType, "org");
+  const reach = scope
+    ? and(eq(skills.ownerType, scope.type), eq(skills.ownerId, scope.id))
+    : teamMatch
+      ? or(ownerMatch, teamMatch, orgMatch)
+      : or(ownerMatch, orgMatch);
 
   const rows = await db
     .select()
     .from(skills)
-    .where(
-      and(
-        eq(skills.orgId, owner.orgId),
-        teamMatch ? or(ownerMatch, teamMatch, orgMatch) : or(ownerMatch, orgMatch),
-      ),
-    )
+    .where(and(eq(skills.orgId, owner.orgId), reach))
     .orderBy(asc(skills.name));
 
   // Explicit user → team → org assembly. Do not rely on incidental row order
   // from the query — the dedupe in `listSkillSourcesFor` is first-name-wins,
-  // so this precedence must be deterministic in code.
+  // so this precedence must be deterministic in code. A scoped read holds one
+  // owner type, so for it the three groups collapse to one and the name order
+  // above survives.
   return [
     ...rows.filter((r) => r.ownerType === "user"),
     ...rows.filter((r) => r.ownerType === "team"),

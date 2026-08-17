@@ -1,12 +1,21 @@
 import { Hono } from "hono";
-import { and, count, desc, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray, or } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { parseOrchestratorSessionId } from "@valet/engine";
+import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
+import { submitSessionPrompt } from "./messages.js";
 import { autoTitle } from "../sessions/auto-title.js";
+import {
+  deriveRunFields,
+  groupSubmissionsBySession,
+  type RunStateRow,
+  type SessionRunFields,
+} from "../sessions/run-state.js";
+import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -16,6 +25,7 @@ import {
   sessionRepos,
 } from "../schema/index.js";
 import type {
+  AssistantOwner,
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
@@ -23,7 +33,6 @@ import type {
   PauseSessionResponse,
   RepoBinding,
   SandboxJwtResponse,
-  SessionDetail,
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
@@ -91,57 +100,117 @@ async function getSessionRepos(db: AppDb, sessionId: string): Promise<RepoBindin
   }));
 }
 
-function rowToSummary(row: typeof agentSessions.$inferSelect): SessionSummary {
+// Pure: everything it needs is the row plus the already-derived run fields
+// (`sessions/run-state.ts` owns that derivation, and the queries that feed
+// it). Keeping the mapper query-free is what lets the list route derive for
+// every row from ONE cross-session read.
+function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFields): SessionSummary {
   return {
     id: row.id,
     workspace: row.workspace,
     status: row.status as SessionStatus,
+    runState: run.runState,
     title: row.title ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    lastActivityAt: run.lastActivityAt,
+    owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
   };
+}
+
+/** The row fields `deriveRunFields` reads, narrowed from a full session row. */
+function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
+  return { status: row.status as SessionStatus, updatedAt: row.updatedAt };
 }
 
 // ── List ──────────────────────────────────────────────────────────────────
 
 // Standalone-only (assistant-centered web UI decision 8): excludes
-// orchestrator ids and child ids, server-side, so the client just renders
-// what it gets. Orchestrator-derived children nest inline in the assistant's
-// chat page (via GET /api/orchestrator/children) instead.
+// ASSISTANT ids and child ids, server-side, so the client just renders what
+// it gets. Every assistant is excluded, not only a principal's default —
+// assistants are listed by `GET /api/assistants`, and a principal that owns
+// several would otherwise fill this list with them. Assistant-derived
+// children nest inline in the assistant's chat page (via
+// GET /api/orchestrator/children) instead.
 //
 // Exported so other mounts needing the same "this user's standalone
 // sessions" view (e.g. the MCP `list_sessions` tool, Task 9) reuse the exact
 // query instead of re-deriving it.
-export async function listStandaloneSessions(db: AppDb, userId: string) {
+export async function listStandaloneSessions(db: AppDb, userId: string, owner?: Principal) {
+  // Own rows plus every team you are on — the same union `listWorkflowDefinitions`
+  // and `listSkills` use, so one workspace's sessions read like its workflows.
+  // `owner` narrows that to a single workspace; the caller has already checked
+  // they may reach it.
+  const teamIds = owner ? [] : (await listTeamsForUser(db, userId)).map((t) => t.id);
+  const mine = and(eq(agentSessions.ownerType, "user"), eq(agentSessions.ownerId, userId));
+  const teamRows =
+    teamIds.length > 0
+      ? and(eq(agentSessions.ownerType, "team"), inArray(agentSessions.ownerId, teamIds))
+      : undefined;
+  const scope = owner
+    ? and(eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id))
+    : teamRows
+      ? or(mine, teamRows)
+      : mine;
+
   const [rows, childRows] = await Promise.all([
     db
       .select()
       .from(agentSessions)
-      .where(
-        and(eq(agentSessions.userId, userId), inArray(agentSessions.status, ["active", "hibernated"])),
-      )
+      .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
       .orderBy(desc(agentSessions.updatedAt)),
     db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
   ]);
 
   const childIds = new Set(childRows.map((r) => r.childSessionId));
-  return rows.filter((r) => parseOrchestratorSessionId(r.id) === null && !childIds.has(r.id));
+  return rows.filter((r) => parseAssistantSessionId(r.id) === null && !childIds.has(r.id));
 }
 
 sessionsRouter.get("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineStore } = c.var.providers;
   const userId = c.var.user.id;
 
-  const standalone = await listStandaloneSessions(db, userId);
+  // Optional workspace filter, same shape `GET /api/assistants` takes.
+  const ownerType = c.req.query("ownerType");
+  const ownerId = c.req.query("ownerId");
+  if ((ownerType === undefined) !== (ownerId === undefined)) {
+    return c.json({ error: "Filter by owner with both ownerType and ownerId, or send neither." }, 400);
+  }
+  let owner: Principal | undefined;
+  if (ownerType !== undefined && ownerId !== undefined) {
+    if (ownerType !== "user" && ownerType !== "team") {
+      return c.json({ error: "ownerType must be 'user' or 'team'." }, 400);
+    }
+    const reachable =
+      ownerType === "user" ? ownerId === userId : await isTeamMember(db, ownerId, userId);
+    // 404, not 403: the same existence-hiding every cross-owner read here uses.
+    if (!reachable) return c.json({ error: "owner not found" }, 404);
+    owner = { type: ownerType, id: ownerId };
+  }
 
-  const body: ListSessionsResponse = { sessions: standalone.map(rowToSummary) };
+  // Three round trips, whatever the number of sessions: the two
+  // `listStandaloneSessions` makes, plus ONE cross-session read of every
+  // unsettled submission (the same call the admin submissions route uses).
+  // `groupSubmissionsBySession` then indexes it by session id. A per-row
+  // query here would make an ordinary list cost one query per session.
+  const [standalone, unsettled] = await Promise.all([
+    listStandaloneSessions(db, userId, owner),
+    engineStore.listAllUnsettledSubmissions(),
+  ]);
+  const bySession = groupSubmissionsBySession(unsettled);
+
+  const body: ListSessionsResponse = {
+    sessions: standalone.map((row) =>
+      rowToSummary(row, deriveRunFields(runStateRow(row), bySession.get(row.id) ?? [])),
+    ),
+  };
   return c.json(body);
 });
 
 // ── Create ────────────────────────────────────────────────────────────────
 
 sessionsRouter.post("/", async (c) => {
-  const { db, prebuildService } = c.var.providers;
+  const { db, engineStore, prebuildService } = c.var.providers;
   const user = c.var.user;
   let body: CreateSessionRequest;
   try {
@@ -159,10 +228,30 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "profile must be 'headless' or 'full'" }, 400);
   }
   const profile = body.profile ?? "headless";
+  // Rejected here, before anything is written: a mistyped `initialPrompt` is
+  // a bad request, not a failed enqueue.
+  if (body.initialPrompt !== undefined && typeof body.initialPrompt !== "string") {
+    return c.json({ error: "initialPrompt must be a string. Send the prompt text, or omit the field." }, 400);
+  }
   if (body.docker !== undefined && typeof body.docker !== "boolean") {
-    return c.json({ error: "docker must be a boolean" }, 400);
+    return c.json({ error: "docker must be a boolean. Send true or false, or omit the field." }, 400);
   }
   const docker = body.docker === true;
+
+  // An explicit `teamId: null` from a client that always sends the field is
+  // a real shape — the body is an unchecked cast — so it must fall through to
+  // a personal session rather than misroute into the team branch and 404 on a
+  // team called "null". Same reasoning as `createWorkflowDefinition`.
+  let owner: Principal = { type: "user", id: user.id };
+  if (typeof body.teamId === "string") {
+    // 404 for a non-member or unknown id, matching every other cross-owner
+    // access here — existence-hiding applies to authorization, not just to
+    // whether the row exists.
+    if (!(await isTeamMember(db, body.teamId, user.id))) {
+      return c.json({ error: "team not found" }, 404);
+    }
+    owner = { type: "team", id: body.teamId };
+  }
 
   const parsedRepos = parseRepoBindings(body);
   if ("error" in parsedRepos) {
@@ -193,8 +282,9 @@ sessionsRouter.post("/", async (c) => {
   // Session row + repo bindings must land atomically — a failure between
   // the two statements would otherwise leave an orphaned agentSessions row
   // with no bindings (review finding on commit d0de1af3).
+  let created: typeof agentSessions.$inferSelect | undefined;
   await db.transaction(async (tx) => {
-    await tx
+    const inserted = await tx
       .insert(agentSessions)
       .values({
         id,
@@ -203,13 +293,17 @@ sessionsRouter.post("/", async (c) => {
         workspace: body.workspace,
         title: body.title ?? null,
         status: "active",
-        ownerType: "user",
-        ownerId: user.id,
+        ownerType: owner.type,
+        ownerId: owner.id,
         profile,
         docker,
         createdAt: now,
         updatedAt: now,
-      });
+      })
+      // Returned rather than re-read: the `initialPrompt` submit below needs
+      // the full row to assemble the session meta.
+      .returning();
+    created = inserted[0];
 
     if (repos.length > 0) {
       // Compute target dirs once at bind time (spec decision 15): each binding
@@ -244,11 +338,35 @@ sessionsRouter.post("/", async (c) => {
     });
   }
 
+  // `initialPrompt` (wire `CreateSessionRequest`): queue the first turn once
+  // the row and its repo bindings are durable, through the same submit path
+  // `POST /api/sessions/:id/messages` uses. The prompt goes to the session's
+  // default thread — a session one statement old has no other.
+  //
+  // An enqueue failure does NOT fail the create. The session row exists and
+  // the response carries its id, so answering 500 here would leave the caller
+  // believing nothing was created while an orphan row stayed behind. The
+  // caller sees `runState: "idle"` instead of "working" and can send the
+  // prompt again through the messages route; the server logs the cause.
+  let queuedPrompt = false;
+  if (body.initialPrompt && created) {
+    try {
+      queuedPrompt = (await submitSessionPrompt(c.var.providers, created, body.initialPrompt)) !== null;
+    } catch (err) {
+      console.error(`session ${id}: initialPrompt enqueue failed:`, err);
+    }
+  }
+  // A session this new has no queue history, so the only submission it can
+  // hold is the one just enqueued.
+  const unsettled = queuedPrompt ? await engineStore.listUnsettledSubmissions(id) : [];
+
   const detail: CreateSessionResponse = {
     id,
     workspace: body.workspace,
     status: "active",
+    ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
     title: body.title,
+    owner,
     createdAt: now,
     updatedAt: now,
     messageCount: 0,
@@ -262,17 +380,16 @@ sessionsRouter.post("/", async (c) => {
 // ── Get ───────────────────────────────────────────────────────────────────
 
 sessionsRouter.get("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineStore } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  // View access, not just direct ownership — a team's orchestrator session
+  // is readable by any member (see `services/session-access.ts`); every
+  // other session route in this file stays direct-owner-only.
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canViewSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   const [{ n }] = await db
     .select({ n: count() })
@@ -292,9 +409,11 @@ sessionsRouter.get("/:id", async (c) => {
   }
 
   const repos = await getSessionRepos(db, id);
+  // One session, so one submission read — the same derivation the list uses.
+  const unsettled = await engineStore.listUnsettledSubmissions(id);
 
   const detail: GetSessionResponse = {
-    ...rowToSummary(row),
+    ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
     messageCount: Number(n ?? 0),
     model,
     profile: row.profile,
@@ -307,17 +426,18 @@ sessionsRouter.get("/:id", async (c) => {
 // ── Patch (currently only `model`) ────────────────────────────────────────
 
 sessionsRouter.patch("/:id", async (c) => {
-  const { db, engineHost } = c.var.providers;
+  const { db, engineHost, engineStore } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  // Administer access, not direct ownership: on a team-owned session the
+  // team's admins choose the model, not whichever member opened the
+  // assistant first (see `services/session-access.ts`). The row loads
+  // without an ownership filter so the check can run in application code;
+  // an unauthorized caller still gets the same 404 a missing id gets.
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   let body: { model?: string };
   try {
@@ -340,8 +460,9 @@ sessionsRouter.patch("/:id", async (c) => {
     .select({ n: count() })
     .from(messagesTable)
     .where(eq(messagesTable.sessionId, id));
+  const unsettled = await engineStore.listUnsettledSubmissions(id);
   const detail: GetSessionResponse = {
-    ...rowToSummary(row),
+    ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
     messageCount: Number(n ?? 0),
     model: engineSession.options.modelSpec ?? engineSession.options.model.id,
     profile: row.profile,
@@ -371,15 +492,17 @@ sessionsRouter.post("/:id/auto-title", async (c) => {
   // The persistent `messages` table isn't the source of truth today — the
   // engine owns entries. Route the loader through the same engine session
   // the messages GET endpoint uses so we see what the UI sees.
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const sessionRow = rows[0];
   // Session-not-found is handled inside `autoTitle` too, but bail early
   // here so we don't pay the cost of a sessionFor call on a bad id.
   if (!sessionRow) return c.json({ error: "session not found" }, 404);
+  // Titling a thread is part of prompting, not administering — anyone who
+  // can read and reply may title what they said. Gating this on ownership
+  // left a team member's threads permanently untitled.
+  if (!(await canViewSession(db, sessionRow, userId))) {
+    return c.json({ error: "session not found" }, 404);
+  }
 
   const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, sessionRow));
   const defaultThread = await engineSession.ensureDefaultThread();
@@ -399,7 +522,7 @@ sessionsRouter.post("/:id/auto-title", async (c) => {
         return out;
       },
     },
-    { sessionId: id, threadId, userId },
+    { sessionId: id, threadId },
   );
   if (!result.ok) {
     if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
@@ -436,9 +559,9 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
 
 // Sandbox hibernation plan, Task 4: suspends the session's sandbox on
 // demand (as opposed to the idle sweep's automatic suspend) and stamps the
-// row `"hibernated"`. Owner-gated like every other `/api/sessions/:id`
-// route — unknown or not-owned ids 404. Refuses (409) when a turn is
-// currently running/gated (nothing to safely suspend mid-turn) or when the
+// row `"hibernated"`. Administer-gated (`canAdministerSession`) — unknown
+// ids, and ids the caller may not administer, both 404. Refuses (409) when
+// a turn is running/gated (nothing to safely suspend mid-turn) or when the
 // sandbox provider doesn't support hibernation at all. There is no explicit
 // resume route (spec decision 4) — the next submission, a gateway touch, or
 // a future wake all resume it and clear the status back to `"active"`
@@ -449,17 +572,20 @@ sessionsRouter.post("/:id/pause", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  // Status guard #1: the ownership lookup itself requires `active` — an
+  // Status guard #1: the lookup itself requires `active` — an
   // archived/deleted session 404s exactly like a missing one, rather than
-  // passing the id+userId check and getting resurrected by the status write
-  // below (`listStandaloneSessions` treats `hibernated` as visible).
+  // passing the authorization check and getting resurrected by the status
+  // write below (`listStandaloneSessions` treats `hibernated` as visible).
+  // Ownership is NOT in this query: `canAdministerSession` answers it in
+  // application code, because a team-owned session's `user_id` names the
+  // member who opened it first, not the members who may pause it.
   const rows = await db
     .select()
     .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   if (!sandboxProvider.capabilities().hibernation) {
     return c.json({ error: "provider does not support hibernation" }, 409);
@@ -550,18 +676,17 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
 
 // ── Delete ────────────────────────────────────────────────────────────────
 
+// Administer-gated (`canAdministerSession`): a team-owned session is
+// deleted by the team's admins, not by whichever member opened it first.
+// Unknown ids, and ids the caller may not administer, both 404.
 sessionsRouter.delete("/:id", async (c) => {
   const { db, engineHost } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
   await engineHost.destroy(id).catch((err) => {
@@ -575,5 +700,3 @@ sessionsRouter.delete("/:id", async (c) => {
 
   return c.json({ ok: true });
 });
-
-export type SessionsRouter = typeof sessionsRouter;

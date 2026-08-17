@@ -1,6 +1,8 @@
 export { describeCheckpointContract } from './checkpoints.js';
 export { describeSignalContract } from './signals.js';
 export { describeOwnershipContract } from './ownership.js';
+export { describeListRunsContract } from './runs.js';
+export type { MakeListRunsStore } from './runs.js';
 export { describeRunHostContract, makeRunHostFixtureEngine } from './run-host.js';
 export type {
   MakeRunHostFixture,

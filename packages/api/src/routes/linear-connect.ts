@@ -22,7 +22,7 @@
  * behind `requireOrgAdmin`.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";

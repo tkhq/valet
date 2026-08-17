@@ -5,7 +5,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, beforeEach } from "vitest";
-import { isNull, eq, and, like } from "drizzle-orm";
+import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionPolicies, invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
@@ -19,7 +19,7 @@ import {
   configPolicyId,
   type ReconcileDeps,
 } from "./config-reconcile.js";
-import type { InstanceConfig } from "../config/instance-config.js";
+import { InstanceConfigError, type InstanceConfig } from "../config/instance-config.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -341,20 +341,23 @@ describe("reconcileInstanceConfig — teams pass", () => {
     ({ appDb: db } = await freshTestPgDb());
   });
 
-  it("creates a team with the deterministic id when absent", async () => {
+  it("marks a team it creates as config-owned", async () => {
     const cfg: InstanceConfig = {
       version: 1,
       teams: [{ name: "Engineering" }],
     };
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const expectedId = configTeamId("Engineering");
-    const rows = await db.select().from(teams).where(eq(teams.id, expectedId));
+    // `origin`, not the id, is what says who owns this row. The id stays
+    // deterministic because a legible id is free, but nothing keys on it —
+    // an adopted team keeps the id it was born with (next test).
+    const rows = await db.select().from(teams).where(eq(teams.name, "Engineering"));
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.name).toBe("Engineering");
+    expect(rows[0]!.origin).toBe("config");
+    expect(rows[0]!.id).toBe(configTeamId("Engineering"));
   });
 
-  it("adopts an existing UI team without changing its id", async () => {
+  it("adopts an existing UI team, keeping its id and promoting its origin", async () => {
     const org = await ensureOrg(db);
     // Insert a UI team with a different id but the same name.
     const uiTeamId = "team_ui_deadbeef";
@@ -370,6 +373,69 @@ describe("reconcileInstanceConfig — teams pass", () => {
     const allRows = await db.select().from(teams).where(eq(teams.name, "Engineering"));
     expect(allRows).toHaveLength(1);
     expect(allRows[0]!.id).toBe(uiTeamId);
+    // Promoted: the file now asserts this team's members at every boot, so a
+    // row left at `local` would make `origin` answer the wrong question.
+    expect(allRows[0]!.origin).toBe("config");
+  });
+
+  it("refuses to adopt a team that mirrors an identity-provider group", async () => {
+    const org = await ensureOrg(db);
+    await db.insert(teams).values({
+      id: "team_mirror",
+      orgId: org.id,
+      name: "Engineering",
+      origin: "idp",
+      externalId: "/Engineering",
+      createdAt: Date.now(),
+    });
+
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "alice@example.com", role: "admin" }] }],
+    };
+
+    // Boot must fail. Adoption would hand a group's membership to the file
+    // while the login sync still removes whoever the claim omits.
+    await expect(reconcileInstanceConfig(deps(db), cfg)).rejects.toThrow(InstanceConfigError);
+    await expect(reconcileInstanceConfig(deps(db), cfg)).rejects.toThrow(
+      /already the mirror of identity provider group "\/Engineering"/,
+    );
+
+    // The mirrored row is untouched — not promoted, not re-owned.
+    const rows = await db.select().from(teams).where(eq(teams.name, "Engineering"));
+    expect(rows[0]!.origin).toBe("idp");
+  });
+
+  it("demotes a config team to local when the file stops declaring it", async () => {
+    const declared: InstanceConfig = { version: 1, teams: [{ name: "Engineering" }] };
+    await reconcileInstanceConfig(deps(db), declared);
+
+    // Next boot, the team is gone from the file.
+    const withoutIt: InstanceConfig = { version: 1, teams: [] };
+    await reconcileInstanceConfig(deps(db), withoutIt);
+
+    // Released, never destroyed: the row and its members survive.
+    const rows = await db.select().from(teams).where(eq(teams.name, "Engineering"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.origin).toBe("local");
+  });
+
+  it("keeps a config team's members when it demotes the team", async () => {
+    const org = await ensureOrg(db);
+    await seedUser(db, "u-keep", "keep@example.com");
+    await db
+      .insert(orgMembers)
+      .values({ orgId: org.id, userId: "u-keep", role: "member", createdAt: Date.now() });
+
+    await reconcileInstanceConfig(deps(db), {
+      version: 1,
+      teams: [{ name: "Engineering", members: [{ email: "keep@example.com", role: "admin" }] }],
+    });
+    await reconcileInstanceConfig(deps(db), { version: 1, teams: [] });
+
+    const rows = await db.select().from(teamMembers).where(eq(teamMembers.userId, "u-keep"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.role).toBe("admin");
   });
 
   it("adds a declared member to an existing team", async () => {

@@ -14,7 +14,7 @@
  * an invalid definition is otherwise a completely normal in-progress
  * editing state and is never silently discarded.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
 import { ApiError } from "~/api/client";
 import { Button, Label, Textarea } from "~/components/primitives";
@@ -60,9 +60,23 @@ export interface EditorProps {
    */
   externalDirty?: boolean;
   onCancelExternal?: () => void;
+  /**
+   * Reports whether the definition has edits that are not saved. The
+   * definition draft lives here, so the page cannot otherwise tell that
+   * leaving would discard work. Pass a state setter (a stable identity),
+   * not an inline closure.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function Editor({ initialDefinition, onSave, saving, externalDirty, onCancelExternal }: EditorProps) {
+export function Editor({
+  initialDefinition,
+  onSave,
+  saving,
+  externalDirty,
+  onCancelExternal,
+  onDirtyChange,
+}: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -71,6 +85,10 @@ export function Editor({ initialDefinition, onSave, saving, externalDirty, onCan
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const effectiveDirty = dirty || externalDirty === true;
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const flow = useMemo(() => toFlow(definition), [definition]);
   const validation = useMemo(() => validateWorkflowDefinition(definition), [definition]);

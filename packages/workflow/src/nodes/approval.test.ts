@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ApprovalNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
 import type { WorkflowEngineDeps } from '../engine-deps.js';
-import { driveUntilPark, type InterpreterDeps } from '../interpreter.js';
+import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { NodeExecutorRegistry, OnApprovalPending } from './index.js';
 import { createDefaultNodeExecutors } from './index.js';

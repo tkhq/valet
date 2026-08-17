@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import {
   VirtualSandboxProvider,
-  orchestratorSessionId,
   type ChannelTransport,
   type InboundChannelEvent,
   type OutboundChannelMessage,
@@ -18,6 +17,7 @@ import { eventDropLog } from "../schema/index.js";
 import { linkIdentity } from "./identity-links.js";
 import { ChannelHost, publicUrlFromEnv } from "./host.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -248,14 +248,14 @@ describe("long-poll mode", () => {
     const hostA = buildHost(transportA);
     await hostA.start();
 
-    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
     async function userEntryCount(): Promise<number> {
-      const session = await engineHost.orchestratorSessionFor(
+      const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
         { type: "user", id: USER_ID },
         { actorUserId: USER_ID, orgId: ORG_ID },
       );
       const threadId = session.thread("fake:99").id;
-      const entries = await session.providers.store.getEntries(sessionId, threadId);
+      const entries = await session.providers.store.getEntries(session.id, threadId);
       return entries.filter((e) => e.type === "message" && e.role === "user").length;
     }
 

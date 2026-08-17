@@ -14,6 +14,7 @@ wrangler.deploy.toml
 
 # Environment files
 .env
+.env.backup*
 .env.e2e
 .env.local
 .env.*.local

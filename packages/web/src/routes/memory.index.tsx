@@ -20,12 +20,14 @@ function MemoryIndexPage() {
   const nothingRemembered = treeQ.data !== undefined && treeQ.data.entries.length === 0;
 
   return (
-    <main className="flex flex-1 min-h-0 items-center justify-center p-8 text-center text-sm text-muted">
+    // A plain `div`, not `main`: the app shell already renders the page's one
+    // `main` landmark, and this route paints inside it.
+    <div className="flex flex-1 min-h-0 items-center justify-center p-8 text-center text-sm text-muted">
       {nothingRemembered ? (
         <p>Nothing remembered yet. Talk to {name}, or use Import in the left pane to load a memory bundle.</p>
       ) : (
         <p>Select a file from the tree to read it.</p>
       )}
-    </main>
+    </div>
   );
 }

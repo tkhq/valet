@@ -90,8 +90,8 @@ Wire event types are listed in
 | `/api/org/invites` | GET / POST / DELETE | Invites (admin) |
 | `/api/org/llm-providers` | GET / POST / DELETE | BYO LLM provider keys (admin) |
 | `/api/org/github-app` | — | GitHub App manifest setup (admin) |
-| `/api/org/image-catalog`, `/api/org/prebuilds` | — | Sandbox base images and prebuild configs (admin) |
-| `/api/prebuilds/for-repo` | GET | Prebuild lookup for a repo (member) |
+| `/api/org/sources` | GET / POST / PATCH / DELETE | Sandbox image sources and their bakes (admin) |
+| `/api/sources/for-repo` | GET | Newest repo image bake for a repo (member) |
 | `/api/admin` | — | Operator submission surface (admin) |
 
 ## System

@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CreateSessionRequest, GetReposResponse, RepoBinding } from "@valet/api/wire";
 import {
   Badge,
@@ -277,6 +277,17 @@ function RepoCombobox({
   const [open, setOpen] = useState(false);
   const matches = repos.filter((r) => r.fullName.toLowerCase().includes(query.trim().toLowerCase()));
 
+  // The close-on-blur timer below outlives the component if the dialog is
+  // dismissed within its window: it then sets state on an unmounted tree,
+  // and under jsdom it fires after teardown and throws on a missing
+  // `window`. Hold it so unmount can cancel it.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+    };
+  }, []);
+
   return (
     <div className="relative">
       <Input
@@ -293,7 +304,8 @@ function RepoCombobox({
         }}
         onBlur={() => {
           // Delay so a click on a list item registers before we close.
-          setTimeout(() => setOpen(false), 120);
+          if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+          closeTimer.current = setTimeout(() => setOpen(false), 120);
         }}
         aria-label={label}
         role="combobox"

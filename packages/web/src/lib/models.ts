@@ -50,11 +50,6 @@ export function findModel(id: string | undefined | null): ModelOption | undefine
   return MODEL_CATALOG.find((m) => m.id === id);
 }
 
-export function modelLabel(id: string | undefined | null): string {
-  const m = findModel(id);
-  return m?.label ?? id ?? "Unknown";
-}
-
 /**
  * Matches an `/api/models` catalog id against the curated list — catalog ids
  * for Anthropic entries may be bare (`claude-haiku-4-5`, back-compat) or

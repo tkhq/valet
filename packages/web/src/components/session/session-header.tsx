@@ -12,14 +12,22 @@ import {
   Spinner,
   Tooltip,
 } from "~/components/primitives";
-import { useDeleteSession, usePauseSession, useReplaceSandbox, useSetSessionModel } from "~/api/queries";
-import { useMe, useOrg } from "~/api/settings";
+import {
+  useDeleteSession,
+  usePauseSession,
+  useReplaceSandbox,
+  useSetSessionModel,
+} from "~/api/queries";
+import { useMe, useOrg, useTeams } from "~/api/settings";
+import { useAssistants } from "~/api/assistants";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
+import { useCopyToClipboard } from "~/lib/use-copy";
+import { formatElapsed, useElapsedSeconds } from "~/lib/use-elapsed";
 
 /** Collapse a workspace path down to a header-friendly badge: any
  * multi-segment path shows only its LAST segment ("ws-19",
@@ -51,6 +59,7 @@ function extractActionError(err: unknown, fallback: string): string {
 export function SessionHeader({
   session,
   agentStatus,
+  turnStartedAt,
   conn,
   sandbox,
   threadId,
@@ -58,6 +67,8 @@ export function SessionHeader({
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
+  /** Wire timestamp the current turn began; undefined while idle. */
+  turnStartedAt?: number;
   conn: ConnectionStatus;
   sandbox?: { state: string; epoch: number };
   threadId?: string;
@@ -71,16 +82,20 @@ export function SessionHeader({
   const me = useMe();
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
+  const teams = useTeams();
+  const assistants = useAssistants();
+  // One error slot for both sandbox lifecycle actions (pause, replace).
   const [actionError, setActionError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy: copyToClipboard } = useCopyToClipboard();
 
   async function destroy() {
-    if (
-      !confirm(
-        "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.",
-      )
-    )
-      return;
+    // A team's assistant is shared, so the prompt names what everyone else
+    // loses rather than describing a private session.
+    const prompt =
+      teamId !== null
+        ? `Delete ${title}? Everyone on ${team?.name ?? "the team"} loses this conversation and its threads.`
+        : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
+    if (!confirm(prompt)) return;
     try {
       await del.mutateAsync(session.id);
       navigate({ to: "/" });
@@ -126,30 +141,8 @@ export function SessionHeader({
         userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
       },
     });
-    try {
-      await navigator.clipboard.writeText(transcript);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch (err) {
-      // Clipboard permission denied — fall back to a hidden textarea. This
-      // is the sole reason this handler doesn't just await writeText and
-      // trust it; some browsers block programmatic clipboard writes.
-      const el = document.createElement("textarea");
-      el.value = transcript;
-      el.style.position = "fixed";
-      el.style.opacity = "0";
-      document.body.appendChild(el);
-      el.select();
-      try {
-        document.execCommand("copy");
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
-      } catch (fallbackErr) {
-        console.error("copy transcript failed:", err, fallbackErr);
-      } finally {
-        document.body.removeChild(el);
-      }
-    }
+    const ok = await copyToClipboard(transcript);
+    if (!ok) console.error("copy transcript failed");
   }
 
   // Single-row masthead. The workspace path lives in a hover tooltip on
@@ -162,9 +155,34 @@ export function SessionHeader({
   // The orchestrator's title card carries the orchestrator's chosen name
   // (e.g. "Aurora") — the top-nav logo stays "Valet", so this is where
   // the assistant's identity lives.
-  const isOrchestrator = session.id.startsWith("orchestrator:");
+  // An assistant is titled with its own name, and a team's assistant falls
+  // back to the TEAM's name. Both come from the assistants list rather than
+  // from the session id: the id used to be parsed for the owning team, which
+  // worked only while a team had exactly one assistant. Narrowing still
+  // matters — `orchInfo` is the viewer's OWN assistant, so a bare
+  // `startsWith("orchestrator:")` test titled every team assistant with the
+  // viewer's personal assistant name.
+  const assistant = assistants.data?.assistants.find((a) => a.sessionId === session.id);
+  const teamId = assistant?.owner.type === "team" ? assistant.owner.id : null;
+  const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
+  // Your own assistant is recognised without waiting on the list:
+  // `GET /orchestrator/info` answers with the very session id it names.
+  const isOwnOrchestrator =
+    assistant?.owner.type === "user" || orchInfo.data?.sessionId === session.id;
+  const isAssistantSession = assistant !== undefined || isOwnOrchestrator;
   const title =
-    (isOrchestrator ? orchInfo.data?.name : undefined) || session.title || "Untitled session";
+    assistant?.name ||
+    (teamId !== null ? team?.name : undefined) ||
+    (isOwnOrchestrator ? orchInfo.data?.name : undefined) ||
+    session.title ||
+    "Untitled session";
+
+  // Lifecycle controls (model, pause, delete) act on a session the whole
+  // team shares, so they are a team-admin power — the API enforces the
+  // same rule; this only hides controls that would 404. Personal sessions
+  // are unaffected.
+  const canAdminister =
+    teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   return (
     <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
@@ -173,10 +191,30 @@ export function SessionHeader({
           <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
             {title}
           </span>
-          {/* No `uppercase` on the badge — workspace names are
-              case-sensitive paths; shouting them in caps misrepresents
-              them. */}
-          {session.workspace && (
+          {/* Deliberately NOT `OwnerBadge`. That badge names the owning team
+              and links to its assistant; here the title already IS the team
+              name, and its assistant is the page you are on — so it would
+              render "Platform [Platform]" pointing at itself. This badge
+              answers a different question: whether the conversation you are
+              reading is shared. */}
+          {teamId !== null && (
+            <Badge variant="accent" className="shrink-0">
+              Team
+            </Badge>
+          )}
+          {/* An orchestrator's workspace is a synthetic internal directory
+              (`~/.valet/orchestrator/{type}-{principalId}`), not a place
+              anyone chose or can act on. On a team assistant it rendered as
+              `team-team_99235d43-…` — the doubled prefix is the principal
+              type joined to an id that already carries it — which is an
+              internal identifier shown to a user for no reason. The file's
+              own note above says these paths "shouted at users from the
+              subtitle"; this is that intent, finally applied to the chip.
+
+              No `uppercase` on the chip when it does render — real
+              workspace names are case-sensitive paths, and shouting them in
+              caps misrepresents them. */}
+          {session.workspace && !isAssistantSession && (
             <span className="text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>
@@ -185,18 +223,20 @@ export function SessionHeader({
       </Tooltip>
       <div className="ml-auto flex items-center gap-1.5">
         {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
-        <Tooltip content="Session-default model. Threads inherit unless overridden.">
-          <span>
-            <ModelPicker
-              currentId={session.model}
-              onSelect={(id) => setModel.mutate(id)}
-              disabled={setModel.isPending}
-            />
-          </span>
-        </Tooltip>
+        {canAdminister && (
+          <Tooltip content="Session-default model. Threads inherit unless overridden.">
+            <span>
+              <ModelPicker
+                currentId={session.model}
+                onSelect={(id) => setModel.mutate(id)}
+                disabled={setModel.isPending}
+              />
+            </span>
+          </Tooltip>
+        )}
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
-        <AgentStatusBadge status={agentStatus} />
+        <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} />
         <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
           <Button
             variant="ghost"
@@ -211,45 +251,49 @@ export function SessionHeader({
             )}
           </Button>
         </Tooltip>
-        <Tooltip content="Pause session — sandbox sleeps until the next message">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={pauseSession}
-            disabled={sandbox?.state !== "ready" || pause.isPending}
-            aria-label="Pause session"
-          >
-            {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
-          </Button>
-        </Tooltip>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" aria-label="Session menu">
-              {del.isPending || replace.isPending ? (
-                <Spinner size={14} />
-              ) : (
-                <MoreHorizontal className="h-4 w-4" />
-              )}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              disabled={replace.isPending}
-              onSelect={() => void replaceSandbox()}
-            >
-              <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
-              Replace sandbox
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="text-danger-500"
-              disabled={del.isPending}
-              onSelect={() => void destroy()}
-            >
-              <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-              Delete session…
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {canAdminister && (
+          <>
+            <Tooltip content="Pause session — sandbox sleeps until the next message">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={pauseSession}
+                disabled={sandbox?.state !== "ready" || pause.isPending}
+                aria-label="Pause session"
+              >
+                {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
+              </Button>
+            </Tooltip>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label="Session menu">
+                  {del.isPending || replace.isPending ? (
+                    <Spinner size={14} />
+                  ) : (
+                    <MoreHorizontal className="h-4 w-4" />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={replace.isPending}
+                  onSelect={() => void replaceSandbox()}
+                >
+                  <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
+                  Replace sandbox
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-danger-500"
+                  disabled={del.isPending}
+                  onSelect={() => void destroy()}
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
+                  {teamId !== null ? "Delete this team's assistant…" : "Delete session…"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        )}
       </div>
     </header>
   );
@@ -295,16 +339,18 @@ export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: num
   );
 }
 
-function AgentStatusBadge({ status }: { status: AgentStatus }) {
+function AgentStatusBadge({ status, turnStartedAt }: { status: AgentStatus; turnStartedAt?: number }) {
+  const elapsed = useElapsedSeconds(status === "idle" ? undefined : turnStartedAt);
   if (status === "idle") return <Badge variant="neutral">idle</Badge>;
   const variant =
     status === "error" ? "danger" : status === "thinking" || status === "tool_calling" ? "accent" : "neutral";
   return (
-    <Badge variant={variant} className={cn("inline-flex items-center gap-1.5")}>
+    <Badge variant={variant} className={cn("inline-flex items-center gap-1.5 tabular-nums")}>
       {status !== "queued" && (
         <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
       )}
       {status.replace("_", " ")}
+      {elapsed !== undefined && <span className="text-current/70">{formatElapsed(elapsed)}</span>}
     </Badge>
   );
 }

@@ -93,6 +93,19 @@ export interface StopNode {
   message?: string;
 }
 
+/**
+ * What one node's failure does to the rest of the run (batch-fanout design
+ * decision 3). `fail`, the default, keeps the original behaviour: the
+ * failure starves every node downstream and settles the run `failed`.
+ * `continue` records the same failed checkpoint but activates the node's
+ * outgoing edges and drops the node from failure dominance, so a tail
+ * notify node still runs and reads `nodes.<id>.error`.
+ *
+ * A `foreach` body uses `ForeachNode.onItemError` instead — a body has no
+ * outgoing edges, so this policy would have nothing to activate.
+ */
+export type NodeErrorPolicy = 'fail' | 'continue';
+
 export interface LlmNode {
   id: string;
   type: 'llm';
@@ -102,6 +115,8 @@ export interface LlmNode {
   outputSchema?: Record<string, unknown>;
   temperature?: number;
   maxOutputTokens?: number;
+  /** Omit for `fail`. See `NodeErrorPolicy`. */
+  onError?: NodeErrorPolicy;
 }
 
 // Orchestrator node — trimmed per decision 1 (same trims as SessionNode).
@@ -159,6 +174,8 @@ export interface ToolNode {
   /** Duration (e.g. "24h"). A gate unresolved past it is a denial with
    * resolvedBy 'timeout'. Omit = wait forever. */
   approvalTimeout?: string;
+  /** Omit for `fail`. See `NodeErrorPolicy`. */
+  onError?: NodeErrorPolicy;
 }
 
 /**
@@ -177,6 +194,8 @@ export interface WorkflowCallNode {
   workflowId: string;
   /** Template-rendered, becomes the child trigger payload's `data`. */
   input?: unknown;
+  /** Omit for `fail`. See `NodeErrorPolicy`. */
+  onError?: NodeErrorPolicy;
 }
 
 /**

@@ -1,11 +1,11 @@
 /**
- * `/api/workflows/{triggers,schedules,event-triggers,trigger-catalog,runs}`
+ * `/api/workflows/{triggers,schedules,event-triggers,trigger-catalog}`
  * (spec 2026-08-15). Aggregated trigger read + kind-specific writes over
  * `schedule-service` / `trigger-service` / `WorkflowScheduler.fireNow`.
  *
  * MOUNT ORDER MATTERS: this router must be mounted on `/api/workflows`
  * BEFORE `workflowsRouter`, whose `GET /:id` would otherwise swallow
- * `/triggers` and `/runs` as workflow ids.
+ * `/triggers` as a workflow id.
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
@@ -22,12 +22,10 @@ import {
   listWorkflowTriggers,
   updateWorkflowTrigger,
 } from "../workflows/trigger-service.js";
-import { listRecentWorkflowRuns } from "../workflows/service.js";
 import type {
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowScheduleRequest,
   GetWorkflowTriggerCatalogResponse,
-  ListAllWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
   UpdateWorkflowEventTriggerRequest,
   UpdateWorkflowScheduleRequest,
@@ -91,20 +89,11 @@ workflowTriggersRouter.get("/trigger-catalog", (c) => {
   return c.json(resp);
 });
 
-workflowTriggersRouter.get("/runs", async (c) => {
-  const { db, workflowStore, workflowRunHost, actionPluginByService } = c.var.providers;
-  const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
-  // An absent param parses to NaN and takes the 50 fallback below.
-  const rawLimit = Number(c.req.query("limit"));
-  const limit = Number.isInteger(rawLimit) && rawLimit > 0 && rawLimit <= 200 ? rawLimit : 50;
-  const runs = await listRecentWorkflowRuns(
-    { db, workflowStore, workflowRunHost, actionPluginByService },
-    owner,
-    limit,
-  );
-  const resp: ListAllWorkflowRunsResponse = { runs };
-  return c.json(resp);
-});
+// `GET /api/workflows/runs` is not here. One cross-workflow run list serves
+// the hub's Runs tab and every filtered read, in `routes/workflows.ts`:
+// two handlers on one path meant the first mount silently won, and the
+// filters, the 404 on an unreadable workflow id, and the cursor checks all
+// stopped working.
 
 // ── Schedules ────────────────────────────────────────────────────────────
 

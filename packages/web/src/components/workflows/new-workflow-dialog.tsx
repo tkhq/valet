@@ -10,23 +10,11 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
 import { useCreateWorkflow } from "~/api/workflows";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { createDefaultWorkflowDefinition } from "~/components/workflows/editor-model";
+import { errorText } from "~/lib/error-text";
 
 const DEFAULT_NAME = "Untitled workflow";
-
-/** A brand-new definition's starting shape — the minimal valid `dag/v1`
- * graph (trigger straight into stop). "New workflow" creates one of these
- * immediately and drops the user into the editor rather than an empty
- * canvas or a JSON textarea (plan decision 11). */
-function blankDefinition() {
-  return {
-    version: "dag/v1" as const,
-    nodes: [
-      { id: "trigger", type: "trigger" as const },
-      { id: "stop", type: "stop" as const, outcome: "success" as const },
-    ],
-    edges: [{ from: "trigger", to: "stop" }],
-  };
-}
 
 export function NewWorkflowDialog({
   open,
@@ -38,12 +26,19 @@ export function NewWorkflowDialog({
   const navigate = useNavigate();
   const create = useCreateWorkflow();
   const [name, setName] = useState(DEFAULT_NAME);
+  // The active workspace owns it. An Owner select here duplicated the nav's
+  // workspace switcher and could contradict it.
+  const scope = useWorkspaceScope();
 
   async function submit() {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      const created = await create.mutateAsync({ name: trimmed, definition: blankDefinition() });
+      const created = await create.mutateAsync({
+        name: trimmed,
+        definition: createDefaultWorkflowDefinition(),
+        ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
+      });
       onOpenChange(false);
       setName(DEFAULT_NAME);
       void navigate({ to: "/workflows/$workflowId", params: { workflowId: created.id } });
@@ -74,7 +69,7 @@ export function NewWorkflowDialog({
 
         {create.error && (
           <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
-            {create.error.message}
+            {errorText(create.error)}
           </div>
         )}
 

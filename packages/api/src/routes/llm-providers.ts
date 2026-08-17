@@ -557,5 +557,3 @@ llmProvidersRouter.post("/:id/test", async (c) => {
     return c.json(resp);
   }
 });
-
-export type LlmProvidersRouter = typeof llmProvidersRouter;

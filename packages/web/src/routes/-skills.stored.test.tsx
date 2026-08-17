@@ -14,6 +14,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import type { ListSkillsResponse, ListTeamsResponse, SkillResponse } from "@valet/api/wire";
+import { TooltipProvider } from "~/components/primitives";
 
 const data: ListSkillsResponse = {
   skills: [
@@ -63,7 +64,7 @@ const stored: SkillResponse = {
   editable: true,
 };
 
-const teams: ListTeamsResponse = { teams: [] };
+let teamsData: ListTeamsResponse = { teams: [] };
 
 let currentData: ListSkillsResponse = data;
 let currentState = { isLoading: false, error: null as Error | null };
@@ -89,9 +90,36 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
-  useTeams: () => ({ data: teams, isLoading: false, error: null }),
+  // `teamsData` is a let, so a test can give the caller a team before it
+  // renders. `useOrg` is read by the editor to decide whether the org scope
+  // is open to this caller — a member here, which is the common case.
+  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({ data: { callerRole: "member" }, isLoading: false, error: null }),
 }));
+
+// The badge links by assistant id, so it reads the assistants list to find
+// the team's default one.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: {
+        assistants: [
+          {
+            id: "asst_team_1",
+            owner: { type: "team" as const, id: "team_1" },
+            sessionId: "assistant:asst_team_1",
+            isDefault: true,
+            createdAt: 1,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
 
 // The repositories panel has its own suite; here it only has to render.
 vi.mock("~/api/skill-sources", () => ({
@@ -108,6 +136,7 @@ describe("SkillsIndexPage with stored skills", () => {
   beforeEach(() => {
     currentData = data;
     currentState = { isLoading: false, error: null };
+    teamsData = { teams: [] };
   });
 
   it("badges each card with its scope", () => {
@@ -128,9 +157,59 @@ describe("SkillsIndexPage with stored skills", () => {
   });
 
   it("links a stored skill to its row-id page, not to the name route", () => {
-    render(<SkillsIndexPage />);
-    const link = screen.getByText("Deploy").closest("a");
+    const { container } = render(<SkillsIndexPage />);
+    // The card's link covers the card instead of wrapping it — the owner
+    // badge in the title row is a link of its own — so it is addressed by
+    // the name it carries for a reader, not through the title text.
+    const link = container.querySelector('a[aria-label="Read Deploy"]');
     expect(link?.getAttribute("to")).toBe("/skills/stored/$skillId");
+  });
+
+  it("names the team that owns a skill, instead of the bare word Team", () => {
+    teamsData = {
+      teams: [
+        {
+          id: "team_1",
+          orgId: "org_1",
+          name: "Platform",
+          origin: "local",
+          externalId: null,
+          createdAt: 1,
+          memberCount: 2,
+          callerRole: "member",
+        },
+      ],
+    };
+    currentData = {
+      skills: [
+        {
+          name: "release",
+          description: "How the team ships.",
+          origin: "local",
+          id: "skill_3",
+          ownerType: "team",
+          ownerId: "team_1",
+          shadowed: false,
+          takesArgs: false,
+          updatedAt: 1_700_000_000_000,
+        },
+      ],
+    };
+    const { container } = render(
+      <TooltipProvider>
+        <SkillsIndexPage />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByText("Platform")).toBeTruthy();
+    // Counted inside the grid, as in the scope-badge test above: the scope
+    // filter over the grid carries a "Team" option, which is a filter value
+    // and not a badge on a card.
+    const grid = container.querySelector(".grid");
+    const teamBadges = Array.from(grid?.querySelectorAll("span") ?? []).filter(
+      (el) => el.textContent === "Team",
+    );
+    expect(teamBadges).toHaveLength(0);
   });
 
   it("points at both ways to write one when the catalog is empty", () => {

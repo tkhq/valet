@@ -182,5 +182,3 @@ orgRouter.patch("/members/:userId", async (c) => {
   const resp: PatchOrgMemberResponse = { ok: true };
   return c.json(resp);
 });
-
-export type OrgRouter = typeof orgRouter;

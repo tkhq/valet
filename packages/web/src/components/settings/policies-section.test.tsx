@@ -69,7 +69,7 @@ beforeEach(() => {
             configKeys: [],
             connected: true,
             connect: "manual",
-            actions: [{ id: "gmail.send_email", name: "Send email", riskLevel: "medium" }],
+            actions: [{ id: "gmail.send_email", name: "Send email", riskLevel: "medium", requiresApproval: true }],
           },
         ],
       },

@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { authClient } from "~/lib/auth-client";
 import { useAuthConfig } from "~/api/auth-config";
 import { Button, Input, Label, Spinner } from "~/components/primitives";
@@ -26,6 +26,16 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+
+  // A rejected sign-in changes nothing a screen reader re-reads: the fields
+  // keep their values and the message appends below them. Move the caret to
+  // the message so the next thing read is why the form did not submit. The
+  // effect (not the handler) does the move, because the message mounts on
+  // the render that follows `setError`.
+  useEffect(() => {
+    if (error !== null) errorRef.current?.focus();
+  }, [error]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -34,7 +44,7 @@ export function LoginPage() {
     const { error: signInError } = await authClient.signIn.email({ email, password });
     setSubmitting(false);
     if (signInError) {
-      setError(signInError.message ?? "Couldn't sign in. Check your email and password.");
+      setError(signInError.message ?? "Couldn’t sign in. Check your email and password.");
       return;
     }
     navigate({ to: "/" });
@@ -61,6 +71,9 @@ export function LoginPage() {
               id="login-email"
               type="email"
               autoComplete="email"
+              // An address is not prose. Spell-check marks a correct address
+              // as a mistake and gives the wrong hint after a failed sign-in.
+              spellCheck={false}
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -77,9 +90,21 @@ export function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-          {error && <p className="text-xs text-danger-500">{error}</p>}
+          {error && (
+            <p ref={errorRef} tabIndex={-1} role="alert" className="text-xs text-danger-500">
+              {error}
+            </p>
+          )}
+          {/* The label stays while the request is in flight. A lone spinner
+              names the button "Loading", which tells nobody what is loading. */}
           <Button type="submit" className="w-full" disabled={submitting}>
-            {submitting ? <Spinner size={14} /> : "Sign in"}
+            {submitting ? (
+              <>
+                <Spinner size={14} /> Signing in…
+              </>
+            ) : (
+              "Sign in"
+            )}
           </Button>
         </form>
 

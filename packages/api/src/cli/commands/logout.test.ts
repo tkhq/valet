@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadConfig, saveConfig, type ValetConfig } from "../config.js";
+import { loadConfig, type ValetConfig } from "../config.js";
 import { ExitCode, ProfileNotFoundError } from "../exit.js";
 import { removeProfile, runLogout } from "./logout.js";
 

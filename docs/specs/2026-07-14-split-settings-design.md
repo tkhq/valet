@@ -65,9 +65,9 @@ Every control enumerated (surfaces alone are not a spec).
 - Data: `GET /api/me`.
 
 ### You · Assistant
-- Assistant name: text input (writes `orchestrator_identities.handle`).
+- Assistant name: text input (writes `assistants.name` on the caller's default assistant).
 - Personality: multiline editor (writes `assistant/personality.md` memory file).
-- One Save per field-group, both via existing `PATCH /api/orchestrator/info`; loading/saving/error states as on the dashboard. Components extracted from `IdentityStep` so dashboard and settings share one implementation.
+- One Save per field-group, both via existing `PATCH /api/orchestrator/info`; loading/saving/error states as on the dashboard. Components live in `identity-fields.tsx` so dashboard and settings share one implementation.
 - **Default model**: typeahead combobox (input + filtered list) over `GET /api/models`; curated `MODEL_CATALOG` entries show their friendly label/tier grouping first, remaining registry models listed by raw id below. Selection → `PATCH /api/me {defaultModel}`; a "System default" clear affordance → `{defaultModel: null}` (falls back to `claude-haiku-4-5`). Helper text: "New conversations start on this model; you can still switch per-thread in the chat header."
 
 ### You · Appearance
@@ -118,7 +118,7 @@ Every control enumerated (surfaces alone are not a spec).
 - `routes/settings.tsx` becomes the layout (rail + `<Outlet/>`); sections at `routes/settings.profile.tsx` etc.; org sections `routes/settings.organization*.tsx`. Route-adjacent tests per `-*.test.tsx` convention.
 - New components under `components/settings/`: `settings-rail.tsx`, `section.tsx` (heading + description + children stack with hairline separators), `field-row.tsx`, `radio-card.tsx` (promoted to primitives if reused), `enable-org-card.tsx`, `members-table.tsx`, `teams-panel.tsx`.
 - Data layer: `src/api/settings.ts` query-key factories (`me`, `org`, `orgMembers`) alongside existing `teams` usage; mutations invalidate their keys; the rail's org-group visibility derives from the `GET /api/org` query (cached, so no flash — render the group skeleton-less, appearing on data).
-- The dashboard's `IdentityStep` internals are extracted to `components/assistant/identity-fields.tsx` consumed by both dashboard and `/settings/assistant`.
+- The name and personality fields live in `components/assistant/identity-fields.tsx`, consumed by both dashboard and `/settings/assistant`.
 
 ## Visual direction (implementation via frontend-design skill)
 

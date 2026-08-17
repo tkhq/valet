@@ -15,6 +15,7 @@ import type { ReactElement, ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { TeamSummary } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
 
@@ -35,6 +36,30 @@ const removeTeamMemberMutate = vi.fn();
 
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
+
+/** Renders a real anchor so `getByRole("link")` and href assertions work
+ * without mounting a router. */
+function RouterLinkStub({
+  to,
+  search,
+  children,
+  className,
+}: {
+  to: string;
+  search?: Record<string, string | undefined>;
+  children: ReactNode;
+  className?: string;
+}) {
+  const params = Object.entries(search ?? {}).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined,
+  );
+  const qs = params.length > 0 ? `?${new URLSearchParams(params).toString()}` : "";
+  return (
+    <a href={`${to}${qs}`} className={className}>
+      {children}
+    </a>
+  );
+}
 
 let orgData: {
   id: string;
@@ -66,8 +91,13 @@ let orgMembersData: {
   ],
 };
 
-let teamsData: { teams: Array<{ id: string; orgId: string; name: string; createdAt: number; memberCount: number }> } = {
-  teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
+// Typed as the real wire shape, not a local literal: a field added to
+// `TeamSummary` then breaks this fixture at compile time instead of letting
+// the panel render against a shape the API no longer sends.
+let teamsData: { teams: TeamSummary[] } = {
+  teams: [
+    { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin" },
+  ],
 };
 
 let teamMembersData: { members: Array<{ userId: string; role: "admin" | "member" }> } = {
@@ -88,10 +118,34 @@ let invitesData: {
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
-  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
-    <a {...rest}>{children}</a>
-  ),
+  // `RouterLinkStub` over a bare anchor: it renders a real `href` from `to`
+  // and `search`, which the link assertions below need.
+  Link: RouterLinkStub,
 }));
+
+// The teams panel links to each team's DEFAULT assistant, whose id only the
+// assistants list carries.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: {
+        assistants: [
+          {
+            id: "asst_team_1",
+            owner: { type: "team" as const, id: "team_1" },
+            sessionId: "assistant:asst_team_1",
+            isDefault: true,
+            createdAt: 1,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -109,6 +163,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
     useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
     useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useMe: () => ({ data: { orgRole: "admin" }, isLoading: false, error: null }),
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
     useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
@@ -193,7 +248,9 @@ beforeEach(() => {
     ],
   };
   teamsData = {
-    teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
+    teams: [
+      { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin" },
+    ],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
   invitesData = { invites: [] };
@@ -209,7 +266,7 @@ describe("OrganizationGeneralPage", () => {
     expect(patchOrgMutate).toHaveBeenCalledWith({ name: "Acme Corp" });
   });
 
-  it("shows read-only id and created rows", () => {
+  it("shows the read-only id row", () => {
     render(<OrganizationGeneralPage />);
     expect(screen.getByLabelText("Organization ID")).toHaveProperty("value", "org_1");
   });
@@ -402,6 +459,65 @@ describe("OrganizationTeamsPage", () => {
     expect(deleteTeamMutate).toHaveBeenCalledWith("team_1", expect.objectContaining({
       onSuccess: expect.any(Function),
     }));
+  });
+
+  describe("identity-provider-managed teams", () => {
+    // Admin on purpose: the controls below are gated on authorization AND
+    // on origin, so a member fixture would pass for the wrong reason. This
+    // one proves the origin gate holds even for somebody allowed to mutate.
+    const mirrored: TeamSummary = {
+      id: "team_2",
+      orgId: "org_1",
+      name: "platform",
+      origin: "idp",
+      externalId: "/platform",
+      createdAt: 0,
+      memberCount: 1,
+      callerRole: "admin",
+    };
+
+    it("marks the team and offers no actions menu", () => {
+      teamsData = { teams: [mirrored] };
+      render(<OrganizationTeamsPage />);
+
+      expect(screen.getByText("Identity provider")).toBeTruthy();
+      // The menu holds Delete only, and the API refuses it. An empty menu
+      // would be a control the reader cannot use.
+      expect(screen.queryByRole("button", { name: "platform actions" })).toBeNull();
+    });
+
+    it("offers no membership controls, and says why, naming the group", async () => {
+      teamsData = { teams: [mirrored] };
+      render(<OrganizationTeamsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "Expand platform" }));
+
+      // The reason sits with the roster, where the controls would be.
+      expect(
+        screen.getByText(/Membership comes from identity provider group \/platform\./),
+      ).toBeTruthy();
+      expect(screen.getByText(/sign in again/)).toBeTruthy();
+
+      expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
+      // The role still shows, as a fact rather than a menu.
+      expect(screen.getByText("Admin")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /Admin/ })).toBeNull();
+    });
+
+    it("leaves a local team beside it fully editable", async () => {
+      const user = userEvent.setup();
+      teamsData = { teams: [teamsData.teams[0], mirrored] };
+      render(<OrganizationTeamsPage />);
+
+      expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+      await user.click(screen.getByRole("button", { name: "Add member" }));
+      await user.click(await screen.findByText("Grace"));
+      expect(addTeamMemberMutate).toHaveBeenCalledWith({
+        teamId: "team_1",
+        body: { userId: "u2", role: "member" },
+      });
+    });
   });
 });
 

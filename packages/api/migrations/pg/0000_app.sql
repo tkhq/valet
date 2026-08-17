@@ -261,10 +261,14 @@ CREATE TABLE "teams" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"name" text NOT NULL,
+	"origin" text DEFAULT 'local' NOT NULL,
+	"external_id" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "teams_org_external" ON "teams" ("org_id","origin","external_id");
 --> statement-breakpoint
 CREATE TABLE "team_members" (
 	"team_id" text NOT NULL,
@@ -275,17 +279,27 @@ CREATE TABLE "team_members" (
 --> statement-breakpoint
 CREATE INDEX "team_members_user" ON "team_members" ("user_id");
 --> statement-breakpoint
-CREATE TABLE "orchestrator_identities" (
+CREATE TABLE "assistants" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
+	"name" text,
 	"session_id" text NOT NULL,
-	"handle" text,
-	"created_at" bigint NOT NULL
+	"is_default" boolean DEFAULT false NOT NULL,
+	"created_at" bigint NOT NULL,
+	"archived_at" bigint
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "orchestrator_identities_owner" ON "orchestrator_identities" ("org_id","owner_type","owner_id");
+CREATE UNIQUE INDEX "assistants_session" ON "assistants" ("session_id");
+--> statement-breakpoint
+-- Exactly one default per principal. PARTIAL, not a plain unique: every
+-- non-default assistant shares the same (org, owner_type, owner_id), so a
+-- full unique index would allow only one assistant per principal — the very
+-- rule this table exists to remove.
+CREATE UNIQUE INDEX "assistants_default_owner" ON "assistants" ("org_id","owner_type","owner_id") WHERE "is_default";
+--> statement-breakpoint
+CREATE INDEX "assistants_owner" ON "assistants" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE TABLE "child_watches" (
 	"child_session_id" text PRIMARY KEY NOT NULL,
@@ -379,6 +393,30 @@ CREATE TABLE "identity_link_codes" (
 );
 --> statement-breakpoint
 CREATE INDEX "identity_link_codes_provider" ON "identity_link_codes" ("provider","code_hash");
+--> statement-breakpoint
+-- Open streaming messages, one row per provider stream the api has started
+-- and not yet stopped. The engine's `text_delta` plane is ephemeral: it is
+-- never appended to the event log and is never replayed. So an api that dies
+-- mid-stream cannot reconstruct the text, and the reader is left with a
+-- message that shimmers forever. This table is the only durable trace of
+-- "a stream is open", and it exists so the next boot can close it.
+--
+-- Not Slack-specific: any transport that implements the start/append/stop
+-- triple gets swept by the same code.
+CREATE TABLE "channel_active_streams" (
+	"channel_type" text NOT NULL,
+	"conversation_key" text NOT NULL,
+	"message_id" text NOT NULL,
+	"thread_ts" text NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text NOT NULL,
+	"engine_message_id" text,
+	"org_id" text NOT NULL,
+	"started_at" bigint NOT NULL,
+	CONSTRAINT "channel_active_streams_pk" PRIMARY KEY("channel_type","conversation_key","message_id")
+);
+--> statement-breakpoint
+CREATE INDEX "channel_active_streams_started" ON "channel_active_streams" ("started_at");
 --> statement-breakpoint
 CREATE TABLE "memory_files" (
 	"owner_type" text NOT NULL,

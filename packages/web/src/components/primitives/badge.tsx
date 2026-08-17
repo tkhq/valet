@@ -1,7 +1,7 @@
 import { forwardRef, type HTMLAttributes } from "react";
 import { cn } from "~/lib/cn";
 
-type Variant = "neutral" | "accent" | "success" | "danger";
+type Variant = "neutral" | "accent" | "success" | "warning" | "danger";
 
 const VARIANT: Record<Variant, string> = {
   neutral: "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
@@ -11,8 +11,16 @@ const VARIANT: Record<Variant, string> = {
   // note in theme.css). That left light-mode `bg-accent-100` under
   // `dark:text-accent-100` — identical colours, an invisible badge.
   accent: "bg-accent-100 text-accent-700 dark:bg-accent-700 dark:text-accent-50",
-  success: "bg-success-500/15 text-success-600 dark:text-success-500",
-  danger: "bg-danger-500/15 text-danger-600 dark:text-danger-500",
+  // Wash tokens, not `bg-success-500/15`. The `success`/`danger` scales are
+  // raw `oklch(...)` strings, so the slash modifier produced NO rule at all
+  // and both badges rendered as bare coloured text with no pill — the same
+  // trap the `accent` note above describes. See `--success-wash` in
+  // theme.css; alpha belongs in the token.
+  success: "bg-success-wash text-success-600 dark:text-success-500",
+  // Amber is the palette's documented "waiting" colour (see the presence
+  // mark in theme.css), so it carries states that are blocked on a person.
+  warning: "bg-warning-wash text-warning-fg",
+  danger: "bg-danger-wash text-danger-600 dark:text-danger-500",
 };
 
 export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {

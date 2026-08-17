@@ -1,12 +1,12 @@
 /**
- * Identity step pure logic (decision 11): reroll randomness, chip
+ * Identity fields pure logic (decision 11): reroll randomness, chip
  * composition, and the "Skip personality" submit path (name only, even
  * when the textarea has text). No DOM — these are extracted precisely so
  * they're testable without mounting the mutation (CLAUDE.md: pure
  * functions over exercising private/DOM internals).
  */
 import { describe, expect, it } from "vitest";
-import { NAME_POOL, appendTraitSentence, identitySubmitBody, pickRandomName } from "./identity-step";
+import { NAME_POOL, appendTraitSentence, identitySubmitBody, pickRandomName } from "./identity-fields";
 
 describe("NAME_POOL", () => {
   it("has 300 unique, non-blank names", () => {

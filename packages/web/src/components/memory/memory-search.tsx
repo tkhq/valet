@@ -2,6 +2,7 @@ import { useState, type KeyboardEvent } from "react";
 import { Search, X } from "lucide-react";
 import type { MemoryTreeEntry } from "@valet/api/wire";
 import { useMemorySearch, useMemoryTree } from "~/api/memory";
+import type { SearchMemorySnippetSegment } from "~/api/memory-types";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { Badge, Input, Spinner } from "~/components/primitives";
 import { formatBytes } from "~/lib/format-bytes";
@@ -152,9 +153,38 @@ function SearchResults({
               <Badge className="ml-auto shrink-0">{r.type}</Badge>
             </span>
             {r.description && <span className="line-clamp-2 text-xs text-muted">{r.description}</span>}
+            <SearchSnippet segments={r.snippet} />
           </button>
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * The matched text from a hit's body, so the result list answers "why did
+ * this file match?" without the reader opening each file.
+ *
+ * The segments arrive as plain text with a `match` flag — never as markup.
+ * `ts_headline` emits `<b>` around each hit by default, and the memory
+ * corpus is agent-authored, so injecting that HTML here would make every
+ * remembered document a stored-XSS vector. The server replaces those
+ * markers with inert delimiters and splits on them; this renders the result
+ * as React text nodes and `<mark>` elements.
+ */
+function SearchSnippet({ segments }: { segments: readonly SearchMemorySnippetSegment[] }) {
+  if (segments.length === 0) return null;
+  return (
+    <span className="line-clamp-2 text-xs leading-snug text-muted">
+      {segments.map((seg, i) =>
+        seg.match ? (
+          <mark key={i} className="rounded-[2px] bg-moss-wash px-0.5 font-medium text-ink">
+            {seg.text}
+          </mark>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        ),
+      )}
+    </span>
   );
 }

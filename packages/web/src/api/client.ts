@@ -9,7 +9,15 @@
 import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
+  CreateAssistantRequest,
+  CreateAssistantResponse,
+  EnsureAssistantSessionResponse,
+  ListAssistantsResponse,
+  PatchAssistantRequest,
+  PatchAssistantResponse,
   CancelWorkflowRunResponse,
+  DeleteWorkflowWebhookResponse,
+  WorkflowWebhookResponse,
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
@@ -80,9 +88,14 @@ import type {
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
+  ListWorkflowTemplatesResponse,
+  InstallWorkflowTemplateRequest,
+  InstallWorkflowTemplateResponse,
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
@@ -117,8 +130,17 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  CreateEventSubscriptionRequest,
+  CreateEventSubscriptionResponse,
+  GetEventCatalogResponse,
+  GetEventResponse,
+  ListEventsResponse,
+  ListEventSubscriptionsResponse,
+  PatchEventSubscriptionRequest,
+  PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
+  RedeliverEventResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -225,6 +247,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return (await res.json()) as T;
 }
 
+/** Keyset paging for the run lists. `cursor` is a page's `nextCursor`. */
+export interface WorkflowRunPage {
+  limit?: number;
+  cursor?: string;
+}
+
+/** Filters the cross-workflow run list accepts. Array fields match any-of. */
+export interface WorkflowRunFilter extends WorkflowRunPage {
+  workflowIds?: string[];
+  status?: WorkflowRunStatus[];
+  outcome?: WorkflowRunOutcome[];
+  parentRunId?: string;
+  since?: number;
+}
+
 export const api = {
   // auth
   getAuthConfig: () => fetchAuthConfig(),
@@ -269,6 +306,28 @@ export const api = {
       `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
     ),
 
+  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
+  // also how the client learns each assistant's session id, so it replaces
+  // the client-side id derivation the rail used to do.
+  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
+  createAssistant: (body: CreateAssistantRequest) =>
+    request<CreateAssistantResponse>("POST", "/assistants", body),
+  patchAssistant: (id: string, body: PatchAssistantRequest) =>
+    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
+  // Archive, not destroy: the row keeps `archived_at` and the conversation
+  // it held survives. `DELETE` carries it because the wire's
+  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
+  // house convention for a soft remove is the same verb as `deleteTeam`.
+  archiveAssistant: (id: string) =>
+    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
+  /** Get-or-create one assistant's session. Creating an assistant writes no
+   * session, so the chat page calls this before opening the conversation. */
+  ensureAssistantSession: (id: string) =>
+    request<EnsureAssistantSessionResponse>(
+      "POST",
+      `/assistants/${encodeURIComponent(id)}/session`,
+    ),
+
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
   getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
@@ -277,7 +336,10 @@ export const api = {
   searchMemory: (q: string) =>
     request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
   getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
-  writeMemoryDoc: (body: { path: string; content: string }) =>
+  // `content` and `pinned` are both optional: the route leaves the body
+  // alone when `content` is absent, which is how the doc view pins a file
+  // without rewriting it.
+  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }) =>
     request<unknown>("PUT", "/memory", body),
   deleteMemoryDoc: (path: string) =>
     request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
@@ -394,8 +456,36 @@ export const api = {
       `/workflows/${encodeURIComponent(id)}/runs`,
       body,
     ),
-  listWorkflowRuns: (id: string) =>
-    request<ListWorkflowRunsResponse>("GET", `/workflows/${encodeURIComponent(id)}/runs`),
+  listWorkflowRuns: (id: string, opts?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListWorkflowRunsResponse>(
+      "GET",
+      `/workflows/${encodeURIComponent(id)}/runs${tail}`,
+    );
+  },
+  // Cross-workflow run list. `parentRunId` is how a batch parent's child
+  // runs come back in one request.
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+    // An any-of filter with no values matches nothing. A query string cannot
+    // carry an empty repeated field, so an unguarded request would drop the
+    // filter and list every readable run — the opposite of what was asked.
+    for (const values of [opts?.workflowIds, opts?.status, opts?.outcome]) {
+      if (values?.length === 0) return Promise.resolve({ runs: [] });
+    }
+    const qs = new URLSearchParams();
+    for (const workflowId of opts?.workflowIds ?? []) qs.append("workflowId", workflowId);
+    for (const status of opts?.status ?? []) qs.append("status", status);
+    for (const outcome of opts?.outcome ?? []) qs.append("outcome", outcome);
+    if (opts?.parentRunId) qs.set("parentRunId", opts.parentRunId);
+    if (opts?.since !== undefined) qs.set("since", String(opts.since));
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+  },
   listWorkflowVersions: (id: string) =>
     request<ListWorkflowVersionsResponse>("GET", `/workflows/${encodeURIComponent(id)}/versions`),
   getWorkflowVersion: (id: string, version: number) =>
@@ -424,6 +514,49 @@ export const api = {
     request<RetryWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/retry`,
+    ),
+
+  // events (event-system design): org feed, per-event detail with delivery
+  // attempts, the plugin trigger catalog, and subscription CRUD
+  getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
+  listEvents: (params?: { service?: string; key?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.service) qs.set("service", params.service);
+    if (params?.key) qs.set("key", params.key);
+    const q = qs.toString();
+    return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
+  },
+  getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
+  redeliverEvent: (id: string) =>
+    request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
+  listEventSubscriptions: () =>
+    request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
+  createEventSubscription: (body: CreateEventSubscriptionRequest) =>
+    request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
+  patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
+    request<PatchEventSubscriptionResponse>(
+      "PATCH",
+      `/event-subscriptions/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deleteEventSubscription: (id: string) =>
+    request<void>("DELETE", `/event-subscriptions/${encodeURIComponent(id)}`),
+  // workflow webhook URL management. Schedules and event triggers are the
+  // flat trigger surface below, not this per-workflow one.
+  getWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+  mintWorkflowWebhook: (id: string) =>
+    request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
+  deleteWorkflowWebhook: (id: string) =>
+    request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
+
+  // workflow templates — the starting points the gallery on /workflows offers
+  listWorkflowTemplates: () => request<ListWorkflowTemplatesResponse>("GET", "/templates"),
+  installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
+    request<InstallWorkflowTemplateResponse>(
+      "POST",
+      `/templates/${encodeURIComponent(id)}/install`,
+      body,
     ),
 
   // workflow triggers (spec 2026-08-15)
@@ -532,6 +665,8 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
+  ensureTeamOrchestrator: (id: string) =>
+    request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),

@@ -6,8 +6,9 @@
  * the old "New session" button is gone from the nav (it moved to the
  * /sessions stub page — see routes/sessions.tsx).
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
@@ -17,6 +18,8 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { TopNav } from "./top-nav";
+import { AppShell } from "./app-shell";
+import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({
@@ -36,9 +39,28 @@ vi.mock("./notifications-bell", () => ({
   NotificationsBell: () => <div data-testid="bell-stub" />,
 }));
 
-function renderNav() {
+function renderNav(opts: { withSidebar?: boolean } = {}) {
+  // The nav reads the workspace scope, which throws outside its provider —
+  // deliberately, so a surface can never silently render another workspace's
+  // data under this one's name. The provider must sit INSIDE the router: it
+  // reads `?assistant=` to let the open assistant win over the stored key.
+  const withScope = (node: React.ReactNode) => (
+    <WorkspaceScopeProvider>{node}</WorkspaceScopeProvider>
+  );
   const rootRoute = createRootRoute({
-    component: () => <TopNav />,
+    component: () =>
+      opts.withSidebar === undefined ? (
+        withScope(<TopNav />)
+      ) : (
+        // The real shell, so the toggle is driven by the state it actually
+        // reads — a hand-built context value would prove only that the
+        // component renders what it is handed.
+        withScope(
+          <AppShell topNav={<TopNav />} sidebar={opts.withSidebar ? <nav /> : undefined}>
+            <div />
+          </AppShell>,
+        )
+      ),
   });
   const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: () => null });
   const sessionsRoute = createRoute({
@@ -98,7 +120,15 @@ describe("TopNav", () => {
     const labels = within(nav)
       .getAllByRole("link")
       .map((el) => el.textContent);
-    expect(labels).toEqual(["Chat", "Memory", "Sessions", "Workflows", "Skills", "Integrations"]);
+    expect(labels).toEqual([
+      "Chat",
+      "Memory",
+      "Sessions",
+      "Workflows",
+      "Events",
+      "Skills",
+      "Integrations",
+    ]);
   });
 
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put
@@ -117,5 +147,68 @@ describe("TopNav", () => {
     renderNav();
     await screen.findByText("Valet");
     expect(screen.queryByText("New session")).toBeNull();
+  });
+});
+
+/**
+ * The sidebar toggle. It lives in the nav rather than floating over the
+ * sidebar's top-right corner, where it used to cover the assistants rail's
+ * "New assistant" button — a control the user could see and could not click.
+ *
+ * jsdom has no layout and no media queries, so both the mobile and desktop
+ * buttons are in the DOM at once and CSS alone decides which is visible.
+ * These assert the part CSS cannot: that each announces the action it
+ * performs, and that the desktop one tracks the shell's real state.
+ */
+describe("TopNav — sidebar toggle", () => {
+  // The collapsed state persists to localStorage, which jsdom shares across
+  // tests in a file — without this, whichever test collapses the sidebar
+  // decides the starting state of every test after it.
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("draws no toggle outside a shell", async () => {
+    renderNav();
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("button", { name: /sidebar/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /open threads/i })).toBeNull();
+  });
+
+  it("draws no toggle when the shell has no sidebar to control", async () => {
+    renderNav({ withSidebar: false });
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("button", { name: /sidebar/i })).toBeNull();
+  });
+
+  it("offers to collapse an open sidebar, and to expand it once collapsed", async () => {
+    renderNav({ withSidebar: true });
+    await screen.findByText("Valet");
+
+    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+
+    await userEvent.click(collapse);
+
+    const expand = screen.getByRole("button", { name: "Expand sidebar" });
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).toBeNull();
+  });
+
+  it("keeps the mobile drawer control labelled for its own action", async () => {
+    renderNav({ withSidebar: true });
+    await screen.findByText("Valet");
+    // Distinct from the desktop label: it opens a drawer, it does not
+    // collapse anything, and a screen reader must not be told otherwise.
+    expect(screen.getByRole("button", { name: "Open threads" })).toBeTruthy();
+  });
+
+  it("puts the toggle ahead of the logo, at the row's left edge", async () => {
+    renderNav({ withSidebar: true });
+    const logo = await screen.findByText("Valet");
+    const toggle = screen.getByRole("button", { name: "Collapse sidebar" });
+    // `compareDocumentPosition` is the only order check jsdom can make; the
+    // flex row does the rest.
+    expect(toggle.compareDocumentPosition(logo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

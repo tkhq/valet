@@ -7,7 +7,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { ForeachNode, LlmNode, SessionNode, TriggerNode, WorkflowNode } from "@valet/workflow";
+import type { ForeachNode, LlmNode, SessionNode, ToolNode, TriggerNode, WorkflowNode } from "@valet/workflow";
 import { Inspector } from "./inspector";
 
 function noop() {}
@@ -100,6 +100,30 @@ describe("Inspector", () => {
     fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
     expect(onRemove).toHaveBeenCalled();
     expect(onDuplicate).toHaveBeenCalled();
+  });
+
+  describe("on-error policy", () => {
+    it("offers the policy on tool nodes and propagates the selection", () => {
+      const onChange = vi.fn();
+      const node: ToolNode = { id: "call", type: "tool", service: "slack", action: "send_message", params: {} };
+      render(<Inspector node={node} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
+
+      fireEvent.change(screen.getByLabelText("On error"), { target: { value: "continue" } });
+      expect(onChange).toHaveBeenCalledWith({ onError: "continue" });
+    });
+
+    it("hides the policy inside a foreach body, where onItemError applies instead", () => {
+      const node: ForeachNode = {
+        id: "foreach-1",
+        type: "foreach",
+        items: "{{trigger.items}}",
+        body: { id: "foreach-1-body", type: "tool", service: "slack", action: "send_message", params: {} },
+      };
+      render(<Inspector node={node} onChange={noop} onRemove={noop} onDuplicate={noop} />);
+
+      expect(screen.queryByLabelText("On error")).toBeNull();
+      expect(screen.getByLabelText("On item error")).toBeTruthy();
+    });
   });
 
   describe("foreach body sub-form", () => {

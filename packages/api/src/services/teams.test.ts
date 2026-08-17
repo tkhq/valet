@@ -1,11 +1,13 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, teams, users, workflowDefinitions } from "../schema/index.js";
+import { orgMembers, orgs, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import {
   addMember,
+  ConfigManagedTeamError,
   createTeam,
   deleteTeam,
+  IdpManagedTeamError,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -190,6 +192,121 @@ describe("teams service", () => {
     await expect(addMember(db, { teamId: team.id, userId: "u9", role: "member" })).rejects.toThrow(
       NotOrgMemberError,
     );
+  });
+
+  describe("identity-provider-managed teams", () => {
+    /**
+     * Seeds a team the way the login-time sync does: `origin: "idp"`, the
+     * full group path, and member rows written straight to the table.
+     * `createTeam` always writes `local`, so it cannot produce one.
+     */
+    async function seedIdpTeam(): Promise<string> {
+      const id = "team_idp";
+      await db.insert(teams).values({
+        id,
+        orgId,
+        name: "platform",
+        origin: "idp",
+        externalId: "/platform",
+        createdAt: Date.now(),
+      });
+      await db.insert(teamMembers).values({ teamId: id, userId: "u1", role: "admin" });
+      await db.insert(teamMembers).values({ teamId: id, userId: "u2", role: "member" });
+      return id;
+    }
+
+    it("addMember refuses, and names the group in the message", async () => {
+      const teamId = await seedIdpTeam();
+      await expect(addMember(db, { teamId, userId: "u3", role: "member" })).rejects.toThrow(
+        IdpManagedTeamError,
+      );
+      // The message must name the group to change, not just state a refusal.
+      await expect(addMember(db, { teamId, userId: "u3", role: "member" })).rejects.toThrow(/\/platform/);
+      expect(await listTeamMembers(db, teamId)).toHaveLength(2);
+    });
+
+    it("setRole refuses", async () => {
+      const teamId = await seedIdpTeam();
+      await expect(setRole(db, { teamId, userId: "u2", role: "admin" })).rejects.toThrow(
+        IdpManagedTeamError,
+      );
+      const members = await listTeamMembers(db, teamId);
+      expect(members.find((m) => m.userId === "u2")?.role).toBe("member");
+    });
+
+    it("removeMember refuses", async () => {
+      const teamId = await seedIdpTeam();
+      await expect(removeMember(db, { teamId, userId: "u2" })).rejects.toThrow(IdpManagedTeamError);
+      expect(await listTeamMembers(db, teamId)).toHaveLength(2);
+    });
+
+    it("deleteTeam refuses and the team survives", async () => {
+      const teamId = await seedIdpTeam();
+      await expect(deleteTeam(db, { teamId })).rejects.toThrow(IdpManagedTeamError);
+      expect(await listTeamsForUser(db, "u1")).toHaveLength(1);
+    });
+
+    it("the guard reads origin, not the name — a local team of the same name is untouched", async () => {
+      // The refusal must key on provenance alone. A local team that happens
+      // to share a mirrored team's name keeps every capability, or the sync
+      // would silently freeze teams it does not own.
+      await seedIdpTeam();
+      // A second org, because `teams_org_name` blocks the same name twice in
+      // one org.
+      await db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() });
+      await seedUser(db, "u8", "org2");
+      await seedUser(db, "u9", "org2");
+      const local = await createTeam(db, { orgId: "org2", name: "platform", creatorUserId: "u9" });
+
+      await addMember(db, { teamId: local.id, userId: "u8", role: "member" });
+      await setRole(db, { teamId: local.id, userId: "u8", role: "admin" });
+      await removeMember(db, { teamId: local.id, userId: "u8" });
+      expect(await listTeamMembers(db, local.id)).toHaveLength(1);
+
+      await deleteTeam(db, { teamId: local.id });
+      expect(await listTeamsForUser(db, "u9")).toHaveLength(0);
+    });
+  });
+
+  describe("config-declared teams", () => {
+    /**
+     * Seeds a team the way the boot reconciler does: `origin: "config"` and
+     * no external id. `createTeam` always writes `local`, so it cannot
+     * produce one.
+     */
+    async function seedConfigTeam(): Promise<string> {
+      const id = "team_cfg_seed";
+      await db.insert(teams).values({ id, orgId, name: "declared", origin: "config", createdAt: Date.now() });
+      await db.insert(teamMembers).values({ teamId: id, userId: "u1", role: "admin" });
+      await db.insert(teamMembers).values({ teamId: id, userId: "u2", role: "member" });
+      return id;
+    }
+
+    it("deleteTeam refuses and names the file to edit", async () => {
+      const teamId = await seedConfigTeam();
+      await expect(deleteTeam(db, { teamId })).rejects.toThrow(ConfigManagedTeamError);
+      // Naming the refusal is not enough — the reader needs the file, because
+      // the next boot recreates a team deleted anywhere else.
+      await expect(deleteTeam(db, { teamId })).rejects.toThrow(/VALET_CONFIG/);
+      expect(await listTeamsForUser(db, "u1")).toHaveLength(1);
+    });
+
+    it("membership stays editable, unlike a mirrored team's", async () => {
+      // The file only asserts members, so an edit here is real work that
+      // lasts until the next restart. Refusing it would be stricter than the
+      // file's own rule.
+      const teamId = await seedConfigTeam();
+
+      await addMember(db, { teamId, userId: "u3", role: "member" });
+      expect(await listTeamMembers(db, teamId)).toHaveLength(3);
+
+      await setRole(db, { teamId, userId: "u2", role: "admin" });
+      const members = await listTeamMembers(db, teamId);
+      expect(members.find((m) => m.userId === "u2")?.role).toBe("admin");
+
+      await removeMember(db, { teamId, userId: "u3" });
+      expect(await listTeamMembers(db, teamId)).toHaveLength(2);
+    });
   });
 
   it("createTeam still reports a conflict when a row was inserted outside the service's own check", async () => {

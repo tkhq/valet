@@ -30,9 +30,22 @@ function MemoryDocPage() {
     void navigate({ to: "/memory" });
   }
 
+  /** A cross-reference inside the document opens the target in this pane —
+   * the same splat route, so the tree/search pane stays mounted. */
+  function onOpenPath(target: string) {
+    void navigate({ to: "/memory/$", params: { _splat: target } });
+  }
+
   return (
-    <main className="flex-1 min-h-0 overflow-y-auto">
-      <MemoryDoc path={path} onNavigateToChat={onNavigateToChat} onDeleted={onDeleted} />
-    </main>
+    // A plain `div`, not `main`: the app shell already renders the page's one
+    // `main` landmark, and this route paints inside it.
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <MemoryDoc
+        path={path}
+        onNavigateToChat={onNavigateToChat}
+        onDeleted={onDeleted}
+        onOpenPath={onOpenPath}
+      />
+    </div>
   );
 }

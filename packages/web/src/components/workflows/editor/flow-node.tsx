@@ -57,7 +57,9 @@ export function runStatusClasses(status: NodeRunStatus | undefined, selected: bo
   }
 }
 
-const RUN_STATUS_GLYPH: Record<NodeRunStatus, string> = {
+/** Also reused outside the canvas (e.g. `CheckpointList`) so a node's
+ * status glyph reads identically wherever it's shown. */
+export const RUN_STATUS_GLYPH: Record<NodeRunStatus, string> = {
   pending: "○",
   running: "◐",
   succeeded: "✓",

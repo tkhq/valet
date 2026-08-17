@@ -13,13 +13,23 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
-import { actionInvocations, actionPolicies, orgs, runtimeGrants, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import {
+  actionInvocations,
+  actionPolicies,
+  orgs,
+  runtimeGrants,
+  workflowDefinitions,
+  workflowSchedules,
+  workflowVersions,
+} from "../schema/index.js";
 import {
   getWorkflowRunDetail,
   listWorkflowRuns,
 } from "../workflows/service.js";
 import type {
   CreateWorkflowResponse,
+  CreateWorkflowScheduleResponse,
+  ListWorkflowSchedulesResponse,
   DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
@@ -136,6 +146,142 @@ describe("GET /api/workflows + /:id", () => {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/workflows?ownerType=&ownerId=", () => {
+  const HALF_FILTER_ERROR = "Filter by owner with both ownerType and ownerId, or send neither.";
+
+  /** A team-owned workflow, created the way a client creates one. */
+  async function createTeamWorkflow(
+    baseUrl: string,
+    teamId: string,
+    name: string,
+  ): Promise<CreateWorkflowResponse> {
+    const res = await fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, definition: VALID_DEFINITION, teamId }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateWorkflowResponse;
+  }
+
+  it("returns the own-plus-teams union unchanged when neither param is given", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ name: "someone-elses", definition: VALID_DEFINITION }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name).sort()).toEqual(["personal", "team-owned"]);
+  });
+
+  it("narrows to one team the caller is on", async () => {
+    api = await bootTestApi();
+    const platform = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const growth = await createTeam(api.providers.db, { orgId: "local-org", name: "Growth", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, platform.id, "platform-wf");
+    await createTeamWorkflow(api.baseUrl, growth.id, "growth-wf");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=${platform.id}`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["platform-wf"]);
+    expect(workflows.map((w) => w.ownerId)).toEqual([platform.id]);
+  });
+
+  it("narrows to the caller's own rows, dropping the teams", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=user&ownerId=local-user`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["personal"]);
+  });
+
+  it("404s a team the caller is not on, and the error names neither the team nor its id", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=${team.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("owner not found");
+    expect(body.error).not.toContain(team.id);
+    expect(body.error).not.toContain("Platform");
+  });
+
+  it("answers an owner that does not exist exactly as it answers one the caller may not reach", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const asOutsider = { "x-valet-test-user-id": "test-member" };
+
+    const forbidden = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=${team.id}`, {
+      headers: asOutsider,
+    });
+    const missing = await fetch(`${api.baseUrl}/api/workflows?ownerType=team&ownerId=team_nonexistent`, {
+      headers: asOutsider,
+    });
+
+    expect(forbidden.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual(await forbidden.json());
+  });
+
+  it("404s another user's rows, org admin included", async () => {
+    api = await bootTestApi();
+    await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ name: "someone-elses", definition: VALID_DEFINITION }),
+    });
+
+    // `local-user` administers the org. Org administration is not a read
+    // path into a member's personal workflows.
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=user&ownerId=test-member`);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s an org filter — nothing admits a caller to an org-owned workflow yet", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=org&ownerId=local-org`);
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a half-given filter, naming the fix", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+
+    const typeOnly = await fetch(`${api.baseUrl}/api/workflows?ownerType=team`);
+    expect(typeOnly.status).toBe(400);
+    expect(((await typeOnly.json()) as { error: string }).error).toBe(HALF_FILTER_ERROR);
+
+    const idOnly = await fetch(`${api.baseUrl}/api/workflows?ownerId=${team.id}`);
+    expect(idOnly.status).toBe(400);
+    expect(((await idOnly.json()) as { error: string }).error).toBe(HALF_FILTER_ERROR);
+  });
+
+  it("400s an ownerType outside the three an owner column holds", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=squad&ownerId=whatever`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("ownerType must be 'user', 'team' or 'org'.");
   });
 });
 
@@ -437,7 +583,6 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(detail.run.runId).toBe(runId);
     expect(detail.run.workflowId).toBe(created.id);
     expect(detail.checkpoints).toEqual([]);
-    expect(detail.signals).toEqual([]);
 
     // Park the run on the approval signal before resolving — the new route
     // validates the run is actually waiting on this gate.
@@ -1475,8 +1620,8 @@ describe("pendingGates + needsApproval wire", () => {
       wf.id,
     );
     expect(runs).not.toBeNull();
-    const approvalRun = runs!.find((r) => r.runId === approvalRunId);
-    const timerRun = runs!.find((r) => r.runId === timerRunId);
+    const approvalRun = runs!.runs.find((r) => r.runId === approvalRunId);
+    const timerRun = runs!.runs.find((r) => r.runId === timerRunId);
     expect(approvalRun?.needsApproval).toBe(true);
     // Timer-parked run must NOT carry needsApproval (absent, not false).
     expect(timerRun?.needsApproval).toBeUndefined();
@@ -1558,6 +1703,229 @@ describe("GET /api/workflows/:id/runs", () => {
     const { runs } = (await res.json()) as ListWorkflowRunsResponse;
     expect(runs.map((r) => r.runId)).toEqual([runId]);
   });
+
+  it("pages by cursor and rejects a limit outside the accepted range", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+    for (const runId of ["wfrun_page_a", "wfrun_page_b", "wfrun_page_c"]) {
+      await api.providers.workflowStore.createRun(
+        runId,
+        { workflowId: created.id, definitionVersionId: "v1" },
+        created.definition,
+        "v1",
+        { ownerType: "user", ownerId: "local-user" },
+      );
+    }
+
+    const first = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs?limit=2`);
+    const firstPage = (await first.json()) as ListWorkflowRunsResponse;
+    expect(firstPage.runs).toHaveLength(2);
+    expect(firstPage.nextCursor).toBeDefined();
+
+    const second = await fetch(
+      `${api.baseUrl}/api/workflows/${created.id}/runs?limit=2&cursor=${encodeURIComponent(firstPage.nextCursor ?? "")}`,
+    );
+    const secondPage = (await second.json()) as ListWorkflowRunsResponse;
+    expect(secondPage.runs).toHaveLength(1);
+    expect(secondPage.nextCursor).toBeUndefined();
+
+    const seen = [...firstPage.runs, ...secondPage.runs].map((r) => r.runId);
+    expect(new Set(seen).size).toBe(3);
+
+    const bad = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs?limit=0`);
+    expect(bad.status).toBe(400);
+    const badCursor = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs?cursor=nonsense`);
+    expect(badCursor.status).toBe(400);
+  });
+});
+
+describe("run detail checkpoint links", () => {
+  it("surfaces a failed session node's sessionId and a workflow node's childRunId", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_links";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const claimed = await api.providers.workflowStore.claimRun(runId, "test-owner", 30_000);
+    if (!claimed) throw new Error("expected claim to succeed");
+    await api.providers.workflowStore.completeCheckpoint(runId, "ask", 0, claimed.attempt, {
+      runId,
+      nodeId: "ask",
+      iteration: 0,
+      status: "failed",
+      error: "session failed",
+      // What `submission-node.ts` and `workflow-call.ts` actually persist.
+      effects: { sessionId: "s_abc", receipt: { threadId: "t1", queueItemId: "q1" }, repairAttempted: false },
+      attempt: claimed.attempt,
+      createdAt: Date.now(),
+    });
+    await api.providers.workflowStore.completeCheckpoint(runId, "sub", 0, claimed.attempt, {
+      runId,
+      nodeId: "sub",
+      iteration: 0,
+      status: "completed",
+      effects: { childRunId: "wfrun_sub_child" },
+      attempt: claimed.attempt,
+      createdAt: Date.now(),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
+    expect(res.status).toBe(200);
+    const detail = (await res.json()) as GetWorkflowRunResponse;
+    const ask = detail.checkpoints.find((cp) => cp.nodeId === "ask");
+    const sub = detail.checkpoints.find((cp) => cp.nodeId === "sub");
+    expect(ask?.sessionId).toBe("s_abc");
+    expect(sub?.childRunId).toBe("wfrun_sub_child");
+    // The rest of the effects bag stays off the wire.
+    expect(JSON.stringify(detail.checkpoints)).not.toContain("repairAttempted");
+  });
+});
+
+describe("DELETE /api/workflows/:id with a run in flight", () => {
+  it("409s while a run is not settled, then deletes once it settles", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_active";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+
+    const blocked = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(blocked.status).toBe(409);
+
+    await api.providers.workflowStore.settleRun(runId, "completed");
+    const deleted = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+  });
+});
+
+describe("GET /api/workflows/runs", () => {
+  /** Seeds one run, returning its id. */
+  async function seedRun(
+    testApi: TestApi,
+    workflowId: string,
+    runId: string,
+    params: Record<string, unknown> = {},
+  ): Promise<string> {
+    await testApi.providers.workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1", ...params },
+      VALID_DEFINITION,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    return runId;
+  }
+
+  it("resolves to the cross-workflow list, not to GET /:id with id='runs'", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(body.runs).toEqual([]);
+  });
+
+  it("lists runs across every workflow the caller owns", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const first = await createWorkflow(api.baseUrl, "wf-one");
+    const second = await createWorkflow(api.baseUrl, "wf-two");
+    await seedRun(api, first.id, "wfrun_cross_a");
+    await seedRun(api, second.id, "wfrun_cross_b");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(new Set(body.runs.map((r) => r.runId))).toEqual(
+      new Set(["wfrun_cross_a", "wfrun_cross_b"]),
+    );
+  });
+
+  it("returns a batch parent's children in one query via parentRunId", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_batch_parent");
+    await seedRun(api, created.id, "wfrun_batch_child_1", {
+      parentRunId: "wfrun_batch_parent",
+      parentNodeId: "fanout",
+      parentIteration: 0,
+    });
+    await seedRun(api, created.id, "wfrun_batch_child_2", {
+      parentRunId: "wfrun_batch_parent",
+      parentNodeId: "fanout",
+      parentIteration: 1,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs?parentRunId=wfrun_batch_parent`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(new Set(body.runs.map((r) => r.runId))).toEqual(
+      new Set(["wfrun_batch_child_1", "wfrun_batch_child_2"]),
+    );
+    expect(body.runs.every((r) => r.parentRunId === "wfrun_batch_parent")).toBe(true);
+    expect(body.runs.map((r) => r.parentNodeId)).toEqual(["fanout", "fanout"]);
+  });
+
+  it("filters by status and rejects an unknown one", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_status_pending");
+    await seedRun(api, created.id, "wfrun_status_settled");
+    await api.providers.workflowStore.settleRun("wfrun_status_settled", "completed");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs?status=settled`);
+    const body = (await res.json()) as ListWorkflowRunsResponse;
+    expect(body.runs.map((r) => r.runId)).toEqual(["wfrun_status_settled"]);
+    expect(body.runs[0].outcome).toBe("completed");
+
+    const bad = await fetch(`${api.baseUrl}/api/workflows/runs?status=nope`);
+    expect(bad.status).toBe(400);
+  });
+
+  it("404s a workflowId the caller cannot read, and hides its runs from an unfiltered list", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_private");
+    const headers = { "x-valet-test-user-id": "test-member" };
+
+    const filtered = await fetch(
+      `${api.baseUrl}/api/workflows/runs?workflowId=${created.id}`,
+      { headers },
+    );
+    expect(filtered.status).toBe(404);
+
+    const unfiltered = await fetch(`${api.baseUrl}/api/workflows/runs`, { headers });
+    expect(unfiltered.status).toBe(200);
+    const body = (await unfiltered.json()) as ListWorkflowRunsResponse;
+    expect(body.runs).toEqual([]);
+  });
+
+  // `created_at` is an integer column. A value it cannot hold must answer 400
+  // with the corrective action, never a 500 carrying a driver syntax error.
+  it("400s a since or cursor value the run store cannot hold", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_bounds");
+
+    for (const query of ["since=1.5", "since=1e30", "since=-1", "cursor=1.5%3Awfrun_bounds"]) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/runs?${query}`);
+      expect([query, res.status]).toEqual([query, 400]);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/millisecond timestamp|nextCursor/);
+    }
+
+    const ok = await fetch(`${api.baseUrl}/api/workflows/runs?since=0`);
+    expect(ok.status).toBe(200);
+  });
 });
 
 describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
@@ -1635,3 +2003,156 @@ describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
     expect(body.deleted).toBe(false);
   });
 });
+
+describe("GET/POST/DELETE /api/workflows/:id/schedules", () => {
+  it("creates a schedule and lists it for that workflow only", async () => {
+    api = await bootTestApi();
+    const a = await createWorkflow(api.baseUrl, "with-schedule");
+    const b = await createWorkflow(api.baseUrl, "without-schedule");
+
+    const created = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+    expect(created.status).toBe(201);
+    const schedule = (await created.json()) as CreateWorkflowScheduleResponse;
+    expect(schedule.workflowId).toBe(a.id);
+    expect(schedule.enabled).toBe(true);
+    expect(schedule.timezone).toBe("UTC");
+    expect(schedule.nextFireAt).toBeGreaterThan(Date.now());
+
+    const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
+    const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyA.schedules.map((s) => s.scheduleId)).toEqual([schedule.scheduleId]);
+
+    const listB = await fetch(`${api.baseUrl}/api/workflows/${b.id}/schedules`);
+    const bodyB = (await listB.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyB.schedules).toEqual([]);
+  });
+
+  it("400s an invalid cron with the corrective error text", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "bad", cron: "every day at nine" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("cron");
+  });
+
+  it("404s schedule routes on another owner's workflow", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const asOther = { "x-valet-test-user-id": "test-member" };
+
+    const list = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      headers: asOther,
+    });
+    expect(list.status).toBe(404);
+
+    const post = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...asOther },
+      body: JSON.stringify({ name: "sneaky", cron: "0 9 * * *" }),
+    });
+    expect(post.status).toBe(404);
+  });
+
+  it("DELETE removes only a schedule that belongs to that workflow", async () => {
+    api = await bootTestApi();
+    const a = await createWorkflow(api.baseUrl, "schedule-owner");
+    const b = await createWorkflow(api.baseUrl, "other-workflow");
+
+    const created = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+    const schedule = (await created.json()) as CreateWorkflowScheduleResponse;
+
+    // Through the WRONG workflow's path: 404, row survives.
+    const cross = await fetch(
+      `${api.baseUrl}/api/workflows/${b.id}/schedules/${schedule.scheduleId}`,
+      { method: "DELETE" },
+    );
+    expect(cross.status).toBe(404);
+
+    const del = await fetch(
+      `${api.baseUrl}/api/workflows/${a.id}/schedules/${schedule.scheduleId}`,
+      { method: "DELETE" },
+    );
+    expect(del.status).toBe(200);
+    const listA = await fetch(`${api.baseUrl}/api/workflows/${a.id}/schedules`);
+    const bodyA = (await listA.json()) as ListWorkflowSchedulesResponse;
+    expect(bodyA.schedules).toEqual([]);
+  });
+
+  it("400s a whitespace-only name and trims a valid one", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const blank = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "   ", cron: "0 9 * * *" }),
+    });
+    expect(blank.status).toBe(400);
+
+    const padded = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "  nightly  ", cron: "0 9 * * *" }),
+    });
+    expect(padded.status).toBe(201);
+    const schedule = (await padded.json()) as CreateWorkflowScheduleResponse;
+    expect(schedule.name).toBe("nightly");
+  });
+
+  it("400s a non-object input (a schedule fires it into every run's trigger payload)", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    for (const badInput of ["a string", 42, ["array"]]) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "nightly", cron: "0 9 * * *", input: badInput }),
+      });
+      expect(res.status).toBe(400);
+    }
+
+    const ok = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *", input: { key: "value" } }),
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  it("deleting the workflow deletes its schedules too", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nightly", cron: "0 9 * * *" }),
+    });
+
+    const del = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+
+    // The workflow is gone, so the schedules route 404s — assert against
+    // the store directly to prove the row itself was deleted, not just
+    // made unreachable through the now-404ing management route.
+    const rows = await api.providers.db
+      .select()
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.workflowId, created.id));
+    expect(rows).toEqual([]);
+  });
+});
+

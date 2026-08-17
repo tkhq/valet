@@ -2,15 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { validateWorkflowDefinition, type WorkflowDefinition } from '@valet/workflow';
 import {
   ADDABLE_NODE_TYPES,
-  EditorModel,
   LAYOUT_COLUMN_GAP,
   LAYOUT_ROW_GAP,
   NODE_META,
   addNode,
-  applyAutoLayout,
   autoLayout,
   connect,
-  createDefaultWorkflowDefinition,
   createEdgeId,
   createNodeId,
   duplicateNode,
@@ -24,7 +21,6 @@ import {
   updateEdge,
   updateNode,
   workflowEdgeToFlowEdge,
-  type WorkflowFlowState,
 } from './editor-model';
 
 function baseDefinition(): WorkflowDefinition {
@@ -479,63 +475,6 @@ describe('autoLayout (BFS depth layering)', () => {
     expect(first).toEqual(second);
   });
 
-  it('applyAutoLayout overwrites every saved position but keeps the viewport', () => {
-    const definition = baseDefinition();
-    const next = applyAutoLayout(definition);
-    expect(next.ui?.viewport).toEqual(definition.ui?.viewport);
-    expect(next.ui?.nodes.trigger.position).toEqual({ x: 0, y: 0 });
-    expect(Object.keys(next.ui?.nodes ?? {})).toEqual(['trigger', 'start', 'branch', 'done']);
-  });
-});
-
-describe('EditorModel', () => {
-  it('starts clean and marks dirty on the first mutation', () => {
-    const model = new EditorModel(baseDefinition());
-    expect(model.dirty).toBe(false);
-    model.setNodePosition('start', { x: 1, y: 1 });
-    expect(model.dirty).toBe(true);
-  });
-
-  it('markSaved resets the dirty flag', () => {
-    const model = new EditorModel(baseDefinition());
-    model.addNode('llm');
-    expect(model.dirty).toBe(true);
-    model.markSaved();
-    expect(model.dirty).toBe(false);
-  });
-
-  it('does not mark dirty for a no-op connect (duplicate edge)', () => {
-    const model = new EditorModel(baseDefinition());
-    const result = model.connect({ source: 'trigger', target: 'start' });
-    expect(result.ok).toBe(true);
-    expect(model.dirty).toBe(false);
-  });
-
-  it('exposes add/remove/duplicate/update/connect/validate through the wrapper and serializes the final definition', () => {
-    const model = new EditorModel(createDefaultWorkflowDefinition());
-    const llmId = model.addNode('llm');
-    model.connect({ source: 'trigger', target: llmId });
-    model.updateNode(llmId, { model: 'claude-haiku-4-5', prompt: 'Summarize {{trigger.data.text}}' });
-
-    expect(model.validate()).toEqual({ ok: true });
-
-    const dupId = model.duplicateNode(llmId);
-    expect(dupId).not.toBeNull();
-    model.removeNode(dupId as string);
-
-    const serialized = model.serialize();
-    expect(serialized.nodes.find((n) => n.id === llmId)).toMatchObject({ model: 'claude-haiku-4-5' });
-    expect(serialized.nodes.some((n) => n.id === dupId)).toBe(false);
-    expect(model.dirty).toBe(true);
-  });
-
-  it('toFlow reflects the live definition', () => {
-    const model = new EditorModel(baseDefinition());
-    const flow: WorkflowFlowState = model.toFlow();
-    expect(flow.nodes).toHaveLength(4);
-    model.removeNode('done');
-    expect(model.toFlow().nodes).toHaveLength(3);
-  });
 });
 
 describe('isWorkflowDefinitionShape', () => {

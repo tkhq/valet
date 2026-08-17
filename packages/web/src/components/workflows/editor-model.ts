@@ -516,20 +516,6 @@ export function setNodePosition(
   };
 }
 
-/** Batch form of `setNodePosition` for e.g. drag-end over multiple selected nodes. */
-export function applyPositions(
-  definition: WorkflowDefinition,
-  positions: Record<string, FlowPosition>,
-): WorkflowDefinition {
-  const knownIds = new Set(definition.nodes.map((node) => node.id));
-  const nextNodes = { ...(definition.ui?.nodes ?? {}) };
-  for (const [nodeId, position] of Object.entries(positions)) {
-    if (!knownIds.has(nodeId)) continue;
-    nextNodes[nodeId] = { ...(nextNodes[nodeId] ?? {}), position };
-  }
-  return { ...definition, ui: { ...definition.ui, nodes: nextNodes } };
-}
-
 export function setViewport(definition: WorkflowDefinition, viewport: FlowViewport): WorkflowDefinition {
   return { ...definition, ui: { nodes: definition.ui?.nodes ?? {}, viewport } };
 }
@@ -607,18 +593,6 @@ function computeBfsDepths(
   return depths;
 }
 
-/** Overwrites every node's saved position with the auto-layout result; keeps the viewport. */
-export function applyAutoLayout(definition: WorkflowDefinition): WorkflowDefinition {
-  const positions = autoLayout(definition);
-  return {
-    ...definition,
-    ui: {
-      ...definition.ui,
-      nodes: Object.fromEntries(definition.nodes.map((node) => [node.id, { position: positions[node.id] ?? { x: 0, y: 0 } }])),
-    },
-  };
-}
-
 // ─── node summaries ────────────────────────────────────────────────────────────
 
 function summarizeNode(node: WorkflowNode): string {
@@ -663,114 +637,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function trimSummary(value: string): string {
   return value.length > 80 ? `${value.slice(0, 77)}...` : value;
-}
-
-// ─── EditorModel: stateful wrapper with dirty tracking ───────────────────────
-
-/**
- * Thin stateful wrapper over the pure functions above, for Tasks 9-10's
- * presentation layer: holds the current `WorkflowDefinition`, tracks
- * whether it has changed since the last `markSaved()`, and exposes the
- * same operations as mutating calls instead of definition-in/definition-out
- * functions. Every mutating method is a one-line call into a pure
- * function above — the pure functions remain independently testable and
- * are the ones exercised by most of this file's test suite.
- */
-export class EditorModel {
-  private definition: WorkflowDefinition;
-  private dirtyFlag = false;
-
-  constructor(definition: WorkflowDefinition) {
-    this.definition = definition;
-  }
-
-  get dirty(): boolean {
-    return this.dirtyFlag;
-  }
-
-  toFlow(): WorkflowFlowState {
-    return toFlow(this.definition);
-  }
-
-  connect(params: ConnectParams): ConnectResult {
-    const result = connect(this.definition, params);
-    if (result.ok && result.definition !== this.definition) {
-      this.definition = result.definition;
-      this.dirtyFlag = true;
-    }
-    return result;
-  }
-
-  addNode(type: AddableDagNodeType, options?: { position?: FlowPosition }): string {
-    const result = addNode(this.definition, type, options);
-    this.definition = result.definition;
-    this.dirtyFlag = true;
-    return result.nodeId;
-  }
-
-  removeNode(nodeId: string): void {
-    const next = removeNode(this.definition, nodeId);
-    if (next !== this.definition) {
-      this.definition = next;
-      this.dirtyFlag = true;
-    }
-  }
-
-  duplicateNode(nodeId: string): string | null {
-    const result = duplicateNode(this.definition, nodeId);
-    if (!result) return null;
-    this.definition = result.definition;
-    this.dirtyFlag = true;
-    return result.nodeId;
-  }
-
-  updateNode(nodeId: string, patch: Record<string, unknown>): void {
-    this.definition = updateNode(this.definition, nodeId, patch);
-    this.dirtyFlag = true;
-  }
-
-  updateEdge(match: EdgeMatch, patch: EdgePatch): void {
-    this.definition = updateEdge(this.definition, match, patch);
-    this.dirtyFlag = true;
-  }
-
-  setNodePosition(nodeId: string, position: FlowPosition): void {
-    this.definition = setNodePosition(this.definition, nodeId, position);
-    this.dirtyFlag = true;
-  }
-
-  applyPositions(positions: Record<string, FlowPosition>): void {
-    this.definition = applyPositions(this.definition, positions);
-    this.dirtyFlag = true;
-  }
-
-  setViewport(viewport: FlowViewport): void {
-    this.definition = setViewport(this.definition, viewport);
-    this.dirtyFlag = true;
-  }
-
-  applyAutoLayout(): void {
-    this.definition = applyAutoLayout(this.definition);
-    this.dirtyFlag = true;
-  }
-
-  /** Replaces the whole definition (e.g. the "Edit JSON" toggle round-trip). Marks dirty. */
-  replace(definition: WorkflowDefinition): void {
-    this.definition = definition;
-    this.dirtyFlag = true;
-  }
-
-  validate(): ReturnType<typeof validateWorkflowDefinition> {
-    return validateWorkflowDefinition(this.definition);
-  }
-
-  serialize(): WorkflowDefinition {
-    return this.definition;
-  }
-
-  markSaved(): void {
-    this.dirtyFlag = false;
-  }
 }
 
 // ─── minimal starter definition ───────────────────────────────────────────────

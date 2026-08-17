@@ -64,7 +64,3 @@ export interface RepoProvider {
   ): Promise<SessionRepoEnv>;
   mintToken(credential: RepoCredential): Promise<{ accessToken: string; expiresAt?: string }>;
 }
-
-export interface RepoProviderPackage {
-  provider: RepoProvider;
-}

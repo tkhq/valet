@@ -23,6 +23,7 @@
   "dependencies": {
     "@valet/engine": "workspace:*",
     "@valet/shared": "workspace:*",
+    "@valet/workflow": "workspace:*",
     "typebox": "^1.1.24"
   },
   "devDependencies": {

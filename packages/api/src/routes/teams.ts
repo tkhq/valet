@@ -7,6 +7,7 @@
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
+ *   POST   /api/teams/:id/orchestrator      → get-or-create the team's default assistant session
  *
  * Org-membership-gated: every route requires the team to belong to the
  * caller's org (`c.var.user.orgId`) — cross-org teams 404 rather than 403,
@@ -15,9 +16,26 @@
  * Mutation-gated: DELETE /:id and the three /members routes additionally
  * require the caller to be a team admin of *that* team, or an org admin
  * (a deliberate recovery path so org admins can always untangle a team even
- * if they're not on it). A caller who fails that check gets 404, same as a
- * caller outside the org — existence-hiding applies to authz, not just org
- * membership.
+ * if they're not on it). That rule lives in `canAdministerTeam`
+ * (`services/teams.ts`), which also gates administration of the resources a
+ * team owns — one definition, no forks. A caller who fails the check gets
+ * 404, same as a caller outside the org — existence-hiding applies to
+ * authz, not just org membership.
+ *
+ * Origin-gated: those same four routes refuse a team whose `origin` is
+ * `idp`. Such a team mirrors an identity-provider group, and the login-time
+ * sync owns it.
+ *
+ * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
+ * file asserts its declared members at each boot but never removes anybody,
+ * so a membership edit here is real work that survives until the next
+ * restart, and refusing it would be stricter than the file's own semantics.
+ * A delete is different: the next boot recreates the team empty, which reads
+ * as data loss, so the route refuses it and names the file instead.
+ *
+ * There is no rename route today. Whoever adds one must refuse BOTH `idp`
+ * and `config`: the reconciler identifies a declared team by name, so a
+ * rename orphans the row and the next boot creates a second team beside it.
  */
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
@@ -26,10 +44,15 @@ import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { teamMembers, teams, type TeamRow } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import {
   addMember,
+  canAdministerTeam,
+  ConfigManagedTeamError,
   createTeam,
   deleteTeam,
+  IdpManagedTeamError,
+  type IdpManagedMutation,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -44,6 +67,7 @@ import type {
   AddTeamMemberRequest,
   CreateTeamRequest,
   CreateTeamResponse,
+  EnsureOrchestratorResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   SetTeamMemberRoleRequest,
@@ -56,18 +80,72 @@ export const teamsRouter = new Hono<AppEnv>();
 async function rowToSummary(
   db: AppEnv["Variables"]["providers"]["db"],
   row: TeamRow,
+  callerUserId: string,
 ): Promise<TeamSummary> {
-  const memberCount = (await listTeamMembers(db, row.id)).length;
-  return { id: row.id, orgId: row.orgId, name: row.name, createdAt: row.createdAt, memberCount };
+  const members = await listTeamMembers(db, row.id);
+  const mine = members.find((m) => m.userId === callerUserId);
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    name: row.name,
+    origin: row.origin,
+    externalId: row.externalId,
+    createdAt: row.createdAt,
+    memberCount: members.length,
+    // null = the caller is not on this team (they see it as an org admin).
+    callerRole: mine?.role ?? null,
+  };
 }
 
 function isTeamRole(v: unknown): v is TeamRole {
   return v === "admin" || v === "member";
 }
 
+/**
+ * Builds the refusal body for a mutation on a team that mirrors an
+ * identity-provider group, or null when the team is Valet's own.
+ *
+ * The status is 409, not 403 and not 404. The caller has already passed both
+ * the org gate and the team-admin gate, and the team plainly exists — what
+ * stops the write is the team's own state, exactly like `team_name_conflict`
+ * and `team_owns_workflows` above it. 403 in this API means "your role is too
+ * low", which is not the problem and would send an admin looking for a
+ * permission to grant. 404 is reserved for cross-org and unauthorized
+ * callers, where hiding existence is the point; here the caller may see the
+ * team, so a 404 would be a lie they cannot act on.
+ *
+ * The message comes from `IdpManagedTeamError`, the same class the service
+ * throws, so the route and the service never word the fix differently.
+ */
+function idpManagedRefusal(row: TeamRow, mutation: IdpManagedMutation): { error: string; code: string } | null {
+  if (row.origin !== "idp") return null;
+  const err = new IdpManagedTeamError(row, mutation);
+  return { error: err.message, code: err.code };
+}
+
+/**
+ * Builds the refusal body for a DELETE of a team declared in `valet.yaml`,
+ * or null for any other team.
+ *
+ * Delete only. Membership on a config team stays editable — see the file
+ * header. Same 409 reasoning as `idpManagedRefusal`, and the message comes
+ * from the class the service throws for the same reason.
+ */
+function configManagedDeleteRefusal(row: TeamRow): { error: string; code: string } | null {
+  if (row.origin !== "config") return null;
+  const err = new ConfigManagedTeamError(row.name);
+  return { error: err.message, code: err.code };
+}
+
 /** Maps service errors to the route's JSON error response. Rethrows unknowns. */
 function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 404 | 409 } | null {
-  if (err instanceof TeamNameConflictError || err instanceof LastAdminError || err instanceof TeamOwnsWorkflowsError) {
+  if (
+    err instanceof TeamNameConflictError ||
+    err instanceof LastAdminError ||
+    err instanceof TeamOwnsWorkflowsError ||
+    err instanceof IdpManagedTeamError ||
+    err instanceof ConfigManagedTeamError
+  ) {
     return { body: { error: err.message, code: err.code }, status: 409 };
   }
   if (err instanceof NotTeamMemberError || err instanceof NotFoundError) {
@@ -91,31 +169,9 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
 }
 
 /**
- * Gates the four mutation routes (delete team, add/set-role/remove member):
- * the caller must be a team admin of `teamId`, or an org admin (per
- * `org_members.role`, not the global `users.role` operator flag). Org admin
- * is a deliberate recovery path (e.g. the team's last admin left the org) —
- * not a general-purpose bypass, so keep it narrow and don't extend it to
- * plain org membership.
- */
-async function canMutateTeam(
-  db: AppEnv["Variables"]["providers"]["db"],
-  teamId: string,
-  user: AuthUser,
-): Promise<boolean> {
-  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
-  const members = await db
-    .select()
-    .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
-    .limit(1);
-  return members[0]?.role === "admin";
-}
-
-/**
  * Gates read access to a team's member roster: any member of the team, or
  * any org admin (admins manage the whole org's teams, not just ones they're
- * on) — looser than `canMutateTeam`, which requires *team*-admin.
+ * on) — looser than `canAdministerTeam`, which requires *team*-admin.
  */
 async function canViewTeam(
   db: AppEnv["Variables"]["providers"]["db"],
@@ -145,8 +201,48 @@ teamsRouter.get("/", async (c) => {
     : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
 
   const body: ListTeamsResponse = {
-    teams: await Promise.all(rows.map((r) => rowToSummary(db, r))),
+    teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
   };
+  return c.json(body);
+});
+
+// ── Orchestrator (get-or-create) ────────────────────────────────────────────
+
+/**
+ * The team's DEFAULT assistant session. Mirrors `POST /api/orchestrator`
+ * (`routes/orchestrator.ts`), which explicitly documents team/org
+ * assistants as "created via other paths" — this is that path. Any team
+ * member can reach it, same gate as `GET /:id/members`; there's no
+ * team-admin-only tier for talking to the team's own assistant.
+ *
+ * A team owns any number of assistants. This route resolves the default,
+ * which is what a caller that names only the team can mean. Use
+ * `GET /api/assistants?ownerType=team&ownerId={id}` to reach the others.
+ *
+ * `ensureDefaultAssistantSession` is idempotent and safe to call from every
+ * member: the underlying engine session may already exist (a team-owned
+ * workflow's `orchestrator` node can wake one before any human ever views
+ * it — see `workflows/engine-deps.ts`'s `promptOrchestrator`), in which
+ * case this only backfills the `agent_sessions` app row the viewing routes
+ * (`GET /api/sessions/:id`, messages, the WS) need, rather than creating a
+ * second session.
+ */
+teamsRouter.post("/:id/orchestrator", async (c) => {
+  const { db, engineHost } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+
+  const { sessionId } = await ensureDefaultAssistantSession(
+    { db, engineHost },
+    { type: "team", id },
+    { actorUserId: user.id, orgId: user.orgId },
+  );
+
+  const body: EnsureOrchestratorResponse = { sessionId };
   return c.json(body);
 });
 
@@ -184,7 +280,7 @@ teamsRouter.post("/", async (c) => {
 
   try {
     const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
-    const resp: CreateTeamResponse = { team: await rowToSummary(db, team) };
+    const resp: CreateTeamResponse = { team: await rowToSummary(db, team, user.id) };
     return c.json(resp, 201);
   } catch (err) {
     const mapped = handleServiceError(err);
@@ -202,7 +298,10 @@ teamsRouter.delete("/:id", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  const refusal = idpManagedRefusal(team, "delete") ?? configManagedDeleteRefusal(team);
+  if (refusal) return c.json(refusal, 409);
 
   try {
     await deleteTeam(db, { teamId: id });
@@ -223,7 +322,10 @@ teamsRouter.post("/:id/members", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  const refusal = idpManagedRefusal(team, "membership");
+  if (refusal) return c.json(refusal, 409);
 
   let body: AddTeamMemberRequest;
   try {
@@ -258,7 +360,10 @@ teamsRouter.patch("/:id/members/:userId", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  const refusal = idpManagedRefusal(team, "membership");
+  if (refusal) return c.json(refusal, 409);
 
   let body: SetTeamMemberRoleRequest;
   try {
@@ -290,7 +395,10 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  const refusal = idpManagedRefusal(team, "membership");
+  if (refusal) return c.json(refusal, 409);
 
   try {
     await removeMember(db, { teamId: id, userId: targetUserId });
@@ -301,5 +409,3 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
     throw err;
   }
 });
-
-export type TeamsRouter = typeof teamsRouter;

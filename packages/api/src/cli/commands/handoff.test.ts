@@ -53,9 +53,12 @@ function stubDeps(opts: StubOpts = {}): {
       return Promise.resolve({
         id: "new_1",
         status: "active",
+        runState: "idle",
+        owner: { type: "user" as const, id: "u1" },
         workspace: body.workspace,
         createdAt: 1,
         updatedAt: 1,
+        lastActivityAt: 1,
         messageCount: 0,
         profile: body.profile ?? "headless",
         docker: body.docker ?? false,

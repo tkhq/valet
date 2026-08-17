@@ -1,7 +1,8 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
+import { useCopyToClipboard } from "~/lib/use-copy";
 import { isActiveStatus, type ToolCategory, type ToolStatus } from "./types";
 
 /**
@@ -39,9 +40,6 @@ export interface ToolShellProps {
   status: ToolStatus;
   /** Body content; rendered inside the expandable section. */
   children: ReactNode;
-  /** Default expanded state. Off by default for completed/error to keep
-   *  the chat dense; on while running so the user sees progress. */
-  defaultExpanded?: boolean;
 }
 
 const CATEGORY_STRIP: Record<ToolCategory, string> = {
@@ -89,11 +87,10 @@ export function ToolShell({
   summary,
   status,
   children,
-  defaultExpanded,
 }: ToolShellProps) {
-  const initial = defaultExpanded ?? (status !== "completed");
-  const [expanded, setExpanded] = useState(initial);
-  const stripCls = STATUS_DOT[status];
+  // Start collapsed for completed/error to keep the chat dense; start
+  // expanded while running so the user sees progress.
+  const [expanded, setExpanded] = useState(status !== "completed");
   const isError = status === "error";
 
   return (
@@ -252,25 +249,13 @@ export function CopyButton({
   label?: string;
   className?: string;
 }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(getText());
-      setCopied(true);
-      clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard unavailable (permissions/insecure context) — do nothing.
-    }
-  }
+  const { copied, copy } = useCopyToClipboard();
 
   const Icon = copied ? Check : Copy;
   return (
     <button
       type="button"
-      onClick={() => void copy()}
+      onClick={() => void copy(getText())}
       aria-label={label}
       title={label}
       className={cn(

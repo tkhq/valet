@@ -1,0 +1,32 @@
+import type { SessionNode } from "@valet/workflow";
+import { JsonTextarea, LabeledInput, LabeledTextarea, SelectField } from "../fields";
+
+export function SessionForm({
+  node,
+  onChange,
+}: {
+  node: SessionNode;
+  onChange: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <LabeledTextarea label="Prompt" value={node.prompt} onChange={(value) => onChange({ prompt: value })} />
+      <LabeledInput label="Title" value={node.title ?? ""} onChange={(value) => onChange({ title: value || undefined })} />
+      <LabeledInput label="Model" value={node.model ?? ""} onChange={(value) => onChange({ model: value || undefined })} />
+      <JsonTextarea
+        label="Output schema (JSON)"
+        value={node.outputSchema}
+        onChange={(value) => onChange({ outputSchema: value })}
+      />
+      <SelectField
+        label="Wait mode"
+        value={node.wait?.mode ?? "none"}
+        onChange={(value) => onChange({ wait: { mode: value } })}
+        options={[
+          { value: "none", label: "None — don't wait" },
+          { value: "until_idle", label: "Until idle" },
+        ]}
+      />
+    </div>
+  );
+}

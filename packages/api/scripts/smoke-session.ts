@@ -15,7 +15,6 @@
  *   VALET_WORKSPACE=/tmp/valet-smoke-session/ws   workspace for the agent
  *   VALET_PROMPT="..."           override the smoke prompt
  */
-import { homedir } from "node:os";
 import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";

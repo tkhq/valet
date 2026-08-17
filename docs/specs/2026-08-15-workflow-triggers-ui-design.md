@@ -49,9 +49,9 @@ endpoint lands later, it joins the normalized list as a third kind.
    stay as they are.
 2. **No scheduler changes.** The poll loop, idempotency, and catch-up
    behavior are already correct.
-3. **Tabbed hub.** The Workflows page becomes three tabs: Workflows,
-   Runs, Triggers. The workflow editor page gets a scoped triggers panel
-   that reuses the same components.
+3. **Tabbed hub.** The Workflows page becomes four tabs: Workflows,
+   Runs, Triggers, Templates. The workflow editor page gets a scoped
+   triggers panel that reuses the same components.
 4. **Orchestrator-target schedules are first-class.** They have no
    workflowId. The global Triggers tab is their only home.
 
@@ -101,16 +101,21 @@ Service change: add `updateWorkflowTrigger` to `trigger-service.ts`.
 
 Global runs (for the Runs tab):
 
-- `GET /api/workflows/runs` — recent run summaries across the owner's
-  workflows (workflowId, workflow name, status, outcome, startedAt),
-  newest first, limit parameter with a sane default (50).
+- `GET /api/workflows/runs` — run summaries across the owner's workflows
+  (workflowId, workflow name, status, outcome, timestamps), newest first.
+  This is the existing filtered cross-workflow list in
+  `routes/workflows.ts`, not a second handler: it already carries the
+  status/outcome/workflowId/since filters, the 404 on a workflow id the
+  caller cannot read, and cursor paging. The Runs tab reads it with a
+  limit and no filters. Each row now carries `workflowName`, because a
+  cross-workflow list has no heading to name its rows from.
 
 No migrations. No engine changes.
 
 ## Web design (`packages/web`)
 
-`workflows.index.tsx` becomes a tabbed hub (Radix Tabs, existing Tailwind
-idiom). Route-level tab state so each tab is linkable.
+`workflows.index.tsx` becomes a tabbed hub. Route-level tab state so each
+tab is linkable.
 
 - **Workflows tab** — upgraded rows/cards: name, last-run status chip
   (reuse `run-status-chip`), run count, trigger badges (clock icon for
@@ -118,6 +123,9 @@ idiom). Route-level tab state so each tab is linkable.
   existing Run / Edit / Delete actions.
 - **Runs tab** — global recent-runs list from `GET /api/workflows/runs`;
   each row links to the run detail page.
+- **Templates tab** — the workflow template gallery. Templates are the
+  starting points a person with no workflows needs, so the Workflows tab
+  also shows the gallery inline when the list is empty.
 - **Triggers tab** — the unified list, grouped by workflow with an
   "Orchestrator" group for workflowId-less schedules. Each row: kind icon,
   name, summary (cron + "next fire in …" for schedules; event keys for
@@ -181,6 +189,16 @@ aggregate list.
   builder is deferred until the filter vocabulary stabilizes.
 - **No client-side cron preview.** The list shows next-fire times from API
   data; no cron library was added to the web bundle.
+- **One cross-workflow run list, not two.** A second `GET /runs` handler
+  in `workflow-triggers.ts` shared the path with the filtered list in
+  `workflows.ts`. The router picks the first mount, so the filters, the
+  404 on an unreadable workflow id, and the cursor checks stopped
+  working. The filtered handler now serves both readers and stamps
+  `workflowName` on each row; `listRecentWorkflowRuns` is gone.
+- **The editor page's triggers panel lives in the Triggers drawer**, next
+  to the webhook URL, instead of a strip below the canvas. Two schedule
+  lists on one page hold two caches: a create in one never refreshes the
+  other.
 - **Infra: `@valet/plugin-github`'s `./plugin` export and `valet.plugin`
   field now point at `src/plugin.ts`** (matching its `./actions`/`./repo`
   exports). The dist build is broken on dev-v2 and the stack runs

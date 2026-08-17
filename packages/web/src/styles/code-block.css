@@ -1,0 +1,84 @@
+/**
+ * Syntax token colors for `~/components/code-block.tsx`. Deliberately not a
+ * prebuilt Prism theme (those ship fixed hex values that ignore light/dark
+ * and this app's own token system) — these are CSS custom properties
+ * resolved the same way every other color in the app is (see `theme.css`),
+ * so a code block matches the surrounding UI in both themes automatically.
+ *
+ * Token class names come from PrismJS (via `refractor`, which
+ * `react-syntax-highlighter`'s Prism build uses under the hood) — this list
+ * covers what the registered languages (bash/js/ts/tsx/json/diff/yaml/sql/
+ * markdown/python) actually emit, not the full Prism taxonomy.
+ */
+
+.code-block pre {
+  margin: 0;
+  overflow-x: auto;
+  border-radius: 0.375rem;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  padding: 0.625rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.code-block code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--ink);
+  background: transparent;
+}
+
+.code-block .token.comment,
+.code-block .token.prolog,
+.code-block .token.doctype,
+.code-block .token.cdata {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.code-block .token.keyword,
+.code-block .token.important,
+.code-block .token.atrule {
+  color: var(--moss);
+}
+
+.code-block .token.string,
+.code-block .token.attr-value,
+.code-block .token.regex {
+  color: oklch(60.5% 0.18 145);
+}
+
+.code-block .token.number,
+.code-block .token.boolean,
+.code-block .token.constant {
+  color: oklch(60.5% 0.18 55);
+}
+
+.code-block .token.function,
+.code-block .token.class-name {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.code-block .token.operator,
+.code-block .token.punctuation {
+  color: var(--muted);
+}
+
+.code-block .token.property,
+.code-block .token.tag,
+.code-block .token.attr-name {
+  color: oklch(60.5% 0.16 320);
+}
+
+/* diff-specific tokens (only present when language="diff") — same OKLCH
+ * values as `danger.500` in tailwind.config.ts. */
+.code-block .token.deleted {
+  color: oklch(60.0% 0.22 27);
+  background: oklch(60.0% 0.22 27 / 0.08);
+}
+
+.code-block .token.inserted {
+  color: oklch(60.5% 0.18 145);
+  background: oklch(60.5% 0.18 145 / 0.08);
+}

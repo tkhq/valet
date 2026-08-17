@@ -116,7 +116,7 @@ githubConnectRouter.get("/callback", async (c) => {
   if (!code || !state) return c.json({ error: "missing code or state" }, 400);
 
   const user = c.var.user;
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const { engineCredentials, encryptionKey } = c.var.providers;
   const key = deriveSecretKey(encryptionKey);
   const verified = verifyConnectState(state, key, Date.now());
   if (!verified) return c.json({ error: "invalid or expired state" }, 400);

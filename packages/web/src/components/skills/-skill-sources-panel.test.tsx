@@ -4,10 +4,16 @@
  * same way the route suites mock their api modules: this cares that the panel
  * renders sync state and calls the right mutation, not that TanStack Query
  * works.
+ *
+ * A team row's `OwnerBadge` links to that team's assistant and carries a
+ * tooltip, so the panel needs a router stub (as the route suites use) and a
+ * tooltip provider (as `session-header.test.tsx` uses).
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import type { ReactNode } from "react";
 import type { ListSkillSourcesResponse, SkillSourceSummary } from "@valet/api/wire";
+import { TooltipProvider } from "~/components/primitives";
 
 function source(over: Partial<SkillSourceSummary> = {}): SkillSourceSummary {
   return {
@@ -33,6 +39,7 @@ const add = vi.fn();
 const sync = vi.fn();
 const remove = vi.fn();
 let addState = { isPending: false, error: null as Error | null };
+let teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" as const }] };
 
 vi.mock("~/api/skill-sources", () => ({
   useSkillSources: () => ({ data: currentData, ...currentState }),
@@ -41,10 +48,65 @@ vi.mock("~/api/skill-sources", () => ({
   useRemoveSkillSource: () => ({ mutate: remove, isPending: false }),
 }));
 
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
+    <a {...rest}>{children}</a>
+  ),
+  // The workspace scope reads `?assistant=` so an open assistant can override
+  // the stored workspace. This panel is never rendered with one.
+  useSearch: () => ({}),
+}));
+
+vi.mock("~/api/settings", () => ({
+  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+}));
+
+// The badge links by assistant id, so it reads the assistants list to find
+// the team's default one.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({
+      data: {
+        assistants: [
+          {
+            id: "asst_team_1",
+            owner: { type: "team" as const, id: "team_1" },
+            sessionId: "assistant:asst_team_1",
+            isDefault: true,
+            createdAt: 1,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
+
 import { SkillSourcesPanel } from "./skill-sources-panel";
+import { PERSONAL, WorkspaceScopeProvider } from "~/lib/workspace-scope";
+
+/** `workspace` selects the workspace the panel is being read in — the same
+ * thing the nav's switcher sets. It is seeded through localStorage because
+ * that is where the real scope lives, so these cases exercise the actual
+ * persistence rather than a value handed straight to the component. */
+function renderPanel(workspace = PERSONAL) {
+  window.localStorage.setItem("valet:workspace", workspace);
+  return render(
+    <TooltipProvider>
+      <WorkspaceScopeProvider>
+        <SkillSourcesPanel />
+      </WorkspaceScopeProvider>
+    </TooltipProvider>,
+  );
+}
 
 describe("SkillSourcesPanel", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     currentData = { sources: [] };
     currentState = { isLoading: false, error: null };
     addState = { isPending: false, error: null };
@@ -54,7 +116,7 @@ describe("SkillSourcesPanel", () => {
   });
 
   it("states that only public repositories can be imported", () => {
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
 
@@ -62,7 +124,7 @@ describe("SkillSourcesPanel", () => {
   });
 
   it("imports what was typed into the box", () => {
-    render(<SkillSourcesPanel />);
+    renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
 
     fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
@@ -73,9 +135,52 @@ describe("SkillSourcesPanel", () => {
     expect(add).toHaveBeenCalledWith({ repo: "https://github.com/tkhq/skills" });
   });
 
+  it("files the import under the workspace being read, with no second question", () => {
+    // There was an Owner select in this form. It asked again what the nav's
+    // workspace switcher had already answered, and the two could disagree —
+    // the panel could list one workspace's repositories while the form filed
+    // a new one under another.
+    renderPanel("team_1");
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", teamId: "team_1" });
+    expect(screen.queryByLabelText("Owner")).toBeNull();
+  });
+
+  it("sends no teamId in your own workspace", () => {
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/skills" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills" });
+  });
+
+  it("shows the owning team's name on a team-tracked repository", () => {
+    currentData = { sources: [source({ ownerType: "team", ownerId: "team_1" })] };
+    renderPanel();
+
+    expect(screen.getByText("Platform")).toBeTruthy();
+  });
+
+  it("shows no ownership badge on a personal repository", () => {
+    currentData = { sources: [source({ ownerType: "user", ownerId: "u1" })] };
+    renderPanel();
+
+    expect(screen.queryByText("Platform")).toBeNull();
+  });
+
   it("shows what the server said about a repository it refused", () => {
     addState = { isPending: false, error: new Error("Valet reads GitHub repositories only") };
-    render(<SkillSourcesPanel />);
+    renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
 
     expect(screen.getByText(/Valet reads GitHub repositories only/)).toBeTruthy();
@@ -83,7 +188,7 @@ describe("SkillSourcesPanel", () => {
 
   it("lists a tracked repository with its skill count and sync time", () => {
     currentData = { sources: [source()] };
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     expect(screen.getByText("tkhq/skills")).toBeTruthy();
     expect(screen.getByText(/3 skills/)).toBeTruthy();
@@ -92,7 +197,7 @@ describe("SkillSourcesPanel", () => {
 
   it("names the ref and the subdirectory when a source pins them", () => {
     currentData = { sources: [source({ ref: "main", subpath: "agent/skills" })] };
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     expect(screen.getByText(/main/)).toBeTruthy();
     expect(screen.getByText(/agent\/skills/)).toBeTruthy();
@@ -102,7 +207,7 @@ describe("SkillSourcesPanel", () => {
     currentData = {
       sources: [source({ status: "error", lastMessage: "tkhq/x was not found on GitHub." })],
     };
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     expect(screen.getByText(/was not found on GitHub/)).toBeTruthy();
   });
@@ -111,14 +216,14 @@ describe("SkillSourcesPanel", () => {
     currentData = {
       sources: [source({ status: "warning", lastMessage: "broken: name is required." })],
     };
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     expect(screen.getByText(/broken: name is required/)).toBeTruthy();
   });
 
   it("syncs and removes the source the buttons belong to", () => {
     currentData = { sources: [source()] };
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     fireEvent.click(screen.getByRole("button", { name: /^sync$/i }));
     expect(sync).toHaveBeenCalledWith("skillsrc_1");
@@ -129,7 +234,7 @@ describe("SkillSourcesPanel", () => {
 
   it("says a source has never synced", () => {
     currentData = { sources: [source({ status: "pending", lastSyncedAt: null, skillCount: 0 })] };
-    render(<SkillSourcesPanel />);
+    renderPanel();
 
     expect(screen.getByText(/never synced/i)).toBeTruthy();
   });

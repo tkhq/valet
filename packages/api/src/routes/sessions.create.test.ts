@@ -14,10 +14,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import type { SessionDetail, SessionSummary } from "../wire/types.js";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
-import { agentSessions, sessionRepos, imageSources, bakes } from "../schema/index.js";
+import { agentSessions, sessionRepos, imageSources, bakes, teams, teamMembers } from "../schema/index.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
-import type { CreateSessionResponse, GetSessionResponse } from "../wire/types.js";
+import type {
+  CreateSessionResponse,
+  GetSessionResponse,
+  ListSessionsResponse,
+  ListThreadsResponse,
+} from "../wire/types.js";
 
 // Minimal fake builder for zero-config source tests.
 class FakeImageBuilder implements ImageBuilder {
@@ -383,6 +389,91 @@ describe("POST /api/sessions: repo bindings", () => {
   });
 });
 
+// ── initialPrompt (wire `CreateSessionRequest`) ──────────────────────────────
+//
+// `initialPrompt` says "the server enqueues immediately after creation": the
+// create handler runs the same `ensureDefaultThread()` + `submitPrompt()`
+// sequence `POST /api/sessions/:id/messages` uses. No LLM key is needed to
+// assert it — the submission is durable at admission, and with no
+// ANTHROPIC_API_KEY the claim loop releases the turn back to `queued` instead
+// of burning it on a keyless model call.
+
+describe("POST /api/sessions: initialPrompt", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  /** Every submission of the session, settled or not — so the assertion does
+   * not race a turn that a locally-configured API key let run to completion. */
+  async function submissionsFor(testApi: TestApi, sessionId: string) {
+    const { engineStore } = testApi.providers;
+    const [unsettled, settled] = await Promise.all([
+      engineStore.listUnsettledSubmissions(sessionId),
+      engineStore.listSettledSubmissionsBefore(sessionId, Date.now() + 1),
+    ]);
+    return [...unsettled, ...settled];
+  }
+
+  it("queues the prompt on the new session's default thread", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-initial-prompt-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, initialPrompt: "List the files in this repo" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+
+    const submissions = await submissionsFor(api, body.id);
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]?.content).toBe("List the files in this repo");
+
+    // The prompt landed on the session's default thread, not a stray one.
+    const threadsRes = await fetch(`${api.baseUrl}/api/sessions/${body.id}/threads`);
+    const threads = (await threadsRes.json()) as ListThreadsResponse;
+    expect(threads.threads.map((t) => t.id)).toContain(submissions[0]?.threadId);
+
+    // A queued turn reads `working`, both in the create response and the list.
+    expect(body.runState).toBe("working");
+    const listRes = await fetch(`${api.baseUrl}/api/sessions`);
+    const list = (await listRes.json()) as ListSessionsResponse;
+    expect(list.sessions.find((s) => s.id === body.id)?.runState).toBe("working");
+  });
+
+  it("queues nothing when initialPrompt is omitted", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-no-initial-prompt-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+
+    expect(await submissionsFor(api, body.id)).toHaveLength(0);
+    expect(body.runState).toBe("idle");
+  });
+
+  it("400s on a non-string initialPrompt", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-bad-initial-prompt-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, initialPrompt: 42 }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
 // ── Zero-config repo sources (sandbox-reconciliation plan, Task 19) ──────────
 
 describe("POST /api/sessions: zero-config repo sources", () => {
@@ -556,5 +647,123 @@ describe("POST /api/sessions: zero-config repo sources", () => {
       .from(bakes)
       .where(eq(bakes.sourceId, sources[0]!.id));
     expect(bakeRows).toHaveLength(0);
+  });
+});
+
+/**
+ * A standalone session could only ever be personal: create hardcoded
+ * `ownerType: "user"`, so nothing else could own one. Scoping the Sessions
+ * surface by workspace needed creation to take an owner first — a filter
+ * over a column that is always the same value shows an empty list for every
+ * team, which reads as "the team has nothing" rather than "this cannot
+ * exist".
+ */
+describe("POST /api/sessions — team ownership", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  async function seedTeam(target: TestApi, id = "team_1", member = "local-user") {
+    const now = Date.now();
+    await target.providers.db
+      .insert(teams)
+      .values({ id, orgId: "local-org", name: "Platform", createdAt: now });
+    await target.providers.db.insert(teamMembers).values({ teamId: id, userId: member, role: "member" });
+  }
+
+  it("creates a team-owned session and reports the owner", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    const workspace = await mkdtemp(join(tmpdir(), "valet-team-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace, teamId: "team_1" }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as SessionDetail;
+    expect(created.owner).toEqual({ type: "team", id: "team_1" });
+
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, created.id));
+    expect(rows[0]?.ownerType).toBe("team");
+    expect(rows[0]?.ownerId).toBe("team_1");
+  });
+
+  it("404s a team the caller is not on, rather than creating a personal session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    // The team exists; the caller is simply not a member of it.
+    await api.providers.db
+      .insert(teams)
+      .values({ id: "team_other", orgId: "local-org", name: "Elsewhere", createdAt: now });
+    const workspace = await mkdtemp(join(tmpdir(), "valet-team-"));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace, teamId: "team_other" }),
+    });
+    // Silently falling back to a personal session would be worse than the
+    // 404: the caller asked for the team's and would not be told otherwise.
+    expect(res.status).toBe(404);
+  });
+
+  it("treats an explicit teamId: null as personal, not as a team called null", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-team-"));
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace, teamId: null }),
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as SessionDetail).owner.type).toBe("user");
+  });
+
+  it("lists a team's sessions under that workspace, and yours under yours", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    const mine = await mkdtemp(join(tmpdir(), "valet-mine-"));
+    const theirs = await mkdtemp(join(tmpdir(), "valet-theirs-"));
+
+    const post = (body: object) =>
+      fetch(`${api!.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((r) => r.json() as Promise<SessionDetail>);
+
+    const own = await post({ workspace: mine });
+    const team = await post({ workspace: theirs, teamId: "team_1" });
+
+    const list = async (query = "") =>
+      ((await (await fetch(`${api!.baseUrl}/api/sessions${query}`)).json()) as {
+        sessions: SessionSummary[];
+      }).sessions.map((s) => s.id);
+
+    // Unfiltered is the union, matching how workflows and skills list.
+    expect(await list()).toEqual(expect.arrayContaining([own.id, team.id]));
+    expect(await list("?ownerType=team&ownerId=team_1")).toEqual([team.id]);
+    expect(await list("?ownerType=user&ownerId=local-user")).toEqual([own.id]);
+  });
+
+  it("404s a workspace filter naming a team the caller is not on", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/sessions?ownerType=team&ownerId=team_nope`);
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a half-given owner filter, naming the fix", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/sessions?ownerType=team`);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("both ownerType and ownerId");
   });
 });

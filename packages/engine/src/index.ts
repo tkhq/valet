@@ -45,8 +45,8 @@ export {
 export {
   serializePrincipal,
   parsePrincipal,
-  orchestratorSessionId,
-  parseOrchestratorSessionId,
+  assistantSessionId,
+  parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
 export { buildRepoInstructionsFragment } from "./repo-instructions.js";
@@ -73,7 +73,6 @@ export {
   recordSettlement,
   recordToolExecution,
   recordTurn,
-  resetMetricsForTest,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
@@ -116,6 +115,7 @@ export {
   buildPluginCatalog,
   invokeAction,
   prepareActionArgs,
+  approvalModeForAction,
   RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,
@@ -128,6 +128,11 @@ export {
 } from "./plugin-catalog.js";
 export {
   validateValetPlugin,
+  canStream,
+  ChannelStreamError,
+  type ChannelStreamErrorKind,
+  type StreamRef,
+  type SuggestedPrompt,
   type ValetPlugin,
   type CredentialDeclaration,
   type OAuthDeclaration,
@@ -151,11 +156,11 @@ export {
   type ChannelGatePrompt,
   type ChannelGateResolution,
 } from "./valet-plugin.js";
+export { type WorkflowTemplate, type WorkflowTemplateSchedule } from "./workflow-template.js";
 export {
   GateManager,
   DecisionGateWithdrawnError,
   DecisionGateExpiredError,
-  DecisionGateConflictError,
   isDecisionGateWithdrawn,
   isDecisionGateExpired,
   GATE_EXPIRY_DEFAULT_MS,

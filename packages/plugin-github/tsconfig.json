@@ -5,6 +5,18 @@
     "rootDir": "./src",
     "types": []
   },
-  "include": ["src/**/*"],
-  "references": [{ "path": "../sdk" }, { "path": "../shared" }]
+  "include": [
+    "src/**/*"
+  ],
+  "references": [
+    {
+      "path": "../sdk"
+    },
+    {
+      "path": "../shared"
+    },
+    {
+      "path": "../workflow"
+    }
+  ]
 }

@@ -54,21 +54,6 @@ export interface EventBusEvent {
   timestamp: string;
 }
 
-// Question types
-export type QuestionStatus = 'pending' | 'answered' | 'expired';
-
-export interface AgentQuestion {
-  id: string;
-  sessionId: string;
-  text: string;
-  options?: string[];
-  status: QuestionStatus;
-  answer?: string | boolean;
-  createdAt: Date;
-  answeredAt?: Date;
-  expiresAt?: Date;
-}
-
 // Git state types
 export type SessionSourceType = 'pr' | 'issue' | 'branch' | 'manual';
 export type PRState = 'draft' | 'open' | 'closed' | 'merged';
@@ -1095,13 +1080,6 @@ export interface OrgPluginArtifact {
 }
 
 export interface OrgPluginSettings {
-  allowRepoContent: boolean;
-}
-
-export interface PluginContentPayload {
-  personas: Array<{ filename: string; content: string; sortOrder: number }>;
-  skills: Array<{ filename: string; content: string }>;
-  tools: Array<{ filename: string; content: string }>;
   allowRepoContent: boolean;
 }
 

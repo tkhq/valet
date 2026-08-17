@@ -11,6 +11,7 @@ import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
+import { readTeamClaim, reconcileIdpTeams } from "../services/team-sync.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import type { SourceService } from "../bakes/source-service.js";
@@ -86,11 +87,34 @@ export interface HookContext {
   body?: Record<string, unknown> | null;
 }
 
+/**
+ * The subset of the sso plugin's `provisionUser` argument the team sync
+ * reads. Narrow for the same reason `HookContext` is (see above): the real
+ * argument also carries the OAuth token set and the provider row, which a
+ * test would have to fabricate whole. The plugin's wider argument type
+ * satisfies this one structurally, so the callback type-checks as an
+ * `SSOOptions["provisionUser"]` without a cast.
+ *
+ * `userInfo` is the provider's claims AFTER the plugin's whitelist: only
+ * `id`/`email`/`emailVerified`/`name`/`image` survive, plus whatever
+ * `oidcConfig.mapping.extraFields` names. The group claims reach this hook
+ * because `auth/index.ts` declares them there.
+ */
+export interface SsoProvisionData {
+  user: { id: string; email: string };
+  userInfo: Record<string, unknown>;
+}
+
 export interface ProvisioningDeps {
   db: AppDb;
   cfg: AuthConfig;
   credentialStore: CredentialStore;
   instanceConfig?: InstanceConfig | null;
+  /**
+   * Path of the instance config file. Named in the message a group/team name
+   * collision prints, so the reader knows which file to edit.
+   */
+  configPath?: string;
   sourceService?: SourceService;
 }
 
@@ -133,6 +157,30 @@ function readInviteCode(body: Record<string, unknown> | null | undefined): strin
  * membership + invite bookkeeping (`.after`), and provider-token capture
  * into the credential store (`databaseHooks.account.create.after`).
  *
+ * The fifth hook is the odd one out. `provisionUser` is an sso PLUGIN
+ * option, not a member of `hooks`/`databaseHooks`, so `auth/index.ts` hands
+ * it to `sso({...})` instead. It is returned from here anyway, because it
+ * belongs with the provisioning rules and because every database hook above
+ * fires on user CREATION only — none of them re-runs on a repeat sign-in,
+ * and team sync must run on every one.
+ *
+ * ## Two team writers, one order, and why the order does not matter
+ *
+ * A first single-sign-on login runs three of these in sequence. The sso
+ * plugin calls `handleOAuthUserInfo` — which runs the `databaseHooks` — and
+ * only then `provisionUser`, both awaited, before it sets the session cookie
+ * (`@better-auth/sso/dist/index.mjs`, both callback paths). So the order is:
+ * admission (`user.create.before`), then org membership and the
+ * config-declared team bind (`user.create.after`), then the identity-provider
+ * team sync (`provisionUser`). Every later login runs `provisionUser` alone.
+ *
+ * Correctness must NOT rest on that order, because a plugin upgrade can
+ * change it. It rests on the two writers touching disjoint rows: the bind
+ * below reads `origin = 'config'` and the sync reads `origin = 'idp'`, and
+ * the boot reconciler fails the api rather than let one name hold both. The
+ * order is recorded here only because both paths call `ensureOrg`, and a
+ * later edit that widens either scope would reintroduce the overlap.
+ *
  * `user.create.before` and `.after` run within the same request but as
  * separate calls with no shared parameter — `admission`'s resolved invite
  * (if any) rides a module-scoped map keyed by lowercased email between
@@ -143,8 +191,9 @@ function readInviteCode(body: Record<string, unknown> | null | undefined): strin
 export function buildAuthHooks(deps: ProvisioningDeps): {
   beforeHook: ReturnType<typeof createAuthMiddleware>;
   databaseHooks: BetterAuthOptions["databaseHooks"];
+  provisionUser: (data: SsoProvisionData) => Promise<void>;
 } {
-  const { db, cfg, credentialStore, instanceConfig, sourceService } = deps;
+  const { db, cfg, credentialStore, instanceConfig, configPath, sourceService } = deps;
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
@@ -202,6 +251,13 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     // this email. Team rows are resolved by name within the org — if a team
     // is missing (e.g. config edited after boot), skip silently; the next
     // boot's reconciler recreates it.
+    //
+    // `origin = 'config'` is part of that lookup because a team the file does
+    // not own is not the file's to write. A same-named `idp` row belongs to
+    // the login sync, which removes whoever the group claim omits, so binding
+    // to it would add a member the next claim takes away. The reconciler
+    // refuses that collision at boot; this scope is what holds until a boot
+    // happens.
     const userEmail = keyForEmail(user.email);
     for (const teamDecl of instanceConfig?.teams ?? []) {
       const match = (teamDecl.members ?? []).find((m) => m.email === userEmail);
@@ -210,7 +266,13 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       const teamRows = await db
         .select({ id: teams.id })
         .from(teams)
-        .where(and(eq(teams.orgId, org.id), eq(teams.name, teamDecl.name)))
+        .where(
+          and(
+            eq(teams.orgId, org.id),
+            eq(teams.name, teamDecl.name),
+            eq(teams.origin, "config"),
+          ),
+        )
         .limit(1);
       const teamRow = teamRows[0];
       if (!teamRow) continue;
@@ -261,8 +323,48 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     }
   };
 
+  /**
+   * Mirrors the identity provider's groups into this user's teams, on every
+   * single-sign-on login (`provisionUserOnEveryLogin`, set in
+   * `auth/index.ts`). The rules live in `services/team-sync.ts`.
+   *
+   * Two things this function must never do:
+   *
+   * 1. Throw. The plugin awaits it BEFORE it sets the session cookie, so an
+   *    exception here means nobody signs in. A database fault must cost one
+   *    user one stale login, which the next login corrects. It must not lock
+   *    the organization out.
+   * 2. Write anything when the claim is missing. `readTeamClaim` runs first,
+   *    and `ensureOrg` — which CREATES an org — stays behind that check.
+   */
+  const provisionUser = async (data: SsoProvisionData): Promise<void> => {
+    // No OIDC config means no configured claim names. A provider registered
+    // in the database carries no group claim through `userInfo` either,
+    // because the extra fields are declared on the configured provider.
+    const oidc = cfg.oidc;
+    if (!oidc) return;
+
+    try {
+      const claim = readTeamClaim(data.userInfo, oidc.teamClaim, oidc.teamAssertedClaim);
+      if (!claim.present) return;
+
+      const org = await ensureOrg(db);
+      await reconcileIdpTeams(db, {
+        orgId: org.id,
+        userId: data.user.id,
+        claim,
+        adminGroupName: oidc.teamAdminGroup,
+        mirroredGroups: oidc.teamGroups,
+        configPath,
+      });
+    } catch (err) {
+      console.error(`team sync: reconcile failed for user ${data.user.id}:`, err);
+    }
+  };
+
   return {
     beforeHook,
+    provisionUser,
     databaseHooks: {
       user: {
         create: {

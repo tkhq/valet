@@ -7,7 +7,13 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { resolveAudience, routeAttention, type AttentionChannelDeliverer, type AttentionEvent } from "./attention.js";
+import {
+  principalFromOwner,
+  resolveAudience,
+  routeAttention,
+  type AttentionChannelDeliverer,
+  type AttentionEvent,
+} from "./attention.js";
 import { notifications, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 let api: TestApi | undefined;
@@ -15,6 +21,19 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+});
+
+describe("principalFromOwner (pure)", () => {
+  it("accepts the three owner types a principal can have", () => {
+    expect(principalFromOwner({ ownerType: "user", ownerId: "u1" })).toEqual({ type: "user", id: "u1" });
+    expect(principalFromOwner({ ownerType: "team", ownerId: "t1" })).toEqual({ type: "team", id: "t1" });
+    expect(principalFromOwner({ ownerType: "org", ownerId: "o1" })).toEqual({ type: "org", id: "o1" });
+  });
+
+  it("rejects an absent owner and an owner type it cannot resolve an audience for", () => {
+    expect(principalFromOwner(undefined)).toBeUndefined();
+    expect(principalFromOwner({ ownerType: "robot", ownerId: "r1" })).toBeUndefined();
+  });
 });
 
 describe("resolveAudience (pure)", () => {
