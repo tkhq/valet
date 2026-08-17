@@ -293,9 +293,14 @@ describe("SessionHeader — team assistant", () => {
   it("marks it as shared with a badge naming the owning team", () => {
     withTeam("member");
     renderTeamHeader();
+    // Queried as the BADGE, not as text anywhere in the header. Asserting the
+    // text alone would be satisfied by any element carrying it, so the test
+    // would stop being about the badge the moment something else rendered the
+    // team's name — which is exactly what the title used to do.
+    //
     // The team's own name, not the bare word "Team": a person on several
     // teams cannot tell them apart from a generic label.
-    expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.getByTestId("owning-team").textContent).toBe("Platform");
   });
 
   /**

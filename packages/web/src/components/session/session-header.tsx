@@ -209,7 +209,10 @@ export function SessionHeader({
               Still not `OwnerBadge`: that one links to the team's assistant,
               which is the page you are already on. */}
           {teamId !== null && (
-            <Badge variant="accent" className="shrink-0">
+            // The test hook lets a test assert THIS element rather than the
+            // team's name appearing anywhere in the header, which a title
+            // regression could satisfy on its own.
+            <Badge variant="accent" className="shrink-0" data-testid="owning-team">
               {team?.name ?? "Team"}
             </Badge>
           )}

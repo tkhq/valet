@@ -193,12 +193,30 @@ export interface OwnerFilter {
   ownerId: string;
 }
 
+/** The owner pair, encoded, with NO leading separator.
+ *
+ * Split out from `ownerQuery` because two memory endpoints already carry a
+ * query string and need `&`. Serialising them by hand instead skipped
+ * encoding, and would have drifted the moment this format changed. */
+function ownerParams(owner: OwnerFilter | undefined): string {
+  if (!owner) return "";
+  return new URLSearchParams({
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+  }).toString();
+}
+
 /** `?ownerType=&ownerId=`, or empty. The server rejects a half-specified
  * pair, so both are written or neither is. */
 function ownerQuery(owner: OwnerFilter | undefined): string {
-  if (!owner) return "";
-  const qs = new URLSearchParams({ ownerType: owner.ownerType, ownerId: owner.ownerId });
-  return `?${qs.toString()}`;
+  const params = ownerParams(owner);
+  return params ? `?${params}` : "";
+}
+
+/** The owner pair appended to a path that ALREADY has a query string. */
+function ownerSuffix(owner: OwnerFilter | undefined): string {
+  const params = ownerParams(owner);
+  return params ? `&${params}` : "";
 }
 
 class ApiError extends Error {
@@ -426,12 +444,12 @@ export const api = {
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>
     request<GetMemoryDocResponse>(
       "GET",
-      `/memory?path=${encodeURIComponent(path)}${owner ? `&ownerType=${owner.ownerType}&ownerId=${owner.ownerId}` : ""}`,
+      `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`,
     ),
   searchMemory: (q: string, owner?: OwnerFilter) =>
     request<SearchMemoryResponse>(
       "GET",
-      `/memory/search?q=${encodeURIComponent(q)}${owner ? `&ownerType=${owner.ownerType}&ownerId=${owner.ownerId}` : ""}`,
+      `/memory/search?q=${encodeURIComponent(q)}${ownerSuffix(owner)}`,
     ),
   getMemoryGraph: (owner?: OwnerFilter) =>
     request<MemoryGraphResponse>("GET", `/memory/graph${ownerQuery(owner)}`),
