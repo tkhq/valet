@@ -30,6 +30,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   ListSessionsResponse,
+  PatchSessionRequest,
   PauseSessionResponse,
   RepoBinding,
   SandboxJwtResponse,
@@ -423,7 +424,13 @@ sessionsRouter.get("/:id", async (c) => {
   return c.json(detail);
 });
 
-// ── Patch (currently only `model`) ────────────────────────────────────────
+// ── Patch (`model` and/or `title`) ────────────────────────────────────────
+
+/** Upper bound on a hand-typed session name. The auto-titler caps itself at
+ * 60 characters. A person renaming a session sometimes wants more room, so
+ * the manual limit is larger, but it stays bounded: the header and the
+ * session lists render this string. */
+const MAX_SESSION_TITLE_CHARS = 200;
 
 sessionsRouter.patch("/:id", async (c) => {
   const { db, engineHost, engineStore } = c.var.providers;
@@ -439,21 +446,70 @@ sessionsRouter.patch("/:id", async (c) => {
   const row = rows[0];
   if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
 
-  let body: { model?: string };
+  let body: PatchSessionRequest;
   try {
-    body = (await c.req.json()) as { model?: string };
+    body = (await c.req.json()) as PatchSessionRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!body.model || typeof body.model !== "string") {
+
+  const wantsModel = body.model !== undefined;
+  const wantsTitle = body.title !== undefined;
+  // A body with neither field keeps the message this guard has always sent.
+  // The model picker is still the only caller that can omit a field by
+  // accident, and a contract test pins this exact response.
+  if (!wantsModel && !wantsTitle) {
     return c.json({ error: "model is required" }, 400);
   }
+  if (wantsModel && (typeof body.model !== "string" || body.model.length === 0)) {
+    return c.json({ error: "model must be a non-empty string. Send a model id from GET /api/models." }, 400);
+  }
 
-  const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-  try {
-    await engineSession.setModel(body.model);
-  } catch (err) {
-    return c.json({ error: (err as Error).message }, 400);
+  let nextTitle: string | undefined;
+  if (wantsTitle) {
+    if (typeof body.title !== "string") {
+      return c.json({ error: "title must be a string. Send the new session name." }, 400);
+    }
+    nextTitle = body.title.trim();
+    if (nextTitle.length === 0) {
+      return c.json({ error: "title cannot be empty. Send a name with at least one character." }, 400);
+    }
+    if (nextTitle.length > MAX_SESSION_TITLE_CHARS) {
+      return c.json(
+        { error: `title is too long. Use ${MAX_SESSION_TITLE_CHARS} characters or fewer.` },
+        400,
+      );
+    }
+  }
+
+  // Materialize the engine session only when the model changes. A rename
+  // must not start a sandbox — the header renames hibernated sessions too.
+  let model: string | undefined;
+  if (wantsModel && typeof body.model === "string") {
+    const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    try {
+      await engineSession.setModel(body.model);
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+    model = engineSession.options.modelSpec ?? engineSession.options.model.id;
+  } else if (engineHost.isLive(id)) {
+    // Report the model the GET route would report. Same best-effort rule:
+    // do not wake a session to read it.
+    const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    model = engineSession.options.modelSpec ?? engineSession.options.model.id;
+  }
+
+  // The title write lands after every validation, so a rejected model never
+  // leaves a half-applied patch behind.
+  let effectiveRow = row;
+  if (nextTitle !== undefined) {
+    const now = Date.now();
+    await db
+      .update(agentSessions)
+      .set({ title: nextTitle, updatedAt: now })
+      .where(eq(agentSessions.id, id));
+    effectiveRow = { ...row, title: nextTitle, updatedAt: now };
   }
 
   const [{ n }] = await db
@@ -462,11 +518,11 @@ sessionsRouter.patch("/:id", async (c) => {
     .where(eq(messagesTable.sessionId, id));
   const unsettled = await engineStore.listUnsettledSubmissions(id);
   const detail: GetSessionResponse = {
-    ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
+    ...rowToSummary(effectiveRow, deriveRunFields(runStateRow(effectiveRow), unsettled)),
     messageCount: Number(n ?? 0),
-    model: engineSession.options.modelSpec ?? engineSession.options.model.id,
-    profile: row.profile,
-    docker: row.docker,
+    model,
+    profile: effectiveRow.profile,
+    docker: effectiveRow.docker,
   };
   return c.json(detail);
 });

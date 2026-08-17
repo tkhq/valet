@@ -320,11 +320,17 @@ export interface PatchThreadRequest {
 export type PatchThreadResponse = ThreadSummary;
 
 /**
- * Patch a session's settings. Currently only `model` is mutable; this is
- * the session default that threads inherit when they have no override.
+ * Patch a session's settings. Send one field or both.
+ *
+ * `model` is the session default that threads inherit when they have no
+ * override. `title` is the session name shown in the header and the lists;
+ * a person sets it to correct what the auto-titler chose. A body with
+ * neither field is rejected.
  */
 export interface PatchSessionRequest {
   model?: string;
+  /** New session name. Trimmed server-side. Must not be empty. */
+  title?: string;
 }
 
 export type PatchSessionResponse = SessionDetail;

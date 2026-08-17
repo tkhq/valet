@@ -145,6 +145,26 @@ describe("autoTitle", () => {
     expect(await threadTitle("th1")).toBe("Greeting demo");
   });
 
+  it("does not overwrite a session title a person set, even while titling a thread", async () => {
+    // The `already_titled` early return only fires when no thread was
+    // asked for. With a thread id the function runs on, so the session
+    // write must stay behind its own guard. A person can rename a session
+    // (PATCH /api/sessions/:id) at any point, including before the client
+    // fires auto-title for the first thread.
+    await seedSession("Renamed by hand");
+    const result = await autoTitle(
+      {
+        db,
+        loadMessages: async () => [{ role: "user", content: "hi" }],
+        namer: async () => "Model Picked This",
+        now: () => 1,
+      },
+      { sessionId: "s1", threadId: "th1" },
+    );
+    expect(result).toEqual({ ok: true, sessionTitle: null, threadTitle: "Model Picked This" });
+    expect(await sessionTitle()).toBe("Renamed by hand");
+  });
+
   it("does not overwrite an existing thread title", async () => {
     await seedSession(null);
     await db.insert(sessionThreads).values({

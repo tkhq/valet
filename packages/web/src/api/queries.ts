@@ -219,6 +219,19 @@ export function useSetSessionModel(sessionId: string) {
   });
 }
 
+/** PATCH /:id with a `title` — rename the session. The session row and the
+ * session lists both render the title, so both caches are invalidated. */
+export function useRenameSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchSessionResponse, Error, string>({
+    mutationFn: (title) => api.patchSession(sessionId, { title }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({

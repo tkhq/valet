@@ -18,6 +18,7 @@ const setModelMutate = vi.fn();
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+let renameMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 /** The header resolves a team assistant's title and its admin controls from
  * these two lists: the assistant says who owns the session, the team says
  * what that owner is called and what the caller may do. Both empty by
@@ -41,6 +42,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
+    useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
   };
 });
 
@@ -100,6 +102,7 @@ beforeEach(() => {
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
   replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+  renameMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   assistantsData = { assistants: [] };
 });
@@ -225,6 +228,93 @@ describe("SessionHeader — overflow menu", () => {
  * The id used to carry the owning principal, which addressed exactly one
  * assistant per team and could not survive the second one.
  */
+/**
+ * V1 port #10 — the inline-editable title. The auto-titler is the only
+ * writer of `session.title` otherwise, and it is often wrong, so the header
+ * has to offer a correction. Renaming follows the same `canAdminister` rule
+ * as the model picker, pause, and delete.
+ */
+describe("SessionHeader — rename", () => {
+  it("opens an edit box seeded with the current title", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    const box = screen.getByLabelText("Session title");
+    expect(box).toBeInstanceOf(HTMLInputElement);
+    expect((box as HTMLInputElement).value).toBe("Fix the bug");
+  });
+
+  it("saves the trimmed title once on Enter", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "  Ship the parser  {Enter}");
+
+    await waitFor(() => expect(renameMutateAsync).toHaveBeenCalledTimes(1));
+    // Enter unmounts the input, which fires blur straight after. One edit
+    // must still send one PATCH.
+    expect(renameMutateAsync).toHaveBeenCalledWith("Ship the parser");
+  });
+
+  it("saves on blur", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Renamed by blur");
+    await user.tab();
+
+    await waitFor(() => expect(renameMutateAsync).toHaveBeenCalledWith("Renamed by blur"));
+  });
+
+  it("discards the edit on Escape", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Never saved{Escape}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Rename session: Fix the bug" })).toBeTruthy();
+  });
+
+  it("sends nothing when the title is unchanged or emptied", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.type(screen.getByLabelText("Session title"), "{Enter}");
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "{Enter}");
+    // The server rejects an empty title, so an emptied box means "cancel".
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed rename with the server's message", async () => {
+    renameMutateAsync = vi
+      .fn()
+      .mockRejectedValue(new Error("title is too long. Use 200 characters or fewer."));
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Too long{Enter}");
+
+    await waitFor(() =>
+      expect(screen.getByText("title is too long. Use 200 characters or fewer.")).toBeTruthy(),
+    );
+  });
+});
+
 describe("SessionHeader — team assistant", () => {
   function teamSession(): SessionDetail {
     return { ...baseSession(), id: "assistant:asst_team", title: "Assistant" };
@@ -356,5 +446,14 @@ describe("SessionHeader — team assistant", () => {
     renderHeader({ state: "ready", epoch: 1 });
     expect(screen.getByRole("button", { name: /pause/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Session menu" })).toBeTruthy();
+  });
+
+  // An assistant's header shows the ASSISTANT's name, not `session.title`.
+  // An edit box here would store a string the header never reads back.
+  it("offers no rename on an assistant session, even to a team admin", () => {
+    withTeam("admin", "Triage");
+    renderTeamHeader();
+    expect(screen.getByText("Triage")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Rename session/ })).toBeNull();
   });
 });

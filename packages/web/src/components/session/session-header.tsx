@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Check, ClipboardCopy, MoreHorizontal, Moon, RefreshCw, Trash2 } from "lucide-react";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import {
@@ -9,12 +9,14 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  Input,
   Spinner,
   Tooltip,
 } from "~/components/primitives";
 import {
   useDeleteSession,
   usePauseSession,
+  useRenameSession,
   useReplaceSandbox,
   useSetSessionModel,
 } from "~/api/queries";
@@ -80,14 +82,21 @@ export function SessionHeader({
   const setModel = useSetSessionModel(session.id);
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
+  const rename = useRenameSession(session.id);
   const me = useMe();
   const org = useOrg();
   const orchInfo = useOrchestratorInfo();
   const teams = useTeams();
   const assistants = useAssistants();
-  // One error slot for both sandbox lifecycle actions (pause, replace).
+  // One error slot for the header actions (pause, replace, rename).
   const [actionError, setActionError] = useState<string | null>(null);
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  // Enter and blur both reach `commitRename`, and Enter unmounts the input,
+  // which fires blur straight after. The ref makes the commit idempotent so
+  // one edit sends one PATCH.
+  const editOpen = useRef(false);
 
   async function destroy() {
     // A team's assistant is shared, so the prompt names what everyone else
@@ -120,6 +129,34 @@ export function SessionHeader({
       await replace.mutateAsync();
     } catch (err) {
       setActionError(extractActionError(err, "Failed to replace the sandbox."));
+    }
+  }
+
+  function beginRename() {
+    setActionError(null);
+    setTitleDraft(session.title ?? "");
+    editOpen.current = true;
+    setEditingTitle(true);
+  }
+
+  function cancelRename() {
+    editOpen.current = false;
+    setEditingTitle(false);
+  }
+
+  async function commitRename() {
+    if (!editOpen.current) return;
+    editOpen.current = false;
+    setEditingTitle(false);
+    const next = titleDraft.trim();
+    // An empty box and an unchanged name both mean "leave it alone". The
+    // server rejects an empty title, so do not send one.
+    if (next.length === 0 || next === (session.title ?? "")) return;
+    setActionError(null);
+    try {
+      await rename.mutateAsync(next);
+    } catch (err) {
+      setActionError(extractActionError(err, "Failed to rename the session. Try again."));
     }
   }
 
@@ -190,13 +227,71 @@ export function SessionHeader({
   const canAdminister =
     teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
+  // Renaming writes `session.title`, so it is offered only where the header
+  // actually shows that field. An assistant's header shows the assistant's
+  // own name instead, which is renamed on the assistants surface — an edit
+  // box here would store a string nobody ever sees.
+  const canRename = canAdminister && !isAssistantSession;
+
+  // The edit box replaces the title cluster only. The action cluster on the
+  // right keeps rendering, so a rename never hides the model picker, the
+  // status badges, or the error slot that reports a failed rename.
+  if (editingTitle) {
+    return (
+      <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
+        <form
+          className="min-w-0"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void commitRename();
+          }}
+        >
+          <Input
+            autoFocus
+            aria-label="Session title"
+            className="h-7 w-64 text-sm font-semibold"
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={() => void commitRename()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                cancelRename();
+              }
+            }}
+          />
+        </form>
+        <span className="text-xs text-muted shrink-0 hidden sm:inline">
+          Enter to save, Esc to cancel
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
+          <SandboxChip sandbox={sandbox} />
+          <ConnectionBadge conn={conn} />
+          <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} />
+        </div>
+      </header>
+    );
+  }
+
   return (
     <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
       <Tooltip content={workspaceHint} delayDuration={400}>
         <div className="min-w-0 flex items-baseline gap-2 cursor-default">
-          <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
-            {title}
-          </span>
+          {canRename ? (
+            <button
+              type="button"
+              onClick={beginRename}
+              aria-label={`Rename session: ${title}`}
+              className="text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-line/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+            >
+              {rename.isPending ? <Spinner size={14} /> : title}
+            </button>
+          ) : (
+            <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
+              {title}
+            </span>
+          )}
           {/* Names the owning team, now that the title does not.
 
               This badge used to read the bare word "Team", because the title
