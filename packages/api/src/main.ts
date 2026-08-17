@@ -347,7 +347,7 @@ if (instanceConfig) {
   // corrective-action message only — no stack spam. Rethrow anything else.
   try {
     await reconcileInstanceConfig(
-      { db: providers.db, configPath: process.env.VALET_CONFIG },
+      { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
       instanceConfig,
     );
   } catch (e) {
@@ -372,6 +372,7 @@ const authWiring: AuthWiring = authConfig
           credentialStore: providers.engineCredentials,
           instanceConfig,
           configPath: process.env.VALET_CONFIG,
+          sourceService: providers.prebuildService,
         }),
       }),
       authConfig,

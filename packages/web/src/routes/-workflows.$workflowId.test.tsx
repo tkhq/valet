@@ -16,6 +16,11 @@ import type { ReactNode } from "react";
 const navigate = vi.fn();
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
+const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
+  data: { triggers: [] },
+  isLoading: false,
+  error: null,
+}));
 
 const workflowData = {
   id: "wf_1",
@@ -72,6 +77,20 @@ vi.mock("~/api/workflows", () => ({
     isLoading: false,
     error: null,
   }),
+  useWorkflowTriggers: (workflowId?: string) => useWorkflowTriggersMock(workflowId),
+  useWorkflows: () => ({ data: { workflows: [] }, isLoading: false }),
+  // The Triggers drawer holds the webhook section beside the trigger list.
+  useWorkflowWebhook: () => ({ data: null, isLoading: false, error: null }),
+  useMintWorkflowWebhook: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useDeleteWorkflowWebhook: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useUpdateSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useUpdateEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useDeleteSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useDeleteEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useRunScheduleNow: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false }),
+  useCreateSchedule: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false, error: null }),
+  useCreateEventTrigger: () => ({ mutateAsync: vi.fn().mockResolvedValue({}), isPending: false, error: null }),
+  useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
 import { WorkflowEditorPage } from "./workflows.$workflowId";
@@ -167,6 +186,15 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
     expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
+  });
+
+  it("renders the scoped triggers panel for this workflow", () => {
+    useWorkflowTriggersMock.mockClear();
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    // The panel lives in the Triggers drawer, which starts closed, so the
+    // scoped read only happens after the toolbar button opens it.
+    fireEvent.click(screen.getByRole("button", { name: "Triggers" }));
+    expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

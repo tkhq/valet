@@ -97,7 +97,7 @@ async function seedRepoBakeSource(db: AppDb): Promise<string> {
 
 async function seedBaseSource(
   db: AppDb,
-  opts: { enabled?: boolean; id?: string } = {},
+  opts: { enabled?: boolean; id?: string; profile?: "headless" | "full" } = {},
 ): Promise<string> {
   const id = opts.id ?? "base-src-1";
   await db.insert(imageSources).values({
@@ -109,6 +109,8 @@ async function seedBaseSource(
     externalRef: null,
     pullSecretName: null,
     setupCommands: null,
+    // Profile-tagged base sources: default to headless so existing tests pass.
+    profile: opts.profile ?? "headless",
     repoHost: null,
     repoFullName: null,
     cloneUrl: null,
@@ -413,6 +415,146 @@ describe("resolveSnapshot", () => {
       });
 
       expect(snap.baseBakeRef).toBeNull();
+    });
+
+    // ── profile-aware base selection ─────────────────────────────────────────
+
+    it("headless session resolves headless base, ignores full base", async () => {
+      const headlessId = await seedBaseSource(db, { id: "base-headless", profile: "headless" });
+      const fullId = await seedBaseSource(db, { id: "base-full", profile: "full" });
+      await seedBake(db, headlessId, { id: "bake-headless", status: "pushed", imageRef: "ghcr.io/valet/base:headless" });
+      await seedBake(db, fullId, { id: "bake-full", status: "pushed", imageRef: "ghcr.io/valet/base:full" });
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: "headless" }),
+        apiUrl: API_URL,
+        stockImage: STOCK_IMAGE,
+      });
+
+      expect(snap.baseBakeRef).toBe("ghcr.io/valet/base:headless");
+    });
+
+    it("full session resolves full base, ignores headless base", async () => {
+      const headlessId = await seedBaseSource(db, { id: "base-headless", profile: "headless" });
+      const fullId = await seedBaseSource(db, { id: "base-full", profile: "full" });
+      await seedBake(db, headlessId, { id: "bake-headless", status: "pushed", imageRef: "ghcr.io/valet/base:headless" });
+      await seedBake(db, fullId, { id: "bake-full", status: "pushed", imageRef: "ghcr.io/valet/base:full" });
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: "full" }),
+        apiUrl: API_URL,
+        stockImage: STOCK_IMAGE,
+      });
+
+      expect(snap.baseBakeRef).toBe("ghcr.io/valet/base:full");
+    });
+
+    it("session with no profile defaults to headless base", async () => {
+      const headlessId = await seedBaseSource(db, { id: "base-headless", profile: "headless" });
+      const fullId = await seedBaseSource(db, { id: "base-full", profile: "full" });
+      await seedBake(db, headlessId, { id: "bake-headless", status: "pushed", imageRef: "ghcr.io/valet/base:headless" });
+      await seedBake(db, fullId, { id: "bake-full", status: "pushed", imageRef: "ghcr.io/valet/base:full" });
+
+      // meta with no profile → should resolve headless
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: undefined }),
+        apiUrl: API_URL,
+        stockImage: STOCK_IMAGE,
+      });
+
+      expect(snap.baseBakeRef).toBe("ghcr.io/valet/base:headless");
+    });
+
+    // ── boot-window stock-image fallthrough (per-profile defaultImages fix) ──
+    //
+    // These tests verify that when no base bake has been pushed yet (the
+    // "boot window" after a fresh cluster deploy), `resolveSnapshot` faithfully
+    // returns the caller-supplied `stockImage` — which `buildSpecProvider` now
+    // sets to `defaultImages?.[profile] ?? defaultImage ?? ""`, making the
+    // full-profile fall-through land on the full stock image instead of the
+    // headless one. The `stockImage` field is a single string at this layer;
+    // the per-profile selection lives in `buildSpecProvider` (host.ts).
+
+    it("full-profile boot window: stockImage=full-stock → computeSpec image = full-stock (no base bake)", async () => {
+      // No base sources seeded — boot-window state.
+      const FULL_STOCK = "ghcr.io/tkhq/valet-sandbox:latest";
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: "full" }),
+        apiUrl: API_URL,
+        stockImage: FULL_STOCK,
+      });
+
+      expect(snap.baseBakeRef).toBeNull();
+      expect(snap.stockImage).toBe(FULL_STOCK);
+
+      const spec = computeSpec(snap);
+      // No repoBake, no baseBakeRef → falls through to stockImage.
+      expect(spec.image).toBe(FULL_STOCK);
+    });
+
+    it("headless-profile boot window: stockImage=headless-stock → computeSpec image = headless-stock (no base bake)", async () => {
+      const HEADLESS_STOCK = "ghcr.io/tkhq/valet-sandbox-headless:latest";
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: "headless" }),
+        apiUrl: API_URL,
+        stockImage: HEADLESS_STOCK,
+      });
+
+      expect(snap.baseBakeRef).toBeNull();
+      expect(snap.stockImage).toBe(HEADLESS_STOCK);
+
+      const spec = computeSpec(snap);
+      expect(spec.image).toBe(HEADLESS_STOCK);
+    });
+
+    it("full-profile with base bake pushed → uses bake ref, not stockImage", async () => {
+      const FULL_STOCK = "ghcr.io/tkhq/valet-sandbox:latest";
+      const BAKED = "ghcr.io/tkhq/valet-sandbox:baked-sha";
+      const fullId = await seedBaseSource(db, { id: "base-full-bw", profile: "full" });
+      await seedBake(db, fullId, { id: "bake-full-bw", status: "pushed", imageRef: BAKED });
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: "full" }),
+        apiUrl: API_URL,
+        stockImage: FULL_STOCK,
+      });
+
+      expect(snap.baseBakeRef).toBe(BAKED);
+      const spec = computeSpec(snap);
+      // Base bake ref wins over stockImage.
+      expect(spec.image).toBe(BAKED);
+    });
+
+    it("no defaultImages set (stockImage=defaultImage fallback) → backwards compat", async () => {
+      // Simulates a deploy where only VALET_SANDBOX_IMAGE is set (no per-profile
+      // override) — stockImage == defaultImage for both profiles.
+      const DEFAULT_IMAGE = "node:22-bookworm-slim";
+
+      const snap = await resolveSnapshot({
+        db,
+        provider: fakeProvider(true),
+        meta: meta({ repos: undefined, profile: "full" }),
+        apiUrl: API_URL,
+        stockImage: DEFAULT_IMAGE, // no defaultImages → caller passes defaultImage for both
+      });
+
+      expect(snap.baseBakeRef).toBeNull();
+      const spec = computeSpec(snap);
+      expect(spec.image).toBe(DEFAULT_IMAGE);
     });
   });
 });

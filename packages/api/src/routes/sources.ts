@@ -133,6 +133,8 @@ sourcesRouter.post("/", async (c) => {
       externalRef: body.externalRef as string,
       pullSecretName,
       setupCommands: null,
+      // profile is only meaningful for kind='base' rows; null for external.
+      profile: null,
       repoHost: null,
       repoFullName: null,
       cloneUrl: null,
@@ -150,6 +152,10 @@ sourcesRouter.post("/", async (c) => {
     if (typeof body.name !== "string" || body.name.trim() === "") {
       return c.json({ error: "name is required" }, 400);
     }
+    // profile is required for base sources and must be 'headless' or 'full'.
+    if (body.profile !== "headless" && body.profile !== "full") {
+      return c.json({ error: "profile must be 'headless' or 'full' for kind='base' sources" }, 400);
+    }
     const setupCommands = body.setupCommands ?? [];
     const cmdErr = validateSetupCommands(setupCommands);
     if (cmdErr) return c.json({ error: cmdErr }, 400);
@@ -163,6 +169,7 @@ sourcesRouter.post("/", async (c) => {
       externalRef: null,
       pullSecretName: null,
       setupCommands: setupCommands as string[],
+      profile: body.profile as "headless" | "full",
       repoHost: null,
       repoFullName: null,
       cloneUrl: null,
@@ -176,7 +183,7 @@ sourcesRouter.post("/", async (c) => {
       await db.insert(imageSources).values(row);
     } catch (err) {
       if (isPgUniqueViolation(err)) {
-        return c.json({ error: "a base source already exists for this org" }, 409);
+        return c.json({ error: "a base source already exists for this org and profile" }, 409);
       }
       throw err;
     }
@@ -211,6 +218,11 @@ sourcesRouter.patch("/:id", async (c) => {
       return c.json({ error: "schedule must be 'nightly' or 'off'" }, 400);
     }
     patch.schedule = body.schedule;
+  }
+
+  // profile is immutable — reject any attempt to change it.
+  if (body.profile !== undefined) {
+    return c.json({ error: "profile is immutable and cannot be changed after creation" }, 400);
   }
 
   // kind-scoped fields

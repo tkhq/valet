@@ -6,7 +6,7 @@
  * lifecycle scenarios (poll sync, retention, orphan sweep, manual rebuild).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
@@ -22,6 +22,8 @@ import {
   defaultRetention,
   imageRefFor,
   slugify,
+  repoDockerFlag,
+  clearRepoDockerCache,
 } from "./source-service.js";
 
 const orgId = "org1";
@@ -328,6 +330,7 @@ describe("SourceService", () => {
         externalRef: null,
         pullSecretName: null,
         setupCommands: setup,
+        profile: "headless",
         repoHost: null,
         repoFullName: null,
         cloneUrl: null,
@@ -674,7 +677,7 @@ describe("SourceService", () => {
     });
 
     it("parents a new source to the org base source when one exists", async () => {
-      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"], { profile: "headless" });
       await service.ensureRepoSource(orgId, repo);
       const [src] = await db
         .select()
@@ -684,7 +687,7 @@ describe("SourceService", () => {
     });
 
     it("first-bake DEFERS when the org base has no pushed bake — source upserts, no dispatch", async () => {
-      await seedBaseSource(db, ["apt-get install -y jq"]);
+      await seedBaseSource(db, ["apt-get install -y jq"], { profile: "headless" });
       await service.ensureRepoSource(orgId, repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.kind, "repo"));
       expect(sources).toHaveLength(1);
@@ -694,7 +697,7 @@ describe("SourceService", () => {
     });
 
     it("after the base pushes, the cascade fires the deferred first bake", async () => {
-      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"], { profile: "headless" });
       // ensureRepoSource upserts + defers the repo.
       await service.ensureRepoSource(orgId, repo);
       expect(builder.specs.filter((s) => s.kind === "repo")).toHaveLength(0);
@@ -757,6 +760,166 @@ describe("SourceService", () => {
         throw new Error("db down");
       });
       await expect(brokenService.ensureRepoSource(orgId, repo)).resolves.toBeUndefined();
+    });
+  });
+
+  // ── seedDefaultBasesIfMissing ──────────────────────────────────────────
+
+  describe("seedDefaultBasesIfMissing", () => {
+    it("idempotency: calling twice results in exactly 3 rows (1 external, 1 headless base, 1 full base)", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      expect(sources).toHaveLength(3);
+
+      const external = sources.filter((s) => s.kind === "external");
+      const headless = sources.filter((s) => s.kind === "base" && s.profile === "headless");
+      const full = sources.filter((s) => s.kind === "base" && s.profile === "full");
+
+      expect(external).toHaveLength(1);
+      expect(external[0].name).toBe("stock-full");
+      expect(headless).toHaveLength(1);
+      expect(headless[0].name).toBe("default-headless");
+      expect(full).toHaveLength(1);
+      expect(full[0].name).toBe("default-full");
+    });
+
+    it("partial state self-heals: a missing full base is re-seeded on the next call", async () => {
+      // Simulate a crash between Step 2 and Step 3: external + headless rows
+      // exist, the full base does not.
+      await service.seedDefaultBasesIfMissing(orgId);
+      await db
+        .delete(imageSources)
+        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.profile, "full")));
+
+      const before = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      expect(before).toHaveLength(2);
+      const externalBefore = before.find((s) => s.name === "stock-full")!;
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const after = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      expect(after).toHaveLength(3);
+      const full = after.find((s) => s.kind === "base" && s.profile === "full")!;
+      expect(full).toBeDefined();
+      // The restored full base parents at the pre-existing external row, not a
+      // duplicate.
+      expect(full.parentId).toBe(externalBefore.id);
+      expect(after.filter((s) => s.name === "stock-full")).toHaveLength(1);
+    });
+
+    it("two orgs seeded: 6 rows total (3 per org)", async () => {
+      const org2 = "org2";
+      await db.insert(orgs).values({ id: org2, name: "Org 2", createdAt: NOW });
+
+      await service.seedDefaultBasesIfMissing(orgId);
+      await service.seedDefaultBasesIfMissing(org2);
+
+      const allSources = await db.select().from(imageSources);
+      expect(allSources).toHaveLength(6);
+
+      const org1Sources = allSources.filter((s) => s.orgId === orgId);
+      const org2Sources = allSources.filter((s) => s.orgId === org2);
+      expect(org1Sources).toHaveLength(3);
+      expect(org2Sources).toHaveLength(3);
+    });
+
+    it("full base parents at the stock-full external row", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const external = sources.find((s) => s.name === "stock-full")!;
+      const fullBase = sources.find((s) => s.kind === "base" && s.profile === "full")!;
+
+      expect(external).toBeDefined();
+      expect(fullBase.parentId).toBe(external.id);
+    });
+
+    it("headless base has null parentId", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const headlessBase = sources.find((s) => s.kind === "base" && s.profile === "headless")!;
+      expect(headlessBase.parentId).toBeNull();
+    });
+
+    it("headless base has HEADLESS_SETUP_COMMANDS seeded", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const headlessBase = sources.find((s) => s.kind === "base" && s.profile === "headless")!;
+      const cmds = headlessBase.setupCommands as string[];
+      expect(Array.isArray(cmds)).toBe(true);
+      expect(cmds.length).toBeGreaterThan(0);
+      expect(cmds[0]).toContain("apt-get install");
+    });
+
+    it("full base has empty setup_commands", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const fullBase = sources.find((s) => s.kind === "base" && s.profile === "full")!;
+      expect(fullBase.setupCommands).toEqual([]);
+    });
+  });
+
+  // ── ensureRepoSource parents to headless base ─────────────────────────
+
+  describe("ensureRepoSource profile-aware parent", () => {
+    const repo = { host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
+
+    it("parents repo source at the headless base when both profiles are seeded", async () => {
+      // Seed both bases directly.
+      const headlessId = `base_headless_${Math.random().toString(36).slice(2)}`;
+      const fullId = `base_full_${Math.random().toString(36).slice(2)}`;
+      await db.insert(imageSources).values({
+        id: headlessId,
+        orgId,
+        kind: "base",
+        parentId: null,
+        name: "default-headless",
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: ["apt-get install -y git"],
+        profile: "headless",
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+      await db.insert(imageSources).values({
+        id: fullId,
+        orgId,
+        kind: "base",
+        parentId: null,
+        name: "default-full",
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: [],
+        profile: "full",
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+
+      await service.ensureRepoSource(orgId, repo);
+
+      const [src] = await db
+        .select()
+        .from(imageSources)
+        .where(eq(imageSources.kind, "repo"));
+      // Must parent at headless, not full.
+      expect(src.parentId).toBe(headlessId);
     });
   });
 
@@ -1113,5 +1276,135 @@ describe("defaultRetention (kubernetes)", () => {
 describe("error exports", () => {
   it("GitHubAuthError is an Error subclass", () => {
     expect(new GitHubAuthError("x")).toBeInstanceOf(Error);
+  });
+});
+
+// ── repoDockerFlag ────────────────────────────────────────────────────────────
+
+describe("repoDockerFlag", () => {
+  let db: AppDb;
+  let credentials: PgCredentialStore;
+  let fixture: GithubFixture;
+  let contentsHandler: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse;
+
+  function deps(): GitHubTokenDeps {
+    return {
+      db,
+      credentials,
+      key: deriveSecretKey("cache-key"),
+      apiUrl: fixture.url,
+      githubUrl: fixture.url,
+      now: () => NOW,
+    };
+  }
+
+  beforeEach(async () => {
+    const { pgdb, appDb } = await freshTestPgDb();
+    db = appDb;
+    credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+    contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    fixture = startGithubFixture({
+      getContents: (owner, repo, path, ref) => contentsHandler(owner, repo, path, ref),
+    });
+  });
+
+  afterEach(async () => {
+    clearRepoDockerCache();
+    await fixture.close();
+  });
+
+  it("returns true when .valet/prebuild.yaml has docker: true", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: true"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(true);
+  });
+
+  it("returns false when the file is absent, and caches subsequent calls", async () => {
+    let callCount = 0;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") callCount++;
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(false);
+    expect(callCount).toBe(1);
+    // Second call — should be served from cache, no new HTTP call.
+    await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(callCount).toBe(1);
+  });
+
+  it("returns false when docker: false in the file", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: false"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(false);
+  });
+
+  it("returns false on network/server errors (best-effort)", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { status: 500, body: { message: "Internal Server Error" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    expect(result).toBe(false);
+  });
+
+  it("resolves false and does not cache when the fetch hangs (timeout seam)", async () => {
+    // A never-resolving fetch simulates a hung connection. The caller
+    // (host.ts resolveRepoDockerFlag) races this against a 5 s deadline;
+    // here we use a 200 ms deadline so the suite stays fast.
+    let hangResolve: (() => void) | undefined;
+    const hangingFetch: typeof fetch = () =>
+      new Promise<Response>((resolve) => {
+        hangResolve = () => resolve(new Response("{}", { status: 200 }));
+      });
+
+    const timedOut = Symbol("timedOut");
+    const result = await Promise.race([
+      repoDockerFlag({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
+      new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 200)),
+    ]);
+    expect(result).toBe(timedOut); // the call is still pending — not cached
+
+    // The key must NOT be in the cache. If it were, a subsequent call with the
+    // real fixture (docker: true) would return the cached false instead of true.
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: true"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const afterTimeout = await repoDockerFlag(deps(), "tok", "o", "r", "hang-ref");
+    expect(afterTimeout).toBe(true); // real fetch ran — not served from a stale cache entry
+
+    // Resolve the hang to let the dangling promise settle cleanly.
+    hangResolve?.();
+  });
+
+  it("does not grow unboundedly — still resolves correctly after 1001 distinct keys", async () => {
+    // Fill the cache past the 1000-entry cap via distinct owner/repo/ref keys.
+    // Verifies the cap guard does not corrupt state: the 1001st call must still
+    // return the correct value (false for a missing file).
+    contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    const promises: Promise<boolean>[] = [];
+    for (let i = 0; i < 1000; i++) {
+      promises.push(repoDockerFlag(deps(), "tok", "o", `repo-${i}`, "main"));
+    }
+    await Promise.all(promises);
+    // The map was cleared at entry 1000. This call re-fetches cleanly.
+    const result = await repoDockerFlag(deps(), "tok", "o", "cap-check", "main");
+    expect(result).toBe(false);
   });
 });

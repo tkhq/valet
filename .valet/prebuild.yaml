@@ -7,6 +7,10 @@
 # images ship Node without pnpm on PATH. We enable corepack first, then
 # install ourselves.
 skipDetect: true
+# Valet's own docker-gated e2e suites need a docker daemon inside the
+# sandbox (rootless DinD; see docs/prebuild-yaml.md and
+# docs/specs/2026-08-15-sandbox-docker-design.md).
+docker: true
 setup:
   # Base packages the dev loop and e2e suites expect: make (Makefile
   # targets), python3 (scripts/docs/docs_lint.py), jq, build-essential

@@ -128,6 +128,7 @@ export function registerWsRoutes(
                 // query and the UI doesn't currently render this number.
                 messageCount: 0,
                 profile: row.profile,
+                docker: row.docker,
               },
             });
 

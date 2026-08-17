@@ -162,6 +162,85 @@ export async function listWorkflowSchedules(
     .filter((s) => workflowId === undefined || s.workflowId === workflowId);
 }
 
+export interface WorkflowSchedulePatch {
+  name?: string;
+  cron?: string;
+  timezone?: string;
+  enabled?: boolean;
+  prompt?: string;
+  input?: unknown;
+}
+
+/**
+ * Partial update. Target kind is immutable — delete and recreate to switch.
+ * `nextFireAt` is recomputed when cron/timezone change or when the schedule
+ * transitions disabled → enabled (so a stale slot does not fire at once).
+ */
+export async function updateWorkflowSchedule(
+  db: AppDb,
+  orgId: string,
+  scheduleId: string,
+  patch: WorkflowSchedulePatch,
+  now = Date.now(),
+): Promise<
+  | { ok: true; schedule: WorkflowScheduleSummary }
+  | { ok: false; status: 400 | 404; error: string }
+> {
+  const rows = await db
+    .select()
+    .from(workflowSchedules)
+    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return { ok: false, status: 404, error: "schedule not found" };
+
+  if (patch.prompt !== undefined && row.targetKind !== "orchestrator") {
+    return {
+      ok: false,
+      status: 400,
+      error: "prompt only applies to orchestrator-target schedules. Delete this schedule and create an orchestrator one to switch.",
+    };
+  }
+  if (patch.input !== undefined && row.targetKind !== "workflow") {
+    return {
+      ok: false,
+      status: 400,
+      error: "input only applies to workflow-target schedules. Delete this schedule and create a workflow one to switch.",
+    };
+  }
+  if (patch.prompt !== undefined && patch.prompt.trim() === "") {
+    return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the orchestrator." };
+  }
+
+  const cron = patch.cron ?? row.cron;
+  const timezone = patch.timezone ?? row.timezone;
+  const cronOrTzChanged = cron !== row.cron || timezone !== row.timezone;
+  const reEnabled = patch.enabled === true && !row.enabled;
+
+  let nextAt = row.nextFireAt;
+  if (cronOrTzChanged || reEnabled) {
+    const next = nextFireAt(cron, timezone, now);
+    if (!next.ok) return { ok: false, status: 400, error: next.error };
+    nextAt = next.at;
+  }
+
+  const updated = await db
+    .update(workflowSchedules)
+    .set({
+      name: patch.name ?? row.name,
+      cron,
+      timezone,
+      enabled: patch.enabled ?? row.enabled,
+      prompt: patch.prompt ?? row.prompt,
+      input: patch.input !== undefined ? patch.input : row.input,
+      nextFireAt: nextAt,
+      updatedAt: now,
+    })
+    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+    .returning();
+  return { ok: true, schedule: rowToSummary(updated[0]!) };
+}
+
 export async function deleteWorkflowSchedule(
   db: AppDb,
   orgId: string,

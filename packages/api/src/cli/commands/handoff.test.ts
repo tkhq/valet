@@ -61,6 +61,7 @@ function stubDeps(opts: StubOpts = {}): {
         lastActivityAt: 1,
         messageCount: 0,
         profile: body.profile ?? "headless",
+        docker: body.docker ?? false,
       });
     },
     sendPrompt: (id, body) => {

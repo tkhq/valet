@@ -3,6 +3,12 @@ import type { SandboxCreateOpts } from "@valet/engine";
 import {
   CREDS_MOUNT_PATH,
   CREDS_VOLUME_NAME,
+  DEV_FUSE_VOLUME_NAME,
+  DEV_TUN_VOLUME_NAME,
+  DOCKER_LABEL_KEY,
+  DOCKER_STATE_MOUNT_PATH,
+  DOCKER_STATE_VOLUME_NAME,
+  DOCKER_WORKLOAD_FS_GROUP,
   SANDBOX_CR_API_VERSION,
   buildSandboxManifest,
   credsSecretName,
@@ -274,5 +280,74 @@ describe("buildSandboxManifest", () => {
       const alsoWithout = buildSandboxManifest(baseConfig, "sess-1", { ...opts });
       expect(without).toEqual(alsoWithout);
     });
+  });
+});
+
+describe("docker flag (rootless DinD)", () => {
+  const cfg = baseConfig;
+
+  it("adds the rootless securityContext, annotation, volumes, and env", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    const pod = cr.spec.podTemplate;
+    expect(pod.metadata?.annotations?.[
+      "container.apparmor.security.beta.kubernetes.io/sandbox"
+    ]).toBe("unconfined");
+    const c = pod.spec.containers[0]!;
+    expect(c.securityContext?.seccompProfile?.type).toBe("Unconfined");
+    expect(c.securityContext?.capabilities?.add).toEqual(["SYS_ADMIN", "NET_ADMIN"]);
+    expect(c.securityContext?.procMount).toBe("Unmasked");
+    expect(c.env).toContainEqual({ name: "VALET_SANDBOX_DOCKER", value: "1" });
+    expect(c.volumeMounts).toContainEqual({
+      name: DOCKER_STATE_VOLUME_NAME,
+      mountPath: DOCKER_STATE_MOUNT_PATH,
+    });
+    expect(c.volumeMounts).toContainEqual({
+      name: DEV_TUN_VOLUME_NAME,
+      mountPath: "/dev/net/tun",
+    });
+    expect(pod.spec.volumes).toContainEqual(
+      expect.objectContaining({ name: DOCKER_STATE_VOLUME_NAME }),
+    );
+    expect(pod.spec.volumes).toContainEqual(
+      expect.objectContaining({ name: DEV_FUSE_VOLUME_NAME }),
+    );
+    expect(pod.spec.volumes).toContainEqual(
+      expect.objectContaining({ name: DEV_TUN_VOLUME_NAME }),
+    );
+    expect(JSON.stringify(cr)).not.toContain("privileged");
+  });
+
+  it("sets pod-level fsGroup 1500 so the workspace PVC is group-writable by dockerd", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(DOCKER_WORKLOAD_FS_GROUP).toBe(1500);
+    expect(cr.spec.podTemplate.spec.securityContext).toEqual({ fsGroup: 1500 });
+  });
+
+  it("labels the CR docker-enabled so restore() can re-derive the flag", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(cr.metadata.labels[DOCKER_LABEL_KEY]).toBe("true");
+  });
+
+  it("headless+docker uses the start-headless probe wrapper command", () => {
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(cr.spec.podTemplate.spec.containers[0]!.command).toEqual([
+      "sh",
+      "-c",
+      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+    ]);
+  });
+
+  it("emits nothing docker-related when the flag is absent", () => {
+    const cr = buildSandboxManifest(cfg, "sb-plain", {});
+    const s = JSON.stringify(cr);
+    expect(s).not.toContain("seccomp");
+    expect(s).not.toContain("apparmor");
+    expect(s).not.toContain("VALET_SANDBOX_DOCKER");
+    expect(s).not.toContain(DOCKER_STATE_VOLUME_NAME);
+    expect(s).not.toContain("capabilities");
+    expect(s).not.toContain("procMount");
+    expect(s).not.toContain(DEV_TUN_VOLUME_NAME);
+    expect(s).not.toContain("fsGroup");
+    expect(s).not.toContain(DOCKER_LABEL_KEY);
   });
 });

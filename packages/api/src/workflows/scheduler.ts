@@ -85,32 +85,20 @@ export class WorkflowScheduler {
     }
   }
 
-  private async fire(schedule: typeof workflowSchedules.$inferSelect, now: number): Promise<void> {
+  /** Dispatch one fire for `slotMs`. Shared by the poll loop (slot =
+   * next_fire_at) and fireNow (slot = now → a distinct, still-idempotent
+   * runId per manual fire). Returns an error string for states the poll
+   * loop responds to by disabling. Does NOT touch next_fire_at. */
+  private async dispatch(
+    schedule: typeof workflowSchedules.$inferSelect,
+    slotMs: number,
+  ): Promise<"ok" | { error: string }> {
     const { db, workflowRunHost } = this.deps;
-
-    // Advance-or-disable FIRST (before starting the run): if the cron no
-    // longer parses we disable instead of hot-looping, and if the run
-    // start crashes the derived runId makes the retry idempotent.
-    const next = nextFireAt(schedule.cron, schedule.timezone, now);
-    if (!next.ok) {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
-      await db
-        .update(workflowSchedules)
-        .set({ enabled: false, updatedAt: now })
-        .where(eq(workflowSchedules.id, schedule.id));
-      return;
-    }
 
     if (schedule.targetKind === "orchestrator") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
-        console.error(`workflow scheduler: disabling ${schedule.id} — orchestrator target without a prompt`);
-        await db
-          .update(workflowSchedules)
-          .set({ enabled: false, updatedAt: now })
-          .where(eq(workflowSchedules.id, schedule.id));
-        return;
+        return { error: "orchestrator target without a prompt. Edit the schedule and set a prompt." };
       }
-      // Idempotent per slot via dispatchId, mirroring event deliveries.
       await this.deps.deliverToOrchestrator({
         orgId: schedule.orgId,
         ownerType: schedule.ownerType,
@@ -126,27 +114,17 @@ export class WorkflowScheduler {
             scheduleId: schedule.id,
             scheduleName: schedule.name,
             cron: schedule.cron,
-            firedAt: new Date(schedule.nextFireAt).toISOString(),
+            firedAt: new Date(slotMs).toISOString(),
           },
         },
-        dispatchId: `schedule:${schedule.id}:${schedule.nextFireAt}`,
+        dispatchId: `schedule:${schedule.id}:${slotMs}`,
       });
-      await db
-        .update(workflowSchedules)
-        .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now })
-        .where(eq(workflowSchedules.id, schedule.id));
-      return;
+      return "ok";
     }
 
     if (!schedule.workflowId) {
-      console.error(`workflow scheduler: disabling ${schedule.id} — workflow target without a workflow_id`);
-      await db
-        .update(workflowSchedules)
-        .set({ enabled: false, updatedAt: now })
-        .where(eq(workflowSchedules.id, schedule.id));
-      return;
+      return { error: "workflow target without a workflow_id. Delete this schedule and recreate it against a workflow." };
     }
-
     const defRows = await db
       .select()
       .from(workflowDefinitions)
@@ -154,16 +132,10 @@ export class WorkflowScheduler {
       .limit(1);
     const def = defRows[0];
     if (!def) {
-      // Workflow deleted out from under the schedule — disable, don't spin.
-      console.error(`workflow scheduler: disabling ${schedule.id} — workflow ${schedule.workflowId} is gone`);
-      await db
-        .update(workflowSchedules)
-        .set({ enabled: false, updatedAt: now })
-        .where(eq(workflowSchedules.id, schedule.id));
-      return;
+      return { error: `workflow ${schedule.workflowId} is gone. Delete this schedule or recreate the workflow.` };
     }
 
-    const runId = scheduledRunId(schedule.id, schedule.nextFireAt);
+    const runId = scheduledRunId(schedule.id, slotMs);
     const existing = await db
       .select({ id: workflowRuns.id })
       .from(workflowRuns)
@@ -173,7 +145,7 @@ export class WorkflowScheduler {
       const trigger: WorkflowTriggerPayload = {
         type: "schedule",
         triggerId: schedule.id,
-        timestamp: new Date(schedule.nextFireAt).toISOString(),
+        timestamp: new Date(slotMs).toISOString(),
         data: { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} },
         metadata: { scheduleId: schedule.id, timezone: schedule.timezone },
       };
@@ -194,10 +166,48 @@ export class WorkflowScheduler {
         ownerId: def.ownerId,
       });
     }
+    return "ok";
+  }
 
+  private async fire(schedule: typeof workflowSchedules.$inferSelect, now: number): Promise<void> {
+    const { db } = this.deps;
+    const next = nextFireAt(schedule.cron, schedule.timezone, now);
+    if (!next.ok) {
+      console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
+      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+      return;
+    }
+    const result = await this.dispatch(schedule, schedule.nextFireAt);
+    if (result !== "ok") {
+      console.error(`workflow scheduler: disabling ${schedule.id} — ${result.error}`);
+      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+      return;
+    }
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now })
       .where(eq(workflowSchedules.id, schedule.id));
+  }
+
+  /** Manual fire from the API. Uses `now` as the slot (distinct idempotent
+   * runId per press), updates lastFiredAt, never moves nextFireAt, and
+   * works on disabled schedules (firing by hand is how you test one). */
+  async fireNow(orgId: string, scheduleId: string): Promise<"ok" | "not_found" | { error: string }> {
+    const { db } = this.deps;
+    const now = (this.deps.now ?? Date.now)();
+    const rows = await db
+      .select()
+      .from(workflowSchedules)
+      .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+      .limit(1);
+    const schedule = rows[0];
+    if (!schedule) return "not_found";
+    const result = await this.dispatch(schedule, now);
+    if (result !== "ok") return result;
+    await db
+      .update(workflowSchedules)
+      .set({ lastFiredAt: now, updatedAt: now })
+      .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)));
+    return "ok";
   }
 }

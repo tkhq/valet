@@ -36,6 +36,24 @@ export const CREDS_MOUNT_PATH = "/etc/valet/creds";
 /** Volume name for the per-sandbox credential Secret volume. */
 export const CREDS_VOLUME_NAME = "valet-creds";
 
+/** Volume name for the rootless Docker data-root emptyDir (rootless DinD). */
+export const DOCKER_STATE_VOLUME_NAME = "docker-state";
+/** Mount path for the rootless Docker data-root inside the container. */
+export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
+/** Volume name for the /dev/fuse hostPath device (rootless DinD). */
+export const DEV_FUSE_VOLUME_NAME = "dev-fuse";
+/** Volume name for the /dev/net/tun hostPath device (rootless DinD — needed by rootlesskit). */
+export const DEV_TUN_VOLUME_NAME = "dev-tun";
+/** CR label marking a docker-enabled sandbox. `restore()` re-derives the
+ * exec-identity flag from this label (the CR is the only state that
+ * survives an api restart — mirrors how `spec.service` records the
+ * profile). Value is always "true"; the label is absent otherwise. */
+export const DOCKER_LABEL_KEY = "valet.dev/docker";
+/** The `dockerd` workload user's uid/gid (docker/Dockerfile.sandbox-k8s
+ * `useradd -m -u 1500 dockerd`). Used as the pod-level `fsGroup` so the
+ * kubelet makes the workspace PVC group-writable by that user. */
+export const DOCKER_WORKLOAD_FS_GROUP = 1500;
+
 /** Returns the name of the Kubernetes Secret backing the creds volume for a sandbox. */
 export function credsSecretName(sandboxName: string): string {
   return `valet-creds-${sandboxName}`;
@@ -155,10 +173,42 @@ export function buildSandboxManifest(
     ];
   }
 
+  // Rootless DinD: seccomp Unconfined, VALET_SANDBOX_DOCKER env, docker-state
+  // emptyDir + /dev/fuse hostPath volumes. Mirrors the AppArmor+seccomp
+  // mechanism used by the rootless BuildKit builder in k8s-builder.ts. Never
+  // sets privileged — rootless Docker does not require it.
+  if (opts.docker) {
+    container.securityContext = {
+      seccompProfile: { type: "Unconfined" },
+      capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
+      procMount: "Unmasked",
+    };
+    container.env = [...(container.env ?? []), { name: "VALET_SANDBOX_DOCKER", value: "1" }];
+    container.volumeMounts = [
+      ...(container.volumeMounts ?? []),
+      { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
+      { name: DEV_FUSE_VOLUME_NAME, mountPath: "/dev/fuse" },
+      { name: DEV_TUN_VOLUME_NAME, mountPath: "/dev/net/tun" },
+    ];
+    if (!isFullProfile) {
+      container.command = [
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+      ];
+    }
+  }
+
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     containers: [container],
     restartPolicy: "Always",
   };
+  if (opts.docker) {
+    // Pod-level fsGroup: the workspace PVC mounts group-owned by the
+    // dockerd user's gid, so non-privileged (dockerd) execs can write
+    // /workspace — the k8s analog of start-docker.sh's `chown /workspace`.
+    podSpec.securityContext = { fsGroup: DOCKER_WORKLOAD_FS_GROUP };
+  }
   if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
     podSpec.imagePullSecrets = cfg.imagePullSecrets;
   }
@@ -171,8 +221,26 @@ export function buildSandboxManifest(
     podSpec.volumes = [credsVolume];
   }
 
+  if (opts.docker) {
+    podSpec.volumes = [
+      ...(podSpec.volumes ?? []),
+      { name: DOCKER_STATE_VOLUME_NAME, emptyDir: {} },
+      { name: DEV_FUSE_VOLUME_NAME, hostPath: { path: "/dev/fuse", type: "CharDevice" } },
+      { name: DEV_TUN_VOLUME_NAME, hostPath: { path: "/dev/net/tun", type: "CharDevice" } },
+    ];
+  }
+
   const spec: SandboxCR["spec"] = {
     podTemplate: {
+      ...(opts.docker
+        ? {
+            metadata: {
+              annotations: {
+                [`container.apparmor.security.beta.kubernetes.io/${SANDBOX_CONTAINER_NAME}`]: "unconfined",
+              },
+            },
+          }
+        : {}),
       spec: podSpec,
     },
     volumeClaimTemplates: [
@@ -191,12 +259,15 @@ export function buildSandboxManifest(
     spec.service = true;
   }
 
+  const labels: Record<string, string> = { [SESSION_LABEL_KEY]: name };
+  if (opts.docker) labels[DOCKER_LABEL_KEY] = "true";
+
   return {
     apiVersion: cfg.apiVersion,
     kind: "Sandbox",
     metadata: {
       name,
-      labels: { [SESSION_LABEL_KEY]: name },
+      labels,
     },
     spec,
   };

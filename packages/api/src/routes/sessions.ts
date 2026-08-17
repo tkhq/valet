@@ -233,6 +233,10 @@ sessionsRouter.post("/", async (c) => {
   if (body.initialPrompt !== undefined && typeof body.initialPrompt !== "string") {
     return c.json({ error: "initialPrompt must be a string. Send the prompt text, or omit the field." }, 400);
   }
+  if (body.docker !== undefined && typeof body.docker !== "boolean") {
+    return c.json({ error: "docker must be a boolean. Send true or false, or omit the field." }, 400);
+  }
+  const docker = body.docker === true;
 
   // An explicit `teamId: null` from a client that always sends the field is
   // a real shape — the body is an unchecked cast — so it must fall through to
@@ -292,6 +296,7 @@ sessionsRouter.post("/", async (c) => {
         ownerType: owner.type,
         ownerId: owner.id,
         profile,
+        docker,
         createdAt: now,
         updatedAt: now,
       })
@@ -366,6 +371,7 @@ sessionsRouter.post("/", async (c) => {
     updatedAt: now,
     messageCount: 0,
     profile,
+    docker,
     ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail, 201);
@@ -411,6 +417,7 @@ sessionsRouter.get("/:id", async (c) => {
     messageCount: Number(n ?? 0),
     model,
     profile: row.profile,
+    docker: row.docker,
     ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail);
@@ -459,6 +466,7 @@ sessionsRouter.patch("/:id", async (c) => {
     messageCount: Number(n ?? 0),
     model: engineSession.options.modelSpec ?? engineSession.options.model.id,
     profile: row.profile,
+    docker: row.docker,
   };
   return c.json(detail);
 });

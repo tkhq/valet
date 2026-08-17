@@ -51,6 +51,41 @@ const teamsData = {
   ],
 };
 
+const triggersData = {
+  triggers: [
+    {
+      kind: "schedule" as const,
+      id: "sched_1",
+      workflowId: "wf_1",
+      name: "Nightly build",
+      enabled: true,
+      detail: {
+        cron: "0 2 * * *",
+        timezone: "UTC",
+        targetKind: "workflow" as const,
+        nextFireAt: Date.now() + 86400000,
+        lastFiredAt: null,
+      },
+    },
+  ],
+};
+
+const allRunsData = {
+  runs: [
+    {
+      runId: "wfrun_1",
+      workflowId: "wf_1",
+      workflowName: "Deploy pipeline",
+      status: "settled" as const,
+      outcome: "completed" as const,
+      createdAt: Date.now() - 10000,
+      updatedAt: Date.now() - 5000,
+    },
+  ],
+};
+
+let searchState: Record<string, unknown> = {};
+
 const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
 const createMutateAsync = vi.fn().mockResolvedValue({
@@ -66,10 +101,12 @@ vi.mock("@tanstack/react-router", () => ({
     <a {...rest}>{children}</a>
   ),
   useNavigate: () => navigate,
+  // One `useSearch` serves both readers: the hub reads `?tab=`, and the
+  // workspace scope reads `?assistant=` so an open assistant can override the
+  // stored workspace. This page is never rendered with an assistant, so
+  // `searchState` only ever carries the tab.
+  useSearch: () => searchState,
   createFileRoute: () => (config: unknown) => config,
-  // The workspace scope reads `?assistant=` so an open assistant can override
-  // the stored workspace. This page is never rendered with one.
-  useSearch: () => ({}),
 }));
 
 vi.mock("~/api/settings", () => ({
@@ -107,6 +144,16 @@ vi.mock("~/api/workflows", () => ({
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
   useDeleteWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useWorkflowTriggers: () => ({ data: triggersData, isLoading: false, error: null }),
+  useAllWorkflowRuns: () => ({ data: allRunsData, isLoading: false, error: null }),
+  useUpdateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUpdateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useRunScheduleNow: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useTriggerCatalog: () => ({ data: { catalog: [] }, isLoading: false, error: null }),
+  useCreateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useCreateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 // The gallery has its own suite; here it only has to be identifiable, so the
@@ -136,6 +183,8 @@ const populated = [...workflowsData.workflows];
 
 beforeEach(() => {
   workflowsData.workflows = [...populated];
+  searchState = {};
+  navigate.mockClear();
 });
 
 describe("WorkflowsIndexPage", () => {
@@ -186,6 +235,31 @@ describe("WorkflowsIndexPage", () => {
     );
   });
 
+  it("shows the Workflows tab by default with per-workflow trigger badges", () => {
+    renderPage();
+    expect(screen.getByText("Deploy pipeline")).toBeTruthy();
+    expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
+  });
+
+  it("renders the Runs tab from the global runs feed", () => {
+    searchState = { tab: "runs" };
+    renderPage();
+    expect(screen.getByText("Deploy pipeline")).toBeTruthy(); // workflowName column
+    expect(screen.getByText("completed")).toBeTruthy(); // RunStatusChip label
+  });
+
+  it("renders the Triggers tab with the unified list", () => {
+    searchState = { tab: "triggers" };
+    renderPage();
+    expect(screen.getByText("Nightly build")).toBeTruthy();
+  });
+
+  it("tab buttons navigate via search params", () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /Triggers/ }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { tab: "triggers" } }));
+  });
+
   it("puts templates behind a tab so an existing list stays the page", () => {
     renderPage();
 
@@ -193,19 +267,20 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.queryByTestId("template-gallery")).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    expect(navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: { tab: "templates" } }),
+    );
 
+    searchState = { tab: "templates" };
+    renderPage();
     expect(screen.getByTestId("template-gallery")).toBeTruthy();
-    expect(screen.queryByText("Deploy pipeline")).toBeNull();
   });
 
-  it("makes the gallery the whole page when there are no workflows", () => {
+  it("makes the gallery the zero state when there are no workflows", () => {
     workflowsData.workflows = [];
     renderPage();
 
     expect(screen.getByTestId("template-gallery")).toBeTruthy();
-    // No tabs: with nothing to list, a "Your workflows" tab is chrome over
-    // an empty list.
-    expect(screen.queryByRole("tab")).toBeNull();
     expect(screen.getByText(/no workflows yet/i)).toBeTruthy();
   });
 });

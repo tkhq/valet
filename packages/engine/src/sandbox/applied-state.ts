@@ -41,7 +41,8 @@ export interface AppliedState {
  * inside the container filesystem on all provider implementations.
  */
 export async function readAppliedState(sandbox: Sandbox): Promise<AppliedState | null> {
-  const result = await sandbox.exec(`cat ${APPLIED_PATH}`);
+  // /etc is a system path — must run as root, not as the docker workload user.
+  const result = await sandbox.exec(`cat ${APPLIED_PATH}`, { privileged: true });
   if (result.exitCode !== 0) {
     // File missing or unreadable — treat as no applied state
     return null;
@@ -108,8 +109,10 @@ async function writeAppliedState(
   state: AppliedState,
 ): Promise<void> {
   const json = posixSingleQuoteEscape(JSON.stringify(state));
+  // /etc is a system path — must run as root, not as the docker workload user.
   const result = await sandbox.exec(
     `mkdir -p /etc/valet && printf '%s' '${json}' > ${APPLIED_PATH}`,
+    { privileged: true },
   );
   if (result.exitCode !== 0) {
     throw new Error(

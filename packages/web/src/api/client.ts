@@ -16,11 +16,7 @@ import type {
   PatchAssistantRequest,
   PatchAssistantResponse,
   CancelWorkflowRunResponse,
-  CreateWorkflowScheduleRequest,
-  CreateWorkflowScheduleResponse,
-  DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
-  ListWorkflowSchedulesResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
   ListBakesResponse,
@@ -39,6 +35,8 @@ import type {
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  CreateWorkflowEventTriggerRequest,
+  CreateWorkflowScheduleRequest,
   DeleteCredentialResponse,
   DeleteGrantRequest,
   DeleteGrantResponse,
@@ -56,12 +54,14 @@ import type {
   GetSkillResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
+  GetWorkflowTriggerCatalogResponse,
   ListCredentialsResponse,
   ListActionLogResponse,
   ListDecisionsResponse,
   ListGrantsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
+  ListAllWorkflowRunsResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
   CreateLlmProviderRequest,
@@ -87,6 +87,7 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  ListWorkflowTriggersResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
   ListWorkflowVersionsResponse,
@@ -155,9 +156,13 @@ import type {
   StartWorkflowRunResponse,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
+  UpdateWorkflowEventTriggerRequest,
   UpdateWorkflowRequest,
+  UpdateWorkflowScheduleRequest,
   UsageSummaryResponse,
   UpdateWorkflowResponse,
+  WorkflowEventTriggerResponse,
+  WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
 } from "@valet/api/wire";
@@ -536,26 +541,14 @@ export const api = {
     ),
   deleteEventSubscription: (id: string) =>
     request<void>("DELETE", `/event-subscriptions/${encodeURIComponent(id)}`),
-  // workflow triggers: webhook URL management + cron schedules
+  // workflow webhook URL management. Schedules and event triggers are the
+  // flat trigger surface below, not this per-workflow one.
   getWorkflowWebhook: (id: string) =>
     request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
   mintWorkflowWebhook: (id: string) =>
     request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
   deleteWorkflowWebhook: (id: string) =>
     request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
-  listWorkflowSchedules: (id: string) =>
-    request<ListWorkflowSchedulesResponse>("GET", `/workflows/${encodeURIComponent(id)}/schedules`),
-  createWorkflowSchedule: (id: string, body: CreateWorkflowScheduleRequest) =>
-    request<CreateWorkflowScheduleResponse>(
-      "POST",
-      `/workflows/${encodeURIComponent(id)}/schedules`,
-      body,
-    ),
-  deleteWorkflowSchedule: (id: string, scheduleId: string) =>
-    request<DeleteWorkflowScheduleResponse>(
-      "DELETE",
-      `/workflows/${encodeURIComponent(id)}/schedules/${encodeURIComponent(scheduleId)}`,
-    ),
 
   // workflow templates — the starting points the gallery on /workflows offers
   listWorkflowTemplates: () => request<ListWorkflowTemplatesResponse>("GET", "/templates"),
@@ -565,6 +558,31 @@ export const api = {
       `/templates/${encodeURIComponent(id)}/install`,
       body,
     ),
+
+  // workflow triggers (spec 2026-08-15)
+  listWorkflowTriggers: (workflowId?: string) =>
+    request<ListWorkflowTriggersResponse>(
+      "GET",
+      `/workflows/triggers${workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""}`,
+    ),
+  getWorkflowTriggerCatalog: () =>
+    request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
+  listAllWorkflowRuns: (limit?: number) =>
+    request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${limit ? `?limit=${limit}` : ""}`),
+  createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
+    request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
+  updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>
+    request<WorkflowScheduleResponse>("PATCH", `/workflows/schedules/${encodeURIComponent(id)}`, body),
+  deleteWorkflowSchedule: (id: string) =>
+    request<{ ok: true }>("DELETE", `/workflows/schedules/${encodeURIComponent(id)}`),
+  runWorkflowScheduleNow: (id: string) =>
+    request<{ ok: true }>("POST", `/workflows/schedules/${encodeURIComponent(id)}/run`),
+  createWorkflowEventTrigger: (body: CreateWorkflowEventTriggerRequest) =>
+    request<WorkflowEventTriggerResponse>("POST", "/workflows/event-triggers", body),
+  updateWorkflowEventTrigger: (id: string, body: UpdateWorkflowEventTriggerRequest) =>
+    request<WorkflowEventTriggerResponse>("PATCH", `/workflows/event-triggers/${encodeURIComponent(id)}`, body),
+  deleteWorkflowEventTrigger: (id: string) =>
+    request<{ ok: true }>("DELETE", `/workflows/event-triggers/${encodeURIComponent(id)}`),
 
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),

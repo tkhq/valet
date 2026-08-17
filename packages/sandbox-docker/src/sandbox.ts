@@ -131,6 +131,12 @@ export interface DockerSandboxOptions {
   /** Absolute host path for the creds bind mount (~/.valet/creds/<sandboxId>/).
    * Present only when the sandbox was created with credsFiles. */
   credsHostDir?: string;
+  /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). When set,
+   * non-privileged execs run as the `dockerd` workload user (see
+   * `buildDockerExecArgs`). Like `credsHostDir`, this survives `restore()`
+   * because the provider's in-memory sandbox map holds the instance —
+   * there is no on-disk re-derivation path (see `restore`'s docblock). */
+  docker?: boolean;
 }
 
 const CONTAINER_WORKSPACE = "/workspace";
@@ -156,6 +162,10 @@ export interface BuildDockerRunArgsOpts {
    * (create()) is responsible for writing the files BEFORE invoking docker run.
    * When absent, no creds volume is added. */
   credsHostDir?: string;
+  /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). Adds the
+   * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
+   * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
+  docker?: boolean;
 }
 
 /**
@@ -171,6 +181,16 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   runArgs.push("--workdir", CONTAINER_WORKSPACE);
   runArgs.push("-v", `${opts.workspaceHostPath}:${CONTAINER_WORKSPACE}`);
   if (opts.credsHostDir) runArgs.push("-v", `${opts.credsHostDir}:/etc/valet/creds:ro`);
+  if (opts.docker) {
+    runArgs.push("--security-opt", "seccomp=unconfined");
+    runArgs.push("--security-opt", "apparmor=unconfined");
+    runArgs.push("--security-opt", "systempaths=unconfined");
+    runArgs.push("--cap-add", "SYS_ADMIN");
+    runArgs.push("--cap-add", "NET_ADMIN");
+    runArgs.push("--device", "/dev/fuse");
+    runArgs.push("--device", "/dev/net/tun");
+    runArgs.push("--env", "VALET_SANDBOX_DOCKER=1");
+  }
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
@@ -202,6 +222,15 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
       "-c",
       "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
     );
+  } else if (opts.docker) {
+    // Same probe-and-degrade idiom as the full profile: images without the
+    // rootless toolchain still come up (docker commands then fail inside).
+    runArgs.push(
+      opts.image,
+      "sh",
+      "-c",
+      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+    );
   } else {
     // Keep the container alive — most images exit immediately if PID 1 is
     // an interactive shell and there's no TTY. `tail -f /dev/null` is a
@@ -211,6 +240,46 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   return runArgs;
 }
 
+export interface BuildDockerExecArgsOpts {
+  containerId: string;
+  /** Already-resolved absolute container-side working directory. */
+  cwd: string;
+  command: string;
+  env?: Record<string, string>;
+  /** Adds `--interactive` (set when the caller supplies stdin). */
+  interactive?: boolean;
+  /** The sandbox was created with SandboxCreateOpts.docker. */
+  docker?: boolean;
+  /** ExecOpts.privileged — run with the container's default (root) user. */
+  privileged?: boolean;
+}
+
+/**
+ * Pure `docker exec` argv builder (same extract-pure-function pattern as
+ * `buildDockerRunArgs`). Exec identity: in a docker-enabled sandbox every
+ * non-privileged exec runs as the `dockerd` workload user (`-u dockerd`,
+ * HOME pointed at its home dir) so files the workload creates are mapped
+ * inside the rootless docker daemon's user namespace. `privileged: true`
+ * (prep's system steps) and non-docker sandboxes keep the container's
+ * default user — argv byte-identical to the pre-flag shape.
+ */
+export function buildDockerExecArgs(opts: BuildDockerExecArgsOpts): string[] {
+  const args = ["exec"];
+  args.push("--workdir", opts.cwd);
+  if (opts.env) {
+    for (const [k, v] of Object.entries(opts.env)) {
+      args.push("--env", `${k}=${v}`);
+    }
+  }
+  if (opts.interactive) args.push("--interactive");
+  if (opts.docker && !opts.privileged) {
+    args.push("-u", "dockerd");
+    args.push("--env", "HOME=/home/dockerd");
+  }
+  args.push(opts.containerId, "sh", "-c", opts.command);
+  return args;
+}
+
 export class DockerSandbox implements Sandbox {
   readonly id: string;
   readonly workspace: string;
@@ -218,6 +287,7 @@ export class DockerSandbox implements Sandbox {
   readonly containerWorkspace: string;
   readonly image: string;
   readonly credsHostDir?: string;
+  readonly docker?: boolean;
   private jobs = new Map<string, DockerJobState>();
   private nextJobId = 1;
 
@@ -228,6 +298,7 @@ export class DockerSandbox implements Sandbox {
     this.containerWorkspace = opts.containerWorkspace;
     this.image = opts.image;
     this.credsHostDir = opts.credsHostDir;
+    this.docker = opts.docker;
   }
 
   /**
@@ -310,16 +381,15 @@ export class DockerSandbox implements Sandbox {
 
   private execArgs(command: string, opts?: ExecOpts): string[] {
     const cwd = opts?.cwd ? this.resolveContainerPath(opts.cwd) : this.containerWorkspace;
-    const args = ["exec"];
-    args.push("--workdir", cwd);
-    if (opts?.env) {
-      for (const [k, v] of Object.entries(opts.env)) {
-        args.push("--env", `${k}=${v}`);
-      }
-    }
-    if (opts?.stdin !== undefined) args.push("--interactive");
-    args.push(this.containerId, "sh", "-c", command);
-    return args;
+    return buildDockerExecArgs({
+      containerId: this.containerId,
+      cwd,
+      command,
+      env: opts?.env,
+      interactive: opts?.stdin !== undefined,
+      docker: this.docker,
+      privileged: opts?.privileged,
+    });
   }
 
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
@@ -653,21 +723,42 @@ function assertPlainFilenames(caller: string, names: string[]): void {
 /** Write credential files into the given directory (mode 0600). Creates the
  * directory (mode 0700, mkdir -p equivalent) before writing.
  *
+ * Docker-enabled sandboxes (`opts.docker`) instead get 0644 files in a 0755
+ * dir: git runs as the `dockerd` workload user there, and the credential
+ * helper must be able to read the mounted files. The trade: on a dev
+ * machine the bind-mounted creds become readable by other local users of
+ * the same host (the k8s provider's Secret mounts are already 0644, so this
+ * only widens the docker/dev posture, not production).
+ *
  * Throws if any key is not a plain filename (e.g. "../evil" or "a/b") to
  * prevent path-traversal writes outside the creds dir.
  *
  * Exported for unit testing. */
-export async function writeCredsFiles(dir: string, files: Record<string, string>): Promise<void> {
+export async function writeCredsFiles(
+  dir: string,
+  files: Record<string, string>,
+  opts?: { docker?: boolean },
+): Promise<void> {
   assertPlainFilenames("writeCredsFiles", Object.keys(files));
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  const dirMode = opts?.docker ? 0o755 : 0o700;
+  const fileMode = opts?.docker ? 0o644 : 0o600;
+  await fs.mkdir(dir, { recursive: true, mode: dirMode });
+  // `mkdir` mode is masked by the process umask and ignored for an existing
+  // dir — chmod explicitly so the mode is authoritative on every write.
+  await fs.chmod(dir, dirMode);
   for (const [name, content] of Object.entries(files)) {
     // Write to a sibling temp file then rename so the container-side bind
     // mount always sees a fully written file (avoids partial-read races on
     // macOS Docker Desktop where the FUSE/VirtioFS layer reflects file writes
     // as they happen rather than after flush).
     const tmp = join(dir, `.${name}.tmp`);
-    await fs.writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
+    await fs.writeFile(tmp, content, { encoding: "utf8", mode: fileMode });
     await fs.rename(tmp, join(dir, name));
+    // `writeFile`'s mode is masked by the process umask (a 0077 umask turns
+    // the docker-case 0644 into 0600, and the credential helper running as
+    // the workload user then cannot read the token). chmod explicitly, same
+    // as the directory above.
+    await fs.chmod(join(dir, name), fileMode);
   }
 }
 
@@ -751,6 +842,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       isolated: true,
       coldStartEstimateMs: 8000,
       credsMount: true,
+      dockerSupport: true,
     };
   }
 
@@ -794,7 +886,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     let sandboxCredsDir: string | undefined;
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
       sandboxCredsDir = credsHostDir(containerName);
-      await writeCredsFiles(sandboxCredsDir, opts.credsFiles);
+      await writeCredsFiles(sandboxCredsDir, opts.credsFiles, { docker: opts.docker });
     }
 
     const runArgs = buildDockerRunArgs({
@@ -806,6 +898,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       resources: opts.resources,
       profile: opts.profile,
       credsHostDir: sandboxCredsDir,
+      docker: opts.docker,
     });
 
     const startResult = await execProcess("docker", runArgs, {});
@@ -822,6 +915,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       containerWorkspace: CONTAINER_WORKSPACE,
       image,
       credsHostDir: sandboxCredsDir,
+      docker: opts.docker,
     });
     this.sandboxes.set(id, sb);
     return sb;
@@ -875,7 +969,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     await Promise.all(
       removed.map((f) => fs.unlink(join(dir, f)).catch(() => undefined)),
     );
-    await writeCredsFiles(dir, files);
+    await writeCredsFiles(dir, files, { docker: sb.docker });
     await awaitCredsPropagation(sb, files, removed);
   }
 

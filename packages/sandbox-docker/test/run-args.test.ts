@@ -1,8 +1,8 @@
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { buildDockerRunArgs, credsCheckScript, writeCredsFiles } from "../src/sandbox.js";
+import { buildDockerExecArgs, buildDockerRunArgs, credsCheckScript, writeCredsFiles } from "../src/sandbox.js";
 
 const baseOpts = {
   containerName: "valet-sandbox-test",
@@ -129,6 +129,50 @@ describe("buildDockerRunArgs (pure)", () => {
   });
 });
 
+describe("buildDockerExecArgs (workload exec identity)", () => {
+  const base = { containerId: "cid-1", cwd: "/workspace", command: "echo hi" };
+
+  it("non-docker sandbox — byte-identical baseline pin, no -u either way", () => {
+    expect(buildDockerExecArgs(base)).toEqual([
+      "exec",
+      "--workdir",
+      "/workspace",
+      "cid-1",
+      "sh",
+      "-c",
+      "echo hi",
+    ]);
+    expect(buildDockerExecArgs({ ...base, privileged: true })).not.toContain("-u");
+  });
+
+  it("docker sandbox + non-privileged runs as dockerd with HOME set, before the container id", () => {
+    const args = buildDockerExecArgs({ ...base, docker: true });
+    const uIdx = args.indexOf("-u");
+    expect(uIdx).toBeGreaterThan(-1);
+    expect(args[uIdx + 1]).toBe("dockerd");
+    const joined = args.join(" ");
+    expect(joined).toContain("--env HOME=/home/dockerd");
+    expect(uIdx).toBeLessThan(args.indexOf("cid-1"));
+    expect(args.slice(-4)).toEqual(["cid-1", "sh", "-c", "echo hi"]);
+  });
+
+  it("docker sandbox + privileged keeps the container's default (root) user", () => {
+    const args = buildDockerExecArgs({ ...base, docker: true, privileged: true });
+    expect(args).not.toContain("-u");
+    expect(args.join(" ")).not.toContain("HOME=/home/dockerd");
+  });
+
+  it("keeps env/interactive handling regardless of the docker flag", () => {
+    const args = buildDockerExecArgs({
+      ...base,
+      docker: true,
+      env: { FOO: "bar" },
+      interactive: true,
+    });
+    expect(args).toEqual(expect.arrayContaining(["--env", "FOO=bar", "--interactive"]));
+  });
+});
+
 describe("writeCredsFiles (pure — no Docker required)", () => {
   let tmp: string;
 
@@ -162,6 +206,34 @@ describe("writeCredsFiles (pure — no Docker required)", () => {
     // Both files exist; no error thrown on access.
     await expect(access(join(tmp, "token"))).resolves.toBeUndefined();
     await expect(access(join(tmp, "other"))).resolves.toBeUndefined();
+    const fileMode = (await stat(join(tmp, "token"))).mode & 0o777;
+    expect(fileMode).toBe(0o600);
+  });
+
+  it("docker-enabled sandboxes get world-readable creds (0644 files, 0755 dir)", async () => {
+    const dir = join(tmp, "docker-creds");
+    await writeCredsFiles(dir, { token: "abc" }, { docker: true });
+    expect((await stat(join(dir, "token"))).mode & 0o777).toBe(0o644);
+    expect((await stat(dir)).mode & 0o777).toBe(0o755);
+  });
+
+  it("file modes survive a restrictive umask (0077) — chmod is authoritative", async () => {
+    const prev = process.umask(0o077);
+    try {
+      const dir = join(tmp, "umask-creds");
+      await writeCredsFiles(dir, { token: "abc" }, { docker: true });
+      expect((await stat(join(dir, "token"))).mode & 0o777).toBe(0o644);
+      expect((await stat(dir)).mode & 0o777).toBe(0o755);
+    } finally {
+      process.umask(prev);
+    }
+  });
+
+  it("non-docker sandboxes keep 0600 files and a 0700 dir", async () => {
+    const dir = join(tmp, "plain-creds");
+    await writeCredsFiles(dir, { token: "abc" });
+    expect((await stat(join(dir, "token"))).mode & 0o777).toBe(0o600);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
   });
 });
 
@@ -203,5 +275,47 @@ describe("credsCheckScript path-traversal guard", () => {
   it("rejects traversal in removed names", () => {
     expect(() => credsCheckScript({}, ["../outside"])).toThrow(/unsafe key/);
     expect(() => credsCheckScript({}, ["."])).toThrow(/unsafe key/);
+  });
+});
+
+describe("docker flag (rootless DinD)", () => {
+  const base = {
+    containerName: "valet-sandbox-x",
+    image: "img:1",
+    workspaceHostPath: "/tmp/ws",
+    network: "bridge",
+  };
+
+  it("adds exactly the rootless relaxations when docker is true", () => {
+    const args = buildDockerRunArgs({ ...base, docker: true });
+    const joined = args.join(" ");
+    expect(joined).toContain("--security-opt seccomp=unconfined");
+    expect(joined).toContain("--security-opt apparmor=unconfined");
+    expect(joined).toContain("--security-opt systempaths=unconfined");
+    expect(joined).toContain("--cap-add SYS_ADMIN");
+    expect(joined).toContain("--cap-add NET_ADMIN");
+    expect(joined).toContain("--device /dev/fuse");
+    expect(joined).toContain("--device /dev/net/tun");
+    expect(joined).toContain("--env VALET_SANDBOX_DOCKER=1");
+    expect(joined).not.toContain("--privileged");
+  });
+
+  it("headless+docker runs the start-headless probe wrapper", () => {
+    const args = buildDockerRunArgs({ ...base, docker: true });
+    expect(args[args.length - 1]).toBe(
+      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+    );
+  });
+
+  it("emits nothing docker-related when the flag is absent", () => {
+    const joined = buildDockerRunArgs(base).join(" ");
+    expect(joined).not.toContain("seccomp");
+    expect(joined).not.toContain("apparmor");
+    expect(joined).not.toContain("systempaths");
+    expect(joined).not.toContain("/dev/fuse");
+    expect(joined).not.toContain("VALET_SANDBOX_DOCKER");
+    expect(joined).not.toContain("cap-add");
+    expect(joined).not.toContain("SYS_ADMIN");
+    expect(joined).not.toContain("NET_ADMIN");
   });
 });

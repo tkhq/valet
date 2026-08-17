@@ -1,8 +1,13 @@
-# Session sandbox image for the `sandbox-kubernetes` provider (kubernetes-
-# deployment design decision 2). This is the pod the k8s provider's manifest
-# builder runs — NOT the legacy OpenCode/VNC/code-server dev-environment
-# image at `docker/Dockerfile.sandbox` (that one backs the Modal/docker-
-# compose "opencode" stack and is intentionally left untouched).
+# CI-published full-profile base image for the `sandbox-kubernetes` provider
+# (kubernetes-deployment design decision 2). This image is the FROM target for
+# the auto-seeded `kind='base', profile='full'` image_sources row — it ships
+# the compiled `@valet/sandbox-gateway` bundle, ttyd, and code-server on top
+# of the headless agent tooling, making it suitable for interactive developer
+# sessions. Published as `ghcr.io/tkhq/valet-sandbox:sha-<shortsha>` by
+# `.github/workflows/docker-publish.yml`. NOT the legacy OpenCode/VNC/code-
+# server dev-environment image at `docker/Dockerfile.sandbox` (that one backs
+# the Modal/docker-compose "opencode" stack and is intentionally left
+# untouched).
 #
 # `packages/sandbox-kubernetes/src/manifest.ts` sets the pod's `command`
 # depending on profile:
@@ -122,6 +127,39 @@ RUN curl -fsSL -o /tmp/gh.deb \
 # docker/start-full.sh execs. Requires VALET_SESSION_ID +
 # VALET_SANDBOX_JWT_SECRET in the pod/container env — exits 1 if missing.
 COPY --from=gateway-build /out/gateway /gateway
+
+# Rootless docker-in-sandbox toolchain (sandbox-docker design,
+# docs/specs/2026-08-15-sandbox-docker-design.md). Baked always, dormant
+# unless VALET_SANDBOX_DOCKER=1 — start scripts launch dockerd-rootless as
+# the non-root `dockerd` user. Pinned; bump deliberately.
+ARG DOCKER_VERSION=5:29.7.2-1~debian.12~bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gnupg uidmap fuse-overlayfs slirp4netns iproute2 iptables \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli=${DOCKER_VERSION} \
+        docker-ce=${DOCKER_VERSION} \
+        docker-ce-rootless-extras=${DOCKER_VERSION} \
+        docker-buildx-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Exec-identity contract: `dockerd` gets its own primary group and NO
+# supplementary groups. Both providers depend on this — `docker exec -u
+# dockerd` and the k8s setpriv wrapper (`--init-groups`) must resolve the
+# same group set. If you add dockerd to a group here, both pick it up.
+RUN useradd -m -u 1500 dockerd \
+    && grep -v '^dockerd:' /etc/subuid > /tmp/subuid.tmp && mv /tmp/subuid.tmp /etc/subuid \
+    && grep -v '^dockerd:' /etc/subgid > /tmp/subgid.tmp && mv /tmp/subgid.tmp /etc/subgid \
+    && echo "dockerd:200000:65536" >> /etc/subuid \
+    && echo "dockerd:200000:65536" >> /etc/subgid
+
+COPY docker/start-docker.sh /start-docker.sh
+COPY docker/start-headless.sh /start-headless.sh
+RUN chmod +x /start-docker.sh /start-headless.sh
 
 COPY docker/start-full.sh /start-full.sh
 RUN chmod +x /start-full.sh

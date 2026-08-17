@@ -11,22 +11,28 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  CreateWorkflowEventTriggerRequest,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
   CreateWorkflowScheduleRequest,
-  CreateWorkflowScheduleResponse,
-  ListWorkflowSchedulesResponse,
   WorkflowWebhookResponse,
   GetWorkflowRunResponse,
+  GetWorkflowTriggerCatalogResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
+  ListWorkflowTriggersResponse,
   ResolveWorkflowApprovalRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
+  UpdateWorkflowEventTriggerRequest,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
+  UpdateWorkflowScheduleRequest,
   GetWorkflowVersionResponse,
   ListWorkflowVersionsResponse,
+  WorkflowEventTriggerResponse,
+  WorkflowScheduleResponse,
 } from "@valet/api/wire";
 import { api, ApiError, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
 
@@ -44,7 +50,9 @@ export const qkWorkflows = {
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
   webhook: (id: string) => ["workflows", id, "webhook"] as const,
-  schedules: (id: string) => ["workflows", id, "schedules"] as const,
+  triggers: (workflowId?: string) => ["workflows", "triggers", workflowId ?? "all"] as const,
+  allRuns: () => ["workflows", "all-runs"] as const,
+  triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -134,6 +142,34 @@ export function useRunDetail(
     queryFn: () => api.getWorkflowRun(runId),
     enabled: !!runId,
     refetchInterval: (query) => (query.state.data?.run.status === "settled" ? false : 5000),
+    ...opts,
+  });
+}
+
+export function useWorkflowTriggers(
+  workflowId?: string,
+  opts?: Partial<UseQueryOptions<ListWorkflowTriggersResponse>>,
+) {
+  return useQuery<ListWorkflowTriggersResponse>({
+    queryKey: qkWorkflows.triggers(workflowId),
+    queryFn: () => api.listWorkflowTriggers(workflowId),
+    ...opts,
+  });
+}
+
+export function useTriggerCatalog() {
+  return useQuery<GetWorkflowTriggerCatalogResponse>({
+    queryKey: qkWorkflows.triggerCatalog(),
+    queryFn: () => api.getWorkflowTriggerCatalog(),
+    staleTime: 5 * 60_000, // plugin catalog changes only on deploy
+  });
+}
+
+export function useAllWorkflowRuns(opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>) {
+  return useQuery<ListAllWorkflowRunsResponse>({
+    queryKey: qkWorkflows.allRuns(),
+    queryFn: () => api.listAllWorkflowRuns(),
+    refetchInterval: 5000, // runs move; same cadence as run detail
     ...opts,
   });
 }
@@ -242,7 +278,7 @@ export function useCancelRun(runId: string) {
   });
 }
 
-// ── Triggers: webhook + schedules ────────────────────────────────────────
+// ── Triggers: webhook, schedules, event triggers ─────────────────────────
 
 /** The webhook status read treats "no webhook configured" (404) as `null`
  * rather than an error — absence is the normal starting state. */
@@ -286,31 +322,66 @@ export function useDeleteWorkflowWebhook(id: string) {
   });
 }
 
-export function useWorkflowSchedules(id: string) {
-  return useQuery<ListWorkflowSchedulesResponse>({
-    queryKey: qkWorkflows.schedules(id),
-    queryFn: () => api.listWorkflowSchedules(id),
+function useInvalidateTriggers() {
+  const qc = useQueryClient();
+  return () => qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+}
+
+export function useCreateSchedule() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<WorkflowScheduleResponse, Error, CreateWorkflowScheduleRequest>({
+    mutationFn: (body) => api.createWorkflowSchedule(body),
+    onSuccess: invalidate,
   });
 }
 
-export function useCreateWorkflowSchedule(id: string) {
+export function useUpdateSchedule() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<WorkflowScheduleResponse, Error, { id: string; body: UpdateWorkflowScheduleRequest }>({
+    mutationFn: ({ id, body }) => api.updateWorkflowSchedule(id, body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteSchedule() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (id) => api.deleteWorkflowSchedule(id),
+    onSuccess: invalidate,
+  });
+}
+
+export function useRunScheduleNow() {
   const qc = useQueryClient();
-  return useMutation<CreateWorkflowScheduleResponse, Error, CreateWorkflowScheduleRequest>({
-    mutationFn: (body) => api.createWorkflowSchedule(id, body),
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (id) => api.runWorkflowScheduleNow(id),
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: qkWorkflows.schedules(id) });
+      void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+      void qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
     },
   });
 }
 
-export function useDeleteWorkflowSchedule(id: string) {
-  const qc = useQueryClient();
-  return useMutation<{ deleted: boolean }, Error, string>({
-    mutationFn: (scheduleId) => api.deleteWorkflowSchedule(id, scheduleId),
-    // onSettled, not onSuccess: a failed delete (e.g. a row another tab
-    // already removed) must also reconcile the stale list.
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: qkWorkflows.schedules(id) });
-    },
+export function useCreateEventTrigger() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<WorkflowEventTriggerResponse, Error, CreateWorkflowEventTriggerRequest>({
+    mutationFn: (body) => api.createWorkflowEventTrigger(body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateEventTrigger() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<WorkflowEventTriggerResponse, Error, { id: string; body: UpdateWorkflowEventTriggerRequest }>({
+    mutationFn: ({ id, body }) => api.updateWorkflowEventTrigger(id, body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteEventTrigger() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (id) => api.deleteWorkflowEventTrigger(id),
+    onSuccess: invalidate,
   });
 }

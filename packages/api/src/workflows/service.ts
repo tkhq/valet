@@ -25,6 +25,7 @@ import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   actionInvocations,
+  eventSubscriptions,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -42,6 +43,8 @@ import {
 } from "../policies/service.js";
 import type {
   GetWorkflowRunResponse,
+  GlobalWorkflowRunSummary,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
@@ -204,6 +207,16 @@ export async function ownedWorkflowIds(db: AppDb, owner: WorkflowOwner): Promise
     .from(workflowDefinitions)
     .where(await ownedDefinitionFilter(db, owner));
   return rows.map((r) => r.id);
+}
+
+/** The same read as `ownedWorkflowIds`, with the display name each id needs
+ * when the rows leave their own workflow's page. */
+async function ownedWorkflowNames(db: AppDb, owner: WorkflowOwner): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id, name: workflowDefinitions.name })
+    .from(workflowDefinitions)
+    .where(await ownedDefinitionFilter(db, owner));
+  return new Map(rows.map((r) => [r.id, r.name]));
 }
 
 /**
@@ -441,6 +454,23 @@ export async function deleteWorkflowDefinition(
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
+
+  // Triggers must not outlive the workflow: orphaned schedules would be
+  // disabled by the scheduler eventually, but the triggers list would show
+  // ghosts until then. Event subscriptions targeting the workflow are
+  // app-db rows with no FK, so remove them explicitly.
+  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
+  const subs = await deps.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId));
+  for (const sub of subs) {
+    // `target` is a free-form jsonb column; guard the shape before reading
+    // so a malformed row cannot abort the cleanup loop mid-delete.
+    if (typeof sub.target !== "object" || sub.target === null) continue;
+    const target = sub.target as { kind?: string; workflowId?: string };
+    if (target.kind === "workflow" && target.workflowId === id) {
+      await deps.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
+    }
+  }
+
   // No FK/cascade on workflow_webhooks (it's keyed by workflowId, a plain
   // text column) — without this, a deleted workflow's hookId secret would
   // sit in the table forever, unreachable through any owner-facing route
@@ -588,6 +618,11 @@ export interface OwnerRunsFilter extends RunPageOptions {
  * the caller named a workflow id they cannot read — the route answers 404,
  * so an unreadable workflow and a missing one stay indistinguishable.
  *
+ * Each row carries `workflowName`. A cross-workflow list has no per-workflow
+ * heading, so the name must travel with the run or the reader cannot tell
+ * the rows apart. The names come from the same definition read the
+ * authorization check already does, so this costs no extra query.
+ *
  * Runs of a deleted definition are unreachable here, as they were through
  * the per-workflow list: they stay reachable by run id.
  */
@@ -595,12 +630,12 @@ export async function listRunsForOwner(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   filter: OwnerRunsFilter = {},
-): Promise<ListWorkflowRunsResponse | null> {
-  const readable = await ownedWorkflowIds(deps.db, owner);
+): Promise<ListAllWorkflowRunsResponse | null> {
+  const nameById = await ownedWorkflowNames(deps.db, owner);
+  const readable = [...nameById.keys()];
   let workflowIds = readable;
   if (filter.workflowIds !== undefined) {
-    const readableSet = new Set(readable);
-    if (filter.workflowIds.some((id) => !readableSet.has(id))) return null;
+    if (filter.workflowIds.some((id) => !nameById.has(id))) return null;
     workflowIds = filter.workflowIds;
   }
   if (workflowIds.length === 0) return { runs: [] };
@@ -614,7 +649,13 @@ export async function listRunsForOwner(
     limit: clampRunLimit(filter.limit),
     cursor: filter.cursor,
   });
-  return { runs: result.runs.map(toRunSummary), nextCursor: result.nextCursor };
+  const runs = result.runs.map((run) => {
+    const summary = toRunSummary(run);
+    // The id is the fallback label: a run whose definition was renamed
+    // between the two reads is still identifiable, and never blank.
+    return { ...summary, workflowName: nameById.get(summary.workflowId) ?? summary.workflowId };
+  });
+  return { runs, nextCursor: result.nextCursor };
 }
 
 /**
@@ -1006,3 +1047,4 @@ export async function getWorkflowRunDetail(
     pendingGates,
   };
 }
+

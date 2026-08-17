@@ -837,6 +837,15 @@ export interface ExecOpts {
   signal?: AbortSignal;
   stdin?: string;
   maxOutputBytes?: number;
+  /**
+   * Run this exec with the sandbox's full (root) privileges. Default false:
+   * in a docker-enabled sandbox (SandboxCreateOpts.docker) providers run
+   * non-privileged execs as the dedicated workload user (`dockerd`) so
+   * files the workload creates are mapped inside the rootless docker
+   * daemon's user namespace. In sandboxes without docker, this flag has no
+   * effect — every exec keeps the container's default user.
+   */
+  privileged?: boolean;
 }
 
 export interface ExecResult {
@@ -921,6 +930,16 @@ export interface SandboxCreateOpts {
    * Absent: no creds volume is mounted.
    */
   credsFiles?: Record<string, string>;
+  /**
+   * Request a rootless docker daemon inside the sandbox. Providers that
+   * support it (capabilities().dockerSupport) grant: seccomp/AppArmor/system
+   * paths unconfined, CAP_SYS_ADMIN + CAP_NET_ADMIN, /dev/fuse + /dev/net/tun,
+   * and VALET_SANDBOX_DOCKER=1 so the image start scripts launch
+   * dockerd-rootless. Never privileged. See spec decision 2 in
+   * docs/specs/2026-08-15-sandbox-docker-design.md. Providers without support
+   * ignore the flag.
+   */
+  docker?: boolean;
 }
 
 /**
@@ -943,6 +962,11 @@ export interface SandboxCapabilities {
    * NOT isolated.
    */
   isolated?: boolean;
+  /**
+   * Whether the backend honors SandboxCreateOpts.docker (rootless
+   * docker-in-sandbox). Absent means not supported; the flag is ignored.
+   */
+  dockerSupport?: boolean;
   /**
    * Whether the backend can scale an idle sandbox to zero and later wake it
    * with its workspace intact (hibernation). When true, the provider MUST

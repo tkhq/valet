@@ -404,4 +404,20 @@ fi
 pass "GitHub App env fallback: non-secret half in ConfigMap, secret half in Secret, opt-in"
 
 echo
+echo "== helm template (sandbox.image null — remote per-profile deploys) =="
+NULL_IMAGE_RENDER="$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set-json 'sandbox.image=null')"
+# Herestrings, not `echo | grep -q`: under pipefail a -q early-exit
+# SIGPIPEs the echo and turns a successful match into a failed pipeline.
+grep -q 'VALET_SANDBOX_IMAGE:' <<<"$NULL_IMAGE_RENDER" \
+  && fail "sandbox.image=null render: VALET_SANDBOX_IMAGE must be omitted so the api resolves seeded per-profile base sources"
+grep -q 'VALET_FULL_BASE_IMAGE:' <<<"$NULL_IMAGE_RENDER" \
+  || fail "sandbox.image=null render: per-profile base env vars must still render"
+pass "sandbox.image=null omits VALET_SANDBOX_IMAGE, keeps per-profile base vars"
+
+echo "== helm template (sandbox.image.repository without tag — must fail loudly) =="
+if helm template valet "$CHART_DIR" --kube-version 1.30.0 --set sandbox.image.repository=example.com/foo --set-json 'sandbox.image.tag=null' >/dev/null 2>&1; then
+  fail "repository-without-tag render: must fail (a silent \"foo:\" ref is a malformed image), got a clean render"
+fi
+pass "sandbox.image.repository without tag fails the render (required tag)"
+
 echo "All golden assertions passed."

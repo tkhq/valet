@@ -28,6 +28,12 @@ Set `true` to suppress lockfile auto-detection. No install step runs unless your
 
 Use `skipDetect` when your repo brings its own toolchain that the base image does not provide and that auto-detection cannot handle. You must supply the full install sequence in `setup`.
 
+### `docker`
+
+Type: `boolean` (default `false`)
+
+Set `true` to give this repo's sessions a rootless docker daemon inside the sandbox. The daemon runs as a non-root user; the sandbox is never privileged. Docker state is ephemeral — images pull again after the sandbox restarts. See `docs/specs/2026-08-15-sandbox-docker-design.md`.
+
 ## Dockerfile step order
 
 The bake produces a Dockerfile in this order:
@@ -54,7 +60,7 @@ Valet checks for these files at the repository root, in this order. Multiple ent
 
 Detection is root-level only. A nested `packages/foo/pnpm-lock.yaml` does not trigger a step.
 
-The org base image provides: `python3`, `jq`, `build-essential`, `curl`, and the Node runtime. Repos that need more must add it via `setup` or `image`.
+Repo bakes build on the org's headless base image. The default headless base provides: `git`, `gh`, `ripgrep`, `curl`, `bash`, `openssh-client`, and the Node runtime. It does not include `python3`, `jq`, or `build-essential`. Repos that need more must add it via `setup` or `image`.
 
 ## Examples
 

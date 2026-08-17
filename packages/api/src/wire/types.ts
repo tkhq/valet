@@ -110,6 +110,9 @@ export interface SessionDetail extends SessionSummary {
   /** Session-default model id. Threads inherit when they have no override. */
   model?: string;
   profile: SandboxProfile;
+  /** Request a rootless docker daemon inside this session's sandbox
+   * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
+  docker: boolean;
   /** Repos bound to this session, in position order. Omitted when unbound. */
   repos?: RepoBinding[];
 }
@@ -126,6 +129,9 @@ export interface CreateSessionRequest {
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
   profile?: SandboxProfile;
+  /** Request a rootless docker daemon inside this session's sandbox
+   * (docker-in-sandbox). Defaults to false. */
+  docker?: boolean;
   /** Multiple repo bindings. Mutually exclusive with `repo` (400 if both set). */
   repos?: RepoBinding[];
   /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */
@@ -1068,9 +1074,11 @@ export interface DeleteWorkflowWebhookResponse {
   deleted: boolean;
 }
 
-// Workflow schedules (cron triggers). `schedule-service.ts` also supports
+// Workflow schedules (cron triggers), nested under one workflow at
+// `/api/workflows/:id/schedules`. `schedule-service.ts` also supports
 // orchestrator-prompt schedules; this surface manages only the
-// workflow-scoped kind, so `workflowId` is always set.
+// workflow-scoped kind, so `workflowId` is always set. The flat trigger
+// surface below manages both kinds and is what the UI calls.
 export interface WorkflowScheduleWire {
   scheduleId: string;
   workflowId: string;
@@ -1086,7 +1094,12 @@ export interface ListWorkflowSchedulesResponse {
   schedules: WorkflowScheduleWire[];
 }
 
-export interface CreateWorkflowScheduleRequest {
+/**
+ * Body of `POST /api/workflows/:id/schedules`. The target discriminator that
+ * the flat `CreateWorkflowScheduleRequest` carries is implied by the path
+ * here, so this body omits it — hence the separate name.
+ */
+export interface CreateScheduleOnWorkflowRequest {
   name: string;
   /** 5-field cron expression (minute hour day-of-month month day-of-week). */
   cron: string;
@@ -1204,6 +1217,126 @@ export interface InstallWorkflowTemplateResponse {
   workflowName: string;
   /** Present when the template armed a cron schedule. */
   scheduleId?: string;
+}
+
+/** A run row read outside one workflow's page, where the reader has no
+ * heading to tell them which workflow it belongs to. */
+export interface GlobalWorkflowRunSummary extends WorkflowRunSummary {
+  workflowName: string;
+}
+
+export interface ListAllWorkflowRunsResponse {
+  runs: GlobalWorkflowRunSummary[];
+  /** Absent on the last page, exactly as `ListWorkflowRunsResponse`. */
+  nextCursor?: string;
+}
+
+// ── Workflow triggers (spec 2026-08-15) ──────────────────────────────────
+
+export interface WorkflowScheduleTriggerDetail {
+  cron: string;
+  timezone: string;
+  targetKind: "workflow" | "orchestrator";
+  prompt?: string;
+  input?: unknown;
+  nextFireAt: number;
+  lastFiredAt: number | null;
+}
+
+export interface WorkflowEventTriggerDetail {
+  eventKeys: string[];
+  filters: unknown[];
+}
+
+export type WorkflowTriggerItem =
+  | {
+      kind: "schedule";
+      id: string;
+      workflowId?: string;
+      name: string;
+      enabled: boolean;
+      detail: WorkflowScheduleTriggerDetail;
+    }
+  | {
+      kind: "event";
+      id: string;
+      workflowId: string;
+      name: string;
+      enabled: boolean;
+      detail: WorkflowEventTriggerDetail;
+    };
+
+export interface ListWorkflowTriggersResponse {
+  triggers: WorkflowTriggerItem[];
+}
+
+export type CreateWorkflowScheduleRequest = {
+  name: string;
+  cron: string;
+  timezone?: string;
+} & (
+  | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
+  | { target: { kind: "orchestrator"; prompt: string } }
+);
+
+export interface UpdateWorkflowScheduleRequest {
+  name?: string;
+  cron?: string;
+  timezone?: string;
+  enabled?: boolean;
+  prompt?: string;
+  input?: unknown;
+}
+
+export interface WorkflowScheduleResponse {
+  schedule: {
+    scheduleId: string;
+    targetKind: "workflow" | "orchestrator";
+    workflowId?: string;
+    prompt?: string;
+    name: string;
+    cron: string;
+    timezone: string;
+    enabled: boolean;
+    input?: unknown;
+    lastFiredAt: number | null;
+    nextFireAt: number;
+  };
+}
+
+export interface CreateWorkflowEventTriggerRequest {
+  workflowId: string;
+  name: string;
+  eventKeys: string[];
+  filters?: unknown[];
+}
+
+export interface UpdateWorkflowEventTriggerRequest {
+  name?: string;
+  eventKeys?: string[];
+  filters?: unknown[];
+  enabled?: boolean;
+}
+
+export interface WorkflowEventTriggerResponse {
+  trigger: {
+    triggerId: string;
+    workflowId: string;
+    name: string;
+    eventKeys: string[];
+    filters: unknown[];
+    enabled: boolean;
+  };
+}
+
+export interface WorkflowTriggerCatalogEntry {
+  key: string;
+  description: string;
+  filters: { field: string; description: string }[];
+}
+
+export interface GetWorkflowTriggerCatalogResponse {
+  catalog: { service: string; entries: WorkflowTriggerCatalogEntry[] }[];
 }
 
 export interface GetMemoryTreeResponse {

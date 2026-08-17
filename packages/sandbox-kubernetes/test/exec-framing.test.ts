@@ -8,7 +8,16 @@
  */
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { buildShellCommand, exitCodeFromStatus, shQuote } from "../src/exec.js";
+import {
+  buildShellCommand,
+  execInPod,
+  exitCodeFromStatus,
+  shQuote,
+  wrapAsWorkloadUser,
+  type ExecDeps,
+  type ExecStatus,
+  type PodExecApi,
+} from "../src/exec.js";
 
 /** Runs `printf '%s' <quoted>` through a real local shell and returns what
  * it printed — the ground truth for "did shQuote produce something the
@@ -85,6 +94,89 @@ describe("buildShellCommand", () => {
     const result = spawnSync("/bin/sh", ["-c", built], { encoding: "utf8" });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe("hello-tmp");
+  });
+});
+
+const SETPRIV_PREFIX =
+  "exec setpriv --reuid dockerd --regid dockerd --init-groups " +
+  "env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c ";
+
+describe("wrapAsWorkloadUser", () => {
+  it("wraps the shell command in the exact setpriv prefix, single-quoted", () => {
+    expect(wrapAsWorkloadUser("echo hi")).toBe(`${SETPRIV_PREFIX}${shQuote("echo hi")}`);
+  });
+
+  it("the inner command survives single-quote escaping round-trip through a real shell", () => {
+    const inner = `printf '%s' 'it'\\''s "quoted"'`;
+    const wrapped = wrapAsWorkloadUser(inner);
+    // setpriv isn't available on dev machines — strip the identity prefix
+    // and run the structurally identical `exec /bin/sh -c '<inner>'` tail,
+    // which exercises the exact quoting the wrapper emits.
+    expect(wrapped.startsWith(SETPRIV_PREFIX)).toBe(true);
+    const runnable = `exec /bin/sh -c ${wrapped.slice(SETPRIV_PREFIX.length)}`;
+    const result = spawnSync("/bin/sh", ["-c", runnable], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`it's "quoted"`);
+  });
+});
+
+/** Fake transport: records the command argv of every exec and reports the
+ * given status immediately. */
+class FakePodExecApi implements PodExecApi {
+  commands: string[][] = [];
+  constructor(private status: ExecStatus = { status: "Success" }) {}
+
+  async exec(
+    _namespace: string,
+    _podName: string,
+    _containerName: string,
+    command: string[],
+    _stdout: unknown,
+    _stderr: unknown,
+    _stdin: unknown,
+    _tty: boolean,
+    statusCallback?: (status: ExecStatus) => void,
+  ): Promise<{ close(): void }> {
+    this.commands.push(command);
+    queueMicrotask(() => statusCallback?.(this.status));
+    return { close() {} };
+  }
+}
+
+describe("execInPod workload-user wrapping", () => {
+  function deps(docker: boolean): { deps: ExecDeps; api: FakePodExecApi } {
+    const api = new FakePodExecApi();
+    return { deps: { api, namespace: "ns", containerName: "sandbox", docker }, api };
+  }
+
+  it("docker-enabled + non-privileged wraps the command with setpriv", async () => {
+    const { deps: d, api } = deps(true);
+    const result = await execInPod(d, "pod-1", "echo hi");
+    expect(result.exitCode).toBe(0);
+    expect(api.commands[0]).toEqual(["/bin/sh", "-c", `${SETPRIV_PREFIX}${shQuote("echo hi")}`]);
+  });
+
+  it("docker-enabled + privileged stays unwrapped", async () => {
+    const { deps: d, api } = deps(true);
+    await execInPod(d, "pod-1", "echo hi", { privileged: true });
+    expect(api.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+  });
+
+  it("non-docker sandboxes stay unwrapped either way", async () => {
+    const { deps: d, api } = deps(false);
+    await execInPod(d, "pod-1", "echo hi");
+    await execInPod(d, "pod-1", "echo hi", { privileged: true });
+    expect(api.commands).toEqual([
+      ["/bin/sh", "-c", "echo hi"],
+      ["/bin/sh", "-c", "echo hi"],
+    ]);
+  });
+
+  it("wraps AFTER env/cwd folding so the whole composed command runs as dockerd", async () => {
+    const { deps: d, api } = deps(true);
+    await execInPod(d, "pod-1", "pwd", { cwd: "/workspace", env: { FOO: "bar" } });
+    const composed = buildShellCommand("pwd", { cwd: "/workspace", env: { FOO: "bar" } });
+    expect(api.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser(composed)]);
   });
 });
 

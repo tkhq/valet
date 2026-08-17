@@ -45,7 +45,7 @@ import {
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveDefaultImage } from "../providers/sandbox-backend.js";
-import { resolveRecipe, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
+import { resolveRecipe, loadPrebuildOverride, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
 import type { SpawnFn } from "../prebuilds/docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { pushRefFor } from "../prebuilds/k8s-builder.js";
@@ -293,6 +293,53 @@ export async function resolveRecipeFromGitHub(
   return resolveRecipe(files, read);
 }
 
+const repoDockerCache = new Map<string, { value: boolean; at: number }>();
+const REPO_DOCKER_TTL_MS = 10 * 60 * 1000;
+
+/** Clears the module-level `repoDockerFlag` cache. Exposed for test isolation
+ * only — production code must not call this. */
+export function clearRepoDockerCache(): void {
+  repoDockerCache.clear();
+}
+
+/** Best-effort read of `.valet/prebuild.yaml`'s `docker` key for a repo ref.
+ * Errors (auth, rate limit, bad YAML) resolve `false`: the session still
+ * starts, without docker. The session-create `docker` option is the
+ * corrective override when the repo read cannot succeed.
+ *
+ * Results are cached per `owner/repo@ref` for 10 minutes (both `true` and
+ * `false` are cached so a missing file does not generate repeated API calls). */
+export async function repoDockerFlag(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<boolean> {
+  const key = `${owner}/${repo}@${ref}`;
+  const hit = repoDockerCache.get(key);
+  if (hit && Date.now() - hit.at < REPO_DOCKER_TTL_MS) return hit.value;
+  let value = false;
+  try {
+    const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
+    const override = await loadPrebuildOverride(read);
+    value = override?.docker === true;
+  } catch (err) {
+    console.error(
+      `repoDockerFlag: read failed for ${key}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  // Crude size cap: clear the whole map rather than LRU-evict. The map holds
+  // at most ~1000 entries (owner/repo@ref strings + booleans), which is small
+  // enough in memory; clearing is O(1) and avoids the complexity of a real
+  // eviction policy. A hard limit of 1000 is far beyond any realistic session
+  // volume before the 10-min TTL would reclaim entries anyway.
+  if (repoDockerCache.size >= 1000) repoDockerCache.clear();
+  repoDockerCache.set(key, { value, at: Date.now() });
+  return value;
+}
+
 /** Resolves an `api`-purpose GitHub token for `owner/repo`, falling back to
  * `null` (unauthenticated) when NO credential is configured at all. */
 async function resolveApiTokenOrNull(
@@ -316,8 +363,26 @@ const DEFAULT_SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
  * `last_bound_at` older than this is auto-disabled by the nightly pass. */
 const DECAY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Last-resort fallback base image when neither the config nor
- * `resolveDefaultImage(env)` resolve one. */
-const FALLBACK_BASE_IMAGE = "node:20-bookworm";
+ * `resolveDefaultImage(env)` resolve one. Updated from node:20-bookworm for
+ * consistency with the seeded headless base. */
+const FALLBACK_BASE_IMAGE = "node:22-bookworm-slim";
+
+/** Default public base image for the seeded headless base source.
+ * Overridden by VALET_HEADLESS_BASE_IMAGE env var. */
+const DEFAULT_HEADLESS_BASE_IMAGE = "node:22-bookworm-slim";
+
+/** Default CI-published full-profile base image (ships gateway + ttyd +
+ * code-server). Overridden by VALET_FULL_BASE_IMAGE env var. */
+const DEFAULT_FULL_BASE_IMAGE = "ghcr.io/tkhq/valet-sandbox:latest";
+
+/** Setup commands for the seeded headless base. Mirrors the base-tooling
+ * section of docker/Dockerfile.sandbox-k8s (lines 45-59, 108-119). Node is
+ * present in node:22-bookworm-slim by default. */
+const HEADLESS_SETUP_COMMANDS: string[] = [
+  "apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates coreutils curl procps bash openssh-client && rm -rf /var/lib/apt/lists/*",
+  `GH_VERSION=2.63.2 && curl -fsSL -o /tmp/gh.deb "https://github.com/cli/cli/releases/download/v\${GH_VERSION}/gh_\${GH_VERSION}_linux_$(dpkg --print-architecture).deb" && dpkg -i /tmp/gh.deb && rm /tmp/gh.deb`,
+  "mkdir -p /workspace",
+];
 
 /** Canonical recipe JSON — mirrors `recipe.ts`'s private helper so the
  * identity hash covers full step content (id + lockfile + command) plus the
@@ -505,14 +570,15 @@ export class SourceService {
    *  2. The parent source: external → its `external_ref`; base → its current
    *     CONSISTENT pushed bake's `image_ref` (chained bake). A non-ready base
    *     parent falls through to stock (callers must have already deferred).
-   *  3. `resolveDefaultImage(env)` (`VALET_SANDBOX_IMAGE`).
-   *  4. `FALLBACK_BASE_IMAGE`. */
+   *  3. `VALET_HEADLESS_BASE_IMAGE` env var (for unparented headless base sources).
+   *  4. `resolveDefaultImage(env)` (`VALET_SANDBOX_IMAGE`, deprecated fallback).
+   *  5. `FALLBACK_BASE_IMAGE`. */
   private async resolveBaseImage(source: ImageSourceRow, override: string | undefined): Promise<string> {
     if (override) return override;
     const parentBase = await this.resolveParentBase(source);
     if (parentBase.status === "external" && parentBase.ref) return parentBase.ref;
     if (parentBase.status === "ready") return parentBase.bake.imageRef;
-    return resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
+    return this.env.VALET_HEADLESS_BASE_IMAGE ?? resolveDefaultImage(this.env) ?? DEFAULT_HEADLESS_BASE_IMAGE;
   }
 
   /** The identity that a PARENT source contributes to its child's identity
@@ -1077,11 +1143,15 @@ export class SourceService {
         return;
       }
 
+      // Repo sources are always agent (headless) workspaces; parent at the
+      // headless base so the agent tooling layer is included.
       const baseSource = await this.db
         .select({ id: imageSources.id })
         .from(imageSources)
-        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base")))
+        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base"), eq(imageSources.profile, "headless")))
         .limit(1);
+      // Fall back to null (no parent) if no headless base exists yet —
+      // defensive; post-seed this should not happen.
       const parentId = baseSource[0]?.id ?? null;
 
       const id = `src_${this.newId()}`;
@@ -1164,6 +1234,162 @@ export class SourceService {
       await this.startBake(sourceId);
     } catch (err) {
       console.error(`ensureRepoSource: first bake of ${repo.fullName} failed:`, err);
+    }
+  }
+
+  /**
+   * Idempotent seeding of the three default base rows every org needs:
+   *
+   *   1. `kind='external'`, `name='stock-full'` — the CI-published full-profile
+   *      image (ghcr.io/tkhq/valet-sandbox or VALET_FULL_BASE_IMAGE).
+   *   2. `kind='base'`, `profile='headless'` — no parent; resolves its FROM via
+   *      VALET_HEADLESS_BASE_IMAGE → VALET_SANDBOX_IMAGE → DEFAULT_HEADLESS_BASE_IMAGE.
+   *   3. `kind='base'`, `profile='full'` — parent = the stock-full external row;
+   *      empty setup_commands (the full image ships everything already).
+   *
+   * Never throws — errors are logged and swallowed so org creation is not
+   * blocked by a seed failure. Safe to call repeatedly.
+   */
+  async seedDefaultBasesIfMissing(orgId: string): Promise<void> {
+    const headlessBaseImage = this.env.VALET_HEADLESS_BASE_IMAGE ?? DEFAULT_HEADLESS_BASE_IMAGE;
+    const fullBaseImage = this.env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE;
+    const now = this.now();
+
+    // Step 1 — ensure the stock-full external row exists.
+    const existingExternal = await this.db
+      .select({ id: imageSources.id })
+      .from(imageSources)
+      .where(
+        and(
+          eq(imageSources.orgId, orgId),
+          eq(imageSources.kind, "external"),
+          eq(imageSources.name, "stock-full"),
+        ),
+      )
+      .limit(1);
+
+    let stockFullId: string;
+    if (existingExternal[0]) {
+      stockFullId = existingExternal[0].id;
+    } else {
+      stockFullId = `src_${this.newId()}`;
+      await this.db.insert(imageSources).values({
+        id: stockFullId,
+        orgId,
+        kind: "external",
+        parentId: null,
+        name: "stock-full",
+        externalRef: fullBaseImage,
+        pullSecretName: null,
+        setupCommands: null,
+        profile: null,
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      console.log(`seedDefaultBasesIfMissing(${orgId}): seeded stock-full external row ${stockFullId}`);
+    }
+
+    // Step 2 — ensure the headless base row exists.
+    const existingHeadless = await this.db
+      .select({ id: imageSources.id })
+      .from(imageSources)
+      .where(
+        and(
+          eq(imageSources.orgId, orgId),
+          eq(imageSources.kind, "base"),
+          eq(imageSources.profile, "headless"),
+        ),
+      )
+      .limit(1);
+
+    let headlessId: string;
+    if (existingHeadless[0]) {
+      headlessId = existingHeadless[0].id;
+    } else {
+      headlessId = `src_${this.newId()}`;
+      await this.db.insert(imageSources).values({
+        id: headlessId,
+        orgId,
+        kind: "base",
+        parentId: null,
+        name: "default-headless",
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: HEADLESS_SETUP_COMMANDS,
+        profile: "headless",
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      console.log(
+        `seedDefaultBasesIfMissing(${orgId}): seeded headless base ${headlessId} FROM ${headlessBaseImage}`,
+      );
+      // Fire a background bake so the headless base is ready for repo children.
+      await this.maybeFireBaseBake(headlessId, orgId);
+    }
+
+    // Step 3 — ensure the full base row exists.
+    const existingFull = await this.db
+      .select({ id: imageSources.id })
+      .from(imageSources)
+      .where(
+        and(
+          eq(imageSources.orgId, orgId),
+          eq(imageSources.kind, "base"),
+          eq(imageSources.profile, "full"),
+        ),
+      )
+      .limit(1);
+
+    if (!existingFull[0]) {
+      const fullId = `src_${this.newId()}`;
+      await this.db.insert(imageSources).values({
+        id: fullId,
+        orgId,
+        kind: "base",
+        parentId: stockFullId,
+        name: "default-full",
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: [],
+        profile: "full",
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      console.log(`seedDefaultBasesIfMissing(${orgId}): seeded full base ${fullId} FROM ${fullBaseImage}`);
+      await this.maybeFireBaseBake(fullId, orgId);
+    }
+  }
+
+  /** Best-effort background bake for a newly-seeded base source. Skips when
+   * no builder is wired. Never throws. */
+  private async maybeFireBaseBake(sourceId: string, orgId: string): Promise<void> {
+    if (!this.builder) {
+      console.log(`seedDefaultBasesIfMissing(${orgId}): no image builder — skipping first bake of ${sourceId}`);
+      return;
+    }
+    if (await this.hasActiveBake(sourceId)) return;
+    try {
+      await this.startBake(sourceId);
+    } catch (err) {
+      console.error(`seedDefaultBasesIfMissing(${orgId}): first bake of ${sourceId} failed:`, err);
     }
   }
 

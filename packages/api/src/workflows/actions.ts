@@ -37,11 +37,13 @@ import {
   deleteWorkflowTrigger,
   listEventTypes,
   listWorkflowTriggers,
+  updateWorkflowTrigger,
 } from "./trigger-service.js";
 import {
   createWorkflowSchedule,
   deleteWorkflowSchedule,
   listWorkflowSchedules,
+  updateWorkflowSchedule,
 } from "./schedule-service.js";
 import {
   deleteWorkflowWebhook,
@@ -708,6 +710,98 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const updateSchedule = action(
+    Type.Object({
+      schedule_id: Type.String(),
+      name: Type.Optional(Type.String()),
+      cron: Type.Optional(
+        Type.String({
+          description: '5-field cron expression, e.g. "0 9 * * 1-5". Changes recompute next fire time.',
+        }),
+      ),
+      timezone: Type.Optional(
+        Type.String({ description: 'IANA timezone name, e.g. "America/Denver". Changes recompute next fire time.' }),
+      ),
+      enabled: Type.Optional(
+        Type.Boolean({ description: "false pauses the schedule; re-enabling recomputes next fire time." }),
+      ),
+      prompt: Type.Optional(Type.String({ description: "Orchestrator-target schedules only." })),
+      input: Type.Optional(
+        Type.Record(Type.String(), Type.Unknown(), {
+          description: "Workflow-target schedules only. Pass null to clear a previously set input.",
+        }),
+      ),
+    }),
+  )({
+    id: "workflows.update_schedule",
+    name: "Update schedule",
+    description:
+      "Update a cron schedule by id. Changing cron or timezone recomputes next fire time. " +
+      "Setting enabled=false pauses the schedule; re-enabling recomputes next fire time so a stale slot does not fire at once. " +
+      "Target kind (workflow vs orchestrator) cannot change — delete and recreate to switch.",
+    riskLevel: "medium",
+    execute: async ({ schedule_id, name, cron, timezone, enabled, prompt, input }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await updateWorkflowSchedule(
+        getDeps().db,
+        owner.orgId,
+        schedule_id,
+        { name, cron, timezone, enabled, prompt, input },
+      );
+      if (!result.ok) return { success: false, error: result.error };
+      return { success: true, data: result.schedule };
+    },
+  });
+
+  const updateTrigger = action(
+    Type.Object({
+      trigger_id: Type.String(),
+      name: Type.Optional(Type.String()),
+      event_keys: Type.Optional(
+        Type.Array(Type.String(), {
+          description: 'Event key patterns; trailing ".*" wildcard supported.',
+        }),
+      ),
+      filters: Type.Optional(
+        Type.Array(
+          Type.Object({
+            field: Type.String(),
+            op: Type.Union([
+              Type.Literal("eq"),
+              Type.Literal("in"),
+              Type.Literal("prefix"),
+              Type.Literal("contains"),
+            ]),
+            value: Type.Unknown(),
+          }),
+        ),
+      ),
+      enabled: Type.Optional(Type.Boolean()),
+    }),
+  )({
+    id: "workflows.update_trigger",
+    name: "Update event trigger",
+    description:
+      "Update a workflow event trigger by id. All fields are optional; only supplied fields change. " +
+      "Changing event_keys or filters re-validates against the event catalog.",
+    riskLevel: "medium",
+    execute: async ({ trigger_id, name, event_keys, filters, enabled }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const result = await updateWorkflowTrigger(
+        deps.db,
+        deps.plugins ?? [],
+        owner.orgId,
+        trigger_id,
+        { name, eventKeys: event_keys, filters, enabled },
+      );
+      if (!result.ok) return { success: false, error: result.error };
+      return { success: true, data: result.trigger };
+    },
+  });
+
   const createWebhook = action(Type.Object({ workflow_id: Type.String() }))({
     id: "workflows.create_webhook",
     name: "Create or rotate workflow webhook",
@@ -786,9 +880,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       createTrigger,
       listTriggers,
       deleteTrigger,
+      updateTrigger,
       createSchedule,
       listSchedules,
       deleteSchedule,
+      updateSchedule,
       createWebhook,
       getWebhook,
       deleteWebhook,

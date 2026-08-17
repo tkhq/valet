@@ -151,6 +151,10 @@ export async function installCredentialHelper(sandbox: Sandbox, apiUrl: string):
   await sandbox.writeFile(stagedHelper, gitCredentialHelperScript(apiUrl));
   await sandbox.writeFile(stagedGhWrapper, ghWrapperScript(apiUrl));
 
+  // System step: writing /usr/local/bin needs the sandbox's full (root)
+  // privileges — in docker-enabled sandboxes non-privileged execs run as
+  // the dockerd workload user, which cannot write there. chmod 755 keeps
+  // the scripts world-executable, so the workload user can still run them.
   const install = await sandbox.exec(
     [
       "mkdir -p /usr/local/bin",
@@ -159,6 +163,7 @@ export async function installCredentialHelper(sandbox: Sandbox, apiUrl: string):
       `cp ${shQuote(stagedGhWrapper)} ${GH_SHIM_PATH}`,
       `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH}`,
     ].join(" && "),
+    { privileged: true },
   );
   if (install.exitCode !== 0) {
     throw new Error(execFailureMessage("workspace prep: installing credential helper failed", install));
@@ -180,12 +185,19 @@ export async function installCredentialHelper(sandbox: Sandbox, apiUrl: string):
 
   // Discovered running this against a real Docker sandbox (docker-gated
   // integration test): the workspace bind-mount is owned by the HOST
-  // user's uid, but `git` runs as whatever uid `docker exec` defaults to
-  // (root in a stock image) — a uid mismatch git treats as "dubious
-  // ownership" and refuses to operate on (`fatal: detected dubious
-  // ownership in repository at '/workspace'`), which would otherwise
-  // silently brick every clone/fetch/checkout below. `*` covers every
-  // binding's target dir regardless of layout.
+  // user's uid, but `git` runs as whatever uid the exec resolves to — a
+  // uid mismatch git treats as "dubious ownership" and refuses to operate
+  // on (`fatal: detected dubious ownership in repository at '/workspace'`),
+  // which would otherwise silently brick every clone/fetch/checkout below.
+  // `*` covers every binding's target dir regardless of layout.
+  //
+  // Exec identity split: ONLY the /usr/local/bin install above runs
+  // privileged. Every other prep exec (this config, identity, clones)
+  // stays non-privileged, so in docker-enabled sandboxes git runs as the
+  // dockerd workload user and writes /home/dockerd/.gitconfig +
+  // dockerd-owned clones — files the rootless docker daemon's user
+  // namespace can map. Non-docker sandboxes are unchanged (non-privileged
+  // execs keep the container's default user).
   const safeDirectory = await sandbox.exec("git config --global --add safe.directory '*'");
   if (safeDirectory.exitCode !== 0) {
     throw new Error(execFailureMessage("workspace prep: git config safe.directory failed", safeDirectory));

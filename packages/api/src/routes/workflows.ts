@@ -55,7 +55,8 @@ import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
-  CreateWorkflowScheduleRequest,
+  ListAllWorkflowRunsResponse,
+  CreateScheduleOnWorkflowRequest,
   CreateWorkflowScheduleResponse,
   DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
@@ -249,7 +250,9 @@ workflowsRouter.get("/runs", async (c) => {
   // cannot read is indistinguishable from one that does not exist.
   if (!page) return c.json({ error: "workflow not found" }, 404);
 
-  const resp: ListWorkflowRunsResponse = page;
+  // Rows carry `workflowName`: this list mixes workflows, so the hub's Runs
+  // tab has no heading to name them from.
+  const resp: ListAllWorkflowRunsResponse = page;
   return c.json(resp);
 });
 
@@ -453,9 +456,9 @@ workflowsRouter.post("/:id/schedules", async (c) => {
   const summary = await getWorkflowDefinition(deps, owner, id);
   if (!summary) return c.json({ error: "workflow not found" }, 404);
 
-  let body: CreateWorkflowScheduleRequest;
+  let body: CreateScheduleOnWorkflowRequest;
   try {
-    body = (await c.req.json()) as CreateWorkflowScheduleRequest;
+    body = (await c.req.json()) as CreateScheduleOnWorkflowRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }

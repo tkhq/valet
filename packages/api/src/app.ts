@@ -28,6 +28,7 @@ import { memoryRouter } from "./routes/memory.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { templatesRouter } from "./routes/templates.js";
@@ -227,6 +228,9 @@ export function createApp(
   app.route("/api/orchestrator", orchestratorRouter);
   app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);
+  // Trigger routes first: workflowsRouter's `GET /:id` would otherwise
+  // swallow `/triggers` and `/runs` as workflow ids.
+  app.route("/api/workflows", workflowTriggersRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/templates", templatesRouter);
   app.route("/api/plugins", pluginsRouter);

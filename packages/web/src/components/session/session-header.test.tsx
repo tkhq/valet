@@ -82,6 +82,7 @@ function baseSession(): SessionDetail {
     lastActivityAt: Date.now(),
     messageCount: 3,
     profile: "headless",
+    docker: false,
   };
 }
 
