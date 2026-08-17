@@ -20,7 +20,11 @@ export interface WorkflowPatch {
   /** Also drops every edge touching a removed node, and its ui position. */
   removeNodeIds?: string[];
   addEdges?: WorkflowEdge[];
-  /** `fromOutput` omitted → removes matching edges regardless of branch. */
+  /**
+   * `fromOutput` omitted → removes matching edges regardless of branch.
+   * Applied before `removeNodeIds`, so listing a removed node's edges here
+   * is valid (redundant, not an error).
+   */
   removeEdges?: WorkflowEdgeRef[];
 }
 
@@ -45,19 +49,9 @@ export function applyWorkflowPatch(definition: WorkflowDefinition, patch: Workfl
     else next.nodes.push(node);
   }
 
-  for (const id of patch.removeNodeIds ?? []) {
-    const idx = next.nodes.findIndex((n) => n.id === id);
-    if (idx < 0) {
-      errors.push(`remove_node_ids: no node with id ${JSON.stringify(id)}`);
-      continue;
-    }
-    next.nodes.splice(idx, 1);
-    next.edges = next.edges.filter((e) => e.from !== id && e.to !== id);
-    if (next.ui?.nodes && id in next.ui.nodes) {
-      delete next.ui.nodes[id];
-    }
-  }
-
+  // Process remove_edges before remove_node_ids. Node removal also drops the
+  // node's edges, so a patch that removes a node AND lists its edges here must
+  // not fail with "no edge matches" — the edges did exist in the definition.
   for (const ref of patch.removeEdges ?? []) {
     const before = next.edges.length;
     next.edges = next.edges.filter(
@@ -70,6 +64,19 @@ export function applyWorkflowPatch(definition: WorkflowDefinition, patch: Workfl
     );
     if (next.edges.length === before) {
       errors.push(`remove_edges: no edge matches ${JSON.stringify(ref)}`);
+    }
+  }
+
+  for (const id of patch.removeNodeIds ?? []) {
+    const idx = next.nodes.findIndex((n) => n.id === id);
+    if (idx < 0) {
+      errors.push(`remove_node_ids: no node with id ${JSON.stringify(id)}`);
+      continue;
+    }
+    next.nodes.splice(idx, 1);
+    next.edges = next.edges.filter((e) => e.from !== id && e.to !== id);
+    if (next.ui?.nodes && id in next.ui.nodes) {
+      delete next.ui.nodes[id];
     }
   }
 

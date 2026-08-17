@@ -61,6 +61,35 @@ describe("applyWorkflowPatch", () => {
     }
   });
 
+  it("accepts a patch that removes a node and lists its edges explicitly", () => {
+    const result = applyWorkflowPatch(base(), {
+      removeNodeIds: ["greet"],
+      removeEdges: [
+        { from: "trigger", to: "greet" },
+        { from: "greet", to: "done" },
+      ],
+      addEdges: [{ from: "trigger", to: "done" }],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.definition.nodes.map((n) => n.id)).toEqual(["trigger", "done"]);
+      expect(result.definition.edges).toEqual([{ from: "trigger", to: "done" }]);
+    }
+  });
+
+  it("still rejects a remove_edges entry that matches nothing", () => {
+    const result = applyWorkflowPatch(base(), {
+      removeNodeIds: ["greet"],
+      removeEdges: [{ from: "trigger", to: "ghost" }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([
+        'remove_edges: no edge matches {"from":"trigger","to":"ghost"}',
+      ]);
+    }
+  });
+
   it("reports unknown ids/edges instead of silently no-oping", () => {
     const result = applyWorkflowPatch(base(), {
       removeNodeIds: ["ghost"],
