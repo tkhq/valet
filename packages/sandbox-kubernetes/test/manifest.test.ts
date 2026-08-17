@@ -330,6 +330,21 @@ describe("docker flag (rootless DinD)", () => {
     expect(cr.spec.podTemplate.spec.securityContext).toEqual({ fsGroup: 1500 });
   });
 
+  it("sets hostUsers: false — k8s >=1.33 REQUIRES it for procMount: Unmasked", () => {
+    // k8s validation (1.31+, enforced once ProcMountType is on — default in
+    // 1.33): "hostUsers must be false to use Unmasked". Without this field
+    // an upgraded cluster REJECTS the pod outright. On clusters where
+    // UserNamespacesSupport is off (<=1.32 default) the API server drops
+    // the field, so it is inert today and load-bearing after the upgrade.
+    const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+    expect(cr.spec.podTemplate.spec.hostUsers).toBe(false);
+  });
+
+  it("leaves hostUsers unset for non-docker sandboxes", () => {
+    const cr = buildSandboxManifest(cfg, "sb-plain", {});
+    expect(cr.spec.podTemplate.spec.hostUsers).toBeUndefined();
+  });
+
   it("labels the CR docker-enabled so restore() can re-derive the flag", () => {
     const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
     expect(cr.metadata.labels[DOCKER_LABEL_KEY]).toBe("true");

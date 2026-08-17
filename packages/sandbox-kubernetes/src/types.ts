@@ -150,6 +150,12 @@ export interface SandboxPodSpec {
   containers: SandboxContainer[];
   /** See `PodSecurityContext` — set only for docker-enabled sandboxes. */
   securityContext?: PodSecurityContext;
+  /** `corev1.PodSpec.hostUsers` — false runs the pod in a user namespace.
+   * Set (false) only for docker-enabled sandboxes: k8s >=1.31 validation
+   * requires it for `procMount: Unmasked`, enforced once the ProcMountType
+   * gate is on (default from 1.33). On clusters with UserNamespacesSupport
+   * off the API server drops the field, so it is inert there. */
+  hostUsers?: boolean;
   restartPolicy?: "Always" | "OnFailure" | "Never";
   /** See `K8sProviderConfig.imagePullSecrets`'s docblock. */
   imagePullSecrets?: { name: string }[];
