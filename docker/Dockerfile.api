@@ -34,7 +34,10 @@
 # ─── Stage 1: install + build ──────────────────────────────────────────
 FROM node:22-bookworm-slim AS builder
 
-RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+# Corepack defers to the repo's `packageManager` pin, so the version here
+# only warms the cache — keep it equal to package.json's pin or the build
+# silently runs a different pnpm than this line claims.
+RUN corepack enable && corepack prepare pnpm@10.30.3 --activate
 
 WORKDIR /repo
 
@@ -80,9 +83,12 @@ RUN pnpm --filter @valet/web run build
 # Self-contained production-only deploy of @valet/api: resolves every
 # workspace dependency to real files (not symlinks) and installs with
 # --prod, so devDependencies (typescript, vitest, drizzle-kit, ...) are
-# excluded from what ships.
+# excluded from what ships. --legacy keeps the pnpm 9 deploy semantics
+# under pnpm 10+ (without it, deploy hard-fails with
+# ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE unless the whole workspace opts
+# into inject-workspace-packages, which would change local-dev linking).
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm-store,sharing=locked \
-    pnpm --filter @valet/api deploy --prod /out/api
+    pnpm --filter @valet/api deploy --legacy --prod /out/api
 
 # ─── Stage 2: runtime ───────────────────────────────────────────────────
 FROM node:22-bookworm-slim AS runtime
