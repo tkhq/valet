@@ -9,6 +9,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
 import { teamMembers, teams } from "../src/schema/index.js";
+import { setOrgFeatures } from "../src/services/org.js";
 import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -343,6 +344,11 @@ describe("teams routes", () => {
      * `origin: "idp"` and the full group path, and member rows written
      * straight to the table. `createTeam` cannot make one — it always writes
      * `local` — which is the point.
+     *
+     * `ssoTeamSync` goes on with it, because `origin` alone no longer locks
+     * the row. The lock exists so a hand edit is not undone at the next
+     * sign-in, so it holds only while a sync actually runs — see
+     * `isLiveIdpMirror`. The dormant half is tested at the end of this block.
      */
     async function seedIdpTeam(name: string, externalId: string): Promise<string> {
       const id = `team_idp_${name}`;
@@ -358,6 +364,7 @@ describe("teams routes", () => {
       // local-user is a team admin here, so every refusal below is reached
       // through the authz gate rather than short-circuited by it.
       await db.insert(teamMembers).values({ teamId: id, userId: "local-user", role: "admin" });
+      await setOrgFeatures(db, "local-org", { ssoTeamSync: true });
       return id;
     }
 
@@ -446,6 +453,27 @@ describe("teams routes", () => {
       // test-admin is an org admin, the widest recovery path this router has.
       const res = await fetch(`${baseUrl}/api/teams/${teamId}`, { method: "DELETE", headers: ADMIN_HEADERS });
       expect(res.status).toBe(409);
+    });
+
+    it("allows the edit once mirroring is off — a dormant mirror is not locked", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+      const teamId = await seedIdpTeam("platform", "/platform");
+      // The rows stay exactly as they were; only the org feature goes off.
+      // Nothing reasserts the group now, so refusing would leave a team
+      // nobody can change.
+      await setOrgFeatures(api.providers.db, "local-org", { ssoTeamSync: false });
+
+      const res = await fetch(`${baseUrl}/api/teams/${teamId}/members`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ userId: "test-member", role: "member" }),
+      });
+      expect(res.status).toBe(201);
+
+      const members = await fetch(`${baseUrl}/api/teams/${teamId}/members`, { headers: HEADERS });
+      const { members: rows } = (await members.json()) as ListTeamMembersResponse;
+      expect(rows.map((m) => m.userId).sort()).toEqual(["local-user", "test-member"]);
     });
 
     it("an unauthorized caller still gets 404, not 409 — the refusal must not leak existence", async () => {

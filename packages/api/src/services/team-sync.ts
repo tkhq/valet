@@ -106,11 +106,18 @@ export interface DesiredTeams {
   teams: Map<string, DesiredTeam>;
   /** Paths Valet does not mirror. Reported, never guessed at. */
   ignored: string[];
+  /**
+   * Paths that would have matched a listed group but carry no leading `/`.
+   * Reported apart from `ignored`, because the fix is on the identity
+   * provider's mapper and not on the group structure.
+   */
+  notRooted: string[];
 }
 
 /** Why one group produced no team and no membership. */
 export type SkipReason =
   | "path_not_mirrored"
+  | "path_not_rooted"
   | "name_taken_by_local_team"
   | "name_taken_by_config_team"
   | "name_taken_by_other_group"
@@ -143,9 +150,16 @@ export interface ReconcileOptions {
   adminGroupName: string;
   /**
    * Top-level group paths this instance mirrors, from
-   * `auth.sso.teams.groups`. Absent means every top-level group in the claim.
+   * `auth.sso.teams.groups`. Required, and an empty list mirrors nothing.
+   *
+   * There is no "mirror everything" value on purpose. A deployment that
+   * names no group cannot have decided which groups are teams, and an
+   * identity provider carries groups that have nothing to do with Valet —
+   * `/everyone`, `/vpn-users`, a project group from years ago. To mirror
+   * those makes teams nobody asked for, and no rule here can tell them from
+   * the ones the operator wants. The operator names the groups.
    */
-  mirroredGroups?: string[];
+  mirroredGroups: string[];
   /**
    * Path of the instance config file, named in the message a config-team
    * collision prints. Absent when the deployment declares no file.
@@ -256,34 +270,67 @@ export function readTeamClaim(
  * result: `["/platform", "/platform/admins"]` and its reverse both give
  * admin on `platform`.
  *
- * `mirroredGroups` is the optional allowlist from
- * `auth.sso.teams.groups`. Absent, every top-level group in the claim is
- * mirrored, which is the behaviour of a deployment that declares no file.
- * Present, a group outside it is dropped in silence: it was excluded on
- * purpose, and a warning for a deliberate choice would repeat on every login
- * of every user for as long as the group exists. The unreadable and
- * unmirrorable paths below are different — nobody chose those.
+ * `mirroredGroups` is the allowlist from `auth.sso.teams.groups`. A group
+ * outside it is dropped in silence: it was excluded on purpose, and a
+ * warning for a deliberate choice would repeat on every login of every user
+ * for as long as the group exists. The unreadable and unmirrorable paths
+ * below are different — nobody chose those.
+ *
+ * An empty list therefore mirrors nothing, and it is the value a deployment
+ * that names no group gets. The list has no "everything" value, so no
+ * caller can reach this function fail-open (`ReconcileOptions`).
+ *
+ * A path must start with `/`, the same shape the allowlist entries must have
+ * (`config/instance-config.ts`). A bare group NAME is refused, for the
+ * reason that makes the allowlist worth having at all: a provider that sends
+ * leaf names instead of full paths reports a member of `/contractors/platform`
+ * as `platform`, which is byte for byte what a member of `/platform` sends.
+ * The nesting is gone, so no rule here can tell the two apart, and a group
+ * the operator never named would grant membership of a team they did name.
+ * Keycloak's group mapper has a "Full group path" switch that sends the
+ * path; some providers send group names only, and a deployment on one of
+ * those mirrors nothing. That is the fail-closed answer.
  */
 export function desiredTeamsFromPaths(
   paths: string[],
   adminGroupName: string,
-  mirroredGroups?: string[],
+  mirroredGroups: string[],
 ): DesiredTeams {
   const wanted = new Map<string, DesiredTeam>();
   const ignored: string[] = [];
-  const allowed = mirroredGroups === undefined ? undefined : new Set(mirroredGroups);
+  const notRooted: string[] = [];
+  const allowed = new Set(mirroredGroups);
 
   for (const raw of paths) {
-    const segments = raw.trim().split("/").filter((segment) => segment.length > 0);
+    const trimmed = raw.trim();
+    const segments = trimmed.split("/").filter((segment) => segment.length > 0);
     const parent = segments[0];
     const isParent = segments.length === 1;
     const isAdminSubGroup = segments.length === 2 && segments[1] === adminGroupName;
 
-    // The allowlist is checked before the shape, so an excluded group's path
-    // never reaches the "not mirrored" warning either.
-    if (allowed !== undefined && (parent === undefined || !allowed.has(`/${parent}`))) continue;
+    // A path with no segment at all — "/" or "//" — names no group, so the
+    // allowlist cannot answer for it. Nobody chose to send it, so it is
+    // reported rather than dropped.
+    if (parent === undefined) {
+      ignored.push(raw);
+      continue;
+    }
 
-    if (parent === undefined || !(isParent || isAdminSubGroup)) {
+    // The allowlist is checked before the rest of the shape, so an excluded
+    // group's path never reaches the "not mirrored" warning either.
+    if (!allowed.has(`/${parent}`)) continue;
+
+    // Checked AFTER the allowlist on purpose. A mapper that sends bare names
+    // sends one for every group the user is in, and most of those are groups
+    // the operator excluded. To report those would print a warning per
+    // excluded group per login. Only a bare name that would otherwise have
+    // become a team is worth a word, and it is the one that is dangerous.
+    if (!trimmed.startsWith("/")) {
+      notRooted.push(raw);
+      continue;
+    }
+
+    if (!(isParent || isAdminSubGroup)) {
       ignored.push(raw);
       continue;
     }
@@ -294,7 +341,7 @@ export function desiredTeamsFromPaths(
     wanted.set(path, { path, name: parent, role });
   }
 
-  return { teams: wanted, ignored };
+  return { teams: wanted, ignored, notRooted };
 }
 
 type ResolveOutcome = { ok: true; teamId: string; created: boolean } | { ok: false; reason: SkipReason };
@@ -454,6 +501,106 @@ async function resolveIdpTeam(
   }
 }
 
+/** What the boot report found. Returned so a test can read it. */
+export interface TeamSyncStateReport {
+  enabled: boolean;
+  /** Top-level group paths the deployment named. */
+  mirroredGroups: number;
+  /** Team rows with `origin='idp'` that already exist in the org. */
+  mirroredTeams: number;
+  /**
+   * Of those, the rows whose group is no longer in the allowlist. The sync
+   * keeps them and their members, and updates neither.
+   */
+  unlistedTeams: number;
+}
+
+/**
+ * Prints what team mirroring will do, once, at boot.
+ *
+ * Three states are silent failures without it, and each is a state an
+ * operator cannot see from the teams page:
+ *
+ * 1. Mirroring is ON and no group is named. Every login reads the claim and
+ *    creates nothing, which looks the same as a broken mapper.
+ * 2. Mirroring is OFF and mirrored teams exist. Valet keeps them and keeps
+ *    their members — no team is deleted — but nothing updates them any more.
+ * 3. Mirroring is ON and a mirrored team's group is not in the allowlist.
+ *    That team is dormant while every other mirror is live, which is the one
+ *    state nothing on screen distinguishes: the row still reads "Identity
+ *    provider" and still refuses a rename, a membership edit and a delete.
+ *
+ * This reports; it never writes. To delete a team here would take away
+ * whatever that team owns, from an operator who only changed a setting.
+ */
+export async function reportTeamSyncState(
+  db: AppDb,
+  opts: {
+    orgId: string;
+    enabled: boolean;
+    /**
+     * Whether this deployment has an OIDC provider at all. Without one no
+     * group claim ever arrives, so "you named no group" would send the
+     * reader to fix a list that could not have helped them.
+     */
+    ssoConfigured: boolean;
+    mirroredGroups: string[];
+    configPath?: string;
+  },
+): Promise<TeamSyncStateReport> {
+  const rows = await db
+    .select({ id: teams.id, name: teams.name, externalId: teams.externalId })
+    .from(teams)
+    .where(and(eq(teams.orgId, opts.orgId), eq(teams.origin, "idp")));
+
+  // A NULL `external_id` belongs to a row the sync did not write, so it is
+  // not the sync's to report on — the same test `reconcileIdpTeams` makes.
+  const allowed = new Set(opts.mirroredGroups);
+  const unlisted = rows.filter((row) => row.externalId !== null && !allowed.has(row.externalId));
+
+  const report: TeamSyncStateReport = {
+    enabled: opts.enabled,
+    mirroredGroups: opts.mirroredGroups.length,
+    mirroredTeams: rows.length,
+    unlistedTeams: unlisted.length,
+  };
+
+  if (opts.enabled && opts.ssoConfigured && opts.mirroredGroups.length === 0) {
+    console.warn(
+      `team sync: the ssoTeamSync feature is on and no group is listed, so no team will be created. ` +
+        `Add the group paths to auth.sso.teams.groups in ${configFileLabel(opts.configPath)}, ` +
+        `then restart the api.`,
+    );
+  }
+
+  if (!opts.enabled && rows.length > 0) {
+    console.warn(
+      `team sync: the ssoTeamSync feature is off, and ${rows.length} team(s) from your identity ` +
+        `provider are still here with their members. Valet deleted nothing and now updates nothing. ` +
+        `To mirror groups again, set org.features.ssoTeamSync to true in ` +
+        `${configFileLabel(opts.configPath)}, or turn team sync on in Settings.`,
+    );
+  }
+
+  if (opts.enabled && unlisted.length > 0) {
+    // Name the teams. The count alone does not tell the reader which row on
+    // the teams page stopped tracking its group, and the row itself still
+    // reads "Identity provider".
+    const named = unlisted
+      .map((row) => `'${row.name}' (${row.externalId ?? "unknown group"})`)
+      .join(", ");
+    console.warn(
+      `team sync: ${unlisted.length} team(s) mirror a group that auth.sso.teams.groups does not ` +
+        `list: ${named}. Valet keeps each team and its members, and updates neither. To mirror a ` +
+        `group again, add its path to auth.sso.teams.groups in ${configFileLabel(opts.configPath)} ` +
+        `and restart the api. To edit or delete the team by hand, turn team sync off in Settings ` +
+        `first.`,
+    );
+  }
+
+  return report;
+}
+
 /**
  * Reconciles one user's mirrored team membership to match the claim.
  *
@@ -466,7 +613,7 @@ export async function reconcileIdpTeams(db: AppDb, opts: ReconcileOptions): Prom
   // and information we do not have cannot authorise a write.
   if (!opts.claim.present) return { ...NOTHING, skipped: [] };
 
-  const { teams: wanted, ignored } = desiredTeamsFromPaths(
+  const { teams: wanted, ignored, notRooted } = desiredTeamsFromPaths(
     opts.claim.paths,
     opts.adminGroupName,
     opts.mirroredGroups,
@@ -480,6 +627,19 @@ export async function reconcileIdpTeams(db: AppDb, opts: ReconcileOptions): Prom
         `'/platform/${opts.adminGroupName}'.`,
     );
     skipped.push({ groupPath: path, reason: "path_not_mirrored" });
+  }
+
+  // One message for the whole set, not one for each path. Every path here
+  // has the same cause and the same fix, so a message per path repeats the
+  // same instruction on every login of every user.
+  if (notRooted.length > 0) {
+    console.warn(
+      `team sync: ${notRooted.length} group name(s) arrived without a leading '/' and were ignored: ` +
+        `${notRooted.join(", ")}. A bare name cannot be told from a group of the same name inside ` +
+        `another group. Turn on 'Full group path' on the identity provider's group mapper, then ` +
+        `sign in again.`,
+    );
+    for (const path of notRooted) skipped.push({ groupPath: path, reason: "path_not_rooted" });
   }
 
   const roleByTeamId = new Map<string, TeamRole>();
@@ -511,11 +671,26 @@ export async function reconcileIdpTeams(db: AppDb, opts: ReconcileOptions): Prom
   const held = new Set<string>();
   const removals: string[] = [];
   const roleChanges: Array<{ teamId: string; role: TeamRole }> = [];
+  const allowed = new Set(opts.mirroredGroups);
 
   for (const row of current) {
     // The sync stamps `external_id` on every mirror it creates, so a NULL
     // here belongs to a row the sync did not write. Leave it alone.
     if (row.externalId === null) continue;
+
+    // A mirror of a group this deployment no longer lists is DORMANT, the
+    // same as every mirror when the feature gate is off. `wanted` is already
+    // filtered by the allowlist, so without this test "we stopped mirroring
+    // this group" and "the claim dropped you from this group" produce the
+    // same diff, and one edit to the list empties the team one login at a
+    // time. The list must decide what the sync updates, never what it takes
+    // away: the team keeps the skills, sources and workflows it owns, and
+    // the boot report counts it (`reportTeamSyncState`).
+    //
+    // Leaving the row out of `held` is safe. Every key in `wanted` is
+    // allowlisted, and `teams_org_external` allows one row per external id,
+    // so no addition below can target this team.
+    if (!allowed.has(row.externalId)) continue;
     held.add(row.teamId);
 
     if (!wanted.has(row.externalId)) {

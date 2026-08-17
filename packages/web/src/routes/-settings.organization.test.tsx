@@ -66,7 +66,7 @@ let orgData: {
   name: string;
   createdAt: number;
   callerRole: "admin" | "member";
-  features: { organizations: boolean };
+  features: { organizations: boolean; ssoTeamSync?: boolean };
 } = {
   id: "org_1",
   name: "Acme",
@@ -479,8 +479,9 @@ describe("OrganizationTeamsPage", () => {
       callerRole: "admin",
     };
 
-    it("marks the team and offers no actions menu", () => {
+    it("marks the team and offers no actions menu WHILE mirroring is on", () => {
       teamsData = { teams: [mirrored] };
+      orgData = { ...orgData, features: { organizations: true, ssoTeamSync: true } };
       render(<OrganizationTeamsPage />);
 
       expect(screen.getByText("Identity provider")).toBeTruthy();
@@ -489,8 +490,22 @@ describe("OrganizationTeamsPage", () => {
       expect(screen.queryByRole("button", { name: "platform actions" })).toBeNull();
     });
 
+    it("marks a team paused and RETURNS its controls when mirroring is off", () => {
+      // Off is the default. A team the sync no longer touches must not stay
+      // locked: nothing is going to overwrite an edit, and leaving it read
+      // only would strand whatever it owns with no way to change who can
+      // reach it.
+      teamsData = { teams: [mirrored] };
+      render(<OrganizationTeamsPage />);
+
+      expect(screen.getByText("Identity provider (paused)")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "platform actions" })).toBeTruthy();
+    });
+
     it("offers no membership controls, and says why, naming the group", async () => {
       teamsData = { teams: [mirrored] };
+      // The lock is what this asserts, so mirroring must be ON for it.
+      orgData = { ...orgData, features: { organizations: true, ssoTeamSync: true } };
       render(<OrganizationTeamsPage />);
       fireEvent.click(screen.getByRole("button", { name: "Expand platform" }));
 

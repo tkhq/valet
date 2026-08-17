@@ -13,6 +13,7 @@ import { orgMembers, orgs, users, invites, teams, teamMembers } from "../schema/
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createInvite } from "./invites.js";
+import { ensureOrg, setOrgFeatures } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
@@ -535,7 +536,7 @@ describe("buildAuthHooks", () => {
   describe("provisionUser (team sync)", () => {
     const ssoUser = { id: "existing", email: "existing@x.test" };
 
-    function ssoConfig(): AuthConfig {
+    function ssoConfig(overrides: { teamGroups?: string[] } = {}): AuthConfig {
       return baseConfig({
         oidc: {
           issuer: "https://idp.test/realms/valet",
@@ -546,8 +547,25 @@ describe("buildAuthHooks", () => {
           teamClaim: "groups",
           teamAssertedClaim: "groups_asserted",
           teamAdminGroup: "admins",
+          // The allowlist. Declared in every test that expects a team,
+          // because an absent list mirrors nothing.
+          teamGroups: ["/platform", "/research"],
+          ...overrides,
         },
       });
+    }
+
+    /**
+     * Puts the deployment in the state an operator reaches deliberately:
+     * an org exists and `ssoTeamSync` is on. Returns the org id.
+     *
+     * Nothing here is the default. A test that does not call this is testing
+     * a deployment that set nothing, which must mirror nothing.
+     */
+    async function enableMirroring(): Promise<string> {
+      const org = await ensureOrg(db);
+      await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      return org.id;
     }
 
     async function teamsOf(userId: string): Promise<Array<{ team: string; role: string }>> {
@@ -559,7 +577,12 @@ describe("buildAuthHooks", () => {
         .orderBy(teams.name);
     }
 
+    async function allTeams(): Promise<Array<{ id: string; name: string; origin: string }>> {
+      return db.select({ id: teams.id, name: teams.name, origin: teams.origin }).from(teams).orderBy(teams.name);
+    }
+
     it("mirrors the group claim into teams on a sign-in", async () => {
+      await enableMirroring();
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
 
       await provisionUser({
@@ -574,6 +597,7 @@ describe("buildAuthHooks", () => {
     });
 
     it("changes nothing when the group claim is missing", async () => {
+      await enableMirroring();
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
       await provisionUser({ user: ssoUser, userInfo: { groups: ["/platform"], groups_asserted: "true" } });
 
@@ -584,6 +608,7 @@ describe("buildAuthHooks", () => {
     });
 
     it("empties the mirrored teams when the marker arrives without groups", async () => {
+      await enableMirroring();
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
       await provisionUser({ user: ssoUser, userInfo: { groups: ["/platform"], groups_asserted: "true" } });
 
@@ -607,6 +632,7 @@ describe("buildAuthHooks", () => {
       // The plugin awaits this hook BEFORE it sets the session cookie, so an
       // exception here locks everybody out. Dropping the table the reconcile
       // reads first is the fault; the next test re-applies the migrations.
+      await enableMirroring();
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
       await db.execute(sql`DROP TABLE "teams" CASCADE`);
 
@@ -616,6 +642,207 @@ describe("buildAuthHooks", () => {
           userInfo: { groups: ["/platform"], groups_asserted: "true" },
         }),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  /**
+   * The `ssoTeamSync` gate. Off is the default, and the first test here is
+   * the property the whole feature exists for.
+   */
+  describe("provisionUser — the ssoTeamSync gate", () => {
+    const ssoUser = { id: "existing", email: "existing@x.test" };
+
+    function ssoConfig(teamGroups: string[] = ["/platform", "/research"]): AuthConfig {
+      return baseConfig({
+        oidc: {
+          issuer: "https://idp.test/realms/valet",
+          clientId: "valet",
+          clientSecret: "shh",
+          name: "SSO",
+          domain: "idp.test",
+          teamClaim: "groups",
+          teamAssertedClaim: "groups_asserted",
+          teamAdminGroup: "admins",
+          teamGroups,
+        },
+      });
+    }
+
+    async function teamsOf(userId: string): Promise<Array<{ team: string; role: string }>> {
+      return db
+        .select({ team: teams.name, role: teamMembers.role })
+        .from(teamMembers)
+        .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+        .where(eq(teamMembers.userId, userId))
+        .orderBy(teams.name);
+    }
+
+    async function teamRows(): Promise<Array<{ id: string; name: string; origin: string }>> {
+      return db
+        .select({ id: teams.id, name: teams.name, origin: teams.origin })
+        .from(teams)
+        .orderBy(teams.name);
+    }
+
+    /** A team an earlier release mirrored, before the gate existed. */
+    async function seedMirroredTeam(orgId: string, name: string, path: string): Promise<string> {
+      const id = `team_${name}`;
+      await db.insert(teams).values({
+        id,
+        orgId,
+        name,
+        origin: "idp",
+        externalId: path,
+        createdAt: Date.now(),
+      });
+      await db.insert(teamMembers).values({ teamId: id, userId: "existing", role: "admin" });
+      return id;
+    }
+
+    it("an operator who sets nothing mirrors no group and loses no team", async () => {
+      // THE property. An upgrade must not create teams nobody asked for, and
+      // it must not take away the teams and memberships that already exist —
+      // a mirrored team can own skills, sources and workflows, so deleting
+      // one takes that work from people who changed no setting.
+      const org = await ensureOrg(db);
+      const kept = await seedMirroredTeam(org.id, "platform", "/platform");
+
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform", "/research"], groups_asserted: "true" },
+      });
+
+      // No new team, and the old one is untouched — same row, same members.
+      expect(await teamRows()).toEqual([{ id: kept, name: "platform", origin: "idp" }]);
+      expect(await teamsOf("existing")).toEqual([{ team: "platform", role: "admin" }]);
+    });
+
+    it("creates no org when there is none, so a login writes nothing at all", async () => {
+      // The gate lives on the org row. Reading it must not be the thing that
+      // creates the org it reads.
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform"], groups_asserted: "true" },
+      });
+
+      expect(await db.select({ id: orgs.id }).from(orgs)).toEqual([]);
+      expect(await teamRows()).toEqual([]);
+    });
+
+    it("mirrors a listed group once the gate is on", async () => {
+      const org = await ensureOrg(db);
+      await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform/admins"], groups_asserted: "true" },
+      });
+
+      expect(await teamsOf("existing")).toEqual([{ team: "platform", role: "admin" }]);
+    });
+
+    it("ignores a group the allowlist leaves out", async () => {
+      // The operator's stated fear: an identity provider full of groups that
+      // have nothing to do with Valet.
+      const org = await ensureOrg(db);
+      await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(["/platform"]), credentialStore });
+      await provisionUser({
+        user: ssoUser,
+        userInfo: {
+          groups: ["/platform", "/everyone", "/vpn-users", "/contractors-2021"],
+          groups_asserted: "true",
+        },
+      });
+
+      expect(await teamRows()).toEqual([
+        expect.objectContaining({ name: "platform", origin: "idp" }),
+      ]);
+    });
+
+    it("mirrors nothing when the gate is on and no group is listed", async () => {
+      const org = await ensureOrg(db);
+      await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig([]), credentialStore });
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform", "/research"], groups_asserted: "true" },
+      });
+
+      expect(await teamRows()).toEqual([]);
+    });
+
+    it("keeps syncing identity while team mirroring is off", async () => {
+      // Turning team mirroring off must not turn identity sync off. The
+      // role and the org membership come from the user-create hooks, which
+      // never read the gate.
+      const cfg = ssoConfig();
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
+
+      const newUser = makeUser({ id: "u-sso", email: "new@idp.test" });
+      const ctx = dbHookCtx({ path: "/sso/callback/valet" });
+      const before = await databaseHooks!.user!.create!.before!(newUser, ctx);
+      expect(before).not.toBe(false);
+      const stampedRole = (before as { data: { role: string } }).data.role;
+
+      await db
+        .insert(users)
+        .values({
+          id: newUser.id,
+          email: newUser.email,
+          name: newUser.name,
+          role: stampedRole as "admin" | "member",
+        });
+      await databaseHooks!.user!.create!.after!({ ...newUser, role: stampedRole }, ctx);
+
+      // The org membership row exists, which is what gates every read path.
+      const membership = await db
+        .select({ role: orgMembers.role })
+        .from(orgMembers)
+        .where(eq(orgMembers.userId, "u-sso"));
+      expect(membership).toEqual([{ role: "member" }]);
+
+      // And no team was mirrored, which is the half the gate turned off.
+      const { provisionUser } = buildAuthHooks({ db, cfg, credentialStore });
+      await provisionUser({
+        user: { id: "u-sso", email: "new@idp.test" },
+        userInfo: { groups: ["/platform"], groups_asserted: "true" },
+      });
+      expect(await teamRows()).toEqual([]);
+    });
+
+    it("converges on the same rows when the gate is turned on later", async () => {
+      // No wipe and no re-import. The mirror is found by group path, so the
+      // row it created before the gate went off is the row it adopts again.
+      const org = await ensureOrg(db);
+      await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform"], groups_asserted: "true" },
+      });
+      const [created] = await teamRows();
+      expect(created).toMatchObject({ name: "platform", origin: "idp" });
+
+      // Off: the login writes nothing, and the team keeps its member.
+      await setOrgFeatures(db, org.id, { ssoTeamSync: false });
+      await provisionUser({ user: ssoUser, userInfo: { groups: [], groups_asserted: "true" } });
+      expect(await teamsOf("existing")).toEqual([{ team: "platform", role: "member" }]);
+
+      // On again: same row id, and the claim is authoritative once more.
+      await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      await provisionUser({
+        user: ssoUser,
+        userInfo: { groups: ["/platform/admins"], groups_asserted: "true" },
+      });
+      expect(await teamRows()).toEqual([{ id: created?.id, name: "platform", origin: "idp" }]);
+      expect(await teamsOf("existing")).toEqual([{ team: "platform", role: "admin" }]);
     });
   });
 });

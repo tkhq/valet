@@ -10,7 +10,7 @@ import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
-import { ensureOrg } from "../services/org.js";
+import { ensureOrg, findOrg, getOrgFeatures } from "../services/org.js";
 import { readTeamClaim, reconcileIdpTeams } from "../services/team-sync.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
@@ -328,14 +328,22 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
    * single-sign-on login (`provisionUserOnEveryLogin`, set in
    * `auth/index.ts`). The rules live in `services/team-sync.ts`.
    *
-   * Two things this function must never do:
+   * This function is ONLY team mirroring. It decides no role and no
+   * membership of the organization: admission, the global role and the
+   * `org_members` row are settled by `userCreateBefore` and `userCreateAfter`
+   * above, which never read the gate below. Identity keeps syncing when team
+   * mirroring is off.
+   *
+   * Three things this function must never do:
    *
    * 1. Throw. The plugin awaits it BEFORE it sets the session cookie, so an
    *    exception here means nobody signs in. A database fault must cost one
    *    user one stale login, which the next login corrects. It must not lock
    *    the organization out.
-   * 2. Write anything when the claim is missing. `readTeamClaim` runs first,
-   *    and `ensureOrg` — which CREATES an org — stays behind that check.
+   * 2. Write anything when the claim is missing. `readTeamClaim` runs first.
+   * 3. Create an org. The gate is a column on the org row, so asking whether
+   *    mirroring is on must not be the thing that makes an org to ask about.
+   *    `findOrgFeatures` reads; `ensureOrg` is not called from here.
    */
   const provisionUser = async (data: SsoProvisionData): Promise<void> => {
     // No OIDC config means no configured claim names. A provider registered
@@ -348,13 +356,25 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       const claim = readTeamClaim(data.userInfo, oidc.teamClaim, oidc.teamAssertedClaim);
       if (!claim.present) return;
 
-      const org = await ensureOrg(db);
+      // The gate. Off is the default and the answer for a deployment that
+      // set nothing, so no team is created and no membership is removed. It
+      // is read on each login, not at boot, so an operator who turns it on
+      // does not have to restart the api. Existing mirrored teams are left
+      // exactly as they are while it is off — see the spec, "When the gate
+      // is off".
+      const org = await findOrg(db);
+      if (!org) return;
+      const features = await getOrgFeatures(db, org.id);
+      if (!features.ssoTeamSync) return;
+
       await reconcileIdpTeams(db, {
         orgId: org.id,
         userId: data.user.id,
         claim,
         adminGroupName: oidc.teamAdminGroup,
-        mirroredGroups: oidc.teamGroups,
+        // No declared list means no group was named, which mirrors nothing.
+        // The boot report names the fix (`services/team-sync.ts`).
+        mirroredGroups: oidc.teamGroups ?? [],
         configPath,
       });
     } catch (err) {

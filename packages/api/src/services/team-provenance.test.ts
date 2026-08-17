@@ -43,13 +43,21 @@ async function boot(cfg: InstanceConfig): Promise<void> {
   await reconcileInstanceConfig({ db, configPath: "/etc/valet/valet.yaml" }, cfg);
 }
 
-/** One single-sign-on login, with the group paths the claim carried. */
+/**
+ * One single-sign-on login, with the group paths the claim carried.
+ *
+ * The allowlist covers both groups these tests use. It is explicit because
+ * the sync has no "mirror everything" value: a login that named no group
+ * would mirror nothing, and every provenance test here would pass without
+ * ever creating the `idp` row it is about.
+ */
 async function signIn(userId: string, paths: string[]) {
   return reconcileIdpTeams(db, {
     orgId,
     userId,
     claim: { present: true, paths },
     adminGroupName: ADMIN_GROUP,
+    mirroredGroups: ["/platform", "/research"],
     configPath: "/etc/valet/valet.yaml",
   });
 }

@@ -16,6 +16,17 @@ export type OrgRole = "admin" | "member";
 
 export interface OrgFeatures {
   organizations: boolean;
+  /**
+   * Whether the identity provider's groups become teams at each
+   * single-sign-on login (`services/team-sync.ts`).
+   *
+   * Off is the default, and an absent key reads as off. Team creation from
+   * groups changes who can reach a team's skills, workflows and sessions, so
+   * an operator must ask for it. Nothing else in the login path depends on
+   * it: admission, the global role and org membership are decided by the
+   * user-create hooks in `auth/provisioning.ts`, which never read this flag.
+   */
+  ssoTeamSync: boolean;
 }
 
 export interface OrgMemberSummary {
@@ -68,6 +79,19 @@ export async function ensureOrg(
   return { id };
 }
 
+/**
+ * Returns the org, or undefined when this deployment has none yet.
+ *
+ * The read-only half of `ensureOrg`, for a caller that must not create an
+ * org as a side effect of asking a question about one. The login team sync
+ * is such a caller: its feature gate lives on the org row, so no org means
+ * no gate, which means off.
+ */
+export async function findOrg(db: AppQueryable): Promise<{ id: string } | undefined> {
+  const rows = await db.select({ id: orgs.id }).from(orgs).limit(1);
+  return rows[0];
+}
+
 /** True when `userId` holds `org_members.role === "admin"` in `orgId`. */
 export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string): Promise<boolean> {
   const rows = await db
@@ -88,19 +112,55 @@ export async function isOrgMember(db: AppQueryable, orgId: string, userId: strin
   return rows.length > 0;
 }
 
-/** Reads `orgs.features` (jsonb); an absent `organizations` key reads as false. */
-export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<OrgFeatures> {
+/** Every feature key reads as false when absent, so a new gate defaults to off. */
+const FEATURES_OFF: OrgFeatures = { organizations: false, ssoTeamSync: false };
+
+/** Reads the raw `orgs.features` jsonb, or an empty record when the org has none. */
+async function readRawFeatures(db: AppQueryable, orgId: string): Promise<Record<string, unknown>> {
   const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
-  const row = rows[0];
-  if (!row?.features) return { organizations: false };
-  return { organizations: Boolean((row.features as Record<string, unknown>).organizations) };
+  const value = rows[0]?.features;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
 }
 
-/** Merges `features` into `orgs.features` (partial update — only provided keys change). */
+/**
+ * Reads `orgs.features` (jsonb). An absent key reads as false, which is what
+ * makes every gate here off for an operator who sets nothing.
+ */
+export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<OrgFeatures> {
+  const raw = await readRawFeatures(db, orgId);
+  return {
+    organizations: Boolean(raw.organizations),
+    ssoTeamSync: Boolean(raw.ssoTeamSync),
+  };
+}
+
+/**
+ * Reads the feature gates of the deployment's org, without creating one.
+ *
+ * No org means no gate row, so every feature reads as off. A caller on the
+ * login path must use this instead of `ensureOrg` + `getOrgFeatures`: a gate
+ * check must not be the thing that creates an org.
+ */
+export async function findOrgFeatures(db: AppQueryable): Promise<OrgFeatures> {
+  const org = await findOrg(db);
+  if (!org) return { ...FEATURES_OFF };
+  return getOrgFeatures(db, org.id);
+}
+
+/**
+ * Merges `features` into `orgs.features`. Only the given keys change.
+ *
+ * The merge is against the RAW jsonb, not against `getOrgFeatures`. The
+ * typed reader projects the record down to the keys this file knows, so a
+ * merge against it would erase every other key. `valet.yaml` may declare a
+ * feature key that this build does not name (`config/instance-config.ts`
+ * accepts `org.features` as any boolean record), and one write from the
+ * settings page must not delete what the file put there.
+ */
 export async function setOrgFeatures(db: AppQueryable, orgId: string, features: Partial<OrgFeatures>): Promise<void> {
-  const current = await getOrgFeatures(db, orgId);
-  const merged: OrgFeatures = { ...current, ...features };
-  await db.update(orgs).set({ features: merged }).where(eq(orgs.id, orgId));
+  const raw = await readRawFeatures(db, orgId);
+  await db.update(orgs).set({ features: { ...raw, ...features } }).where(eq(orgs.id, orgId));
 }
 
 /** Reads `orgs.model_preferences` (jsonb); absent/missing reads as `[]`. */

@@ -124,7 +124,12 @@ export function configPolicyId(dimension: PolicyDimension, value: string): strin
 // Org pass
 // ---------------------------------------------------------------------------
 
-async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig, sourceService?: SourceService): Promise<void> {
+async function reconcileOrgPass(
+  db: AppDb,
+  cfg: InstanceConfig,
+  configPath: string | undefined,
+  sourceService?: SourceService,
+): Promise<void> {
   const org = await ensureOrg(db, sourceService);
 
   const orgCfg = cfg.org;
@@ -139,7 +144,24 @@ async function reconcileOrgPass(db: AppDb, cfg: InstanceConfig, sourceService?: 
   if (orgCfg.features !== undefined) {
     const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, org.id)).limit(1);
     const existing = (rows[0]?.features ?? {}) as Record<string, boolean>;
-    const merged: Record<string, boolean> = { ...existing, ...orgCfg.features };
+    const declared = orgCfg.features;
+
+    // Say which switch the file just moved. Settings shows the same flags
+    // and writes the same column, so an admin who turns one off in Settings
+    // sees it come back at the next api restart with nothing to explain it.
+    // The file wins by design; what was missing is the reader being told.
+    // Only a key whose value actually CHANGES is named, so a steady
+    // deployment prints nothing.
+    for (const [key, value] of Object.entries(declared)) {
+      if (existing[key] === value) continue;
+      console.warn(
+        `[config-reconcile] org.features.${key} set to ${value} from ` +
+          `${configFileLabel(configPath)}. The file wins at every boot, so the Settings toggle for ` +
+          `this feature does not last. To control it in Settings, remove the key from that file.`,
+      );
+    }
+
+    const merged: Record<string, boolean> = { ...existing, ...declared };
     await db.update(orgs).set({ features: merged }).where(eq(orgs.id, org.id));
   }
 
@@ -806,7 +828,7 @@ export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: Instance
   const { db, configPath, sourceService } = deps;
 
   // Pass 1: org + members + invites
-  await reconcileOrgPass(db, cfg, sourceService);
+  await reconcileOrgPass(db, cfg, configPath, sourceService);
 
   // Pass 2: teams
   await reconcileTeamsPass(db, cfg, configPath);

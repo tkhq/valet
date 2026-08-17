@@ -106,7 +106,7 @@ orgRouter.patch("/", async (c) => {
       return c.json({ error: "features must be an object" }, 400);
     }
     const featuresRecord = features as Record<string, unknown>;
-    const featureFields = new Set(["organizations"]);
+    const featureFields = new Set(["organizations", "ssoTeamSync"]);
     const unknownFeatureFields = Object.keys(featuresRecord).filter((k) => !featureFields.has(k));
     if (unknownFeatureFields.length > 0) {
       return c.json({ error: `unknown feature(s): ${unknownFeatureFields.join(", ")}` }, 400);
@@ -118,8 +118,25 @@ orgRouter.patch("/", async (c) => {
       }
       update.organizations = featuresRecord.organizations;
     }
-    // `setOrgFeatures` merges into the existing TYPED features object rather
-    // than clobbering unknown keys — see services/org.ts.
+    if ("ssoTeamSync" in featuresRecord) {
+      if (typeof featuresRecord.ssoTeamSync !== "boolean") {
+        return c.json({ error: "features.ssoTeamSync must be a boolean" }, 400);
+      }
+      // Either direction takes effect at the next single-sign-on login, with
+      // no restart: the claim names are read at boot, but the write path
+      // reads this gate on each login (`auth/provisioning.ts`).
+      //
+      // It lasts only while `valet.yaml` does not declare the same key. The
+      // boot reconciler merges the file's `org.features` over this column at
+      // every start, so on a deployment that declares it the file wins and
+      // this write survives until the next restart. The reconciler prints
+      // one line naming the file when it changes a value
+      // (`services/config-reconcile.ts`).
+      update.ssoTeamSync = featuresRecord.ssoTeamSync;
+    }
+    // `setOrgFeatures` merges into the raw jsonb, so a key this build does
+    // not name — one `valet.yaml` declared — survives this write. See
+    // services/org.ts.
     await setOrgFeatures(db, user.orgId, update);
   }
 

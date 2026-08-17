@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
@@ -8,6 +9,7 @@ import {
   createTeam,
   deleteTeam,
   IdpManagedTeamError,
+  isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -19,6 +21,7 @@ import {
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "./teams.js";
+import { setOrgFeatures } from "./org.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -199,6 +202,12 @@ describe("teams service", () => {
      * Seeds a team the way the login-time sync does: `origin: "idp"`, the
      * full group path, and member rows written straight to the table.
      * `createTeam` always writes `local`, so it cannot produce one.
+     *
+     * `ssoTeamSync` is turned on with it, because `origin` alone no longer
+     * locks the row. The lock exists so a hand edit is not undone at the
+     * next sign-in, so it holds only while a sync actually runs — see
+     * `isLiveIdpMirror`. The dormant half is tested at the end of this
+     * block.
      */
     async function seedIdpTeam(): Promise<string> {
       const id = "team_idp";
@@ -212,6 +221,7 @@ describe("teams service", () => {
       });
       await db.insert(teamMembers).values({ teamId: id, userId: "u1", role: "admin" });
       await db.insert(teamMembers).values({ teamId: id, userId: "u2", role: "member" });
+      await setOrgFeatures(db, orgId, { ssoTeamSync: true });
       return id;
     }
 
@@ -265,6 +275,49 @@ describe("teams service", () => {
 
       await deleteTeam(db, { teamId: local.id });
       expect(await listTeamsForUser(db, "u9")).toHaveLength(0);
+    });
+
+    describe("with team sync off", () => {
+      /** The same row, in an org whose `ssoTeamSync` gate is off. */
+      async function seedDormantMirror(): Promise<string> {
+        const teamId = await seedIdpTeam();
+        await setOrgFeatures(db, orgId, { ssoTeamSync: false });
+        return teamId;
+      }
+
+      it("is not a live mirror, although the row still says idp", async () => {
+        const teamId = await seedDormantMirror();
+        const rows = await db.select().from(teams).where(eq(teams.id, teamId));
+        expect(rows[0]?.origin).toBe("idp");
+        expect(await isLiveIdpMirror(db, rows[0]!)).toBe(false);
+      });
+
+      it("takes membership edits again, because no sign-in will undo them", async () => {
+        const teamId = await seedDormantMirror();
+
+        await addMember(db, { teamId, userId: "u3", role: "member" });
+        await setRole(db, { teamId, userId: "u2", role: "admin" });
+        await removeMember(db, { teamId, userId: "u3" });
+
+        const members = await listTeamMembers(db, teamId);
+        expect(members).toHaveLength(2);
+        expect(members.find((m) => m.userId === "u2")?.role).toBe("admin");
+      });
+
+      it("can be deleted by hand, so nobody is left with a team they cannot remove", async () => {
+        const teamId = await seedDormantMirror();
+        await deleteTeam(db, { teamId });
+        expect(await listTeamsForUser(db, "u1")).toHaveLength(0);
+      });
+
+      it("locks again the moment the gate goes back on", async () => {
+        const teamId = await seedDormantMirror();
+        await addMember(db, { teamId, userId: "u3", role: "member" });
+
+        await setOrgFeatures(db, orgId, { ssoTeamSync: true });
+
+        await expect(removeMember(db, { teamId, userId: "u3" })).rejects.toThrow(IdpManagedTeamError);
+      });
     });
   });
 

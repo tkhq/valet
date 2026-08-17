@@ -1971,6 +1971,16 @@ export interface UsageSummaryResponse {
 
 export interface OrgFeaturesWire {
   organizations: boolean;
+  /**
+   * Whether the identity provider's groups become teams at each
+   * single-sign-on login. Off by default.
+   *
+   * The client reads it to know whether an `origin: "idp"` team is a LIVE
+   * mirror or a dormant one. A dormant mirror keeps its members and its
+   * work, but nothing reasserts it, so the client returns the team controls
+   * that a live mirror hides.
+   */
+  ssoTeamSync: boolean;
 }
 
 export interface OrgResponse {

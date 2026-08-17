@@ -45,6 +45,29 @@ stub applies. Provider variable pairs are all-or-none.
 
 ### Group claims from the identity provider
 
+Team creation from groups is a feature you turn on. It is off in every
+deployment that does not set it, and none of the variables or keys in this
+section turns it on. The switch is the `ssoTeamSync` org feature:
+
+```yaml
+org:
+  features:
+    ssoTeamSync: true
+```
+
+An org admin can also turn it on in Settings, which takes effect at the next
+sign-in and needs no restart. While it is off, sign-in still works and still
+decides the user's role and org membership; only team mirroring stops.
+
+The file wins over Settings, and it wins at every boot. If `valet.yaml`
+declares `ssoTeamSync`, the boot reconciler writes that value over whatever
+Settings holds, so a toggle set in the UI lasts until the next api restart.
+It prints one line naming the file each time it changes the value. To control
+the feature from Settings, remove the key from the file. Note also that the
+reconciler only adds declared keys and never removes one, so a value the file
+wrote once stays in the database after you delete the line — turn it off in
+Settings.
+
 Valet maps identity-provider groups to teams, so the provider must send group
 membership in the token. The local Keycloak realm
 (`docker/keycloak/valet-realm.json`, started by `make dev-keycloak`) carries
@@ -66,8 +89,9 @@ mapper set ran. Present marker plus absent `groups` means the user is in no
 group. An absent marker means Valet learned nothing about groups and must
 change no membership.
 
-The seeded realm puts `alice` in `/platform/admins`, and `bob` in `/platform`
-and `/research`, so the two dev users have different membership shapes.
+The seeded realm puts one user in `/platform/admins`, and a second user in
+`/platform` and `/research`, so the two dev users have different membership
+shapes.
 
 #### Keep the two mappers together
 
@@ -122,7 +146,7 @@ auth:
       claim: groups                   # AUTH_OIDC_TEAM_CLAIM
       assertedClaim: groups_asserted  # AUTH_OIDC_TEAM_ASSERTED_CLAIM
       adminSubGroup: admins           # AUTH_OIDC_TEAM_ADMIN_GROUP
-      groups:                         # optional allowlist, no env equivalent
+      groups:                         # the allowlist, no env equivalent
         - /platform
         - /research
 ```
@@ -131,10 +155,44 @@ If you set an environment variable and declare the matching key, the api
 refuses to start and names both. Remove one. The check is per field, so you
 can declare two keys in the file and set the third variable.
 
-`groups` limits the sync to the groups you list. Omit it and Valet mirrors
-every top-level group the claim carries, which is the behavior of a
-deployment with no file. Each entry must be a top-level path such as
-`/platform`; the admin sub-group of a listed group is still read.
+`groups` is the allowlist, and it decides every team the sync may create.
+Only a group you list becomes a team. Any other group the claim carries is
+ignored, and it is ignored in silence, because you excluded it on purpose and
+a warning would repeat at every sign-in of every user. Omit `groups` and
+Valet mirrors nothing at all — an identity provider carries groups that have
+nothing to do with Valet, such as `/everyone` or `/vpn-users`, and no rule
+can tell those from the groups you want. The api prints one line at boot when
+`ssoTeamSync` is on and the list is empty.
+
+Each entry must be a top-level path such as `/platform`. The admin sub-group
+of a listed group is still read, so `/platform` also admits
+`/platform/admins`. There are no patterns: to mirror `/eng-web` and
+`/eng-api`, list both. Matching is exact after trimming, so `/Platform` and
+`/platform` are two entries.
+
+The claim must carry full group paths, with the leading `/`. A group NAME on
+its own is ignored, and the api prints one line naming the fix. The reason is
+that a name loses the nesting: a member of `/contractors/platform` and a
+member of `/platform` both send `platform`, so a group you never listed would
+grant membership of a team you did. On Keycloak, turn on **Full group path**
+on the group mapper. A provider that cannot send paths mirrors nothing.
+
+#### Taking a group off the list
+
+Removing a group from `groups` stops the mirroring of that group. It does not
+deprovision anybody. The team keeps its name, its members and the skills,
+sources and workflows it owns, and no sign-in changes it any more — the same
+state the whole feature reaches when `ssoTeamSync` goes off. The list decides
+what Valet updates, never what Valet takes away.
+
+The api prints one line at boot naming each such team. Put the group back on
+the list and restart, and the next sign-in of each member updates the team
+again.
+
+One limitation to know: while `ssoTeamSync` is on, the api still refuses to
+rename, empty or delete such a team, because it reads `origin='idp'` and the
+gate and nothing else. To edit or delete one by hand, turn `ssoTeamSync` off
+first.
 
 Do not give a team in `teams:` the same name as a group in
 `auth.sso.teams.groups`. The api refuses to start on that pair, and it
@@ -143,6 +201,26 @@ otherwise make two teams that look like one in the teams page. A declared
 team and a mirrored group cannot share a name: each owns its members, and
 sharing one row would make the file add a member at every boot that the sync
 removes at the next sign-in.
+
+#### Turning team sync off again
+
+Valet deletes no team when `ssoTeamSync` goes off. A team that mirrored a
+group keeps its name, its members, and the skills, sources and workflows it
+owns — a delete would take that work away from people who only changed a
+setting. What stops is the updating: no sign-in adds a member, removes one,
+or creates a team any more.
+
+Those teams then become editable in Valet again. While the sync runs, Valet
+refuses to rename, empty or delete a mirrored team, because the next sign-in
+would undo the change. With the sync off nothing undoes anything, so the
+controls come back and the teams page marks each such team "Identity provider
+(paused)". The api also prints one line at boot that names how many there
+are.
+
+Turn `ssoTeamSync` back on and each team is adopted again by its group path,
+not by its name, so a team you renamed keeps working. From that point the
+identity provider owns the membership again, and it removes anybody you added
+by hand as each user signs in. No wipe and no re-import is needed.
 
 ## Sandboxes
 
