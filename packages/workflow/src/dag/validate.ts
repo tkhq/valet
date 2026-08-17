@@ -122,6 +122,37 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
 
+/** Observed LLM synonyms for real fields, too far from the real name for
+ * the edit-distance hint to catch. Each entry maps the wrong key to the
+ * field the author meant. */
+const KEY_ALIASES: Partial<Record<DagNodeType, Record<string, string>>> = {
+  trigger: {
+    inputSchema: 'dataSchema',
+    input_schema: 'dataSchema',
+    inputs: 'dataSchema',
+    schema: 'dataSchema',
+  },
+};
+
+const INPUT_DEFINITION_TYPES: ReadonlySet<string> = new Set([
+  'string',
+  'number',
+  'boolean',
+  'object',
+  'array',
+]);
+
+const INPUT_DEFINITION_KEYS: readonly string[] = [
+  'type',
+  'required',
+  'default',
+  'description',
+  'enum',
+  'label',
+  'placeholder',
+  'hidden',
+];
+
 /** Typed as `ReadonlySet<string>` on purpose: the runtime input is
  * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
  * cannot hold. */
@@ -344,11 +375,56 @@ function lintNodeKeys(node: WorkflowNode, label: string, errors: string[]): void
       );
       continue;
     }
+    const alias = KEY_ALIASES[node.type]?.[key];
+    if (alias) {
+      errors.push(
+        `${label}: unknown field ${JSON.stringify(key)} on a ${JSON.stringify(node.type)} node — did you mean ${JSON.stringify(alias)}?`,
+      );
+      continue;
+    }
     errors.push(`${label}: unknown field ${JSON.stringify(key)} on a ${JSON.stringify(node.type)} node${didYouMean(key, allowed)}`);
   }
 }
 
 // ─── Per-type field validation ───────────────────────────────────────────────
+
+/** Lint trigger.dataSchema: a map of field name → input definition. The
+ * stored value is LLM-authored JSON, so every level is re-checked here even
+ * though the TypeScript type says `Record<string, WorkflowInputDefinition>`. */
+function validateTriggerDataSchema(dataSchema: unknown, label: string, errors: string[]): void {
+  if (!isPlainObject(dataSchema)) {
+    errors.push(
+      `${label}: trigger.dataSchema must be an object mapping each input field to { type, required?, default?, description?, enum? }`,
+    );
+    return;
+  }
+  for (const [field, def] of Object.entries(dataSchema)) {
+    const fieldLabel = `${label}: trigger.dataSchema.${field}`;
+    if (!isPlainObject(def)) {
+      errors.push(`${fieldLabel} must be an object like { "type": "string", "required": true }`);
+      continue;
+    }
+    const type = def.type;
+    if (typeof type !== 'string' || !INPUT_DEFINITION_TYPES.has(type)) {
+      errors.push(
+        `${fieldLabel}.type must be one of: ${[...INPUT_DEFINITION_TYPES].map((t) => JSON.stringify(t)).join(', ')}`,
+      );
+    }
+    if (def.required !== undefined && typeof def.required !== 'boolean') {
+      errors.push(`${fieldLabel}.required must be a boolean`);
+    }
+    if (def.enum !== undefined && !Array.isArray(def.enum)) {
+      errors.push(`${fieldLabel}.enum must be an array of allowed values`);
+    }
+    for (const key of Object.keys(def)) {
+      if (!INPUT_DEFINITION_KEYS.includes(key)) {
+        errors.push(
+          `${fieldLabel}: unknown field ${JSON.stringify(key)} in an input definition${didYouMean(key, INPUT_DEFINITION_KEYS)}`,
+        );
+      }
+    }
+  }
+}
 
 function validateNodeFields(
   node: WorkflowNode,
@@ -359,8 +435,8 @@ function validateNodeFields(
 ): void {
   switch (node.type) {
     case 'trigger':
-      if (node.dataSchema !== undefined && !isPlainObject(node.dataSchema)) {
-        errors.push(`${label}: trigger.dataSchema must be an object`);
+      if (node.dataSchema !== undefined) {
+        validateTriggerDataSchema(node.dataSchema, label, errors);
       }
       break;
     case 'workflow':

@@ -51,7 +51,7 @@ Always surface returned `workflowId`/`runId` values — the chat UI uses them to
 
 Node types:
 
-- `trigger` — entry point; exactly one per workflow
+- `trigger` — entry point; exactly one per workflow; optional `dataSchema` declares the run's inputs (see Trigger data)
 - `set` — bind values into run state
 - `if` — conditional; outgoing edges use `"fromOutput": "true"` / `"false"`
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
@@ -83,6 +83,17 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 - Event trigger: `{ key, summary, refs, payload }` — `payload` is the provider's event body. GitHub example: `{{trigger.data.payload.pull_request.number}}` (single `payload`, then GitHub's own webhook shape).
 - Webhook: the raw JSON POST body.
 - Schedule: `{ scheduleName, cron, input }` → static input at `{{trigger.data.input...}}`.
+
+**Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array`:
+
+```json
+{ "id": "start", "type": "trigger", "dataSchema": {
+  "owner": { "type": "string", "required": true, "description": "GitHub org or user" },
+  "number": { "type": "number", "required": true, "label": "PR number" }
+} }
+```
+
+`start_run` validates its `input` against the schema (defaults merge in, missing required fields and type mismatches are rejected with per-field errors), and the web UI's Run button opens a form generated from it. Declare a `dataSchema` whenever downstream nodes read `{{trigger.data.<field>}}` from manual runs — it turns a silent `null` render into a named validation error.
 
 **Rendering rules.** A field that is exactly one `{{...}}` keeps the value's type (objects/arrays/numbers survive). Mixed text stringifies each expression. A path that resolves to nothing renders as `null` in a single-template field and `""` in mixed text — the save-time linter and the run-time error messages both name bad paths, but a syntactically-valid path to a missing key only surfaces at run time. When a tool param fails validation ("must be string"), suspect a template that rendered null; the node error lists the unresolved paths.
 
