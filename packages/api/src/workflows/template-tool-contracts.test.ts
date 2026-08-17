@@ -123,9 +123,25 @@ function referencedPaths(definition: WorkflowDefinition): string[][] {
 }
 
 /**
+ * Result fields the workflow engine writes itself, so no action produces
+ * them and this file must not ask one to.
+ *
+ * A tool node with `onDeny: "skip"` completes with `{ approved, policyDenied,
+ * resolvedBy, note }` when its approval gate is denied or times out
+ * (`workflow/src/nodes/tool.ts`, `denyOutcome`). A definition reads those to
+ * tell a refusal apart from a call that failed — which it cannot do any
+ * other way, because a tolerated failure exposes `nodes.<id>.error` and the
+ * validator rejects that path.
+ */
+const ENGINE_WRITTEN_RESULT_FIELDS = new Set(["approved", "policyDenied", "resolvedBy", "note"]);
+
+/**
  * Field names read directly under one node's result, e.g. `items` from
  * `nodes.review_queue.result.items`. Both `result` and its legacy alias
  * `output` address the same value (`interpreter.ts` writes both).
+ *
+ * Engine-written fields are left out: they are real paths, but the action
+ * behind the node is not what produces them.
  */
 function fieldsReadFrom(definition: WorkflowDefinition, nodeId: string): string[] {
   const fields = new Set<string>();
@@ -133,7 +149,7 @@ function fieldsReadFrom(definition: WorkflowDefinition, nodeId: string): string[
     if (segments[0] !== "nodes" || segments[1] !== nodeId) continue;
     if (segments[2] !== "result" && segments[2] !== "output") continue;
     const field = segments[3];
-    if (field !== undefined) fields.add(field);
+    if (field !== undefined && !ENGINE_WRITTEN_RESULT_FIELDS.has(field)) fields.add(field);
   }
   return [...fields];
 }
@@ -188,24 +204,113 @@ const PLACEHOLDER_BY_TYPE: Record<WorkflowInputDefinition["type"], unknown> = {
 };
 
 /**
+ * What a trigger maps into a hidden object field.
+ *
+ * `WorkflowInputDefinition.hidden` marks "a value a webhook maps in", and an
+ * event-triggered template reads its whole subject out of one — every
+ * repository, pull request and commit value in the pull-request review
+ * template is a `trigger.data.payload.…` path. `{}` renders all of them
+ * null, so the action's parameter schema would reject the node for a reason
+ * that has nothing to do with the mapping under test.
+ *
+ * One object carries every key any template reads, the same way `ITEM_ALIAS`
+ * does above. Today that is a GitHub `pull_request` body. Add keys when a
+ * second template needs different ones.
+ */
+const WEBHOOK_PAYLOAD: Record<string, unknown> = {
+  action: "synchronize",
+  repository: {
+    full_name: "acme/widgets",
+    name: "widgets",
+    owner: { login: "acme" },
+  },
+  sender: { id: 4242, login: "octocat" },
+  pull_request: {
+    number: 42,
+    state: "open",
+    draft: false,
+    title: "Fix the flake in the batch suite",
+    user: { login: "octocat" },
+    head: { ref: "fix/flake", sha: "d3adb33fd3adb33fd3adb33fd3adb33fd3adb33f" },
+    base: { ref: "main" },
+  },
+};
+
+/**
  * Stand-ins for the literals install bakes into a template's params
  * (`workflows/templates.ts#bakeInputs`). A param that still reads
  * `{{ trigger.data.<field> }}` here is holding the place of one of those,
  * so the field's own `default` is used where it declares one. A field
  * without one gets a value of its declared type, which keeps the action's
  * parameter schema exercised rather than dodged by a null.
+ *
+ * A hidden object field is the exception: install never bakes one (it bakes
+ * primitives only), because a trigger supplies it at fire time. See
+ * {@link WEBHOOK_PAYLOAD}.
  */
 function installedInputValues(definition: WorkflowDefinition): Record<string, unknown> {
   const trigger = definition.nodes.find((node) => node.type === "trigger");
   const schema = trigger?.type === "trigger" ? trigger.dataSchema : undefined;
   const values: Record<string, unknown> = {};
   for (const [field, def] of Object.entries(schema ?? {})) {
+    if (def.hidden === true && def.type === "object" && def.default === undefined) {
+      values[field] = WEBHOOK_PAYLOAD;
+      continue;
+    }
     values[field] = def.default !== undefined ? def.default : PLACEHOLDER_BY_TYPE[def.type];
   }
   return values;
 }
 
+/**
+ * Upstream node results a tool node's params read.
+ *
+ * A param that names an earlier node has to render to a value of the right
+ * type, or the action's parameter schema rejects it for a reason that is
+ * not the mapping under test. A single-expression param keeps the value's
+ * type, so an enum-valued param needs a real member of that enum and an
+ * array-valued param needs a real array.
+ *
+ * Keyed by node id and shared across templates, the way `ITEM_ALIAS` is.
+ * Both `result` and its alias `output` carry the same value, because a
+ * template may address either (`interpreter.ts` writes both).
+ */
+const NODE_RESULTS: Record<string, unknown> = {
+  classify: { output: { labelId: "Label_7" } },
+  // The review template's llm node. `verdict` must be one of the two the
+  // create_review action accepts, and `findings` must be the array of
+  // anchors it posts, not their JSON text.
+  review: {
+    text: "",
+    output: {
+      verdict: "REQUEST_CHANGES",
+      summary: "Retries the flaky case. One retry has no ceiling.",
+      findings: [
+        {
+          path: "packages/api/src/batch.test.ts",
+          line: 2,
+          body: "**Major** — the retry loop has no ceiling. Give it a maximum attempt count.",
+        },
+      ],
+      findingsMarkdown: "- **Major** `packages/api/src/batch.test.ts:2` — the retry loop has no ceiling.",
+      unreadFiles: "none",
+    },
+    usage: {},
+  },
+  // The review template's inspect node, which pins the review to the SHA
+  // the diff was read at.
+  inspect: {
+    number: 42,
+    changed_files: 1,
+    matched_file_count: 1,
+    head: { ref: "fix/flake", sha: "d3adb33fd3adb33fd3adb33fd3adb33fd3adb33f" },
+    patch_summary: { limit_bytes: 120000, included_bytes: 24, truncated_files: 0, omitted_files: 0 },
+  },
+};
+
 function paramRenderContext(definition: WorkflowDefinition): TemplateContext {
+  const nodes: Record<string, { result: unknown; output: unknown }> = {};
+  for (const [id, result] of Object.entries(NODE_RESULTS)) nodes[id] = { result, output: result };
   return {
     trigger: {
       type: "manual",
@@ -213,9 +318,7 @@ function paramRenderContext(definition: WorkflowDefinition): TemplateContext {
       data: installedInputValues(definition),
       metadata: {},
     },
-    nodes: {
-      classify: { result: { output: { labelId: "Label_7" } }, output: { output: { labelId: "Label_7" } } },
-    },
+    nodes,
     item: ITEM_ALIAS,
     index: 0,
   };
@@ -400,6 +503,16 @@ function startGithubFixture(): { url: string; close: () => Promise<void> } {
   // pull request touches nothing".
   app.get("/repos/:owner/:repo/pulls/:pullNumber/files", (c) => c.json(PULL_REQUEST_FILES));
   app.get("/repos/:owner/:repo/pulls/:pullNumber/reviews", (c) => c.json([]));
+  // `create_review` reads the id, the state and the url off the response,
+  // and a template reads `review_id` back to tell an accepted review from a
+  // rejected one.
+  app.post("/repos/:owner/:repo/pulls/:pullNumber/reviews", (c) =>
+    c.json({
+      id: 990011,
+      state: "CHANGES_REQUESTED",
+      html_url: "https://github.test/acme/widgets/pull/42#pullrequestreview-990011",
+    }),
+  );
   app.get("/repos/:owner/:repo/pulls/:pullNumber/comments", (c) => c.json([]));
   app.get("/repos/:owner/:repo/pulls/:pullNumber", (c) => c.json(PULL_REQUEST_BODY));
   app.get("/repos/:owner/:repo/commits/:ref/check-runs", (c) => c.json({ check_runs: [] }));
@@ -566,7 +679,14 @@ describe("shipped templates: tool node contracts", () => {
             // a node id, so the template must be part of the key or the
             // second case silently replays the first one's result.
             invocationId: `contract:${templateId}:${node.id}`,
-            ...(node.credential !== undefined ? { credential: node.credential } : {}),
+            // `app` becomes `user` here. That selection mints an
+            // installation token and throws when no GitHub App is installed
+            // for the params owner, which this fixture has none of — and
+            // the failure would land on the field-mapping assertion below,
+            // which is not what it tests. Identity selection has its own
+            // coverage in `plugins/action-invoker.test.ts`, both the
+            // resolving and the loud-failure paths.
+            credential: node.credential === "app" ? "user" : node.credential,
           },
           CTX,
         );

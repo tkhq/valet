@@ -205,6 +205,40 @@ aggregate list.
   TypeScript directly via tsx, so dist-pointing exports failed to resolve
   in fresh worktrees.
 
+## Known gap: a template cannot arm an event trigger
+
+`WorkflowTemplate` (`@valet/engine`) declares a `schedule`, and
+`installWorkflowTemplate` writes the `workflow_schedules` row for it. There
+is no matching field for an event subscription, and install writes no
+`event_subscriptions` row. An event trigger is only created through
+`createWorkflowTrigger`, which a person reaches at
+`POST /api/workflows/:id/triggers` or through the New trigger dialog above.
+
+So an event-driven template installs into a workflow that never fires until
+somebody adds its trigger by hand and chooses the event keys and the repo
+filter. `github.pull-request-review`, the first such template, states that
+in its own first caveat and repeats it in the message it stops with when a
+run reaches it with no event payload. Two smaller consequences of the same
+gap:
+
+- The gallery card reads the cadence off `summary.schedule`, and
+  `describeCadence(null)` says "Runs when you start it". That sentence is
+  wrong for an event-driven template, and the summary carries no field that
+  could correct it.
+- `resolveInstallValues` treats a scheduled install as the only one that has
+  to bake its inputs. An EVENT run delivers `{ key, summary, refs, payload }`
+  in `trigger.data` and no `dataSchema` defaults either, so a
+  `{{ trigger.data.<field> }}` reference that survives an unscheduled
+  install renders null on every delivery. The web install dialog seeds
+  declared defaults and blocks submit on an empty required field, but a
+  direct `POST /api/templates/:id/install` with `{}` does not. Until that is
+  closed, an event-driven template should declare no per-install input at
+  all.
+
+Closing it means one field on `WorkflowTemplate` naming the event keys and
+the filter fields, an insert beside the schedule insert inside the same
+transaction, and a cadence sentence derived from it.
+
 ## Delivery
 
 - Branch `conner/workflow-triggers-ui` off `dev-v2`, PR against `dev-v2`.
