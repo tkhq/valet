@@ -229,6 +229,17 @@ export function buildSandboxManifest(
     // range must fit inside the pod user namespace (see
     // docker/Dockerfile.sandbox-k8s).
     podSpec.hostUsers = false;
+    // Writable, delegated cgroups. The kubelet-default cgroupfs mount is
+    // read-only AND owned by unmapped host root, so runc inside the
+    // sandbox cannot create per-container groups — every `docker run`
+    // fails ("mkdir /sys/fs/cgroup/docker: read-only file system", or
+    // EACCES after a rw remount). The named RuntimeClass maps to a
+    // containerd runtime with `cgroup_writable = true`, which fixes both
+    // the mount flags and — under the systemd cgroup driver — the
+    // ownership. See K8sProviderConfig.dockerRuntimeClassName.
+    if (cfg.dockerRuntimeClassName) {
+      podSpec.runtimeClassName = cfg.dockerRuntimeClassName;
+    }
   }
   if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
     podSpec.imagePullSecrets = cfg.imagePullSecrets;

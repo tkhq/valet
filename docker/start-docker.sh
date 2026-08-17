@@ -61,9 +61,22 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
   # to child groups while the root group has member processes, so move
   # every process into an /init leaf before writing subtree_control.
   if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-    mount -o remount,rw /sys/fs/cgroup 2>>"$LOG" \
-      || mount -t cgroup2 -o rw,nosuid,nodev,noexec cgroup2 /sys/fs/cgroup 2>>"$LOG" \
-      || echo "valet: cgroup2 remount failed — docker run will fail on read-only cgroupfs" >>"$LOG"
+    # Bind remount first: it clears the per-mount read-only flag, which is
+    # all kubelet sets (the cgroup2 superblock itself is rw on the host),
+    # and it is the only variant in-userns root may perform — a plain
+    # remount acts on the superblock and fails with EPERM from a user
+    # namespace. `remount,bind` is the documented util-linux spelling for
+    # MS_REMOUNT|MS_BIND (mount(8), "Bind mount operation": the classic
+    # way to change VFS entry flags is `mount -o remount,bind,ro ...`);
+    # verified live on an EKS 1.33 userns pod — /proc/self/mountinfo
+    # flips ro -> rw. Plain remount kept as the fallback for non-userns
+    # environments. NOTE: rw mount flags are necessary, not sufficient —
+    # the pod cgroup dir is owned by unmapped host root unless the node
+    # runtime delegates it (containerd `cgroup_writable = true` via the
+    # sandbox RuntimeClass; see K8sProviderConfig.dockerRuntimeClassName).
+    mount -o remount,bind,rw /sys/fs/cgroup 2>>"$LOG" \
+      || mount -o remount,rw /sys/fs/cgroup 2>>"$LOG" \
+      || echo "valet: cgroup2 rw remount failed — docker run will fail on read-only cgroupfs" >>"$LOG"
     if mkdir -p /sys/fs/cgroup/init 2>>"$LOG"; then
       # The xargs form is verbatim moby hack/dind. The single > redirect is
       # safe on cgroupfs: cgroup.procs is not a regular file — O_TRUNC is a
@@ -78,6 +91,9 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
       done
       grep -q . /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null \
         || echo "valet: cgroup2 controller delegation failed — docker run may lack resource controllers" >>"$LOG"
+    else
+      echo "valet: pod cgroup not writable (owner is unmapped host root?) — docker run will fail." \
+           "The sandbox needs the cgroup_writable RuntimeClass; see dockerRuntimeClassName." >>"$LOG"
     fi
   fi
   # overlay2 on the emptyDir data-root; vfs only if the probe fails
