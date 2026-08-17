@@ -345,6 +345,40 @@ describe("SourceService", () => {
       );
     });
 
+    it("unparented base identity follows VALET_HEADLESS_BASE_IMAGE — the same ref its FROM resolves", async () => {
+      // `resolveBaseImage` FROMs VALET_HEADLESS_BASE_IMAGE for an unparented
+      // headless base; the identity must read the same env chain, or a
+      // headless-base pin change re-FROMs without re-identifying (stale bakes
+      // never rebake) and a VALET_SANDBOX_IMAGE change re-identifies without
+      // re-FROMing (pointless rebakes).
+      const base: typeof imageSources.$inferSelect = {
+        id: "b-env",
+        orgId,
+        kind: "base",
+        parentId: null,
+        name: "base",
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: [],
+        profile: "headless",
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      const svcA = makeService({ env: { VALET_HEADLESS_BASE_IMAGE: "node:22-bookworm-slim" } });
+      const svcB = makeService({ env: { VALET_HEADLESS_BASE_IMAGE: "node:24-bookworm-slim" } });
+      const a = svcA.identityHash(base, null);
+      const b = svcB.identityHash(base, null);
+      svcA.stop();
+      svcB.stop();
+      expect(a).not.toBe(b);
+    });
+
     it("repo identity changes when the parent identity changes (chain)", async () => {
       const srcId = await seedRepoSource(db);
       const [src] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
@@ -797,6 +831,24 @@ describe("SourceService", () => {
       expect(headless[0].name).toBe("default-headless");
       expect(full).toHaveLength(1);
       expect(full[0].name).toBe("default-full");
+    });
+
+    it("re-seed after a deploy pin change updates the stock-full external ref", async () => {
+      // A deploy rolls VALET_FULL_BASE_IMAGE forward (new immutable sha tag).
+      // The stock-full external row must follow, or every org keeps baking
+      // its full base FROM the stale CI image forever.
+      const oldSvc = makeService({ env: { VALET_FULL_BASE_IMAGE: "ghcr.io/tkhq/valet-sandbox:sha-old" } });
+      await oldSvc.seedDefaultBasesIfMissing(orgId);
+      oldSvc.stop();
+
+      const newSvc = makeService({ env: { VALET_FULL_BASE_IMAGE: "ghcr.io/tkhq/valet-sandbox:sha-new" } });
+      await newSvc.seedDefaultBasesIfMissing(orgId);
+      newSvc.stop();
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      expect(sources).toHaveLength(3);
+      const external = sources.find((s) => s.name === "stock-full")!;
+      expect(external.externalRef).toBe("ghcr.io/tkhq/valet-sandbox:sha-new");
     });
 
     it("partial state self-heals: a missing full base is re-seeded on the next call", async () => {

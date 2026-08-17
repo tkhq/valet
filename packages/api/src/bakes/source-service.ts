@@ -363,11 +363,6 @@ const DEFAULT_SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
 /** Decay window (spec decision 13): a repo source with no live binding and a
  * `last_bound_at` older than this is auto-disabled by the nightly pass. */
 const DECAY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-/** Last-resort fallback base image when neither the config nor
- * `resolveDefaultImage(env)` resolve one. Updated from node:20-bookworm for
- * consistency with the seeded headless base. */
-const FALLBACK_BASE_IMAGE = "node:22-bookworm-slim";
-
 /** Default public base image for the seeded headless base source.
  * Overridden by VALET_HEADLESS_BASE_IMAGE env var. */
 const DEFAULT_HEADLESS_BASE_IMAGE = "node:22-bookworm-slim";
@@ -571,14 +566,23 @@ export class SourceService {
    *  2. The parent source: external → its `external_ref`; base → its current
    *     CONSISTENT pushed bake's `image_ref` (chained bake). A non-ready base
    *     parent falls through to stock (callers must have already deferred).
-   *  3. `VALET_HEADLESS_BASE_IMAGE` env var (for unparented headless base sources).
-   *  4. `resolveDefaultImage(env)` (`VALET_SANDBOX_IMAGE`, deprecated fallback).
-   *  5. `FALLBACK_BASE_IMAGE`. */
+   *  3. `stockBaseRef()` — the shared stock chain (`VALET_HEADLESS_BASE_IMAGE`
+   *     → deprecated `VALET_SANDBOX_IMAGE` → `DEFAULT_HEADLESS_BASE_IMAGE`),
+   *     also used by `identityHash` so FROM and identity always agree. */
   private async resolveBaseImage(source: ImageSourceRow, override: string | undefined): Promise<string> {
     if (override) return override;
     const parentBase = await this.resolveParentBase(source);
     if (parentBase.status === "external" && parentBase.ref) return parentBase.ref;
     if (parentBase.status === "ready") return parentBase.bake.imageRef;
+    return this.stockBaseRef();
+  }
+
+  /** The stock ref an unparented source falls back to. ONE chain for both
+   * the FROM (`resolveBaseImage`) and the identity (`identityHash` /
+   * `baseIdentity`): a divergent identity re-FROMs without re-identifying
+   * (stale bakes never rebake on a pin change) or re-identifies without
+   * re-FROMing (pointless rebakes). */
+  private stockBaseRef(): string {
     return this.env.VALET_HEADLESS_BASE_IMAGE ?? resolveDefaultImage(this.env) ?? DEFAULT_HEADLESS_BASE_IMAGE;
   }
 
@@ -597,7 +601,7 @@ export class SourceService {
 
   /** Content-addressed identity for a `base` source. */
   private baseIdentity(source: ImageSourceRow, parentIdentity: string | null): string {
-    const stock = resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
+    const stock = this.stockBaseRef();
     const parent = parentIdentity ?? stock;
     return sha256Hex(`${parent}|${canonicalRecipeJson([], readSetupCommands(source))}`);
   }
@@ -614,7 +618,7 @@ export class SourceService {
    *                    where recipeHash covers the RESOLVED recipe snapshot.
    */
   identityHash(source: ImageSourceRow, parentIdentity: string | null, recipe?: RecipeSnapshot): string {
-    const stock = resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
+    const stock = this.stockBaseRef();
     if (source.kind === "external") return source.externalRef ?? stock;
     if (source.kind === "base") return this.baseIdentity(source, parentIdentity);
     // repo
@@ -1290,6 +1294,24 @@ export class SourceService {
     let stockFullId: string;
     if (existingExternal[0]) {
       stockFullId = existingExternal[0].id;
+      // Follow deploy pin changes: when VALET_FULL_BASE_IMAGE moves to a new
+      // tag, the external row must move with it or every org keeps baking
+      // its full base FROM the stale CI image. The ref change moves the full
+      // base's identity, so the nightly scheduler rebakes it on the new pin.
+      const currentRef = await this.db
+        .select({ externalRef: imageSources.externalRef })
+        .from(imageSources)
+        .where(eq(imageSources.id, stockFullId))
+        .limit(1);
+      if (currentRef[0] && currentRef[0].externalRef !== fullBaseImage) {
+        await this.db
+          .update(imageSources)
+          .set({ externalRef: fullBaseImage, updatedAt: now })
+          .where(eq(imageSources.id, stockFullId));
+        console.log(
+          `seedDefaultBasesIfMissing(${orgId}): stock-full ref ${currentRef[0].externalRef} → ${fullBaseImage}`,
+        );
+      }
     } else {
       stockFullId = `src_${this.newId()}`;
       await this.db.insert(imageSources).values({
