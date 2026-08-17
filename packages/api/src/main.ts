@@ -492,7 +492,10 @@ async function close(): Promise<void> {
     console.error("rotateSweep.stop failed:", err);
   }
   try {
-    installationSweep.stop();
+    // Awaited, unlike the sweeps above it: a pass in flight holds a database
+    // query open, and closing the store under it logs errors that look like
+    // real failures during every shutdown.
+    await installationSweep.stop();
   } catch (err) {
     console.error("installationSweep.stop failed:", err);
   }

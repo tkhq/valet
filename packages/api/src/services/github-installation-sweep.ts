@@ -116,7 +116,10 @@ export interface InstallationSweepDeps extends GithubAppDeps {
 }
 
 export interface InstallationSweepHandle {
-  stop(): void;
+  /** Stops the timer and resolves when the pass in flight finishes. Await it
+   * in a shutdown path, so the process does not close the database under a
+   * query the sweep still has open. */
+  stop(): Promise<void>;
 }
 
 /** Per-org scheduling state. It survives only in this process: a restart
@@ -179,17 +182,46 @@ export function selectDueOrg(candidates: SweepCandidate[], now: number, state: S
  */
 export function startInstallationSweep(deps: InstallationSweepDeps): InstallationSweepHandle {
   const state = createSweepState();
+  /**
+   * The tick that is in flight, or null.
+   *
+   * A tick calls GitHub, so it can outlast the interval. Without this guard
+   * the timer starts a second tick over the first, and because a tick records
+   * the org it checked only AFTER its await, both ticks select the SAME org
+   * and call GitHub twice for it. Under a slow network the overlap compounds
+   * on every period.
+   *
+   * Holding the promise rather than a boolean also lets `stop` wait for the
+   * pass to finish.
+   */
+  let inFlight: Promise<void> | null = null;
+  let stopped = false;
+
   const timer = setInterval(() => {
-    void runInstallationSweepTick(deps, state).catch((err) => {
-      console.error("github installation sweep: tick failed (the next tick continues):", err);
-    });
+    if (stopped || inFlight !== null) return;
+    // The tick reports which org it checked. The handle only needs to know
+    // that the pass finished, so the id is dropped here.
+    const pass: Promise<void> = runInstallationSweepTick(deps, state)
+      .then(() => undefined)
+      .catch((err) => {
+        console.error("github installation sweep: tick failed (the next tick continues):", err);
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+    inFlight = pass;
   }, deps.intervalMs ?? DEFAULT_INTERVAL_MS);
   // Do not prevent the process from exiting if this is the only active handle.
   timer.unref?.();
 
   return {
     stop() {
+      stopped = true;
       clearInterval(timer);
+      // Resolves when the pass in flight finishes, so a caller that awaits
+      // this does not tear the database down under a live query. Never
+      // rejects: the pass already swallowed its own errors.
+      return inFlight ?? Promise.resolve();
     },
   };
 }
