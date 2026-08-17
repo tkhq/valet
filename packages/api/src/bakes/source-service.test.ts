@@ -752,6 +752,20 @@ describe("SourceService", () => {
       expect(builder.specs).toHaveLength(1);
     });
 
+    it("re-bind backfills a null parent_id once a headless base exists — repo bakes stop FROMing stock", async () => {
+      // A repo source created BEFORE the org's headless base was seeded:
+      // parent_id null → resolveParentBase returns "none" → every bake FROMs
+      // the stock node image, which has no git (the dev-v2 `git: not found`
+      // bake failures). Re-binding after the base exists must adopt it.
+      const srcId = await seedRepoSource(db, { id: "src_orphan", parentId: null });
+      const baseId = await seedBaseSource(db, ["apt-get install -y git"], { profile: "headless" });
+
+      await service.ensureRepoSource(orgId, repo);
+
+      const [src] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
+      expect(src.parentId).toBe(baseId);
+    });
+
     it("never throws on a DB error", async () => {
       // Use the real db but make its first read throw, so ensureRepoSource's
       // try/catch is exercised against a genuine AppDb shape (no double-cast).

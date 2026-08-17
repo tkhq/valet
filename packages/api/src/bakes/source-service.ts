@@ -679,6 +679,18 @@ export class SourceService {
     return this.dispatch(builder, row, spec);
   }
 
+  /** The org's kind='base' profile='headless' source id, or null when the
+   * org has not been seeded yet. Repo sources parent here so their bakes
+   * inherit the agent tooling layer (git, gh, ripgrep). */
+  private async headlessBaseId(orgId: string): Promise<string | null> {
+    const baseSource = await this.db
+      .select({ id: imageSources.id })
+      .from(imageSources)
+      .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base"), eq(imageSources.profile, "headless")))
+      .limit(1);
+    return baseSource[0]?.id ?? null;
+  }
+
   /** True when a repo source must DEFER its bake because its parent is a base
    * source without a consistent pushed bake. Deferring keeps a repo's recorded
    * identity and its FROM image derived from the SAME base bake — a repo baked
@@ -1134,9 +1146,20 @@ export class SourceService {
 
       if (existing[0]) {
         const source = existing[0];
+        // Backfill: a source created before the org's headless base was
+        // seeded has parent_id null, so every bake FROMs the raw stock image
+        // — no git, no agent tooling, and the clone step fails forever.
+        // Adopt the base on re-bind; the identity change makes the nightly
+        // scheduler rebake on the proper lineage.
+        const adoptedParentId = source.parentId ?? (await this.headlessBaseId(orgId));
         await this.db
           .update(imageSources)
-          .set({ lastBoundAt: now, enabled: true, updatedAt: now })
+          .set({
+            lastBoundAt: now,
+            enabled: true,
+            updatedAt: now,
+            ...(adoptedParentId !== source.parentId ? { parentId: adoptedParentId } : {}),
+          })
           .where(eq(imageSources.id, source.id));
         // Fire a bake when this re-bound source has no pushed bake yet.
         const current = await this.currentBake(source.id);
@@ -1146,14 +1169,9 @@ export class SourceService {
 
       // Repo sources are always agent (headless) workspaces; parent at the
       // headless base so the agent tooling layer is included.
-      const baseSource = await this.db
-        .select({ id: imageSources.id })
-        .from(imageSources)
-        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base"), eq(imageSources.profile, "headless")))
-        .limit(1);
       // Fall back to null (no parent) if no headless base exists yet —
       // defensive; post-seed this should not happen.
-      const parentId = baseSource[0]?.id ?? null;
+      const parentId = await this.headlessBaseId(orgId);
 
       const id = `src_${this.newId()}`;
       await this.db.insert(imageSources).values({
