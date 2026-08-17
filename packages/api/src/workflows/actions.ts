@@ -619,6 +619,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         // This action appends a node to the stored definition, so an error
         // the stored definition already held blocks it. Say so: the caller
         // cannot see the offending node from the arguments it sent.
+        //
+        // Both arguments are the same list ON PURPOSE. This reason code is
+        // raised by validating the STORED definition alone, before the node
+        // is appended (`addAggregateNode`), so every error in it is by
+        // definition pre-existing. An error the appended node introduces
+        // arrives under `would_be_invalid` instead, and is formatted below
+        // as the caller's own. Keep the two reason codes apart if this
+        // action ever takes a user-supplied path.
         if (result.reason === "stored_definition_invalid") {
           return { success: false, error: formatEditLintErrors(result.errors, result.errors) };
         }
