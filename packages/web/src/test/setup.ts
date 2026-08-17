@@ -73,9 +73,27 @@ if (typeof document !== "undefined") {
   // before asserting anything. Same class of gap as the shims above: jsdom
   // is missing a browser API this app legitimately uses.
   //
+  // The guard probes behavior, not existence: Node >= 22.4 defines a
+  // built-in `localStorage` global that is inert without a valid
+  // `--localstorage-file` (reads warn, `clear` is missing), so an
+  // existence check leaves that broken object in place and every test
+  // touching persisted state fails under newer Node.
+  //
   // Per-file, not shared: each test file gets its own jsdom global, so this
   // starts empty for every file and needs no reset between them.
-  if (typeof globalThis.localStorage === "undefined") {
+  const localStorageWorks = (() => {
+    try {
+      const ls = globalThis.localStorage;
+      if (typeof ls === "undefined" || typeof ls.clear !== "function") return false;
+      ls.setItem("__vitest_probe__", "1");
+      const ok = ls.getItem("__vitest_probe__") === "1";
+      ls.removeItem("__vitest_probe__");
+      return ok;
+    } catch {
+      return false;
+    }
+  })();
+  if (!localStorageWorks) {
     const store = new Map<string, string>();
     const storage: Storage = {
       get length() {
