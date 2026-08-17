@@ -1041,6 +1041,20 @@ const updatePullRequest = action(Type.Object({
   description: "Update a pull request title, body, state, labels, or assignees",
   riskLevel: "medium",
   execute: async (args, ctx) => {
+    if (
+      args.title === undefined &&
+      args.body === undefined &&
+      args.state === undefined &&
+      args.labels === undefined &&
+      args.assignees === undefined
+    ) {
+      return {
+        success: false,
+        error:
+          "update_pull_request needs at least one field to change. " +
+          "Provide title, body, state, labels, or assignees.",
+      };
+    }
     const octokit = await getOctokit(ctx);
     const updateBody: Record<string, unknown> = {};
     if (args.title !== undefined) updateBody.title = args.title;

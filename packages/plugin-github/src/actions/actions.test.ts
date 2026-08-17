@@ -954,6 +954,19 @@ describe("github.update_pull_request", () => {
     expect(result.data.url).toBe("https://github.com/acme/widgets/pull/7");
   });
 
+  it("rejects a call with no fields and sends no requests", async () => {
+    const server = useFixture();
+
+    const result = await update({});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe(
+      "update_pull_request needs at least one field to change. " +
+        "Provide title, body, state, labels, or assignees.",
+    );
+    expect(server.calls).toHaveLength(0);
+  });
+
   it("sends an empty assignees list, which unassigns everybody", async () => {
     const server = useFixture();
 
