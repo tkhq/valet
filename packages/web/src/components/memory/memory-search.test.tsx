@@ -34,6 +34,16 @@ const searchResults = [
   },
 ];
 
+// The pane reads the workspace it is searching. `useListOwner` needs the
+// caller's own id, because the switcher holds a routing key rather than a
+// principal — mocked here rather than wrapping in a provider, matching how
+// this file already isolates the pane from the network.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
+  useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: false } }, isLoading: false, error: null }),
+}));
+
 vi.mock("~/api/memory", () => ({
   useMemoryTree: () => ({
     data: { entries: treeEntries },

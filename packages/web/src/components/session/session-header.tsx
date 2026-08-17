@@ -23,6 +23,7 @@ import { useAssistants } from "~/api/assistants";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
+import { assistantLabel } from "./assistant-rail";
 import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
@@ -155,13 +156,11 @@ export function SessionHeader({
   // The orchestrator's title card carries the orchestrator's chosen name
   // (e.g. "Aurora") — the top-nav logo stays "Valet", so this is where
   // the assistant's identity lives.
-  // An assistant is titled with its own name, and a team's assistant falls
-  // back to the TEAM's name. Both come from the assistants list rather than
-  // from the session id: the id used to be parsed for the owning team, which
-  // worked only while a team had exactly one assistant. Narrowing still
-  // matters — `orchInfo` is the viewer's OWN assistant, so a bare
-  // `startsWith("orchestrator:")` test titled every team assistant with the
-  // viewer's personal assistant name.
+  // The owning team comes from the assistants list rather than from the
+  // session id: the id used to be parsed for it, which worked only while a
+  // team had exactly one assistant. Narrowing still matters — `orchInfo` is
+  // the viewer's OWN assistant, so a bare `startsWith("orchestrator:")` test
+  // titled every team assistant with the viewer's personal assistant name.
   const assistant = assistants.data?.assistants.find((a) => a.sessionId === session.id);
   const teamId = assistant?.owner.type === "team" ? assistant.owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
@@ -170,9 +169,16 @@ export function SessionHeader({
   const isOwnOrchestrator =
     assistant?.owner.type === "user" || orchInfo.data?.sessionId === session.id;
   const isAssistantSession = assistant !== undefined || isOwnOrchestrator;
+  // `assistantLabel` is the SAME function the rail uses, so the row you
+  // clicked and the header you land on cannot disagree. They did: an
+  // assistant nobody has named showed as "Default assistant" in the rail and
+  // as the owning TEAM's name here, which read as two different things.
+  //
+  // The team name is no longer a fallback for a nameless assistant. It named
+  // the wrong entity — a team owns assistants, it is not one — and the badge
+  // beside this title already says which team the conversation belongs to.
   const title =
-    assistant?.name ||
-    (teamId !== null ? team?.name : undefined) ||
+    (assistant ? assistantLabel(assistant) : undefined) ||
     (isOwnOrchestrator ? orchInfo.data?.name : undefined) ||
     session.title ||
     "Untitled session";
@@ -191,15 +197,23 @@ export function SessionHeader({
           <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
             {title}
           </span>
-          {/* Deliberately NOT `OwnerBadge`. That badge names the owning team
-              and links to its assistant; here the title already IS the team
-              name, and its assistant is the page you are on — so it would
-              render "Platform [Platform]" pointing at itself. This badge
-              answers a different question: whether the conversation you are
-              reading is shared. */}
+          {/* Names the owning team, now that the title does not.
+
+              This badge used to read the bare word "Team", because the title
+              was the team's name and "Platform [Platform]" says one thing
+              twice. The title is the assistant's own label now — the same
+              label the rail shows — so the team name would otherwise appear
+              nowhere in this row, and "Team" alone cannot answer WHICH team
+              a person with several is reading.
+
+              Still not `OwnerBadge`: that one links to the team's assistant,
+              which is the page you are already on. */}
           {teamId !== null && (
-            <Badge variant="accent" className="shrink-0">
-              Team
+            // The test hook lets a test assert THIS element rather than the
+            // team's name appearing anywhere in the header, which a title
+            // regression could satisfy on its own.
+            <Badge variant="accent" className="shrink-0" data-testid="owning-team">
+              {team?.name ?? "Team"}
             </Badge>
           )}
           {/* An orchestrator's workspace is a synthetic internal directory

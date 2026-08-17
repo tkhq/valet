@@ -193,12 +193,30 @@ export interface OwnerFilter {
   ownerId: string;
 }
 
+/** The owner pair, encoded, with NO leading separator.
+ *
+ * Split out from `ownerQuery` because two memory endpoints already carry a
+ * query string and need `&`. Serialising them by hand instead skipped
+ * encoding, and would have drifted the moment this format changed. */
+function ownerParams(owner: OwnerFilter | undefined): string {
+  if (!owner) return "";
+  return new URLSearchParams({
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+  }).toString();
+}
+
 /** `?ownerType=&ownerId=`, or empty. The server rejects a half-specified
  * pair, so both are written or neither is. */
 function ownerQuery(owner: OwnerFilter | undefined): string {
-  if (!owner) return "";
-  const qs = new URLSearchParams({ ownerType: owner.ownerType, ownerId: owner.ownerId });
-  return `?${qs.toString()}`;
+  const params = ownerParams(owner);
+  return params ? `?${params}` : "";
+}
+
+/** The owner pair appended to a path that ALREADY has a query string. */
+function ownerSuffix(owner: OwnerFilter | undefined): string {
+  const params = ownerParams(owner);
+  return params ? `&${params}` : "";
 }
 
 class ApiError extends Error {
@@ -353,7 +371,10 @@ export const api = {
   getAuthConfig: () => fetchAuthConfig(),
 
   // sessions
-  listSessions: () => request<ListSessionsResponse>("GET", "/sessions"),
+  /** Unscoped lists the caller's own sessions plus every team's they can
+   * reach. `owner` narrows it to one workspace. */
+  listSessions: (owner?: OwnerFilter) =>
+    request<ListSessionsResponse>("GET", `/sessions${ownerQuery(owner)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   createSession: (body: CreateSessionRequest) =>
@@ -416,12 +437,22 @@ export const api = {
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
-  getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
-  getMemoryDoc: (path: string) =>
-    request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
-  searchMemory: (q: string) =>
-    request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
-  getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
+  /** Unscoped reads the caller's own memory. `owner` reads one workspace's
+   * — a team's memory is the team's, not a view of yours. */
+  getMemoryTree: (owner?: OwnerFilter) =>
+    request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+  getMemoryDoc: (path: string, owner?: OwnerFilter) =>
+    request<GetMemoryDocResponse>(
+      "GET",
+      `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`,
+    ),
+  searchMemory: (q: string, owner?: OwnerFilter) =>
+    request<SearchMemoryResponse>(
+      "GET",
+      `/memory/search?q=${encodeURIComponent(q)}${ownerSuffix(owner)}`,
+    ),
+  getMemoryGraph: (owner?: OwnerFilter) =>
+    request<MemoryGraphResponse>("GET", `/memory/graph${ownerQuery(owner)}`),
   // `content` and `pinned` are both optional: the route leaves the body
   // alone when `content` is absent, which is how the doc view pins a file
   // without rewriting it.

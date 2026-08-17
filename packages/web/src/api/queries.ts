@@ -34,12 +34,15 @@ import type {
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
 import { useLiveQuery } from "~/lib/use-live-query";
-import { api } from "./client";
+import { api, type OwnerFilter } from "./client";
 
 // ── Query key factory ────────────────────────────────────────────────────
 
 export const qk = {
-  sessions: () => ["sessions"] as const,
+  /** The owner is a trailing element, so `["sessions"]` stays the prefix
+   * that invalidates every workspace's list at once. */
+  sessions: (owner?: OwnerFilter) =>
+    ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
@@ -80,10 +83,16 @@ export function sessionsAreLive(data: ListSessionsResponse): boolean {
  * Polls while any session is working or blocked on a person, and stops when
  * none are. See `lib/use-live-query.ts` for the policy.
  */
-export function useSessions(opts?: UseQueryOptions<ListSessionsResponse>) {
+/** The sessions of one workspace, or of everything the caller can reach.
+ * `owner` MUST reach the query key, or switching answers from the previous
+ * workspace's cache. */
+export function useSessions(
+  owner?: OwnerFilter,
+  opts?: UseQueryOptions<ListSessionsResponse>,
+) {
   return useLiveQuery<ListSessionsResponse>({
-    queryKey: qk.sessions(),
-    queryFn: () => api.listSessions(),
+    queryKey: qk.sessions(owner),
+    queryFn: () => api.listSessions(owner),
     isLive: sessionsAreLive,
     ...opts,
   });

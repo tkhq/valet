@@ -6,19 +6,32 @@
  */
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type { GetMemoryTreeResponse } from "@valet/api/wire";
-import { api, ApiError } from "./client";
+import { api, ApiError, type OwnerFilter } from "./client";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
 
+/** Every key carries the workspace, so switching refetches instead of
+ * answering from the previous workspace's cache. The owner is a trailing
+ * element, leaving the bare prefix as the one that invalidates all of them. */
+function ownerKey(owner?: OwnerFilter): readonly string[] {
+  return owner ? [owner.ownerType, owner.ownerId] : [];
+}
+
 export const qkMemory = {
-  tree: () => ["memory", "tree"] as const,
-  doc: (path: string) => ["memory", "doc", path] as const,
-  search: (q: string) => ["memory", "search", q] as const,
+  tree: (owner?: OwnerFilter) => ["memory", "tree", ...ownerKey(owner)] as const,
+  doc: (path: string, owner?: OwnerFilter) =>
+    ["memory", "doc", path, ...ownerKey(owner)] as const,
+  search: (q: string, owner?: OwnerFilter) =>
+    ["memory", "search", q, ...ownerKey(owner)] as const,
+  graph: (owner?: OwnerFilter) => ["memory", "graph", ...ownerKey(owner)] as const,
 };
 
-export function useMemoryTree(opts?: Partial<UseQueryOptions<GetMemoryTreeResponse>>) {
+export function useMemoryTree(
+  owner?: OwnerFilter,
+  opts?: Partial<UseQueryOptions<GetMemoryTreeResponse>>,
+) {
   return useQuery<GetMemoryTreeResponse>({
-    queryKey: qkMemory.tree(),
-    queryFn: () => api.getMemoryTree(),
+    queryKey: qkMemory.tree(owner),
+    queryFn: () => api.getMemoryTree(owner),
     ...opts,
   });
 }
@@ -33,11 +46,12 @@ export function useMemoryTree(opts?: Partial<UseQueryOptions<GetMemoryTreeRespon
  */
 export function useMemoryDoc(
   path: string,
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<GetMemoryDocResponse>>,
 ) {
   return useQuery<GetMemoryDocResponse>({
-    queryKey: qkMemory.doc(path),
-    queryFn: () => api.getMemoryDoc(path),
+    queryKey: qkMemory.doc(path, owner),
+    queryFn: () => api.getMemoryDoc(path, owner),
     retry: (failureCount, error) => {
       if (error instanceof ApiError && error.status === 404) return false;
       return failureCount < 2;
@@ -55,12 +69,13 @@ export function useMemoryDoc(
  */
 export function useMemorySearch(
   q: string,
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<SearchMemoryResponse>>,
 ) {
   const trimmed = q.trim();
   return useQuery<SearchMemoryResponse>({
-    queryKey: qkMemory.search(trimmed),
-    queryFn: () => api.searchMemory(trimmed),
+    queryKey: qkMemory.search(trimmed, owner),
+    queryFn: () => api.searchMemory(trimmed, owner),
     enabled: trimmed.length > 0,
     ...opts,
   });

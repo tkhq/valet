@@ -94,6 +94,9 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
+  // `useListOwner` reads the caller's own id: the workspace switcher
+  // holds a routing key, not a principal.
+  useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
   // `teamsData` is a let, so a test can give the caller a team before it
   // renders. `useOrg` is read by the editor to decide whether the org scope
   // is open to this caller — a member here, which is the common case.
