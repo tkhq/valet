@@ -30,6 +30,18 @@
  * Both listings take the same optional `?ownerType=&ownerId=` filter, for a
  * client that shows one workspace at a time. `readOwnerScope` reads it for
  * both, so the two pages cannot answer a bad filter differently.
+ *
+ * Both are keyset-paginated, in the shape the action log set
+ * (`policies/admin.ts`): `?limit=` with a default and a cap, an opaque
+ * `?cursor=` a client only passes back, and `nextCursor: null` on the last
+ * page. The catalog walks ONE cursor over two sources — the in-memory plugin
+ * skills first, then the stored rows — so a page boundary can fall between
+ * them without repeating a skill or skipping one.
+ *
+ * The catalog also takes the Library's own three controls: `?scope=`,
+ * `?kind=`, and `?q=`. They are applied here and not in the client because a
+ * control that filtered one page would answer about that page while claiming
+ * to answer about the library.
  */
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
@@ -38,28 +50,41 @@ import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { partitionByName } from "../plugins/assemble.js";
+import { readLimit } from "../lib/page-cursor.js";
 import {
   asRecord,
   createSkill,
+  decodeSkillCursor,
   deleteSkill,
+  encodeSkillCursor,
   isAuthorizedFor,
+  listSkillNamesInReach,
   listSkills,
+  listSkillsPage,
+  PLUGIN_SKILL_RANK,
+  rankOf,
   readableSkillRow,
+  SKILL_DEFAULT_LIMIT,
+  SKILL_MAX_LIMIT,
   SkillNameConflictError,
   SkillNotLocalError,
   SkillReservedNameError,
   SkillValidationError,
   updateSkill,
+  type SkillCursor,
   type SkillOwner,
 } from "../services/skills.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
   countSkillsPerSource,
   createSkillSource,
+  decodeSkillSourceCursor,
   deleteSkillSource,
   listSkillSources,
   markSkillSourceDue,
   ownedSkillSourceRow,
+  SKILL_SOURCE_DEFAULT_LIMIT,
+  SKILL_SOURCE_MAX_LIMIT,
   SkillSourceConflictError,
   SkillSourceInputError,
 } from "../services/skill-sources.js";
@@ -77,6 +102,7 @@ import type {
   SkillResponse,
   SkillSourceSummary,
   SkillSourceSyncResponse,
+  SkillSummary,
   StoredSkillSummary,
   UpdateSkillRequest,
 } from "../wire/types.js";
@@ -206,50 +232,190 @@ function errorResponse(err: unknown): { body: Record<string, unknown>; status: 4
   throw err;
 }
 
+// ── The Library filters ───────────────────────────────────────────────────
+//
+// The Library's chips, scope select, and search box are applied HERE, not in
+// the client. A page is a slice of the catalog, so a filter applied to the
+// slice alone answers about that slice while the control claims to answer
+// about the catalog: a search would miss every match on a page not yet read.
+
+type FilterCheck<T> = { ok: true; value: T | undefined } | { ok: false; error: string };
+
+function readKind(raw: string | undefined): FilterCheck<"skill" | "prompt"> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (raw === "skill" || raw === "prompt") return { ok: true, value: raw };
+  return { ok: false, error: "kind must be 'skill' or 'prompt'. Remove it to list both." };
+}
+
+const CATALOG_SCOPES = ["personal", "team", "org", "plugin"] as const;
+type CatalogScope = (typeof CATALOG_SCOPES)[number];
+
+function readCatalogScope(raw: string | undefined): FilterCheck<CatalogScope> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  const found = CATALOG_SCOPES.find((s) => s === raw);
+  if (found) return { ok: true, value: found };
+  return {
+    ok: false,
+    error: "scope must be 'personal', 'team', 'org' or 'plugin'. Remove it to list every scope.",
+  };
+}
+
+/** A plugin skill sorts before every stored row and carries its plugin name
+ * where a stored row carries its id, so one cursor walks both. */
+function pluginCursorKey(summary: PluginSkillSummary): SkillCursor {
+  return { r: PLUGIN_SKILL_RANK, n: summary.name, id: summary.plugin };
+}
+
+/** Orders two plugin skills by the same key the cursor compares them with.
+ * Plain `<` and not `localeCompare`: the cursor test below is a plain string
+ * comparison, and a locale that disagrees with it would skip an entry or
+ * hand the same one back twice. */
+function byCursorKey(a: PluginSkillSummary, b: PluginSkillSummary): number {
+  if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+  if (a.plugin !== b.plugin) return a.plugin < b.plugin ? -1 : 1;
+  return 0;
+}
+
+/** Keeps the plugin skills that sort after `cursor`. Nothing survives a
+ * cursor already past the plugin block. */
+function pluginsAfter(summaries: PluginSkillSummary[], cursor: SkillCursor | undefined): PluginSkillSummary[] {
+  const sorted = [...summaries].sort(byCursorKey);
+  if (!cursor) return sorted;
+  if (cursor.r !== PLUGIN_SKILL_RANK) return [];
+  return sorted.filter(
+    (s) => s.name > cursor.n || (s.name === cursor.n && s.plugin > cursor.id),
+  );
+}
+
+/** Applies the same three filters to the in-memory plugin skills the SQL
+ * read applies to stored rows. A plugin skill never declares an invocation,
+ * so it is always a plain skill and never a prompt. */
+function keepPluginSkill(
+  summary: PluginSkillSummary,
+  filter: { kind?: "skill" | "prompt"; query?: string },
+): boolean {
+  if (filter.kind === "prompt") return false;
+  if (filter.query === undefined || filter.query.length === 0) return true;
+  const needle = filter.query.toLowerCase();
+  return (
+    summary.name.toLowerCase().includes(needle) ||
+    (summary.description ?? "").toLowerCase().includes(needle)
+  );
+}
+
 // ── Catalog ───────────────────────────────────────────────────────────────
 
 skillsRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const caller = owner(c);
-  const filter = await readOwnerScope(db, caller, c.req.query("ownerType"), c.req.query("ownerId"));
-  if (!filter.ok) return c.json({ error: filter.error }, filter.status);
+  const ownerType = c.req.query("ownerType");
+  // `pin`, not `filter`: this selects ONE owner by id, where the `scope`
+  // below selects a class of owners. The two read alike and mean different
+  // things, so they do not share a name in this handler.
+  const pin = await readOwnerScope(db, caller, ownerType, c.req.query("ownerId"));
+  if (!pin.ok) return c.json({ error: pin.error }, pin.status);
 
-  const pluginSkills = ownedSkills(c.var.providers.plugins);
-  const rows = await listSkills(db, caller, filter.scope);
+  const kind = readKind(c.req.query("kind"));
+  if (!kind.ok) return c.json({ error: kind.error }, 400);
+  const scope = readCatalogScope(c.req.query("scope"));
+  if (!scope.ok) return c.json({ error: scope.error }, 400);
+  // Two ways to name the same axis. The owner pin selects ONE owner by id;
+  // `scope` selects a whole class of owners. Answering both at once would
+  // mean silently ignoring one, so say which to drop.
+  if (scope.value !== undefined && ownerType !== undefined) {
+    return c.json(
+      { error: "Filter by scope or by owner, not both. Remove scope, or remove ownerType and ownerId." },
+      400,
+    );
+  }
+  const query = c.req.query("q")?.trim();
+  const limit = readLimit(c.req.query("limit"), SKILL_DEFAULT_LIMIT, SKILL_MAX_LIMIT);
+  if (limit === undefined) {
+    return c.json(
+      { error: `limit must be a whole number of 1 or more. Remove it to take the default of ${SKILL_DEFAULT_LIMIT}.` },
+      400,
+    );
+  }
+  const cursorParam = c.req.query("cursor");
+  const cursor = cursorParam === undefined ? undefined : decodeSkillCursor(cursorParam);
+  if (cursorParam !== undefined && cursor === undefined) {
+    return c.json(
+      { error: "That cursor is not one this listing issued. Remove it to start at the first page." },
+      400,
+    );
+  }
 
-  // Shadowing is a property of the caller's whole reach, never of the page
-  // being read. `listSkills` returns personal rows before team rows and the
-  // first of a repeated name is the one that reaches a session, so judging a
-  // filtered page against itself drops the very row that wins: a team page
-  // would report a team skill live while a personal copy of the same name
-  // silently beat it everywhere. Judge against the unfiltered set, then show
-  // only the rows this page asked for.
-  const judged = filter.scope === undefined ? rows : await listSkills(db, caller);
-  const { shadowed } = partitionByName(
-    pluginSkills.map((entry) => entry.skill.name),
-    judged,
-  );
-  const shadowedIds = new Set(shadowed.map((row) => row.id));
-  const onPage = new Set(rows.map((row) => row.id));
-  const kept = rows.filter((row) => !shadowedIds.has(row.id));
-  const shadowedOnPage = shadowed.filter((row) => onPage.has(row.id));
+  const catalogFilter = {
+    ...(kind.value === undefined ? {} : { kind: kind.value }),
+    ...(query === undefined || query.length === 0 ? {} : { query }),
+  };
 
   // Both kinds, in one list. A reader of this page asks "what can the
   // assistant read", and the answer includes the skills the installed
   // plugins ship — which is also the only way a shadow warning makes sense,
   // since the skill doing the shadowing is usually one of them.
   //
-  // A filtered listing drops them: the filter selects rows BY owner, and a
-  // plugin skill has no owner to select it by. It still shadows, and so does
-  // a stored row from another workspace — see the `judged` set above, which
-  // is why a filtered page can flag a row shadowed by something it does not
-  // itself list.
+  // An owner-pinned listing drops them: that filter selects rows BY owner,
+  // and a plugin skill has no owner to select it by. They still shadow —
+  // see `judged` below, which is why a pinned page can flag a row shadowed
+  // by something it does not itself list.
+  const pluginSkills = ownedSkills(c.var.providers.plugins);
+  const wantsPlugins = pin.scope === undefined && (scope.value === undefined || scope.value === "plugin");
+  const pluginPage = wantsPlugins
+    ? pluginsAfter(
+        pluginSkills.map(toPluginSummary).filter((s) => keepPluginSkill(s, catalogFilter)),
+        cursor,
+      )
+    : [];
+
+  // Stored rows fill whatever the plugin block leaves. One extra entry over
+  // the limit is what says a further page exists.
+  const wantStored = scope.value === "plugin" ? 0 : limit + 1 - pluginPage.length;
+  const stored =
+    wantStored > 0
+      ? (
+          await listSkillsPage(
+            db,
+            caller,
+            pin.scope,
+            {
+              ...catalogFilter,
+              ...(scope.value === undefined || scope.value === "plugin" ? {} : { scope: scope.value }),
+            },
+            wantStored,
+            cursor,
+          )
+        ).rows
+      : [];
+
+  // Shadowing is a property of the caller's whole reach, never of the page
+  // being read. Personal rows come before team rows and the first of a
+  // repeated name is the one that reaches a session, so judging a page
+  // against itself drops the very row that wins: a team page would report a
+  // team skill live while a personal copy of the same name silently beat it
+  // everywhere. Judge against the caller's whole reach — names only, so a
+  // page request never pulls every skill body.
+  const judged = await listSkillNamesInReach(db, caller);
+  const { shadowed } = partitionByName(
+    pluginSkills.map((entry) => entry.skill.name),
+    judged,
+  );
+  const shadowedIds = new Set(shadowed.map((row) => row.id));
+
+  const entries: Array<{ summary: SkillSummary; key: SkillCursor }> = [
+    ...pluginPage.map((summary) => ({ summary, key: pluginCursorKey(summary) })),
+    ...stored.map((row) => ({
+      summary: toStoredSummary(row, shadowedIds.has(row.id)),
+      key: { r: rankOf(row.ownerType), n: row.name, id: row.id },
+    })),
+  ];
+  const hasMore = entries.length > limit;
+  const page = hasMore ? entries.slice(0, limit) : entries;
+  const last = page[page.length - 1];
+
   const resp: ListSkillsResponse = {
-    skills: [
-      ...(filter.scope ? [] : pluginSkills.map(toPluginSummary)),
-      // Listing order matches delivery order, so the `kept` rows come first.
-      ...[...kept, ...shadowedOnPage].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
-    ],
+    skills: page.map((entry) => entry.summary),
+    nextCursor: hasMore && last ? encodeSkillCursor(last.key) : null,
   };
   return c.json(resp);
 });
@@ -406,13 +572,32 @@ skillsRouter.get("/sources", async (c) => {
   const filter = await readOwnerScope(db, caller, c.req.query("ownerType"), c.req.query("ownerId"));
   if (!filter.ok) return c.json({ error: filter.error }, filter.status);
 
-  const rows = await listSkillSources(db, caller, filter.scope);
+  const limit = readLimit(c.req.query("limit"), SKILL_SOURCE_DEFAULT_LIMIT, SKILL_SOURCE_MAX_LIMIT);
+  if (limit === undefined) {
+    return c.json(
+      { error: `limit must be a whole number of 1 or more. Remove it to take the default of ${SKILL_SOURCE_DEFAULT_LIMIT}.` },
+      400,
+    );
+  }
+  const cursorParam = c.req.query("cursor");
+  const cursor = cursorParam === undefined ? undefined : decodeSkillSourceCursor(cursorParam);
+  if (cursorParam !== undefined && cursor === undefined) {
+    return c.json(
+      { error: "That cursor is not one this listing issued. Remove it to start at the first page." },
+      400,
+    );
+  }
+
+  const page = await listSkillSources(db, caller, filter.scope, limit, cursor);
+  // The count query is scoped to the page's ids, so it grows with the page
+  // and not with the number of sources tracked.
   const counts = await countSkillsPerSource(
     db,
-    rows.map((row) => row.id),
+    page.rows.map((row) => row.id),
   );
   const resp: ListSkillSourcesResponse = {
-    sources: rows.map((row) => toSourceSummary(row, counts.get(row.id) ?? 0)),
+    sources: page.rows.map((row) => toSourceSummary(row, counts.get(row.id) ?? 0)),
+    nextCursor: page.nextCursor ?? null,
   };
   return c.json(resp);
 });

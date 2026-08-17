@@ -51,10 +51,17 @@ import {
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import { parseRepoInput, SkillSourceInputError } from "../services/skill-sources.js";
+import {
+  PublicSkillRepoReader,
+  SkillRepoReadError,
+  SkillRepoTimeoutError,
+} from "../services/skill-repo-reader.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  GetWorkflowImportFileResponse,
   ListAllWorkflowRunsResponse,
   CreateScheduleOnWorkflowRequest,
   CreateWorkflowScheduleResponse,
@@ -253,6 +260,111 @@ workflowsRouter.get("/runs", async (c) => {
   // Rows carry `workflowName`: this list mixes workflows, so the hub's Runs
   // tab has no heading to name them from.
   const resp: ListAllWorkflowRunsResponse = page;
+  return c.json(resp);
+});
+
+// ── Import ────────────────────────────────────────────────────────────────
+
+/**
+ * Reads one file out of a PUBLIC GitHub repository, so the import dialog can
+ * take a definition that lives in version control.
+ *
+ * PUBLIC REPOSITORIES ONLY, through the tokenless `PublicSkillRepoReader`.
+ * The reason is the one its module comment gives for skill sources, and it
+ * applies here word for word: a token resolved on this path would be the
+ * organization GitHub App's, which reaches every repository the App is
+ * installed on, and nothing in this codebase yet checks that the caller may
+ * read the repository they typed. Until such a check exists, the App's reach
+ * must not sit behind a box that takes a repository name.
+ *
+ * The file is returned as TEXT. The client owns the one parser that reads
+ * both a pasted file and this response, so the two sources cannot drift into
+ * accepting different shapes, and the definition is validated where every
+ * other definition is validated — `POST /` below, with the full environment
+ * hooks that reject an unknown service.
+ */
+workflowsRouter.get("/import/repo-file", async (c) => {
+  const repo = blankToUndefined(c.req.query("repo"));
+  const path = blankToUndefined(c.req.query("path"));
+  if (repo === undefined) {
+    return c.json({ error: "Enter a repository. Write it as owner/repo, or paste its GitHub URL." }, 400);
+  }
+  if (path === undefined) {
+    return c.json(
+      { error: "Enter the path of the workflow file in the repository, such as workflows/deploy.json." },
+      400,
+    );
+  }
+
+  // `parseRepoInput` is the address parser the skill sources form already
+  // uses. It reads `owner/repo` out of a bare name or a GitHub URL, and it
+  // refuses a ref or a path that leaves the repository.
+  let parsed;
+  try {
+    parsed = parseRepoInput(repo, { ref: blankToUndefined(c.req.query("ref")), subpath: path });
+  } catch (err) {
+    if (err instanceof SkillSourceInputError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  if (parsed.subpath === "") {
+    return c.json(
+      { error: "Enter the path of the workflow file in the repository, such as workflows/deploy.json." },
+      400,
+    );
+  }
+
+  const at = parsed.ref === "" ? "" : ` at ${parsed.ref}`;
+  let content: string | null;
+  try {
+    // Constructed per request so the GitHub base URL is read now, not at
+    // module load — the same rule `repos/github-host.ts` follows.
+    content = await new PublicSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
+  } catch (err) {
+    // The reader words its own messages for the skill sync sweep, which
+    // tells the reader to wait for the next poll. An import has a person in
+    // front of it, so the action named here is the one they can take now.
+    if (err instanceof SkillRepoTimeoutError) {
+      return c.json(
+        { error: `GitHub did not answer for ${parsed.repoFullName}. Try the import again.` },
+        504,
+      );
+    }
+    if (err instanceof SkillRepoReadError) {
+      return c.json(
+        {
+          error: `GitHub refused to serve ${parsed.repoFullName}/${parsed.subpath}. Valet reads public repositories without a credential, and GitHub limits that to 60 requests each hour. Wait, then try the import again.`,
+        },
+        502,
+      );
+    }
+    throw err;
+  }
+
+  // One message covers every miss: unauthenticated, a private repository, a
+  // wrong branch, a misspelled path and a directory all answer the same way.
+  if (content === null) {
+    return c.json(
+      {
+        error: `Valet found no file at ${parsed.subpath} in ${parsed.repoFullName}${at}. Valet reads public repositories only, so a private repository, a wrong branch and a misspelled path look the same here. Check the repository, the path and the branch, and make the repository public.`,
+      },
+      404,
+    );
+  }
+  if (content.trim() === "") {
+    return c.json(
+      {
+        error: `${parsed.subpath} in ${parsed.repoFullName}${at} is empty, or larger than the 1 MB GitHub serves inline. Point the path at the exported definition file.`,
+      },
+      400,
+    );
+  }
+
+  const resp: GetWorkflowImportFileResponse = {
+    repo: parsed.repoFullName,
+    path: parsed.subpath,
+    ref: parsed.ref,
+    content,
+  };
   return c.json(resp);
 });
 
