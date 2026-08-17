@@ -901,3 +901,68 @@ describe("github.create_review", () => {
     expect(result.data.inline_comments).toBe(1);
   });
 });
+
+// ─── update_pull_request ────────────────────────────────────────────────────
+
+describe("github.update_pull_request", () => {
+  async function update(args: Record<string, unknown>) {
+    return findAction("github.update_pull_request").execute(
+      { owner: "acme", repo: "widgets", pullNumber: 7, ...args },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  it("sends title, body, and state through the pulls endpoint", async () => {
+    const server = useFixture();
+
+    const result = await update({ title: "New title", body: "New body.", state: "closed" });
+
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "PATCH /repos/acme/widgets/pulls/7",
+    ]);
+    expect(server.calls[0].body).toEqual({ title: "New title", body: "New body.", state: "closed" });
+  });
+
+  it("routes assignees through the issues endpoint, which the pulls endpoint rejects", async () => {
+    const server = useFixture();
+
+    const result = await update({ title: "New title", assignees: ["first-account"] });
+
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "PATCH /repos/acme/widgets/pulls/7",
+      "PATCH /repos/acme/widgets/issues/7",
+    ]);
+    expect(server.calls[0].body).toEqual({ title: "New title" });
+    expect(server.calls[1].body).toEqual({ assignees: ["first-account"] });
+  });
+
+  it("skips the pulls call when only assignees is given", async () => {
+    const server = useFixture();
+
+    const result = await update({ assignees: ["first-account", "second-account"] });
+
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "PATCH /repos/acme/widgets/issues/7",
+    ]);
+    expect(server.calls[0].body).toEqual({ assignees: ["first-account", "second-account"] });
+    if (!isRecord(result.data)) throw new Error("no data");
+    // The response fields come from the issues PATCH when it is the only call.
+    expect(result.data.number).toBe(7);
+    expect(result.data.url).toBe("https://github.com/acme/widgets/pull/7");
+  });
+
+  it("sends an empty assignees list, which unassigns everybody", async () => {
+    const server = useFixture();
+
+    const result = await update({ assignees: [] });
+
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "PATCH /repos/acme/widgets/issues/7",
+    ]);
+    expect(server.calls[0].body).toEqual({ assignees: [] });
+  });
+});

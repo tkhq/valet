@@ -1032,10 +1032,13 @@ const updatePullRequest = action(Type.Object({
     labels: Type.Optional(
       Type.Array(Type.String(), { description: "Labels to set (replaces existing)" }),
     ),
+    assignees: Type.Optional(
+      Type.Array(Type.String(), { description: "Assignee usernames (replaces existing)" }),
+    ),
   }))({
   id: "github.update_pull_request",
   name: "Update Pull Request",
-  description: "Update a pull request title, body, state, or labels",
+  description: "Update a pull request title, body, state, labels, or assignees",
   riskLevel: "medium",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
@@ -1044,15 +1047,33 @@ const updatePullRequest = action(Type.Object({
     if (args.body !== undefined) updateBody.body = args.body;
     if (args.state !== undefined) updateBody.state = args.state;
     try {
-      const { data: prData } = await octokit.request(
-        "PATCH /repos/{owner}/{repo}/pulls/{pull_number}",
-        {
-          owner: args.owner,
-          repo: args.repo,
-          pull_number: args.pullNumber,
-          ...updateBody,
-        },
-      );
+      let updated: { number: number; html_url: string; title: string; state: string } | undefined;
+      if (Object.keys(updateBody).length > 0 || args.assignees === undefined) {
+        const { data: prData } = await octokit.request(
+          "PATCH /repos/{owner}/{repo}/pulls/{pull_number}",
+          {
+            owner: args.owner,
+            repo: args.repo,
+            pull_number: args.pullNumber,
+            ...updateBody,
+          },
+        );
+        updated = prData;
+      }
+      if (args.assignees !== undefined) {
+        // The pulls endpoint rejects assignees. GitHub stores them on the
+        // underlying issue, so send them to the issues endpoint instead.
+        const { data: issueData } = await octokit.request(
+          "PATCH /repos/{owner}/{repo}/issues/{issue_number}",
+          {
+            owner: args.owner,
+            repo: args.repo,
+            issue_number: args.pullNumber,
+            assignees: args.assignees,
+          },
+        );
+        updated ??= issueData;
+      }
       if (args.labels) {
         await octokit.request(
           "PUT /repos/{owner}/{repo}/issues/{issue_number}/labels",
@@ -1064,13 +1085,15 @@ const updatePullRequest = action(Type.Object({
           },
         );
       }
+      // `updated` is always set: at least one of the two PATCH branches runs.
+      if (!updated) throw new Error("github.update_pull_request made no request");
       return {
         success: true,
         data: {
-          number: prData.number,
-          url: prData.html_url,
-          title: prData.title,
-          state: prData.state,
+          number: updated.number,
+          url: updated.html_url,
+          title: updated.title,
+          state: updated.state,
         },
       };
     } catch (err) {
