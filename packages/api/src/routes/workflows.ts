@@ -51,6 +51,7 @@ import {
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
 import { parseRepoInput, SkillSourceInputError } from "../services/skill-sources.js";
 import {
   PublicSkillRepoReader,
@@ -58,9 +59,12 @@ import {
   SkillRepoTimeoutError,
 } from "../services/skill-repo-reader.js";
 import type {
+  AllowWorkflowPermissionsRequest,
+  AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  GetWorkflowPermissionsResponse,
   GetWorkflowImportFileResponse,
   ListAllWorkflowRunsResponse,
   CreateScheduleOnWorkflowRequest,
@@ -470,6 +474,55 @@ workflowsRouter.get("/:id/runs", async (c) => {
   if (!page) return c.json({ error: "workflow not found" }, 404);
 
   const resp: ListWorkflowRunsResponse = page;
+  return c.json(resp);
+});
+
+// ── Permissions preview + bulk pre-approval ──────────────────────────────
+// The gating set is server-derived from the stored definition on BOTH
+// routes; the POST body can only narrow it. See `../workflows/permissions.ts`.
+
+workflowsRouter.get("/:id/permissions", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const nodes = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
+  if (nodes === null) return c.json({ error: "workflow not found" }, 404);
+  const resp: GetWorkflowPermissionsResponse = { nodes };
+  return c.json(resp);
+});
+
+workflowsRouter.post("/:id/permissions/allow", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+
+  // Shape-check before use: `null` would throw on property access below,
+  // and a bare array has no own `actionIds`, so it would silently take the
+  // "omitted → pre-approve all" branch — a narrowing request must never
+  // widen on a permissions-granting route.
+  let body: AllowWorkflowPermissionsRequest = {};
+  try {
+    const text = await c.req.text();
+    if (text.length > 0) {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return c.json(
+          { error: 'request body must be a JSON object, e.g. {"actionIds": ["service.action"]}. Omit actionIds to pre-approve all gating actions.' },
+          400,
+        );
+      }
+      body = parsed as AllowWorkflowPermissionsRequest;
+    }
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (body.actionIds !== undefined) {
+    if (!Array.isArray(body.actionIds) || body.actionIds.some((id) => typeof id !== "string")) {
+      return c.json({ error: "actionIds must be an array of strings" }, 400);
+    }
+  }
+
+  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds);
+  if (outcome === null) return c.json({ error: "workflow not found" }, 404);
+  if (!outcome.ok) return c.json({ error: outcome.badRequest }, 400);
+
+  const resp: AllowWorkflowPermissionsResponse = outcome.result;
   return c.json(resp);
 });
 

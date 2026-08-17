@@ -15,8 +15,11 @@ import type {
   ListAssistantsResponse,
   PatchAssistantRequest,
   PatchAssistantResponse,
+  AllowWorkflowPermissionsRequest,
+  AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
   ListBakesResponse,
@@ -617,6 +620,17 @@ export const api = {
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
   },
+  getWorkflowPermissions: (id: string) =>
+    request<GetWorkflowPermissionsResponse>(
+      "GET",
+      `/workflows/${encodeURIComponent(id)}/permissions`,
+    ),
+  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest = {}) =>
+    request<AllowWorkflowPermissionsResponse>(
+      "POST",
+      `/workflows/${encodeURIComponent(id)}/permissions/allow`,
+      body,
+    ),
   listWorkflowVersions: (id: string) =>
     request<ListWorkflowVersionsResponse>("GET", `/workflows/${encodeURIComponent(id)}/versions`),
   getWorkflowVersion: (id: string, version: number) =>

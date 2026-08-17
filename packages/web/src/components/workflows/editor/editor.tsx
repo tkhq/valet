@@ -99,6 +99,9 @@ export interface EditorProps {
    * not an inline closure.
    */
   onDirtyChange?: (dirty: boolean) => void;
+  /** Per-node policy predictions for the canvas cards, keyed by node id.
+   * The page owns the query (it is per stored workflow, not per draft). */
+  gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
 }
 
 export function Editor({
@@ -109,6 +112,7 @@ export function Editor({
   externalDirty,
   onCancelExternal,
   onDirtyChange,
+  gateByNodeId,
 }: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
@@ -397,6 +401,7 @@ export function Editor({
               <Canvas
                 flow={flow}
                 errorNodeIds={errorNodeIds}
+                gateByNodeId={gateByNodeId}
                 onNodePositionChange={handleNodePositionChange}
                 onConnect={handleConnect}
                 onSelectNode={handleSelectNode}

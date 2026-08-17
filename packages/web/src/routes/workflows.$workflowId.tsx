@@ -1,12 +1,18 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
-import { MoreHorizontal } from "lucide-react";
+import { MoreHorizontal, ShieldAlert } from "lucide-react";
 import { triggerDataSchema, type WorkflowDefinition } from "@valet/workflow";
-import type { ListWorkflowRunsResponse } from "@valet/api/wire";
+import type {
+  GetWorkflowPermissionsResponse,
+  ListWorkflowRunsResponse,
+  WorkflowNodePermissionWire,
+} from "@valet/api/wire";
 import {
+  useAllowWorkflowPermissions,
   useStartRun,
   useUpdateWorkflow,
   useWorkflow,
+  useWorkflowPermissions,
   useWorkflowRuns,
   useWorkflowVersion,
   useWorkflowVersions,
@@ -18,11 +24,15 @@ import { Editor } from "~/components/workflows/editor/editor";
 import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import { WorkflowPreview } from "~/components/workflows/preview";
+import { RiskBadge } from "~/components/workflows/risk-badge";
 import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import {
   Button,
   ConfirmDialog,
+  Dialog,
+  DialogContent,
+  DialogFooter,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -55,6 +65,8 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
   const update = useUpdateWorkflow(workflowId);
   const startRun = useStartRun(workflowId);
   const runsQ = useWorkflowRuns(workflowId);
+  const permissionsQ = useWorkflowPermissions(workflowId);
+  const allowPermissions = useAllowWorkflowPermissions(workflowId);
   const navigate = useNavigate();
 
   const definition = useMemo<WorkflowDefinition | null>(() => {
@@ -88,6 +100,8 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       update={update}
       startRun={startRun}
       runsQuery={runsQ}
+      permissions={permissionsQ.data}
+      allowPermissions={allowPermissions}
       navigate={navigate}
     />
   );
@@ -105,6 +119,8 @@ function WorkflowEditorPane({
   update,
   startRun,
   runsQuery,
+  permissions,
+  allowPermissions,
   navigate,
 }: {
   workflowId: string;
@@ -117,6 +133,8 @@ function WorkflowEditorPane({
     isLoading: boolean;
     error: unknown;
   };
+  permissions?: GetWorkflowPermissionsResponse;
+  allowPermissions: ReturnType<typeof useAllowWorkflowPermissions>;
   navigate: ReturnType<typeof useNavigate>;
 }) {
   // Right-side drawer: runs list / version history / triggers. Header
@@ -143,6 +161,32 @@ function WorkflowEditorPane({
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
+  const [preapproveOpen, setPreapproveOpen] = useState(false);
+  // The last pre-approval's leftovers: gating actions an org policy keeps
+  // gated, which only an org admin can change. Shown until the next attempt.
+  const [blockedActions, setBlockedActions] = useState<{ actionId: string; reason: string }[]>([]);
+
+  // Per-node badge input for the canvas: only the two states a card marks.
+  const gateByNodeId = useMemo(() => {
+    const map = new Map<string, "require_approval" | "deny">();
+    for (const node of permissions?.nodes ?? []) {
+      if (node.mode === "require_approval" || node.mode === "deny") map.set(node.nodeId, node.mode);
+    }
+    return map;
+  }, [permissions]);
+
+  // The header badge counts ACTIONS, not nodes — pre-approving writes one
+  // override per action, and two nodes calling the same action are one
+  // approval. First node wins as the display row for an action.
+  const gatingActions = useMemo(() => {
+    const seen = new Map<string, WorkflowNodePermissionWire>();
+    for (const node of permissions?.nodes ?? []) {
+      if (node.mode === "require_approval" && node.actionId !== null && !seen.has(node.actionId)) {
+        seen.set(node.actionId, node);
+      }
+    }
+    return [...seen.values()];
+  }, [permissions]);
 
   // Unsaved work is only in memory: the rename lives here and the definition
   // draft lives in `Editor`, so any navigation away drops both. `useBlocker`
@@ -186,6 +230,28 @@ function WorkflowEditorPane({
     goToRun(result.runId);
   }
 
+  function setPreapproveDialog(open: boolean) {
+    setPreapproveOpen(open);
+    // A closed dialog must not reopen showing the previous attempt's error.
+    if (!open) allowPermissions.reset();
+    // Reopening starts a fresh attempt: drop the previous attempt's blocked
+    // notice, or it reads as this attempt's result. Clearing on CLOSE would
+    // never show the notice at all — a confirm sets it and then closes.
+    if (open) setBlockedActions([]);
+  }
+
+  async function handlePreapprove() {
+    let result;
+    try {
+      result = await allowPermissions.mutateAsync();
+    } catch {
+      // `allowPermissions.error` renders the message inside the dialog.
+      return;
+    }
+    setBlockedActions(result.blocked);
+    setPreapproveDialog(false);
+  }
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex items-center justify-between px-6 py-4 border-b border-line">
@@ -216,6 +282,20 @@ function WorkflowEditorPane({
           >
             Triggers
           </Button>
+          {gatingActions.length > 0 && (
+            <button
+              type="button"
+              data-testid="workflow-gate-badge"
+              onClick={() => setPreapproveDialog(true)}
+              title="Some actions pause a run for approval. Pre-approve them to run this workflow unattended."
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning-wash px-2.5 py-1 text-xs font-medium text-warning-fg hover:opacity-80 focus-visible:ring-2 focus-visible:ring-accent-500/40"
+            >
+              <ShieldAlert className="h-3.5 w-3.5" aria-hidden />
+              {gatingActions.length === 1
+                ? "1 action needs approval"
+                : `${gatingActions.length} actions need approval`}
+            </button>
+          )}
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
@@ -238,6 +318,17 @@ function WorkflowEditorPane({
         </div>
       </div>
 
+      {blockedActions.length > 0 && (
+        <div
+          data-testid="preapprove-blocked"
+          className="border-b border-line bg-warning-wash px-6 py-2 text-xs text-warning-fg"
+        >
+          An org policy keeps {blockedActions.length === 1 ? "this action" : "these actions"} gated:{" "}
+          {blockedActions.map((b) => b.actionId).join(", ")}. Ask an org admin to allow{" "}
+          {blockedActions.length === 1 ? "it" : "them"} in the organization policy settings.
+        </div>
+      )}
+
       {hasSchema && schema && (
         <RunWorkflowDialog
           workflowId={workflowId}
@@ -248,6 +339,47 @@ function WorkflowEditorPane({
           onStarted={goToRun}
         />
       )}
+
+      <Dialog open={preapproveOpen} onOpenChange={setPreapproveDialog}>
+        <DialogContent
+          title="Pre-approve actions"
+          description={
+            "Each action below pauses a run until someone approves it. " +
+            "Pre-approving writes an allow override for your user. The override applies to " +
+            "every workflow and session you run, not only this workflow. Remove it any time " +
+            "under Settings → Policy overrides."
+          }
+        >
+          <ul className="flex flex-col gap-1.5 py-1" data-testid="preapprove-actions">
+            {gatingActions.map((action) => (
+              <li key={action.actionId} className="flex items-center gap-2 text-sm text-ink">
+                <span className="truncate font-mono text-xs">{action.actionId}</span>
+                {action.riskLevel && <RiskBadge level={action.riskLevel} />}
+              </li>
+            ))}
+          </ul>
+          <DialogFooter>
+            <Button type="button" variant="secondary" onClick={() => setPreapproveDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              data-testid="preapprove-confirm"
+              disabled={allowPermissions.isPending}
+              onClick={() => void handlePreapprove()}
+            >
+              {allowPermissions.isPending
+                ? "Pre-approving…"
+                : gatingActions.length === 1
+                  ? "Pre-approve 1 action"
+                  : `Pre-approve ${gatingActions.length} actions`}
+            </Button>
+          </DialogFooter>
+          {allowPermissions.error != null && (
+            <p className="text-xs text-danger-500">{allowPermissions.error.message}</p>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* The assistant is the editor's own right-hand column, so a
           conversation about changing the diagram never covers the diagram.
@@ -260,6 +392,7 @@ function WorkflowEditorPane({
             initialDefinition={initialDefinition}
             onSave={handleSave}
             saving={update.isPending}
+            gateByNodeId={gateByNodeId}
             assistant={
               <WorkflowAssistantPanel
                 assistant={assistant}

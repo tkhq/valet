@@ -469,12 +469,12 @@ async function enforceWorkflowPolicy(
  * (`service.action`), mirroring the plugin-catalog's list_tools convention.
  * Both invocation paths resolve to this form, so one org policy / override /
  * grant targets both (spec Deviations T6 #3). */
-function qualifiedActionId(service: string, action: PluginAction): string {
+export function qualifiedActionId(service: string, action: PluginAction): string {
   return action.id.includes(".") ? action.id : `${service}.${action.id}`;
 }
 
 /** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */
-function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {
+export function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {
   return actions.find((a) => {
     if (a.id === actionId) return true;
     const fqid = a.id.includes(".") ? a.id : `${service}.${a.id}`;
