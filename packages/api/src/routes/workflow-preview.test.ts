@@ -58,7 +58,13 @@ function nodeNamed(response: PreviewWorkflowResponse, nodeId: string) {
   return found!;
 }
 
-/** Trigger → set → if → stop. Every pure type, and one deliberate typo. */
+/**
+ * Trigger → set → if → stop. Every pure type, and one deliberate typo.
+ * The typo reads a `trigger.data` field the schema does not declare: the
+ * save-time validator statically rejects `trigger.<field>` (the payload-key
+ * check in validate.ts), so a data-level miss is the shape only the
+ * preview can catch.
+ */
 const PURE_DEFINITION = {
   version: "dag/v1",
   nodes: [
@@ -73,7 +79,7 @@ const PURE_DEFINITION = {
       values: {
         greeting: "Hello {{trigger.data.email}}",
         tier: "{{trigger.data.tier}}",
-        typo: "{{trigger.email}}",
+        typo: "{{trigger.data.username}}",
       },
     },
     {
@@ -142,17 +148,17 @@ describe("POST /api/workflows/:id/preview — pure nodes", () => {
     const body = await preview(api.baseUrl, created.id, { input: { email: "a@example.com" } });
 
     const build = nodeNamed(body, "build");
-    const miss = build.unresolved.find((u) => u.path === "trigger.email");
+    const miss = build.unresolved.find((u) => u.path === "trigger.data.username");
     expect(miss).toBeDefined();
     expect(miss?.field).toBe("values.typo");
-    expect(miss?.resolvedPrefix).toBe("trigger");
-    expect(miss?.availableKeys).toContain("data");
+    expect(miss?.resolvedPrefix).toBe("trigger.data");
+    expect(miss?.availableKeys).toContain("email");
     expect(miss?.message).toContain("resolved to nothing");
     // Every user-facing message names what to do about it.
     expect(miss?.message).toContain("Correct the path");
 
     // The good paths on the same node are not reported.
-    expect(build.unresolved.map((u) => u.path)).toEqual(["trigger.email"]);
+    expect(build.unresolved.map((u) => u.path)).toEqual(["trigger.data.username"]);
   });
 
   it("reports the resolved value of every templated field", async () => {
@@ -166,7 +172,7 @@ describe("POST /api/workflows/:id/preview — pure nodes", () => {
     // A single-expression miss renders as null, which is exactly the
     // failure mode this preview exists to make visible.
     expect(fields.find((f) => f.field === "values.typo")?.resolved).toBeNull();
-    expect(fields.find((f) => f.field === "values.typo")?.unresolvedPaths).toEqual(["trigger.email"]);
+    expect(fields.find((f) => f.field === "values.typo")?.unresolvedPaths).toEqual(["trigger.data.username"]);
   });
 
   it("applies the declared dataSchema, and reports missing required input", async () => {
