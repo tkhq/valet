@@ -107,6 +107,8 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
   "outputSchema": { "type": "object", "properties": { "assignee": { "type": "string" } }, "required": ["assignee"] } }
 ```
 
+The schema alone does not enforce abstention — it still requires a string — so keep both halves: the abstain value the schema accepts and the prompt line that says when to return it. Drop either and the model invents a value again.
+
 ```json
 { "from": "pick", "to": "assign", "when": "nodes.pick.result.output.assignee" },
 { "from": "pick", "to": "no_assignee", "when": "!nodes.pick.result.output.assignee" }
