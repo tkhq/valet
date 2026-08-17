@@ -164,7 +164,7 @@ root. Consequences:
   userns on kernel >= 5.11; the probe keeps vfs as a paranoid fallback.
 - Exec identity unchanged: the workload still runs as `dockerd` (1500);
   it reaches the daemon through the socket, `root:docker` mode 660
-  (`--group docker`; the image adds the group, gid 1501).
+  (`--group docker`; the group comes from the docker-ce package).
 - rootlesskit remains the docker (local dev) backend path, where no
   outer userns exists and it does real work. The sub-id ranges in the
   image only matter on that path now.
