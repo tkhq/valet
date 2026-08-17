@@ -1,14 +1,43 @@
 import { useRef, useState } from "react";
-import type { GithubAppInstallationSummary, PostGithubAppManifestResponse } from "@valet/api/wire";
+import type {
+  GetGithubAppResponse,
+  GithubAppInstallationSummary,
+  PostGithubAppManifestResponse,
+} from "@valet/api/wire";
 import { Badge, Button, Input, Spinner, Switch, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
+import { livePollInterval } from "~/lib/use-live-query";
+import { relativeTime } from "~/lib/relative-time";
 import {
+  qkSettings,
   useCreateGithubAppManifest,
   useDeleteGithubApp,
   useGithubApp,
   useRefreshGithubApp,
   useSaveGithubAppCredential,
 } from "~/api/settings";
+
+/** The server checks installations on its own (`POST /refresh` is the
+ * impatient path, not the only one), so the one state worth polling is the
+ * incomplete one: an App exists and nothing is installed yet, which is exactly
+ * when somebody is watching this page after installing on GitHub. The poll
+ * stops as soon as an installation appears, and the query library holds it in
+ * a hidden tab. This hits our own API and never GitHub. */
+const SETUP_POLL_MS = 15_000;
+
+function setupPollInterval(data: GetGithubAppResponse | undefined): number | false {
+  return livePollInterval(data, (reply) => reply.configured && reply.installations.length === 0, SETUP_POLL_MS);
+}
+
+/** When the server last read this org's installations from GitHub, in epoch
+ * ms; `null` when it has none to date from. The server sends the field (see
+ * `buildGetResponse` in `routes/github-app.ts`), but the shared wire type does
+ * not declare it yet, so read it structurally. Delete this reader once the
+ * field reaches `GetGithubAppResponse`. */
+function readInstallationsCheckedAt(data: GetGithubAppResponse): number | null {
+  const reply: { configured: boolean; installationsCheckedAt?: unknown } = data;
+  return typeof reply.installationsCheckedAt === "number" ? reply.installationsCheckedAt : null;
+}
 
 /**
  * Organization · GitHub — the App setup flow (GitHub/repo integration plan,
@@ -25,7 +54,11 @@ import {
  * attempt is refused on GitHub's own page, where this app never sees it.
  */
 export function GithubAppSection() {
-  const githubAppQ = useGithubApp();
+  const githubAppQ = useGithubApp({
+    // `useGithubApp` sets the same key; `UseQueryOptions` makes it required.
+    queryKey: qkSettings.githubApp(),
+    refetchInterval: (query) => setupPollInterval(query.state.data),
+  });
 
   if (githubAppQ.isLoading) {
     return (
@@ -40,7 +73,7 @@ export function GithubAppSection() {
   if (!githubAppQ.data) return null;
 
   return githubAppQ.data.configured ? (
-    <ConfiguredCard data={githubAppQ.data} />
+    <ConfiguredCard data={githubAppQ.data} checkedAt={readInstallationsCheckedAt(githubAppQ.data)} />
   ) : (
     <NotConfiguredCard webhookMode={githubAppQ.data.webhook.mode} />
   );
@@ -525,10 +558,19 @@ function ExistingAppCard() {
   );
 }
 
+/** How long a quiet sweep may stay quiet before the page says so. The slowest
+ * tier checks every 6 h, so four intervals is a day — long enough that a
+ * healthy webhook-live org never trips it. */
+const STALE_AFTER_MS = 4 * 6 * 60 * 60_000;
+
 function ConfiguredCard({
   data,
+  checkedAt,
 }: {
   data: { app?: { appId: string; appSlug: string; htmlUrl: string; installUrl: string }; installations: GithubAppInstallationSummary[]; webhook: { mode: "public" | "manual" } };
+  /** When the server last read the installations from GitHub, epoch ms.
+   * `null` when there are no installation rows to date from. */
+  checkedAt: number | null;
 }) {
   const refresh = useRefreshGithubApp();
   const deleteApp = useDeleteGithubApp();
@@ -544,16 +586,14 @@ function ConfiguredCard({
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-amber-300 bg-amber-50/70 px-5 py-4 dark:border-amber-700/60 dark:bg-amber-950/40">
           <div className="min-w-0">
             <div className="text-sm font-medium text-ink">One step left — install the App</div>
-            {/* "Automatically" is only true with a webhook. Without one no
-                installation event ever arrives, so the reader has to ask —
-                and being told to wait for something that never happens is
-                worse than being told to press a button. */}
+            {/* Both webhook modes now pick the install up on their own: with
+                a webhook the delivery does it, and without one the background
+                sweep does. The button below stays for anybody who does not
+                want to wait for the next check. */}
             <p className="mt-0.5 text-xs leading-relaxed text-muted">
               The App is created, but nothing works until it's installed on a GitHub account
-              and granted repos.{" "}
-              {data.webhook.mode === "public"
-                ? "After installing, come back — Valet picks it up automatically."
-                : "After installing, come back and choose Refresh installations. This App has no webhook, so Valet cannot see the install until you ask."}
+              and granted repos. After installing, come back — Valet picks it up within a few
+              minutes. Choose Refresh installations to see it now.
             </p>
           </div>
           <Button asChild>
@@ -619,7 +659,20 @@ function ConfiguredCard({
       </div>
 
       <div className="space-y-2">
-        <h3 className="text-xs font-medium uppercase tracking-wider text-muted">Installations</h3>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h3 className="text-xs font-medium uppercase tracking-wider text-muted">Installations</h3>
+          {/* The answer to "it is not updating": one line saying when the
+              server last read GitHub. Without a timestamp there is nothing to
+              date from, so say what is happening instead of guessing. */}
+          <span className="text-xs text-muted">
+            {checkedAt === null ? "Checking automatically" : `Checked ${relativeTime(checkedAt)}`}
+          </span>
+        </div>
+        {checkedAt !== null && Date.now() - checkedAt > STALE_AFTER_MS && (
+          <p className="text-xs text-muted">
+            This is older than expected. Choose Refresh installations to see the error.
+          </p>
+        )}
         {data.installations.length === 0 ? (
           <p className="text-sm text-muted">
             No installations yet — the App can't reach any repos until it's installed.
