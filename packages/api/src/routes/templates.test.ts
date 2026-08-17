@@ -112,7 +112,11 @@ describe("GET /api/templates", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListWorkflowTemplatesResponse;
 
-    expect(body.templates.map((t) => t.id).sort()).toEqual(["gmail-sweep", "notes-echo"]);
+    // The listing also carries the host's own seeded catalog (`catalog.*`
+    // ids, `template-definitions.ts`), which changes as the catalog does.
+    // This file pins the PLUGIN surface, so assert on that partition alone.
+    const pluginIds = body.templates.map((t) => t.id).filter((id) => !id.startsWith("catalog."));
+    expect(pluginIds.sort()).toEqual(["gmail-sweep", "notes-echo"]);
     const sweep = body.templates.find((t) => t.id === "gmail-sweep");
     expect(sweep?.requires).toEqual([{ service: "gmail", connected: false }]);
     expect(sweep?.schedule).toEqual({ cron: "0 12 * * 1-5", timezone: "UTC" });
