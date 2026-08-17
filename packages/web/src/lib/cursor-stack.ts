@@ -15,6 +15,18 @@
  * cannot split into two.
  */
 
+/**
+ * The stack separator.
+ *
+ * This is safe ONLY because a cursor is base64url, whose alphabet is
+ * `A-Z a-z 0-9 - _` — see `encodePageCursor` in the api's `lib/page-cursor.ts`,
+ * which is where the invariant actually lives. `~` is outside that alphabet,
+ * so a cursor can never split into two here.
+ *
+ * A change to the cursor encoding that admits `~` would break paging silently:
+ * a split cursor produces two shorter strings, both of which the server would
+ * reject as malformed. If the encoding changes, change this character too.
+ */
 const SEPARATOR = "~";
 
 /** Reads the stack out of a raw search param. An empty or absent value is
