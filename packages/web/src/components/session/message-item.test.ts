@@ -58,6 +58,9 @@ describe("messageCopyText", () => {
 
   it("falls back to content when a message has no text parts", () => {
     expect(messageCopyText(msg({ content: "legacy body" }))).toBe("legacy body");
+    // The fallback trims too. Without this a legacy message pastes the
+    // padding the transport left around it.
+    expect(messageCopyText(msg({ content: "  padded body  " }))).toBe("padded body");
     expect(
       messageCopyText(
         msg({ content: "legacy body", parts: [{ kind: "thinking", text: "x" }] }),

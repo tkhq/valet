@@ -27,7 +27,7 @@ rebuild what already exists.
 | 8 | Live session log / audit panel | Medium | `packages/client/src/components/panels/logs-panel.tsx:10-26` | Org-scoped surfaces only. Neither filters to a session nor shows lifecycle and tool events |
 | 9 | `@`-mention file picker in the composer | Medium | `chat-input.tsx:219,655-702,909` | Slash-command and slash-argument autocomplete exist (`composer.tsx:78-119`); no `@` path. A path can still be typed, so this is discoverability |
 | 10 | ~~Session rename~~ **PORTED** | Small | Inline-editable header title (`packages/client/src/api/sessions.ts:353`) | Closed: `PATCH /sessions/:id` takes `title`, and the header title is an edit box for whoever may administer the session |
-| 11 | ~~Per-message copy button~~ **PORTED** | Small | `message-item.tsx:125,221,256` | Closed: a hover-revealed copy button on every message row |
+| 11 | ~~Per-message copy button~~ **PORTED** | Small | `message-item.tsx:125,221,256` | Closed on dev-v2 by a separate change; this branch adds the render coverage |
 | 12 | ~~Jump-to-bottom control~~ **PORTED** | Small | `message-list.tsx:108-110`, button at `:164` | Closed: a return-to-bottom button, shown past the same 80px threshold |
 | 13 | Thread pagination | Medium | Server-side, page and cursor modes (`packages/worker/src/lib/db/threads.ts:128-176`), 30-per-page history route | Loads all threads with no LIMIT (`packages/store-postgres/src/store.ts:635-637`). Latent: no break at small thread counts. Thread counts on a real deployment were not measured |
 
