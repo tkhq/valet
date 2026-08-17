@@ -325,9 +325,10 @@ export const agentSessions = pgTable(
     ownerId: text("owner_id").notNull().default(""),
     // Interactive-service profile (sandbox auth gateway plan, Task 5).
     // "headless" (default) is agent-only; "full" additionally runs
-    // ttyd + code-server + the auth gateway inside the sandbox. Only
-    // web-created interactive sessions may request "full" — orchestrator,
-    // child, and workflow sessions always hardcode "headless".
+    // ttyd + code-server + the auth gateway inside the sandbox.
+    // Web-created interactive sessions may request "full", and so may
+    // child sessions via the task tool's profile parameter; orchestrator
+    // and workflow sessions always hardcode "headless".
     profile: text("profile", { enum: ["headless", "full"] }).notNull().default("headless"),
     // Request a rootless docker daemon inside this session's sandbox
     // (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md.
