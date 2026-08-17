@@ -37,6 +37,7 @@ import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-cred
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
+import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { buildRunSettledAttention } from "../workflows/run-attention.js";
@@ -312,6 +313,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
             denylist,
           })
         ).plugins,
+        // Config-declared MCP servers (instance config `mcpServers`). A
+        // service collision with a bundled plugin throws in assemblePlugins.
+        configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
         [workflowsActions, skillsActions],
       ]);
 

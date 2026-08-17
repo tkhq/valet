@@ -10,6 +10,13 @@ export interface McpActionPluginOptions {
   defaultRiskLevel: RiskLevel;
   /** When true, calls MCP server without authentication (for public services). */
   noAuth?: boolean;
+  /**
+   * Fixed bearer token sent on every call, instead of a per-user stored
+   * credential. For servers whose token is instance-wide (config-declared
+   * MCP servers with `auth: bearer`). No connect flow: the service's tools
+   * are visible to every user.
+   */
+  staticToken?: string;
   /** Send the credential as this URL query param instead of an Authorization header. */
   authQueryParam?: string;
   description?: string;
@@ -39,16 +46,19 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const serviceName = opts.serviceName;
   const defaultRiskLevel = opts.defaultRiskLevel;
   const noAuth = opts.noAuth ?? false;
+  const staticToken = opts.staticToken;
 
   return {
     service: serviceName,
     description: opts.description,
     actions: [],
-    requiresCredential: !noAuth,
+    requiresCredential: !noAuth && staticToken === undefined,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
-      const token = await resolveToken(credentials, serviceName, noAuth);
+      const token = await resolveToken(credentials, serviceName, noAuth, staticToken);
       const tools = await client.listTools(token);
-      return tools.map((tool) => mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth));
+      return tools.map((tool) =>
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken),
+      );
     },
   };
 }
@@ -65,8 +75,10 @@ async function resolveToken(
   credentials: CredentialProvider,
   serviceName: string,
   noAuth: boolean,
+  staticToken?: string,
 ): Promise<string | undefined> {
   if (noAuth) return undefined;
+  if (staticToken !== undefined) return staticToken;
   const cred = await credentials.get();
   if (!cred) throw new Error(`${serviceName}: no credential connected`);
   return cred.accessToken;
@@ -78,6 +90,7 @@ function mapToolToAction(
   serviceName: string,
   defaultRiskLevel: RiskLevel,
   noAuth: boolean,
+  staticToken?: string,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -93,7 +106,7 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const token = await resolveToken(ctx.credentials, serviceName, noAuth);
+      const token = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken);
       try {
         const result = await client.callTool(token, tool.name, args);
         return mapToolResult(result);

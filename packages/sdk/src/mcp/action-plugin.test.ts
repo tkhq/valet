@@ -187,6 +187,36 @@ describe('mcpActionPlugin resolveActions', () => {
     );
   });
 
+  it('uses staticToken without reading the credential store, and clears requiresCredential', async () => {
+    let listRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: fixtureTools,
+        onRequest: (req) => {
+          if (req.body.method === 'tools/list') listRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.internal.example/mcp',
+      serviceName: 'internal',
+      defaultRiskLevel: 'medium',
+      staticToken: 'instance-token',
+    });
+    const getSpy = vi.fn(async () => {
+      throw new Error('credentials.get() should not be called when staticToken is set');
+    });
+    const credentials: CredentialProvider = { get: getSpy, request: vi.fn() };
+
+    const actions = await plugin.resolveActions!({ credentials });
+
+    expect(plugin.requiresCredential).toBe(false);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(actions.length).toBe(3);
+    expect(listRequest?.headers.Authorization).toBe('Bearer instance-token');
+  });
+
   it('skips the credential read entirely when noAuth is set', async () => {
     vi.stubGlobal('fetch', makeFetchMock({ tools: fixtureTools }));
     const plugin = mcpActionPlugin({

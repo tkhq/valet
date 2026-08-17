@@ -60,6 +60,16 @@ skillSources:
   - repo: obra/superpowers
     ref: main
     subpath: skills
+
+mcpServers:
+  - name: salesforce
+    url: https://mcp.salesforce.example/mcp
+    auth: oauth
+  - name: internal-docs
+    url: https://mcp.internal.example/mcp
+    auth: bearer
+    tokenEnv: INTERNAL_DOCS_MCP_TOKEN
+    riskLevel: low
 `.trim();
 
 describe("parseInstanceConfig", () => {
@@ -95,6 +105,16 @@ describe("parseInstanceConfig", () => {
       models: [{ id: "qwen-coder" }],
     });
     expect(cfg.skillSources).toEqual([{ repo: "obra/superpowers", ref: "main", subpath: "skills" }]);
+    expect(cfg.mcpServers).toEqual([
+      { name: "salesforce", url: "https://mcp.salesforce.example/mcp", auth: "oauth" },
+      {
+        name: "internal-docs",
+        url: "https://mcp.internal.example/mcp",
+        auth: "bearer",
+        tokenEnv: "INTERNAL_DOCS_MCP_TOKEN",
+        riskLevel: "low",
+      },
+    ]);
   });
 
   it("accepts minimal version: 1 file", () => {
@@ -287,6 +307,114 @@ skillSources:
 `.trim();
     const cfg = parseInstanceConfig(yaml, path);
     expect(cfg.skillSources).toHaveLength(2);
+  });
+});
+
+describe("mcpServers validation", () => {
+  const path = "config/valet.test.yaml";
+  const base = (entry: string) => `version: 1\nmcpServers:\n${entry}`;
+
+  it("accepts every auth mode with its mode-specific keys", () => {
+    const yaml = base(
+      [
+        "  - name: docs",
+        "    url: https://mcp.docs.example/mcp",
+        "    auth: none",
+        "  - name: crm",
+        "    url: https://mcp.crm.example/mcp",
+        "    auth: oauth",
+        "    description: CRM tools",
+        "  - name: typefully",
+        "    url: https://mcp.typefully.com/mcp",
+        "    auth: api_key",
+        "    authQueryParam: TYPEFULLY_API_KEY",
+        "    connectLabel: Typefully API key",
+        "  - name: internal",
+        "    url: https://mcp.internal.example/mcp",
+        "    auth: bearer",
+        "    tokenEnv: INTERNAL_MCP_TOKEN",
+        "    enabled: false",
+      ].join("\n"),
+    );
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.mcpServers).toHaveLength(4);
+    expect(cfg.mcpServers?.[2]?.authQueryParam).toBe("TYPEFULLY_API_KEY");
+    expect(cfg.mcpServers?.[3]?.enabled).toBe(false);
+  });
+
+  it("rejects a name that is not a lowercase slug", () => {
+    const yaml = base("  - name: My Server\n    url: https://x.example/mcp\n    auth: none");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow("mcpServers[0].name must be a lowercase slug");
+  });
+
+  it("rejects a non-http(s) url", () => {
+    const yaml = base("  - name: files\n    url: file:///tmp/mcp\n    auth: none");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow("mcpServers[0].url must use http or https");
+  });
+
+  it("rejects an unknown auth mode", () => {
+    const yaml = base("  - name: x\n    url: https://x.example/mcp\n    auth: basic");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      'mcpServers[0].auth got "basic", allowed values are none, oauth, api_key, bearer.',
+    );
+  });
+
+  it("requires tokenEnv for bearer and rejects it elsewhere", () => {
+    const missing = base("  - name: x\n    url: https://x.example/mcp\n    auth: bearer");
+    expect(() => parseInstanceConfig(missing, path)).toThrow(
+      'mcpServers[0].tokenEnv is required when auth is "bearer"',
+    );
+    const stray = base(
+      "  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    tokenEnv: X_TOKEN",
+    );
+    expect(() => parseInstanceConfig(stray, path)).toThrow(
+      'mcpServers[0].tokenEnv is only valid when auth is "bearer"',
+    );
+  });
+
+  it("rejects authQueryParam on oauth and connectLabel on bearer", () => {
+    const qp = base(
+      "  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    authQueryParam: KEY",
+    );
+    expect(() => parseInstanceConfig(qp, path)).toThrow(
+      'mcpServers[0].authQueryParam is only valid when auth is "api_key" or "bearer"',
+    );
+    const label = base(
+      "  - name: x\n    url: https://x.example/mcp\n    auth: bearer\n    tokenEnv: T\n    connectLabel: X key",
+    );
+    expect(() => parseInstanceConfig(label, path)).toThrow(
+      'mcpServers[0].connectLabel is only valid when auth is "api_key"',
+    );
+  });
+
+  it("rejects a duplicate name naming both indices", () => {
+    const yaml = base(
+      [
+        "  - name: crm",
+        "    url: https://a.example/mcp",
+        "    auth: none",
+        "  - name: crm",
+        "    url: https://b.example/mcp",
+        "    auth: none",
+      ].join("\n"),
+    );
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      'mcpServers[0] and mcpServers[1] both use the name "crm". Rename one.',
+    );
+  });
+
+  it("rejects a missing auth with the corrective list", () => {
+    const yaml = base("  - name: x\n    url: https://x.example/mcp");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "mcpServers[0].auth is required. Set one of none, oauth, api_key, bearer.",
+    );
+  });
+
+  it("rejects an unknown key", () => {
+    const yaml = base("  - name: x\n    url: https://x.example/mcp\n    auth: none\n    token: abc");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      'unknown key "mcpServers[0].token". Remove it or check for a typo.',
+    );
   });
 });
 

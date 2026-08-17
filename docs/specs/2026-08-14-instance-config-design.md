@@ -128,6 +128,15 @@ skillSources:
   - repo: obra/superpowers      # owner/repo on github.com
     ref: main                   # optional; omitted = default branch
     subpath: skills             # optional; omitted = repository root
+
+mcpServers:
+  - name: salesforce            # action service; tools appear as salesforce.<tool>
+    url: https://mcp.example.com/mcp
+    auth: oauth                 # none | oauth | api_key | bearer
+  - name: internal-docs
+    url: https://mcp.internal.example/mcp
+    auth: bearer
+    tokenEnv: INTERNAL_DOCS_MCP_TOKEN   # secret stays in the environment
 ```
 
 Top-level keys in v1:
@@ -142,6 +151,7 @@ Top-level keys in v1:
 | `teams`        | list   | DB reconciler → `teams`, `team_members`            |
 | `llmProviders` | list   | DB reconciler → `llm_providers`                    |
 | `skillSources` | list   | DB reconciler → `skill_sources` (org-owned)        |
+| `mcpServers`   | list   | boot config assembly (synthesized MCP plugins)     |
 
 Every key except `version` is optional, and so is every subfield —
 `org: { features: { organizations: true } }` alone is a valid file. An
@@ -434,6 +444,55 @@ subsystem, it does not replace it.
   human created.
 - Repo addresses are validated with the same parser the route uses
   (`parseRepoInput`), so the file rejects the same inputs the UI rejects.
+
+### `mcpServers` section
+
+Declares remote MCP servers the instance exposes as action services,
+without a plugin package per server. Boot synthesizes one `ValetPlugin`
+per enabled entry (`packages/api/src/plugins/config-mcp.ts`) around the
+same `mcpActionPlugin` seam the bundled MCP plugins use
+(`packages/sdk/src/mcp/action-plugin.ts`). The entry therefore inherits
+every existing surface: dynamic tool discovery, the connect UI
+(`/api/plugins`), MCP OAuth dynamic registration, tool policies, and
+approvals. This section is boot-assembled, not DB-reconciled — the plugin
+set is in-memory process state, so there is no row to converge.
+
+```yaml
+mcpServers:
+  - name: salesforce            # required; lowercase slug; the action service
+    url: https://mcp.example.com/mcp   # required; http(s) MCP endpoint
+    auth: oauth                 # required; none | oauth | api_key | bearer
+    tokenEnv: SF_MCP_TOKEN      # bearer only: env var that holds the token
+    authQueryParam: API_KEY     # api_key/bearer only: send token as query param
+    connectLabel: Acme API key  # api_key only: connect-UI copy
+    description: CRM tools      # optional
+    riskLevel: medium           # optional; default medium
+    enabled: true               # optional; false parks the entry
+```
+
+Auth modes:
+
+- **`none`** — no credential. The server's tools are visible to every user.
+- **`oauth`** — per-user MCP OAuth against `url` (RFC 8414 discovery +
+  RFC 7591 dynamic registration, PKCE). Each user connects in the
+  integrations UI, exactly like the bundled Linear plugin.
+- **`api_key`** — per-user manual token entry in the connect UI.
+- **`bearer`** — one instance-wide token, read from `tokenEnv` at boot.
+  The file never holds secrets, so the entry names the env var. A `bearer`
+  entry whose env var is unset or blank fails boot with the var named.
+  There is no connect flow; every user can use the tools.
+
+Rules:
+
+- `name` is the action service: tools surface as `<name>.<tool>`, and
+  tool policies target them the same way. Names must be unique in the file.
+- A `name` that collides with another plugin's service fails boot in
+  `assemblePlugins`, naming both plugins. Synthesized plugin names carry a
+  `mcp-config:` prefix so a config entry can never silently dedupe against
+  a bundled plugin.
+- Mode-specific keys on the wrong mode fail validation (`tokenEnv` outside
+  `bearer`, `connectLabel` outside `api_key`, `authQueryParam` outside
+  `api_key`/`bearer`).
 
 ## Tool policies
 
