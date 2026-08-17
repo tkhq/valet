@@ -64,6 +64,76 @@ export function formatLintErrors(errors: string[], cap = 20): string {
   return `workflow definition failed validation (fix these and retry):\n${shown.join("\n")}${more}`;
 }
 
+/** One sentence naming what to do about an error the caller did not cause. */
+const PRE_EXISTING_ADVICE =
+  "The workflow already held the error(s) below before this edit, so this edit did not cause them. " +
+  "Fix them in the same call, or open the workflow in the editor and correct them first.";
+
+/**
+ * The clauses the validator appends to a message as advice, and the edge
+ * index it puts in front of one. Both move when a DIFFERENT part of the
+ * definition changes — see `findingKey`.
+ */
+const HINT_MARKERS = [" — ", " (available:", " (did you mean "];
+const EDGE_INDEX = /^edge\[\d+\]/;
+
+/**
+ * An identity for one validator finding that holds across two validation
+ * runs of two different definitions.
+ *
+ * The validator builds its advice from the WHOLE definition: the near-match
+ * suggestion reads every node id, the "available roots" list reads every
+ * alias root, and an edge carries its index in the edge array. An edit to
+ * one node therefore rewrites the message of a finding in a different node
+ * that the edit never touched. A raw string compare reads the rewritten text
+ * as a new finding and tells the caller it caused an error that was already
+ * there — the exact mistake this file exists to prevent. So cut the message
+ * at the first advice clause and drop the edge index.
+ *
+ * The key is coarse on purpose. If two findings collapse onto one key, the
+ * second one reads as pre-existing. That is the safe direction: the reply
+ * still lists the finding in full and still refuses the edit.
+ */
+export function findingKey(message: string): string {
+  let head = message;
+  for (const marker of HINT_MARKERS) {
+    const at = head.indexOf(marker);
+    if (at !== -1) head = head.slice(0, at);
+  }
+  return head.replace(EDGE_INDEX, "edge");
+}
+
+/**
+ * Format the lint output of an edit that does NOT re-send the whole
+ * definition, such as a patch or an appended node. Such an edit revalidates
+ * the merged whole, so an error in a node the caller never touched blocks it.
+ * Without the split below the caller reads a stale trigger path in some other
+ * node as its own mistake, and retries the same edit until it gives up.
+ *
+ * @param blocking every error that blocks the edit.
+ * @param preExisting the errors the stored definition already carried.
+ */
+export function formatEditLintErrors(blocking: string[], preExisting: string[], cap = 20): string {
+  const carried = new Set(preExisting.map(findingKey));
+  const introduced = blocking.filter((e) => !carried.has(findingKey(e)));
+  const inherited = blocking.filter((e) => carried.has(findingKey(e)));
+  if (inherited.length === 0) return formatLintErrors(blocking, cap);
+
+  const bullets = (list: string[]): string => {
+    const shown = list.slice(0, cap).map((e) => `- ${e}`);
+    const more = list.length > cap ? `\n… and ${list.length - cap} more` : "";
+    return `${shown.join("\n")}${more}`;
+  };
+  const inheritedBlock = `${PRE_EXISTING_ADVICE}\n${bullets(inherited)}`;
+  if (introduced.length === 0) {
+    return `workflow definition failed validation (fix these and retry):\n${inheritedBlock}`;
+  }
+  return (
+    `workflow definition failed validation (fix these and retry):\n` +
+    `${bullets(introduced)}\n\n${inheritedBlock}`
+  );
+}
+
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
@@ -441,7 +511,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Edit a workflow WITHOUT re-sending the whole definition: rename, upsert single nodes " +
       "(replace-by-id or append), remove nodes (their edges go too), add/remove edges. " +
       "Prefer this over save_workflow for small edits — the patched result runs the full " +
-      "linter, so a bad patch returns lint errors instead of saving.",
+      "linter, so a bad patch returns lint errors instead of saving. The linter reads the " +
+      "WHOLE merged definition, so an error in a node you did not touch also blocks the " +
+      "patch; the reply names those errors as pre-existing.",
     riskLevel: "medium",
     execute: async ({ workflow_id, name, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -468,11 +540,31 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       });
       if (!patched.ok) return { success: false, error: formatLintErrors(patched.errors) };
 
-      const validation = validateDefinitionInput(
-        patched.definition,
-        buildValidateEnvironment(deps.actionPluginByService),
-      );
-      if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
+      // A rename changes no node and no edge, so it cannot introduce a lint
+      // error. Revalidating anyway would refuse to rename a workflow that
+      // already holds one — while `PUT /api/workflows/:id` renames the same
+      // workflow without complaint, because it validates only when the
+      // request carries a definition. Match that, and keep the two surfaces
+      // from disagreeing about the same edit.
+      const changesGraph =
+        (upsert_nodes !== undefined && upsert_nodes.length > 0) ||
+        (remove_node_ids !== undefined && remove_node_ids.length > 0) ||
+        (add_edges !== undefined && add_edges.length > 0) ||
+        (remove_edges !== undefined && remove_edges.length > 0);
+
+      if (changesGraph) {
+        const env = buildValidateEnvironment(deps.actionPluginByService);
+        const validation = validateDefinitionInput(patched.definition, env);
+        if (!validation.ok) {
+          // Validate the stored definition too, so the reply can say which
+          // errors the patch introduced and which the workflow already held.
+          const before = validateDefinitionInput(stored, env);
+          return {
+            success: false,
+            error: formatEditLintErrors(validation.errors, before.ok ? [] : before.errors),
+          };
+        }
+      }
 
       const updated = await updateWorkflowDefinition(deps, owner, workflow_id, {
         name,
@@ -524,6 +616,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       );
       if (!result.ok) {
         if (result.reason === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
+        // This action appends a node to the stored definition, so an error
+        // the stored definition already held blocks it. Say so: the caller
+        // cannot see the offending node from the arguments it sent.
+        if (result.reason === "stored_definition_invalid") {
+          return { success: false, error: formatEditLintErrors(result.errors, result.errors) };
+        }
         // Two failure shapes: a lint list, or one sentence naming the fix.
         if ("errors" in result) return { success: false, error: formatLintErrors(result.errors) };
         return { success: false, error: result.message };

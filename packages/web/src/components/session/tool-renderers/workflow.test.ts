@@ -3,7 +3,7 @@ import {
   attemptedDefinition,
   isWorkflowCallTool,
   latestFailures,
-  parseLintErrors,
+  parseLintReport,
   workflowListFrom,
   workflowParams,
   workflowRefsFrom,
@@ -147,22 +147,66 @@ describe("workflowListFrom", () => {
   });
 });
 
-describe("parseLintErrors", () => {
+describe("parseLintReport", () => {
   it("extracts bullets from a formatLintErrors payload behind the failed: prefix", () => {
     const text =
       "workflows.save_workflow failed: workflow definition failed validation (fix these and retry):\n" +
       '- node "start": unknown field "description" on a "trigger" node\n' +
       '- node "fetch_prs": tool.service must be a non-empty string (the plugin service, e.g. "github")';
-    expect(parseLintErrors(text)).toEqual([
-      'node "start": unknown field "description" on a "trigger" node',
-      'node "fetch_prs": tool.service must be a non-empty string (the plugin service, e.g. "github")',
+    expect(parseLintReport(text)).toEqual([
+      { kind: "error", text: 'node "start": unknown field "description" on a "trigger" node' },
+      {
+        kind: "error",
+        text: 'node "fetch_prs": tool.service must be a non-empty string (the plugin service, e.g. "github")',
+      },
+    ]);
+  });
+
+  /**
+   * `formatEditLintErrors` (packages/api/src/workflows/actions.ts) writes a
+   * sentence between the bullets to say which errors the workflow already
+   * held. That sentence is not a validator message. Counting it would tell
+   * the author to fix one more thing than the validator found, and showing
+   * it as a bullet would put api prose inside the validator's own list.
+   */
+  it("marks the api's own sentence as a note, not as a validator message", () => {
+    const text =
+      "workflows.patch_workflow failed: workflow definition failed validation (fix these and retry):\n" +
+      '- node "note": values.n references unknown node "ghost"\n' +
+      "\n" +
+      "The workflow already held the error(s) below before this edit, so this edit did not cause them. " +
+      "Fix them in the same call, or open the workflow in the editor and correct them first.\n" +
+      '- node "build": values.to reads "trigger.email", but a trigger payload carries only ' +
+      "type, triggerId, timestamp, data, metadata";
+
+    const lines = parseLintReport(text);
+    expect(lines?.filter((line) => line.kind === "error").map((line) => line.text)).toEqual([
+      'node "note": values.n references unknown node "ghost"',
+      'node "build": values.to reads "trigger.email", but a trigger payload carries only ' +
+        "type, triggerId, timestamp, data, metadata",
+    ]);
+    expect(lines?.filter((line) => line.kind === "note")).toHaveLength(1);
+    // The note keeps its place, so "the error(s) below" still points at the
+    // errors that follow it.
+    expect(lines?.map((line) => line.kind)).toEqual(["error", "note", "error"]);
+  });
+
+  it("marks the cap continuation as a note so it is not counted as an issue", () => {
+    const text =
+      "workflow definition failed validation (fix these and retry):\n" +
+      "- node \"a\": id must match /^[A-Za-z0-9_-]+$/\n" +
+      "… and 4 more";
+    const lines = parseLintReport(text);
+    expect(lines?.filter((line) => line.kind === "error")).toHaveLength(1);
+    expect(lines?.filter((line) => line.kind === "note").map((line) => line.text)).toEqual([
+      "… and 4 more",
     ]);
   });
 
   it("returns null for non-lint failures and successes", () => {
-    expect(parseLintErrors("workflows.get_run failed: run not found: x")).toBeNull();
-    expect(parseLintErrors(undefined)).toBeNull();
-    expect(parseLintErrors('{"workflowId":"wf1"}')).toBeNull();
+    expect(parseLintReport("workflows.get_run failed: run not found: x")).toBeNull();
+    expect(parseLintReport(undefined)).toBeNull();
+    expect(parseLintReport('{"workflowId":"wf1"}')).toBeNull();
   });
 });
 

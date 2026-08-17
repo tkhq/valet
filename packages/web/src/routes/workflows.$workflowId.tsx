@@ -29,6 +29,7 @@ import {
   DropdownMenuTrigger,
   Spinner,
 } from "~/components/primitives";
+import { errorText, validationMessages } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { runCountLabel } from "~/lib/run-count";
 import { cn } from "~/lib/cn";
@@ -390,6 +391,22 @@ function RunsDrawer({
   );
 }
 
+/**
+ * A restore re-saves an old definition, so the save-time validator judges it
+ * again. A version snapshotted before a rule existed does not pass that rule,
+ * and the request 400s. `ApiError.message` is only "PUT /workflows/x → 400",
+ * which names neither the fault nor the fix — the `errors` list does, so it
+ * is what the drawer must show.
+ */
+export function restoreErrorMessage(err: unknown): string {
+  const invalid = validationMessages(err);
+  if (!invalid) return errorText(err, "The restore failed. Try again.");
+  return (
+    "This version was not restored — it does not pass the current validation rules. " +
+    `Correct these in the editor, then save: ${invalid.join("; ")}`
+  );
+}
+
 function HistoryDrawer({
   workflowId,
   currentName,
@@ -418,7 +435,7 @@ function HistoryDrawer({
     try {
       await update.mutateAsync({ name: currentName, definition: versionQ.data.definition });
     } catch (err) {
-      setRestoreError(err instanceof Error ? err.message : "Restore failed.");
+      setRestoreError(restoreErrorMessage(err));
       return;
     }
     setConfirming(null);

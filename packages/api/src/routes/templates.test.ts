@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { builtinWorkflowTemplates } from "../workflows/template-definitions.js";
 import { teamMembers, teams, workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import type {
   InstallWorkflowTemplateRequest,
@@ -113,10 +114,16 @@ describe("GET /api/templates", () => {
     const body = (await res.json()) as ListWorkflowTemplatesResponse;
 
     // The listing also carries the host's own seeded catalog (`catalog.*`
-    // ids, `template-definitions.ts`), which changes as the catalog does.
-    // This file pins the PLUGIN surface, so assert on that partition alone.
-    const pluginIds = body.templates.map((t) => t.id).filter((id) => !id.startsWith("catalog."));
-    expect(pluginIds.sort()).toEqual(["gmail-sweep", "notes-echo"]);
+    // ids, `template-definitions.ts`). Read those ids from the catalog
+    // itself rather than listing them here, so a new template needs no edit
+    // — but keep the set exact. The route layer SKIPS a template whose
+    // definition fails to summarize (`listWorkflowTemplateSummaries`) and
+    // only logs it, so asserting on the plugin partition alone would let the
+    // whole catalog vanish from the gallery without failing a test.
+    const ids = body.templates.map((t) => t.id).sort();
+    const expected = [...builtinWorkflowTemplates.map((t) => t.id), "gmail-sweep", "notes-echo"];
+    expect(ids).toEqual(expected.sort());
+
     const sweep = body.templates.find((t) => t.id === "gmail-sweep");
     expect(sweep?.requires).toEqual([{ service: "gmail", connected: false }]);
     expect(sweep?.schedule).toEqual({ cron: "0 12 * * 1-5", timezone: "UTC" });
