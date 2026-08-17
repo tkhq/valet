@@ -848,6 +848,19 @@ describe("SourceService", () => {
       expect(legacy.enabled).toBe(false);
     });
 
+    it("seed honors the deprecated VALET_SANDBOX_IMAGE when VALET_FULL_BASE_IMAGE is unset (one stock chain)", async () => {
+      // dev-local sets only VALET_SANDBOX_IMAGE; the external row must use
+      // it (same chain as stockBaseRef) or every bake pulls ghcr instead of
+      // the local sandbox image.
+      const svc = makeService({ env: { VALET_SANDBOX_IMAGE: "local/sandbox:dev" } });
+      await svc.seedDefaultBasesIfMissing(orgId);
+      svc.stop();
+
+      const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const external = sources.find((s) => s.name === "stock-full")!;
+      expect(external.externalRef).toBe("local/sandbox:dev");
+    });
+
     it("re-seed after a deploy pin change updates the stock-full external ref", async () => {
       // A deploy rolls VALET_FULL_BASE_IMAGE forward (new immutable sha tag).
       // The stock-full external row must follow, or every org keeps baking

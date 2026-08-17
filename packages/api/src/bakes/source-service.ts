@@ -1288,7 +1288,9 @@ export class SourceService {
    * blocked by a seed failure. Safe to call repeatedly.
    */
   async seedDefaultBasesIfMissing(orgId: string): Promise<void> {
-    const fullBaseImage = this.env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE;
+    // Same chain as `stockBaseRef()` — the external ref and the stock
+    // fall-through must always name the same image.
+    const fullBaseImage = this.stockBaseRef();
     const now = this.now();
 
     // Step 1 — ensure the stock-full external row exists.
