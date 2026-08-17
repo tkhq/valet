@@ -13,7 +13,7 @@ import type {
   SandboxBatchJobsApi,
 } from "@valet/sandbox-kubernetes";
 import type { PrebuildSpec } from "./builder.js";
-import { BUILDKIT_IMAGE, buildkitdToml, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor } from "./k8s-builder.js";
+import { BUILDKIT_IMAGE, buildkitdToml, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor, refHost } from "./k8s-builder.js";
 
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
@@ -61,6 +61,31 @@ describe("pushRefFor", () => {
     // `valet-prebuild/foo:sha` DOES have a slash — a truly hostless ref is one
     // with no slash at all; defensive, never reached for k8s refs.
     expect(pushRefFor("no-slash-ref:tag", "push-host:5000")).toBe("no-slash-ref:tag");
+  });
+});
+
+// ── refHost (pure) ──────────────────────────────────────────────────────
+
+describe("refHost", () => {
+  it("recognizes dotted, ported, and localhost first segments as registry hosts", () => {
+    expect(refHost("ghcr.io/tkhq/valet-sandbox:sha-x")).toBe("ghcr.io");
+    expect(refHost("localhost:30500/src-x/base:abc")).toBe("localhost:30500");
+    expect(refHost("valet-registry:5000/foo:bar")).toBe("valet-registry:5000");
+    expect(refHost("localhost/foo:bar")).toBe("localhost");
+  });
+
+  it("treats a Docker Hub namespace as NOT a host (docker reference grammar)", () => {
+    // "myuser/myimage:tag" pulls from docker.io — the first segment is a
+    // namespace, not a registry host, so the FROM rewrite gate must never
+    // compare it against the pull host.
+    expect(refHost("myuser/myimage:tag")).toBeUndefined();
+    expect(refHost("library/ubuntu:24.04")).toBeUndefined();
+    expect(refHost("valet-prebuild/foo:sha")).toBeUndefined();
+  });
+
+  it("returns undefined for a bare image name", () => {
+    expect(refHost("ubuntu")).toBeUndefined();
+    expect(refHost("node:22-bookworm-slim")).toBeUndefined();
   });
 });
 
