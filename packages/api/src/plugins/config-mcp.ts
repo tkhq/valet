@@ -37,7 +37,15 @@ export function configMcpPlugins(
 function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin {
   let staticToken: string | undefined;
   if (entry.auth === "bearer") {
-    const token = env[entry.tokenEnv ?? ""]?.trim();
+    // `validateMcpServers` guarantees tokenEnv on bearer entries, but this
+    // function also accepts hand-built decls (tests, future callers) — a
+    // missing name must say so, not report `env var undefined is not set`.
+    if (!entry.tokenEnv) {
+      throw new InstanceConfigError(
+        `mcpServers "${entry.name}": auth is "bearer" but tokenEnv is missing. Set tokenEnv to the env var that holds the token.`,
+      );
+    }
+    const token = env[entry.tokenEnv]?.trim();
     if (!token) {
       throw new InstanceConfigError(
         `mcpServers "${entry.name}": env var ${entry.tokenEnv} is not set. Set it, or remove the entry.`,

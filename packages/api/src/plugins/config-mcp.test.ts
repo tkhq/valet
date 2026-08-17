@@ -79,6 +79,13 @@ describe("configMcpPlugins", () => {
     }
   });
 
+  it("a bearer decl built without tokenEnv (bypassing validation) names the missing field", () => {
+    const entry = decl({ auth: "bearer" });
+    expect(() => configMcpPlugins([entry], { EXAMPLE_MCP_TOKEN: "tok" })).toThrow(
+      'mcpServers "example": auth is "bearer" but tokenEnv is missing. Set tokenEnv to the env var that holds the token.',
+    );
+  });
+
   it("a service collision with another plugin throws in assemblePlugins, naming both", () => {
     const bundled = [
       { name: "linear", version: "0.1.0", actions: [{ service: "linear", actions: [] }] },

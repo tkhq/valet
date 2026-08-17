@@ -15,7 +15,12 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually |
 | `VALET_ENCRYPTION_KEY` | Prod | AES-256-GCM key for credentials at rest (warned if unset) |
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |
+| `VALET_CONFIG` | No | Path to the instance config file (`valet.yaml`). `make dev-local` points it at `config/valet.dev.yaml`; the helm chart mounts `api.instanceConfig` and sets it. See docs/specs/2026-08-14-instance-config-design.md |
 | `OPENAI_API_KEY` | No | Fallback OpenAI key |
+
+The instance config's `mcpServers` entries with `auth: bearer` each name
+their own env var (`tokenEnv`). Set that variable in the api's environment;
+the server refuses to boot when it is missing.
 
 ## Auth
 
