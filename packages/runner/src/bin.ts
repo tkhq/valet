@@ -15,6 +15,109 @@ import { AgentClient } from "./agent-client.js";
 import { PromptHandler } from "./prompt.js";
 import { startGateway, cleanupAllCloudflared } from "./gateway.js";
 import { OpenCodeManager, type OpenCodeConfig } from "./opencode-manager.js";
+import {
+  createLocalSession,
+  streamCompletion,
+  cleanupSession,
+  resolveModelPath,
+  listModels,
+  pullModel,
+  removeModel,
+  MODEL_REGISTRY,
+  getModelsDir,
+} from "./local/index.js";
+
+// ─── Local Inference Commands ────────────────────────────────────────────
+
+/**
+ * Run an interactive local chat session with a specified model.
+ */
+async function runLocalChat(modelName: string): Promise<void> {
+  try {
+    const modelPath = await resolveModelPath(modelName);
+    const session = await createLocalSession(modelPath);
+
+    console.log(`\n🚀 Valet Local (${modelName})`);
+    console.log("Type your message. Ctrl+C to exit.\n");
+
+    const readline = await import("readline");
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const prompt = (q: string): Promise<string> =>
+      new Promise((resolve) => rl.question(q, resolve));
+
+    try {
+      while (true) {
+        const input = await prompt("You: ");
+        if (!input.trim()) continue;
+
+        process.stdout.write("Assistant: ");
+        try {
+          for await (const chunk of streamCompletion(session, input)) {
+            process.stdout.write(chunk);
+          }
+        } catch (err) {
+          console.error("\nError during generation:", err);
+        }
+        console.log("\n");
+      }
+    } finally {
+      rl.close();
+      await cleanupSession(session);
+    }
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Error: ${errorMsg}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Handle model management commands.
+ */
+async function handleModelCommand(subcommand: string, arg?: string): Promise<void> {
+  try {
+    if (subcommand === "list") {
+      const models = await listModels();
+      if (models.length === 0) {
+        console.log("No models downloaded.\n");
+        console.log("Available models:");
+        for (const [name, info] of Object.entries(MODEL_REGISTRY)) {
+          console.log(`  ${name} (${info.size})`);
+        }
+        console.log(`\nDownload with: valet model pull <name>`);
+      } else {
+        console.log("Downloaded models:\n");
+        for (const model of models) {
+          console.log(`  ${model.name} (${model.size})`);
+        }
+      }
+    } else if (subcommand === "pull") {
+      if (!arg) {
+        console.error("Model name required: valet model pull <name>");
+        process.exit(1);
+      }
+      await pullModel(arg);
+    } else if (subcommand === "rm") {
+      if (!arg) {
+        console.error("Model name required: valet model rm <name>");
+        process.exit(1);
+      }
+      await removeModel(arg);
+    } else {
+      console.error(`Unknown model command: ${subcommand}`);
+      console.log("Usage: valet model <list|pull|rm> [name]");
+      process.exit(1);
+    }
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Error: ${errorMsg}`);
+    process.exit(1);
+  }
+}
 
 function mergeOpenCodeConfig(
   current: OpenCodeConfig,
@@ -39,8 +142,90 @@ function mergeOpenCodeConfig(
   };
 }
 
+// Parse command-line arguments
+const args = Bun.argv.slice(2);
+
+// Check for subcommands first (local, model)
+if (args[0] === "local") {
+  // valet local [--model <name>]
+  const { values: localValues } = parseArgs({
+    args: args.slice(1),
+    options: {
+      model: { type: "string", short: "m" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+
+  if (localValues.help) {
+    console.log(`
+Valet Local — Interactive chat with a local LLM
+
+Usage:
+  valet local [OPTIONS]
+
+Options:
+  -m, --model <name>  Model to use (default: first available or qwen2.5-0.5b)
+  -h, --help          Show this help message
+
+Available models:
+${Object.entries(MODEL_REGISTRY).map(([name, info]) => `  ${name} (${info.size})`).join("\n")}
+
+Examples:
+  valet local
+  valet local --model qwen2.5-1.5b
+`);
+    process.exit(0);
+  }
+
+  const modelName = (localValues.model as string) || "qwen2.5-0.5b";
+  (async () => {
+    try {
+      await runLocalChat(modelName);
+      process.exit(0);
+    } catch (err) {
+      console.error("Fatal error:", err);
+      process.exit(1);
+    }
+  })();
+} else if (args[0] === "model") {
+  // valet model <list|pull|rm> [name]
+  const subcommand = args[1];
+  const modelArg = args[2];
+
+  if (!subcommand) {
+    console.log(`
+Valet Model — Manage local LLM models
+
+Usage:
+  valet model <command> [name]
+
+Commands:
+  list              List downloaded models
+  pull <name>       Download a model from HuggingFace
+  rm <name>         Delete a downloaded model
+
+Examples:
+  valet model list
+  valet model pull qwen2.5-1.5b
+  valet model rm qwen2.5-0.5b
+`);
+    process.exit(0);
+  }
+
+  (async () => {
+    try {
+      await handleModelCommand(subcommand, modelArg);
+      process.exit(0);
+    } catch (err) {
+      console.error("Fatal error:", err);
+      process.exit(1);
+    }
+  })();
+}
+
+// Otherwise, parse for runner mode
 const { values } = parseArgs({
-  args: Bun.argv.slice(2),
+  args,
   options: {
     "opencode-url": { type: "string" },
     "do-url": { type: "string" },
