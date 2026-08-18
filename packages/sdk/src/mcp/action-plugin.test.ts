@@ -199,6 +199,18 @@ describe('mcpActionPlugin resolveActions', () => {
     expect(await riskFor({ destructiveHint: false, openWorldHint: true }, 'medium')).toBe('high');
   });
 
+  it('raises an open-world write above a low service default (default is not a cap)', async () => {
+    expect(await riskFor({ destructiveHint: false, openWorldHint: true }, 'low')).toBe('high');
+  });
+
+  it('raises an idempotent write above a low service default', async () => {
+    expect(await riskFor({ destructiveHint: false, idempotentHint: true }, 'low')).toBe('medium');
+  });
+
+  it('raises destructiveHint: true to critical above a low service default', async () => {
+    expect(await riskFor({ destructiveHint: true }, 'low')).toBe('critical');
+  });
+
   it('prefers idempotency over open-world for non-destructive writes', async () => {
     expect(
       await riskFor({ destructiveHint: false, idempotentHint: true, openWorldHint: true }, 'high'),

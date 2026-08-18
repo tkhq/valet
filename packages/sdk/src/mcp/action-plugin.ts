@@ -124,6 +124,12 @@ function mapToolToAction(
  * chose the default" from "server never set annotations", so absent hints
  * keep the service default instead of inflating every unannotated write
  * to critical.
+ *
+ * Explicit hints override the service default in BOTH directions — the
+ * configured riskLevel is the assumption for unannotated tools, not a cap
+ * or a floor. A `low` service default does not keep an open-world write at
+ * `low`, just as destructiveHint true has always raised any default to
+ * critical.
  */
 function deriveRiskLevel(tool: McpTool, defaultRiskLevel: RiskLevel): RiskLevel {
   const hints = tool.annotations;
