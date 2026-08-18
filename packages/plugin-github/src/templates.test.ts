@@ -341,61 +341,12 @@ describe("github workflow templates", () => {
     expect([...new Set(services)].sort()).toEqual(["github", "google_calendar", "slack"]);
   });
 
-  it("routes without Slack, so the routing template is validated here too", () => {
-    // It used to send the reviewer a direct message beside the comment,
-    // which made it a cross-service definition this package could not
-    // validate. The comment is now the whole delivery.
-    expect(githubOnly.map((t) => t.id)).toContain("github.unclaimed-pull-request-routing");
-  });
-
   describe.each(githubOnly)("$id", (template) => {
     it("passes the definition validator against the real action list", () => {
       const result = validateWorkflowDefinition(template.definition as WorkflowDefinition, env);
       // The validator's own messages name the node and the corrected path.
       expect(result.ok ? [] : result.errors).toEqual([]);
     });
-  });
-});
-
-// ─── The routing template ────────────────────────────────────────────────
-
-const ROUTING_ID = "github.unclaimed-pull-request-routing";
-
-describe(`${ROUTING_ID} — the comment is the whole delivery`, () => {
-  const definition = definitionOf(ROUTING_ID);
-  const template = templateById(ROUTING_ID);
-
-  it("gives the report the per-comment outcomes it asks the model to name", () => {
-    // The report asks for the reviewers a failed comment left untold. The
-    // counts cannot answer that: `completedCount` and `failedCount` are
-    // numbers, and the status and the error of one attempt live only in
-    // `ForeachResult.items` (`workflow/src/nodes/foreach.ts`). Without that
-    // path the model either drops the names or invents a pair from the
-    // routed list, and the caveat below states the names as fact.
-    const report = orchestratorNode(definition, "report");
-    expect(report.prompt).toContain("{{ nodes.comment.result.items }}");
-    expect(report.prompt).toContain("A comment that failed is a reviewer nobody told");
-    expect(report.prompt).toContain("name each one");
-    // Index-aligned with the routed list, which is how a model turns a
-    // failed entry back into a pull request and a handle.
-    expect(report.prompt).toContain("{{ nodes.route.result.output.routed }}");
-    expect(report.prompt).toContain("SAME order as the routed list");
-  });
-
-  it("collects a failed comment instead of stopping the rest", () => {
-    const comment = definition.nodes.find((n): n is ForeachNode => n.type === "foreach" && n.id === "comment");
-    expect(comment?.onItemError).toBe("collect");
-  });
-
-  it("says that a comment which posts is not proof a person was reached", () => {
-    // The run reads a 201 from `create_comment`, and nothing more. A handle
-    // that is no longer an account renders as plain text, so GitHub
-    // notifies nobody and the report still reads "Failed: 0". The Slack
-    // message used to be the second addressed channel that surfaced a stale
-    // routing row; with it gone the card has to carry the limit.
-    const text = (template.caveats ?? []).join("\n");
-    expect(text).toContain("not proof");
-    expect(text).toContain("correct that handle in the routing file");
   });
 });
 

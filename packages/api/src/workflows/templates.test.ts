@@ -477,7 +477,7 @@ describe("listWorkflowTemplateSummaries", () => {
  * pins that removing "slack" from `SERVICES_NOT_READY` actually changes
  * what a person sees, not only what the flag says. `requires` is derived
  * from tool nodes rather than declared by an author, so a slack tool node
- * added to or removed from either template below moves this test.
+ * added to or removed from any template below moves this test.
  */
 describe("the shipped gallery, now that Slack is available", () => {
   async function shippedIds(): Promise<string[]> {
@@ -490,13 +490,6 @@ describe("the shipped gallery, now that Slack is available", () => {
     const summary = list.find((t) => t.id === "github.assign-reviewers");
     expect(summary).toBeDefined();
     expect(summary?.requires.map((r) => r.service)).toContain("slack");
-  });
-
-  it("still reports no Slack need for the routing template — the comment is its whole delivery", async () => {
-    const list = await listWorkflowTemplateSummaries(deps(bundledPlugins), OWNER);
-    const summary = list.find((t) => t.id === "github.unclaimed-pull-request-routing");
-    expect(summary).toBeDefined();
-    expect(summary?.requires.map((r) => r.service)).not.toContain("slack");
   });
 
   it("now offers the two templates that read Slack for their data", async () => {

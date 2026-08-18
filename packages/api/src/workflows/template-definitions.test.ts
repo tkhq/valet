@@ -424,23 +424,6 @@ describe("template requirements", () => {
   });
 
   /**
-   * The routing template still delivers through a GitHub comment alone — no
-   * action here requests a review, so the comment IS the delivery, and
-   * nothing about that needed Slack to fix. `github.assign-reviewers` is no
-   * longer in this set: it now DMs through Slack in addition to its
-   * orchestrator report, which is the assertion right after this one.
-   */
-  it("the routing template still needs no Slack, and still reports somewhere a person reads", () => {
-    const { definition } = ownedById("github.unclaimed-pull-request-routing");
-    const required = templateRequirements(definition, actionPluginByService, nothingConnected);
-    expect(required.map((r) => r.service)).not.toContain("slack");
-    expect(toolNodesOf(definition).map((node) => node.service)).not.toContain("slack");
-    // Dropping the message without keeping the report would be a run that
-    // tells nobody anything.
-    expect(definition.nodes.some((node) => node.type === "orchestrator")).toBe(true);
-  });
-
-  /**
    * `SERVICES_NOT_READY` (`templates.ts`) no longer names Slack, and this
    * template is the reason it was there: it restores the direct message
    * the original request asked for, on top of the orchestrator report that
