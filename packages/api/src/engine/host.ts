@@ -75,6 +75,7 @@ import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
+import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
 /** Personality is capped at injection time (assistant-centered web UI
@@ -724,7 +725,20 @@ export class EngineHost {
     orgId: string,
     pins: readonly PinnedActionSpec[] = [],
   ): Promise<PluginSessionExtras> {
-    const plugins = this.opts.plugins ?? [];
+    // Availability gate (integration-availability design): a service whose
+    // deployment/org prerequisite is missing never reaches the catalog, so
+    // `list_tools` has nothing to hide. Per-build, not process-static: the
+    // org-credential half of availability changes when an admin connects or
+    // removes the org app.
+    const plugins = gateUnavailableActions(
+      this.opts.plugins ?? [],
+      await unavailableServiceSet({
+        plugins: this.opts.plugins ?? [],
+        orgId,
+        credentials: this.opts.engineCredentials,
+        env: process.env,
+      }),
+    );
     if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
     return pluginSessionExtras(
       plugins,

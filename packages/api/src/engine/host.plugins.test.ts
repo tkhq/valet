@@ -107,6 +107,41 @@ describe("EngineHost + plugin extras", () => {
     expect(session.options.roles).toBeUndefined();
   });
 
+  it("strips an unconfigured service's tools from session builds until the org credential exists", async () => {
+    // Availability gate (integration-availability design): requires.orgCredential
+    // unmet means the agent never sees the service's tools. With the fixture as
+    // the only action plugin, the whole catalog (list_tools/call_tool) drops.
+    const gatedPlugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [{ service: "gated", actions: [makeAction("gated.ping")] } satisfies ActionPlugin],
+      credentials: [
+        { type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } },
+      ],
+    };
+    api = await bootTestApi({ plugins: [gatedPlugin] });
+    const { engineHost, engineCredentials } = api.providers;
+
+    const before = await engineHost.sessionFor("gate-before", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    expect((before.options.tools ?? []).map((t) => t.name)).not.toContain("list_tools");
+
+    await engineCredentials.save({ type: "org", id: "local-org" }, "gated", {
+      type: "bot_token",
+      accessToken: "org-token",
+    });
+
+    const after = await engineHost.sessionFor("gate-after", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    expect((after.options.tools ?? []).map((t) => t.name)).toContain("list_tools");
+  });
+
   it("with plugins: [] a generic session gets no tools/skills/roles at all", async () => {
     api = await bootTestApi({ plugins: [] });
     const { engineHost } = api.providers;
