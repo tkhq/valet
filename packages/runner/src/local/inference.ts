@@ -5,6 +5,14 @@
 
 import { getLlama, LlamaChatSession } from "node-llama-cpp";
 
+/**
+ * Options for local inference, including GPU configuration.
+ */
+export interface LocalInferenceOptions {
+  gpu?: "auto" | "metal" | "cuda" | "vulkan" | false;
+  gpuLayers?: "auto" | "max" | number;
+}
+
 export interface LocalSession {
   context: any;
   session: LlamaChatSession;
@@ -14,16 +22,28 @@ export interface LocalSession {
 /**
  * Create a local inference session by loading a model.
  * @param modelPath Full path to the GGUF model file
+ * @param options GPU and inference options (default: auto GPU detection)
  * @returns A session object with the context
  */
-export async function createLocalSession(modelPath: string): Promise<LocalSession> {
+export async function createLocalSession(
+  modelPath: string,
+  options: LocalInferenceOptions = {}
+): Promise<LocalSession> {
   console.log(`Loading model: ${modelPath}`);
 
   // Load the model using node-llama-cpp v3 API
-  const llama = await getLlama();
-  const model = await llama.loadModel({ modelPath });
+  // gpu: "auto" enables automatic GPU detection (Metal on macOS, CUDA on Linux/Windows)
+  const llama = await getLlama({ gpu: options.gpu ?? "auto" });
+  const model = await llama.loadModel({
+    modelPath,
+    gpuLayers: options.gpuLayers ?? "auto"
+  });
   const context = await model.createContext();
   const session = new LlamaChatSession({ contextSequence: context.getSequence() });
+
+  // Log which GPU backend is active
+  const gpuBackend = (llama as any).gpu ? (llama as any).gpu : "CPU";
+  console.log(`Loaded model on ${gpuBackend}`);
 
   return {
     context,
@@ -62,17 +82,27 @@ export async function* streamCompletion(
  * @param modelPath Full path to the GGUF model file
  * @param prompt The input prompt
  * @param onToken Callback invoked for each token generated
+ * @param options GPU and inference options (default: auto GPU detection)
  * @returns The full generated text
  */
 export async function streamCompletionRealtime(
   modelPath: string,
   prompt: string,
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
+  options: LocalInferenceOptions = {}
 ): Promise<string> {
-  const llama = await getLlama();
-  const model = await llama.loadModel({ modelPath });
+  // gpu: "auto" enables automatic GPU detection (Metal on macOS, CUDA on Linux/Windows)
+  const llama = await getLlama({ gpu: options.gpu ?? "auto" });
+  const model = await llama.loadModel({
+    modelPath,
+    gpuLayers: options.gpuLayers ?? "auto"
+  });
   const context = await model.createContext();
   const session = new LlamaChatSession({ contextSequence: context.getSequence() });
+
+  // Log which GPU backend is active
+  const gpuBackend = (llama as any).gpu ? (llama as any).gpu : "CPU";
+  console.log(`Loaded model on ${gpuBackend}`);
 
   let full = "";
   await session.prompt(prompt, {

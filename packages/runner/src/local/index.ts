@@ -8,6 +8,7 @@ export {
   streamCompletionRealtime,
   cleanupSession,
   type LocalSession,
+  type LocalInferenceOptions,
 } from "./inference.js";
 
 export {

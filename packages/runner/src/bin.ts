@@ -35,6 +35,7 @@ import {
   getValetDir,
   flushQueue,
   startTunnel,
+  type LocalInferenceOptions,
 } from "./local/index.js";
 
 // ─── Local Inference Commands ────────────────────────────────────────────
@@ -42,10 +43,10 @@ import {
 /**
  * Run an interactive local chat session with a specified model.
  */
-async function runLocalChat(modelName: string): Promise<void> {
+async function runLocalChat(modelName: string, options: LocalInferenceOptions = {}): Promise<void> {
   try {
     const modelPath = await resolveModelPath(modelName);
-    const session = await createLocalSession(modelPath);
+    const session = await createLocalSession(modelPath, options);
 
     console.log(`\n🚀 Valet Local (${modelName})`);
     console.log("Type your message. Ctrl+C to exit.\n");
@@ -157,11 +158,13 @@ const args = Bun.argv.slice(2);
 
 // Check for subcommands first (local, model)
 if (args[0] === "local") {
-  // valet local [--model <name>]
+  // valet local [--model <name>] [--gpu <backend>] [--gpu-layers <count>]
   const { values: localValues } = parseArgs({
     args: args.slice(1),
     options: {
       model: { type: "string", short: "m" },
+      gpu: { type: "string" },
+      "gpu-layers": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -174,8 +177,10 @@ Usage:
   valet local [OPTIONS]
 
 Options:
-  -m, --model <name>  Model to use (default: first available or qwen2.5-0.5b)
-  -h, --help          Show this help message
+  -m, --model <name>         Model to use (default: first available or qwen2.5-0.5b)
+  --gpu <backend>            GPU backend: auto, metal, cuda, vulkan, or off/cpu/false (default: auto)
+  --gpu-layers <count|mode>  GPU layers: auto, max, or a number (default: auto)
+  -h, --help                 Show this help message
 
 Available models:
 ${Object.entries(MODEL_REGISTRY).map(([name, info]) => `  ${name} (${info.size})`).join("\n")}
@@ -183,14 +188,47 @@ ${Object.entries(MODEL_REGISTRY).map(([name, info]) => `  ${name} (${info.size})
 Examples:
   valet local
   valet local --model qwen2.5-1.5b
+  valet local --model llama3.2-1b --gpu metal --gpu-layers 32
+  valet local --gpu off  (CPU only)
 `);
     process.exit(0);
   }
 
   const modelName = (localValues.model as string) || "qwen2.5-0.5b";
+  
+  // Parse GPU option (auto, metal, cuda, vulkan, or false/off/cpu)
+  let gpu: "auto" | "metal" | "cuda" | "vulkan" | false = "auto";
+  if (localValues.gpu) {
+    const gpuArg = (localValues.gpu as string).toLowerCase();
+    if (gpuArg === "false" || gpuArg === "off" || gpuArg === "cpu") {
+      gpu = false;
+    } else if (["auto", "metal", "cuda", "vulkan"].includes(gpuArg)) {
+      gpu = gpuArg as "auto" | "metal" | "cuda" | "vulkan";
+    } else {
+      console.error(`Invalid GPU backend: ${localValues.gpu}`);
+      console.error("Valid options: auto, metal, cuda, vulkan, off, cpu, false");
+      process.exit(1);
+    }
+  }
+
+  // Parse GPU layers option
+  let gpuLayers: "auto" | "max" | number = "auto";
+  if (localValues["gpu-layers"]) {
+    const layersArg = (localValues["gpu-layers"] as string).toLowerCase();
+    if (layersArg === "max") {
+      gpuLayers = "max";
+    } else if (!isNaN(Number(layersArg))) {
+      gpuLayers = parseInt(layersArg, 10);
+    } else {
+      console.error(`Invalid GPU layers: ${localValues["gpu-layers"]}`);
+      console.error("Valid options: auto, max, or a number");
+      process.exit(1);
+    }
+  }
+
   (async () => {
     try {
-      await runLocalChat(modelName);
+      await runLocalChat(modelName, { gpu, gpuLayers });
       process.exit(0);
     } catch (err) {
       console.error("Fatal error:", err);
