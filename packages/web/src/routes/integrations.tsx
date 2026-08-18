@@ -20,7 +20,7 @@ export const Route = createFileRoute("/integrations")({
   component: IntegrationsPage,
 });
 
-type ConnectResult = { kind: "connected" | "error"; value: string } | null;
+type ConnectResult = { kind: "connected" | "error"; value: string; detail?: string } | null;
 
 /**
  * Maps OAuth callback error codes to human-readable messages. Each message
@@ -47,12 +47,15 @@ function useConnectResult(): ConnectResult {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("connected");
     const error = params.get("error");
+    // Server-composed corrective action (e.g. an OAuthInterpretError message);
+    // rendered as plain text below, never as markup.
+    const detail = params.get("detail");
     if (!connected && !error) return;
     window.history.replaceState(null, "", window.location.pathname);
     setResult(
       connected
         ? { kind: "connected", value: connected }
-        : { kind: "error", value: error ?? "" },
+        : { kind: "error", value: error ?? "", ...(detail ? { detail } : {}) },
     );
   }, []);
 
@@ -89,7 +92,7 @@ export function IntegrationsPage() {
           )}
           {connectResult?.kind === "error" && (
             <div className="mt-4 rounded border border-line bg-danger-wash px-3 py-2 text-sm text-danger-600">
-              {ERROR_MESSAGES[connectResult.value] ?? (
+              {connectResult.detail ?? ERROR_MESSAGES[connectResult.value] ?? (
                 <>
                   Connection failed: {connectResult.value}. Select Connect on the service below to
                   try again.

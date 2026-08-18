@@ -291,7 +291,12 @@ describe("GET /api/credentials/oauth/callback", () => {
       { redirect: "manual" },
     );
     expect(cb.status).toBe(302);
-    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
+    // OAuthInterpretError messages are user-facing: the redirect carries the
+    // corrective action in `detail` for the integrations page to render.
+    const location = new URL(cb.headers.get("location") ?? "", "http://web.test");
+    expect(location.pathname).toBe("/integrations");
+    expect(location.searchParams.get("error")).toBe("oauth_failed");
+    expect(location.searchParams.get("detail")).toContain("Reinstall the Slack app");
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "slackish");
     expect(stored).toBeNull();

@@ -12,6 +12,8 @@ import type { CredentialSummary, GetGithubAppResponse, IdentityLinkStatus } from
 import { ApiError } from "~/api/client";
 
 const startMutateAsync = vi.fn();
+// Controls the mocked useStartIdentityLink pending state per test.
+let startLinkState: { isPending: boolean; variables?: string } = { isPending: false };
 const setNotifyMutate = vi.fn();
 const unlinkMutate = vi.fn();
 const connectGithubMutateAsync = vi.fn();
@@ -37,7 +39,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useIdentityLinks: () => ({ data: linksData, isLoading, error: isError ? new Error("boom") : null }),
-    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, ...startLinkState }),
     // provider argument accepted but ignored — mocks return fixed stubs
     useSetLinkNotify: (_provider: string) => ({ mutate: setNotifyMutate }),
     useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkMutate, isPending: false }),
@@ -355,6 +357,22 @@ describe("ConnectedAccountsPage", () => {
       render(<ConnectedAccountsPage />);
       expect(screen.getByRole("button", { name: "Connect Telegram" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
+    });
+
+    it("one provider's in-flight start does not disable the other card's button", () => {
+      linksData = {
+        links: [
+          { provider: "telegram", linked: false, channelReady: true },
+          { provider: "slack", linked: false, channelReady: true },
+        ],
+      };
+      startLinkState = { isPending: true, variables: "slack" };
+      render(<ConnectedAccountsPage />);
+      const slackBtn = screen.getByRole("button", { name: "Connecting…" });
+      expect(slackBtn).toHaveProperty("disabled", true);
+      const telegramBtn = screen.getByRole("button", { name: "Connect Telegram" });
+      expect(telegramBtn).toHaveProperty("disabled", false);
+      startLinkState = { isPending: false };
     });
 
     it("provider without deepLink shows code + instructions after start, no anchor", async () => {

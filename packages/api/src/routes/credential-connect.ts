@@ -24,7 +24,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { loadAuthConfig } from "../auth/config.js";
-import type { OAuthIdentity, TokenInterpretation } from "@valet/engine";
+import { OAuthInterpretError, type OAuthIdentity, type TokenInterpretation } from "@valet/engine";
 import {
   authCodeEnvReady,
   ensureMcpOAuthClient,
@@ -258,6 +258,13 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     }
   } catch (err) {
     console.error(`oauth callback: token exchange failed for ${verified.service}:`, err);
+    // OAuthInterpretError messages are composed by the plugin to be shown to
+    // the user (they name the corrective action) and never contain provider
+    // response bodies — those stay in the server log above.
+    if (err instanceof OAuthInterpretError) {
+      const detail = encodeURIComponent(err.message.slice(0, 300));
+      return c.redirect(`${returnTo}/integrations?error=oauth_failed&detail=${detail}`, 302);
+    }
     return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
   }
 

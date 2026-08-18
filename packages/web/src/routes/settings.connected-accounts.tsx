@@ -164,7 +164,9 @@ export function ConnectedAccountsPage() {
           key={link.provider}
           link={link}
           onStart={startLink.mutateAsync}
-          startPending={startLink.isPending}
+          // Pending is scoped to the provider in flight, so starting one
+          // provider's link does not disable every other card's button.
+          startPending={startLink.isPending && startLink.variables === link.provider}
         />
       ))}
 
