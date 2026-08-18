@@ -36,11 +36,10 @@ async function slackError(res: Response, data?: { ok: boolean; error?: string })
   return { success: false, error: `Slack API ${res.status}: ${res.statusText}` };
 }
 
-// V2-GAP: identity-link injection not yet wired in v2 hosts. Legacy read this off
-// a worker-injected `ctx.credentials.owner_slack_user_id` (set once a user linked
-// their Slack identity for private-channel access checks). No v2 host populates
-// this yet; we look for it on the resolved credential's metadata so the branch
-// activates automatically once identity-link lands there.
+// Legacy read this off a worker-injected `ctx.credentials.owner_slack_user_id`
+// (set once a user linked their Slack identity for private-channel access checks).
+// The v2 host now populates this via the identity-link resolver in host.ts; the
+// branch activates automatically when the session user has a linked Slack identity.
 function ownerSlackUserId(cred: Credential | null): string | undefined {
   const raw = cred?.metadata?.["owner_slack_user_id"];
   return typeof raw === "string" ? raw : undefined;
