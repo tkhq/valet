@@ -52,12 +52,56 @@ describe("slack bot scopes", () => {
     "files.info": "files:read",
     "files.getUploadURLExternal": "files:write",
     "files.completeUploadExternal": "files:write",
+    // slack.* actions (plugin-slack/src/actions). The conversations.*
+    // methods need one history/read scope per channel type; the public-
+    // channel scope stands in for the family, and the manifest test below
+    // pins the private/DM variants explicitly.
+    "conversations.history": "channels:history",
+    "conversations.replies": "channels:history",
+    "conversations.info": "channels:read",
+    "conversations.members": "channels:read",
+    "conversations.list": "channels:read",
+    "reactions.add": "reactions:write",
+    "reactions.get": "reactions:read",
+    "pins.list": "pins:read",
+    "users.info": "users:read",
+    "bots.info": "bots:read",
   };
 
   it("declares a scope for every Slack method the transport calls", () => {
     const declared = new Set([...SLACK_REQUIRED_BOT_SCOPES, ...SLACK_OPTIONAL_BOT_SCOPES]);
     for (const [method, scope] of Object.entries(SCOPE_FOR_METHOD)) {
       expect(declared, `${method} needs ${scope}`).toContain(scope);
+    }
+  });
+
+  it("declares every channel-type variant of the history and read scopes", () => {
+    const declared = new Set([...SLACK_REQUIRED_BOT_SCOPES, ...SLACK_OPTIONAL_BOT_SCOPES]);
+    for (const scope of [
+      "channels:history",
+      "groups:history",
+      "im:history",
+      "mpim:history",
+      "channels:read",
+      "groups:read",
+      "im:read",
+      "mpim:read",
+    ]) {
+      expect(declared, `${scope} must be declared`).toContain(scope);
+    }
+  });
+
+  it("keeps V1 parity so a ported surface never forces an app reinstall", () => {
+    const declared = new Set([...SLACK_REQUIRED_BOT_SCOPES, ...SLACK_OPTIONAL_BOT_SCOPES]);
+    for (const scope of [
+      "app_mentions:read",
+      "chat:write.customize",
+      "chat:write.public",
+      "users:read.email",
+      "usergroups:read",
+      "usergroups:write",
+    ]) {
+      expect(declared, `${scope} must be declared`).toContain(scope);
     }
   });
 

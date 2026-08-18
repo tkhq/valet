@@ -72,15 +72,55 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   "files:read",
   // Outbound file attachments.
   "files:write",
+
+  // ── slack.* action surface (plugin-slack/src/actions) ──────────────
+  // `slack.read_history` / `slack.read_thread` (`conversations.history`,
+  // `conversations.replies`) per channel type: public, private, group DM.
+  // DMs ride the required `im:history`.
+  "channels:history",
+  "groups:history",
+  "mpim:history",
+  // `slack.list_channels` / `slack.get_channel_info` (`conversations.list`,
+  // `conversations.info`) and the private-channel membership check
+  // (`conversations.members`, channel-access.ts) per channel type.
+  "channels:read",
+  "groups:read",
+  "im:read",
+  "mpim:read",
+  // `slack.add_reaction` (`reactions.add`).
+  "reactions:write",
+  // `slack.get_reactions` (`reactions.get`).
+  "reactions:read",
+  // `slack.get_pins` (`pins.list`).
+  "pins:read",
+  // Bot-sender enrichment (`bots.info`, data-enrichment design).
+  "bots:read",
+
+  // ── V1 parity, held for surfaces that are ported next ───────────────
+  // The scopes below have no v2 consumer yet. They ride along so an
+  // installed app does not need a reinstall when each surface lands —
+  // Slack grants only what the installed manifest declared.
+  // `app_mention` channel triggers (V1 mention routing).
+  "app_mentions:read",
+  // Persona posting: `chat.postMessage` username/icon overrides.
+  "chat:write.customize",
+  // Posting into public channels the bot has not joined.
+  "chat:write.public",
+  // Email-based workspace-member lookup in the account-link search.
+  "users:read.email",
+  // Usergroup read/manage tools.
+  "usergroups:read",
+  "usergroups:write",
 ];
 
 /**
  * Bot events the agent surface needs. Order is not significant.
  *
  * Workflow triggers over channel activity (reactions, membership, files)
- * are a different surface with different scopes. Add those event names and
- * their history scopes to these lists when that surface lands, so the
- * manifest and the save-time scope check keep one source of truth.
+ * are a different surface: add those event names here when it lands. The
+ * scopes they read with are already declared in
+ * `SLACK_OPTIONAL_BOT_SCOPES`, so landing the surface does not force a
+ * reinstall of every workspace app.
  */
 export const SLACK_BOT_EVENTS: readonly string[] = [
   // Replaces `assistant_thread_started`. The handler gates on
