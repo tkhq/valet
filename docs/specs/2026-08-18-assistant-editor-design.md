@@ -112,9 +112,13 @@ for your own).
   finishes on the old config; the next wake rebuilds with the new one.
   `destroy()` is not used because it would kill a running turn.
 
-The editor needs no new catalog endpoints. `GET /api/plugins` already
-returns each integration with its fully-qualified action list, and
-`GET /api/skills` lists the skills an owner can reach.
+The editor needs no new catalog endpoints, but `GET /api/plugins` gains one
+field: `PluginSummary.actionServices`, the plugin's actions grouped by
+ActionPlugin routing service. The existing `services[].actions` groups by
+CREDENTIAL service and omits credential-less plugins (their `services` array
+is empty), so it cannot feed the editor: the behavior config keys on the
+routing service. `GET /api/skills` lists the skills an owner can reach,
+unchanged.
 
 ## Host enforcement
 
