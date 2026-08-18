@@ -55,7 +55,13 @@ function slackAppResponse(overrides: Partial<GetSlackAppResponse> = {}): GetSlac
         },
         bot_user: { display_name: "Valet", always_online: true },
       },
-      oauth_config: { scopes: { bot: ["assistant:write", "chat:write", "im:history"] } },
+      oauth_config: {
+        redirect_urls: ["https://valet.example.com/api/credentials/oauth/callback"],
+        scopes: {
+          bot: ["assistant:write", "chat:write", "im:history"],
+          user: ["search:read", "chat:write"],
+        },
+      },
       settings: {
         event_subscriptions: {
           request_url: "https://valet.example.com/api/channels/slack/webhook",
