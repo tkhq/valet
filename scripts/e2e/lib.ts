@@ -129,6 +129,7 @@ const TESTED_PLUGINS = [
   "@valet/plugin-linear",
   "@valet/plugin-openai",
   "@valet/plugin-slack",
+  "@valet/plugin-slack-user",
   "@valet/plugin-telegram",
 ];
 

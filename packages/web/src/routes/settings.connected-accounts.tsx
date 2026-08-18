@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import type { CredentialSummary, StartIdentityLinkResponse } from "@valet/api/wire";
+import type { CredentialSummary, IdentityLinkStatus, StartIdentityLinkResponse } from "@valet/api/wire";
 import {
   useIdentityLinks,
   useSetLinkNotify,
@@ -15,37 +15,134 @@ import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Badge, Button, Spinner, Switch } from "~/components/primitives";
 import { formatDateOr } from "~/lib/format-when";
+import { displayName } from "~/components/integrations/display-name";
 
 /**
- * `/settings/connected-accounts` — You · Connected accounts. Telegram
- * account linking only this pass (see `IdentityLinkStatus`'s `provider`
- * field for the shape more channels would slot into).
+ * `/settings/connected-accounts` — You · Connected accounts. Renders one
+ * `LinkAccountCard` per provider returned by `GET /api/me/identity-links`.
  */
 export const Route = createFileRoute("/settings/connected-accounts")({
   component: ConnectedAccountsPage,
 });
 
-/** Server sends `{ error: "telegram bot not configured" }` for the one
- * documented failure (bot token removed between load and click); fall back
- * to a generic message for anything else (network failure, unexpected
- * shape). */
-function extractStartLinkError(err: unknown): string {
+/** Server sends `{ error: "..." }` for documented failures; fall back to a
+ * generic message for anything else (network failure, unexpected shape). */
+function extractStartLinkError(err: unknown, provider: string): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
     const message = (err.payload as Record<string, unknown>).error;
     if (typeof message === "string" && message) return message;
   }
-  return "Couldn't start the Telegram link. Try again.";
+  return `Couldn't start the ${displayName(provider)} link. Try again.`;
+}
+
+interface LinkAccountCardProps {
+  link: IdentityLinkStatus;
+  onStart: (provider: string) => Promise<StartIdentityLinkResponse>;
+  startPending: boolean;
+}
+
+function LinkAccountCard({ link, onStart, startPending }: LinkAccountCardProps) {
+  const [pendingLink, setPendingLink] = useState<StartIdentityLinkResponse | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const setNotify = useSetLinkNotify(link.provider);
+  const unlink = useUnlinkIdentity(link.provider);
+  const label = displayName(link.provider);
+
+  if (!link.channelReady) {
+    return (
+      <FieldRow label={label}>
+        <p className="text-sm text-muted">
+          {label} isn't configured for this organization yet. An admin can add a bot token
+          under Integrations.
+        </p>
+      </FieldRow>
+    );
+  }
+
+  if (!link.linked) {
+    return (
+      <FieldRow label={label} hint={`Message your assistant from ${label}.`}>
+        <div className="space-y-2">
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={startPending}
+            onClick={async () => {
+              try {
+                const res = await onStart(link.provider);
+                setPendingLink(res);
+                setConnectError(null);
+              } catch (err) {
+                setConnectError(extractStartLinkError(err, link.provider));
+              }
+            }}
+          >
+            {startPending ? "Connecting…" : `Connect ${label}`}
+          </Button>
+          {connectError && <p className="text-sm text-danger-500">{connectError}</p>}
+          {pendingLink && (
+            <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3 text-sm">
+              {pendingLink.deepLink && (
+                <>
+                  <a
+                    href={pendingLink.deepLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-moss underline"
+                  >
+                    Open Telegram and press Start
+                  </a>
+                  <p className="break-all font-mono text-xs text-muted">{pendingLink.deepLink}</p>
+                </>
+              )}
+              <p className="break-all font-mono text-xs text-muted">{pendingLink.code}</p>
+              <p className="text-xs text-muted">{pendingLink.instructions}</p>
+              <p className="text-xs text-muted">
+                Link expires in {Math.round(pendingLink.expiresInSeconds / 60)} minutes.
+              </p>
+            </div>
+          )}
+        </div>
+      </FieldRow>
+    );
+  }
+
+  return (
+    <>
+      <FieldRow label={label}>
+        <div className="space-y-1 text-sm text-ink">
+          <div>{link.externalId}</div>
+          {link.createdAt && (
+            <div className="text-xs text-muted">
+              Linked since {formatDateOr(link.createdAt, "")}
+            </div>
+          )}
+        </div>
+      </FieldRow>
+      <FieldRow label="Notify on attention" hint={`Ping you on ${label} when your assistant needs you.`}>
+        <Switch
+          checked={link.notifyAttention ?? false}
+          onCheckedChange={(next) => setNotify.mutate({ notifyAttention: next })}
+          aria-label="Notify on attention"
+        />
+      </FieldRow>
+      <FieldRow label="Disconnect">
+        <Button
+          type="button"
+          variant="danger"
+          disabled={unlink.isPending}
+          onClick={() => unlink.mutate()}
+        >
+          {unlink.isPending ? "Disconnecting…" : "Disconnect"}
+        </Button>
+      </FieldRow>
+    </>
+  );
 }
 
 export function ConnectedAccountsPage() {
   const linksQ = useIdentityLinks();
   const startLink = useStartIdentityLink();
-  const setNotify = useSetLinkNotify();
-  const unlink = useUnlinkIdentity();
-  const [pendingLink, setPendingLink] = useState<StartIdentityLinkResponse | null>(null);
-  const [connectError, setConnectError] = useState<string | null>(null);
-
-  const telegram = linksQ.data?.links.find((l) => l.provider === "telegram");
 
   return (
     <>
@@ -62,86 +159,16 @@ export function ConnectedAccountsPage() {
         <div className="py-4 text-sm text-danger-500">Failed to load connected accounts.</div>
       )}
 
-      {telegram && !telegram.channelReady && (
-        <FieldRow label="Telegram">
-          <p className="text-sm text-muted">
-            Telegram isn't configured for this organization yet. An admin can add a bot token
-            under Integrations.
-          </p>
-        </FieldRow>
-      )}
-
-      {telegram && telegram.channelReady && !telegram.linked && (
-        <FieldRow label="Telegram" hint="Message your assistant from Telegram.">
-          <div className="space-y-2">
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={startLink.isPending}
-              onClick={async () => {
-                try {
-                  const res = await startLink.mutateAsync("telegram");
-                  setPendingLink(res);
-                  setConnectError(null);
-                } catch (err) {
-                  setConnectError(extractStartLinkError(err));
-                }
-              }}
-            >
-              {startLink.isPending ? "Connecting…" : "Connect Telegram"}
-            </Button>
-            {connectError && <p className="text-sm text-danger-500">{connectError}</p>}
-            {pendingLink && (
-              <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3 text-sm">
-                <a
-                  href={pendingLink.deepLink}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium text-moss underline"
-                >
-                  Open Telegram and press Start
-                </a>
-                <p className="break-all font-mono text-xs text-muted">{pendingLink.deepLink}</p>
-                <p className="text-xs text-muted">
-                  Link expires in {Math.round(pendingLink.expiresInSeconds / 60)} minutes.
-                </p>
-              </div>
-            )}
-          </div>
-        </FieldRow>
-      )}
-
-      {telegram && telegram.channelReady && telegram.linked && (
-        <>
-          <FieldRow label="Telegram">
-            <div className="space-y-1 text-sm text-ink">
-              <div>{telegram.externalId}</div>
-              {telegram.createdAt && (
-                <div className="text-xs text-muted">
-                  Linked since {formatDateOr(telegram.createdAt, "")}
-                </div>
-              )}
-            </div>
-          </FieldRow>
-          <FieldRow label="Notify on attention" hint="Ping you on Telegram when your assistant needs you.">
-            <Switch
-              checked={telegram.notifyAttention ?? false}
-              onCheckedChange={(next) => setNotify.mutate({ notifyAttention: next })}
-              aria-label="Notify on attention"
-            />
-          </FieldRow>
-          <FieldRow label="Disconnect">
-            <Button
-              type="button"
-              variant="danger"
-              disabled={unlink.isPending}
-              onClick={() => unlink.mutate()}
-            >
-              {unlink.isPending ? "Disconnecting…" : "Disconnect"}
-            </Button>
-          </FieldRow>
-        </>
-      )}
+      {linksQ.data?.links.map((link) => (
+        <LinkAccountCard
+          key={link.provider}
+          link={link}
+          onStart={startLink.mutateAsync}
+          // Pending is scoped to the provider in flight, so starting one
+          // provider's link does not disable every other card's button.
+          startPending={startLink.isPending && startLink.variables === link.provider}
+        />
+      ))}
 
       <GithubRow />
     </Section>

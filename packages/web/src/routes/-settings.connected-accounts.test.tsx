@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/settings/connected-accounts` — Telegram identity linking (Task 11).
+ * `/settings/connected-accounts` — provider-driven identity linking (Task 9).
  * Mocks `~/api/queries` the same way `-settings.sections.test.tsx` mocks it
  * for the notifications toggle: these tests only care what the page renders
  * and which mutation it fires, not that TanStack Query itself resolves
@@ -12,6 +12,8 @@ import type { CredentialSummary, GetGithubAppResponse, IdentityLinkStatus } from
 import { ApiError } from "~/api/client";
 
 const startMutateAsync = vi.fn();
+// Controls the mocked useStartIdentityLink pending state per test.
+let startLinkState: { isPending: boolean; variables?: string } = { isPending: false };
 const setNotifyMutate = vi.fn();
 const unlinkMutate = vi.fn();
 const connectGithubMutateAsync = vi.fn();
@@ -37,9 +39,10 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useIdentityLinks: () => ({ data: linksData, isLoading, error: isError ? new Error("boom") : null }),
-    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, isPending: false }),
-    useSetLinkNotify: () => ({ mutate: setNotifyMutate }),
-    useUnlinkIdentity: () => ({ mutate: unlinkMutate, isPending: false }),
+    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, ...startLinkState }),
+    // provider argument accepted but ignored — mocks return fixed stubs
+    useSetLinkNotify: (_provider: string) => ({ mutate: setNotifyMutate }),
+    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkMutate, isPending: false }),
   };
 });
 
@@ -119,6 +122,8 @@ describe("ConnectedAccountsPage", () => {
     };
     startMutateAsync.mockResolvedValue({
       deepLink: "https://t.me/valet_bot?start=abc123",
+      code: "abc123",
+      instructions: "Send this code to @valet_bot.",
       expiresInSeconds: 600,
     });
     render(<ConnectedAccountsPage />);
@@ -131,6 +136,9 @@ describe("ConnectedAccountsPage", () => {
     ).toHaveProperty("href", "https://t.me/valet_bot?start=abc123");
     expect(screen.getByText("https://t.me/valet_bot?start=abc123")).toBeTruthy();
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
+    // code and instructions always render
+    expect(screen.getByText("abc123")).toBeTruthy();
+    expect(screen.getByText("Send this code to @valet_bot.")).toBeTruthy();
   });
 
   it("shows an inline error and no deep link when the start mutation fails", async () => {
@@ -335,6 +343,77 @@ describe("ConnectedAccountsPage", () => {
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
       expect(confirm).toHaveBeenCalled();
       expect(disconnectCredentialMutate).toHaveBeenCalledWith("linear");
+    });
+  });
+
+  describe("multi-provider cards", () => {
+    it("renders one card per entry in the links response (telegram + slack)", () => {
+      linksData = {
+        links: [
+          { provider: "telegram", linked: false, channelReady: true },
+          { provider: "slack", linked: false, channelReady: true },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByRole("button", { name: "Connect Telegram" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
+    });
+
+    it("one provider's in-flight start does not disable the other card's button", () => {
+      linksData = {
+        links: [
+          { provider: "telegram", linked: false, channelReady: true },
+          { provider: "slack", linked: false, channelReady: true },
+        ],
+      };
+      startLinkState = { isPending: true, variables: "slack" };
+      render(<ConnectedAccountsPage />);
+      const slackBtn = screen.getByRole("button", { name: "Connecting…" });
+      expect(slackBtn).toHaveProperty("disabled", true);
+      const telegramBtn = screen.getByRole("button", { name: "Connect Telegram" });
+      expect(telegramBtn).toHaveProperty("disabled", false);
+      startLinkState = { isPending: false };
+    });
+
+    it("provider without deepLink shows code + instructions after start, no anchor", async () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: true }],
+      };
+      startMutateAsync.mockResolvedValue({
+        code: "SLACK-CODE-42",
+        instructions: "Send this code to @valet in Slack.",
+        expiresInSeconds: 300,
+      });
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+
+      await waitFor(() => expect(startMutateAsync).toHaveBeenCalledWith("slack"));
+      expect(await screen.findByText("SLACK-CODE-42")).toBeTruthy();
+      expect(screen.getByText("Send this code to @valet in Slack.")).toBeTruthy();
+      // No deep-link anchor when deepLink is absent.
+      expect(screen.queryByRole("link", { name: "Open Telegram and press Start" })).toBeNull();
+    });
+
+    it("telegram card (with deepLink) keeps the anchor after start", async () => {
+      linksData = {
+        links: [{ provider: "telegram", linked: false, channelReady: true }],
+      };
+      startMutateAsync.mockResolvedValue({
+        deepLink: "https://t.me/valet_bot?start=xyz",
+        code: "xyz",
+        instructions: "Or send the code to @valet_bot.",
+        expiresInSeconds: 120,
+      });
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Connect Telegram" }));
+
+      await waitFor(() => expect(startMutateAsync).toHaveBeenCalledWith("telegram"));
+      expect(
+        await screen.findByRole("link", { name: "Open Telegram and press Start" }),
+      ).toHaveProperty("href", "https://t.me/valet_bot?start=xyz");
+      expect(screen.getByText("xyz")).toBeTruthy();
     });
   });
 });

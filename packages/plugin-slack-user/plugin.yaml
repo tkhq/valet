@@ -1,0 +1,6 @@
+name: slack-user
+version: 0.0.1
+description: "Slack (personal) — per-user OAuth acting AS the user: search, read, status, post."
+icon: "\U0001F464"
+iconSlug: slack
+v2: true

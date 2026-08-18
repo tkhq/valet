@@ -38,6 +38,7 @@ import {
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
+import { identityForUser } from "../channels/identity-links.js";
 import type { RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
@@ -935,6 +936,12 @@ export class EngineHost {
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
    *    installation). `null` when no installation resolves.
+   *  - `slack` → user credential first (personal `plugin-slack-user` token),
+   *    then org credential (`plugin-slack` bot token) as fallback. When a
+   *    credential is found and the session user has a `slack` identity link,
+   *    `metadata.owner_slack_user_id` is injected, activating plugin-slack's
+   *    private-channel check. No enrichment when no link is found or no
+   *    credential is stored (returns `null` or the bare stored credential).
    *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
    *    read, byte-identical to the engine's default (store-backed) path.
    *
@@ -1013,8 +1020,30 @@ export class EngineHost {
         return resolveOpenAiCredential(db, credentials, owner, orgId);
       }
       if (service !== "github") {
-        // Byte-identical to the engine's default store-backed read.
-        return credentials.get(owner, service);
+        if (service === "slack") {
+          // The Slack bot token is org-shared: `PUT
+          // /api/credentials/slack?scope=org` stores it under
+          // `{ type: "org", id: orgId }`. The engine's session always calls
+          // the resolver with a user owner, so a plain exact-owner read would
+          // return null for every production session. Read the user credential
+          // first (a personal `plugin-slack-user` token takes precedence);
+          // when absent, escalate to the org owner.
+          const stored =
+            (await credentials.get(owner, service)) ??
+            (await credentials.get({ type: "org", id: orgId }, service));
+          if (stored) {
+            // Activates plugin-slack's dormant private-channel check (its
+            // V2-GAP comment): the identity link is the single source of
+            // truth for the owner's Slack user id, regardless of how the
+            // link was created.
+            const identity = await identityForUser(db, "slack", userId);
+            if (identity) {
+              return { ...stored, metadata: { ...stored.metadata, owner_slack_user_id: identity.externalId } };
+            }
+          }
+          return stored ?? null;
+        }
+        return await credentials.get(owner, service);
       }
       const resolved = await resolveSessionGitHubToken(
         {

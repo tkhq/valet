@@ -378,6 +378,29 @@ describe("IntegrationsPage", () => {
     render(<IntegrationsPage />);
     expect(screen.getByText(/access_denied/)).toBeTruthy();
   });
+
+  it("renders the server-composed detail over the generic fallback", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/integrations?error=oauth_failed&detail=" +
+        encodeURIComponent("Slack returned no user token. Reinstall the Slack app, then connect again."),
+    );
+    render(<IntegrationsPage />);
+    expect(
+      screen.getByText("Slack returned no user token. Reinstall the Slack app, then connect again."),
+    ).toBeTruthy();
+  });
+
+  it("maps identity_conflict to a human-readable message naming the corrective action", () => {
+    window.history.replaceState(null, "", "/integrations?error=identity_conflict");
+    render(<IntegrationsPage />);
+    expect(
+      screen.getByText(
+        "This Slack account is already linked to another Valet user. Unlink it there first, or sign in as that user.",
+      ),
+    ).toBeTruthy();
+  });
 });
 
 describe("brand marks", () => {

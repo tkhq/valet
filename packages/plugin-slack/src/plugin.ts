@@ -15,6 +15,10 @@ const plugin: ValetPlugin = {
   triggers: slackTriggerDefs,
   transports: [slackTransportFactory],
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "slack-tools")],
+  identityLink: {
+    provider: "slack",
+    instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+  },
   credentials: [
     {
       type: "bot_token",

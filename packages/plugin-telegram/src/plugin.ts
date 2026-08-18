@@ -13,6 +13,12 @@ const plugin: ValetPlugin = {
       connectLabel: "Connect Telegram bot",
     },
   ],
+  identityLink: {
+    provider: "telegram",
+    instructions: "Tap the link or send /start <code> to the bot.",
+    deepLink: ({ botUsername, code }) =>
+      botUsername ? `https://t.me/${botUsername}?start=${code}` : null,
+  },
 };
 
 export default plugin;

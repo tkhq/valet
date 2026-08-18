@@ -126,6 +126,9 @@ importers:
       '@valet/plugin-slack':
         specifier: workspace:*
         version: link:../plugin-slack
+      '@valet/plugin-slack-user':
+        specifier: workspace:*
+        version: link:../plugin-slack-user
       '@valet/plugin-stripe':
         specifier: workspace:*
         version: link:../plugin-stripe
@@ -700,6 +703,31 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      typebox:
+        specifier: ^1.1.24
+        version: 1.1.37
+    devDependencies:
+      '@hono/node-server':
+        specifier: ^1.13.0
+        version: 1.19.14(hono@4.11.4)
+      hono:
+        specifier: ^4.3.0
+        version: 4.11.4
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-slack-user:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@valet/plugin-slack':
+        specifier: workspace:*
+        version: link:../plugin-slack
       typebox:
         specifier: ^1.1.24
         version: 1.1.37

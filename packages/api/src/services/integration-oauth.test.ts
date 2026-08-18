@@ -3,7 +3,7 @@
  * concurrent-safe) and authorization_code exchange/refresh against the
  * fake provider (test-helpers/oauth-fixture.ts).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import {
@@ -11,6 +11,7 @@ import {
   exchangeAuthorizationCode,
   refreshAuthorizationCodeToken,
   findOAuthDeclaration,
+  exchangeAuthorizationCodeRaw,
 } from "./integration-oauth.js";
 import type { ValetPlugin } from "@valet/engine";
 
@@ -121,5 +122,32 @@ describe("findOAuthDeclaration", () => {
   it("returns null for services without an oauth declaration", () => {
     expect(findOAuthDeclaration([plugin], "slack")).toBeNull();
     expect(findOAuthDeclaration([{ name: "slack", version: "0", credentials: [{ type: "bot_token", configKeys: ["accessToken"] }] }], "slack")).toBeNull();
+  });
+});
+
+describe("exchangeAuthorizationCodeRaw", () => {
+  const DECL = {
+    mode: "authorization_code" as const,
+    authorizationUrl: "https://slack.test/authorize",
+    tokenUrl: "https://slack.test/oauth.v2.access",
+    clientIdEnv: "SLACK_CLIENT_ID",
+    clientSecretEnv: "SLACK_CLIENT_SECRET",
+  };
+  const ENV = { SLACK_CLIENT_ID: "cid", SLACK_CLIENT_SECRET: "secret" };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("returns the parsed JSON without requiring top-level access_token", async () => {
+    const body = { ok: true, authed_user: { id: "U1", access_token: "xoxp-1", scope: "chat:write" } };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+    const raw = await exchangeAuthorizationCodeRaw({ oauth: DECL, env: ENV, code: "c", redirectUri: "https://api.test/cb" });
+    expect(raw).toEqual(body);
+  });
+
+  it("throws on a non-2xx token response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
+    await expect(
+      exchangeAuthorizationCodeRaw({ oauth: DECL, env: ENV, code: "c", redirectUri: "https://api.test/cb" }),
+    ).rejects.toThrow(/token request failed/);
   });
 });

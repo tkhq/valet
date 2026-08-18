@@ -49,6 +49,9 @@ const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
 /** Cap the in-memory url_private / gate-text / turn maps. */
 const MAX_TRACKED_ENTRIES = 500;
 
+/** Matches a `link <code>` DM that starts the identity-link flow. */
+const LINK_COMMAND_RE = /^\s*link\s+(\S+)\s*$/i;
+
 // ─── Conversation-key codec ─────────────────────────────────────────────────
 //
 // conversationKey: "slack:{teamId}:{channelId}"
@@ -285,6 +288,20 @@ export class SlackTransport implements ChannelTransport {
     const text = cleanSlackText(str(event.text) ?? "", this.botUserId);
     const media = this.mediaOf(event);
     if (text === "" && media === undefined) return null;
+
+    const linkCmd = text !== "" ? LINK_COMMAND_RE.exec(text) : null;
+    if (linkCmd) {
+      const inbound: InboundChannelEvent = {
+        dispatchId: `slack:${eventId}`,
+        conversationKey,
+        sender: { externalId: user },
+        kind: "command",
+        text,
+        command: { name: "start", args: linkCmd[1] },
+        raw: update,
+      };
+      return inbound;
+    }
 
     const inbound: InboundChannelEvent = {
       dispatchId: `slack:${eventId}`,

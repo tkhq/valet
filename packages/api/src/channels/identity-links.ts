@@ -58,7 +58,7 @@ export async function pruneExpiredLinkCodes(db: AppDb, now = Date.now()): Promis
 
 export async function linkIdentity(
   db: AppDb,
-  args: { provider: string; externalId: string; userId: string },
+  args: { provider: string; externalId: string; userId: string; notifyAttention?: boolean },
   now = Date.now(),
 ): Promise<void> {
   await db.delete(userIdentityLinks).where(
@@ -73,7 +73,7 @@ export async function linkIdentity(
     externalId: args.externalId,
     userId: args.userId,
     createdAt: now,
-    notifyAttention: true,
+    notifyAttention: args.notifyAttention ?? true,
   });
 }
 

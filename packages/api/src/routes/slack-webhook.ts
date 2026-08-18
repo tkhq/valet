@@ -48,12 +48,12 @@
  * session (`ChannelHost.routeUpdate`), so two members of one workspace
  * never see each other's threads.
  *
- * That last sentence is currently vacuous, because no Slack user can be
- * linked at all: `routes/identity-links.ts` mints link codes for `telegram`
- * only, and the Slack transport emits no `command` event for
- * `ChannelHost.handleStart` to consume. Every DM therefore stops at
- * `unlinked_sender`. The account-link flow is the missing piece between
- * this route and a working agent.
+ * Linking works two ways. The OAuth auto-link runs when a user completes the
+ * slack-user connect flow and records their Slack user id at that point. The
+ * `link <code>` DM command lets a user link manually: the Slack transport
+ * parses the message into a `command` event that `ChannelHost.handleStart`
+ * consumes. Until a user completes one of these flows their DMs drop at
+ * `unlinked_sender`.
  *
  * Org resolution is the single-org assumption this deployment makes
  * everywhere else (`lib/org.ts`). A multi-org deployment needs a real
