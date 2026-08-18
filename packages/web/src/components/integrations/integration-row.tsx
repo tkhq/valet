@@ -39,6 +39,22 @@ export function isService(plugin: PluginSummary): boolean {
   return plugin.actionCount > 0 || plugin.dynamic === true || plugin.services.length > 0;
 }
 
+/**
+ * An unconfigured service (org/deployment prerequisite missing —
+ * integration-availability design) renders only while a leftover credential
+ * still needs disconnecting. Unconnected + unconfigured = no tile: there is
+ * nothing a non-admin could do with it, and the admin's setup surface is
+ * Settings → Organization, not this grid.
+ */
+export function isVisibleService(service: PluginServiceSummary): boolean {
+  return service.connect !== "unconfigured" || service.connected;
+}
+
+/** True when the plugin has anything left to show in the Services grid. */
+export function hasVisibleSurface(plugin: PluginSummary): boolean {
+  return plugin.services.length === 0 || plugin.services.some(isVisibleService);
+}
+
 function reachMeta(plugin: PluginSummary): string | null {
   if (plugin.actionCount > 0) {
     return `${plugin.actionCount} tool${plugin.actionCount === 1 ? "" : "s"}`;
@@ -99,7 +115,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
               allows it): each credential service gets its own quiet sub-row. */}
           {plugin.services.length > 1 && (
             <ul className="mt-3 space-y-3 border-t border-line pt-3">
-              {plugin.services.map((service) => (
+              {plugin.services.filter(isVisibleService).map((service) => (
                 <li key={service.service}>
                   <ServiceBlock
                     service={service}
@@ -199,6 +215,10 @@ function ServiceBlock({
   // offers the repair beside the disconnect instead of only "Disconnect".
   const repair = needsReauth(health);
   const connectLabel = repair ? "Reconnect" : "Connect";
+  // No connect affordance for an unconfigured service — its tile exists only
+  // so a leftover credential can be disconnected (integration-availability
+  // design). The note below names where the setup actually happens.
+  const unconfigured = service.connect === "unconfigured";
 
   // Every connect path — the org's GitHub App OAuth, the generic per-service
   // OAuth redirect, and manual token entry — now opens the same pre-connect
@@ -231,8 +251,8 @@ function ServiceBlock({
   );
 
   const controls = !service.connected ? (
-    connectControl
-  ) : repair ? (
+    unconfigured ? null : connectControl
+  ) : repair && !unconfigured ? (
     <span className="flex items-center gap-3">
       {disconnectControl}
       {connectControl}
@@ -240,6 +260,12 @@ function ServiceBlock({
   ) : (
     disconnectControl
   );
+
+  const unconfiguredNote = unconfigured ? (
+    <p className="text-xs leading-relaxed text-muted">
+      Not configured for this organization. An admin can set this up in Settings → Organization.
+    </p>
+  ) : undefined;
 
   return (
     <>
@@ -252,8 +278,9 @@ function ServiceBlock({
       {/* The org note reads on a disconnected card too — "your organisation
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
-      {(orgNote || (service.connected && (service.health?.login || note))) && (
+      {(orgNote || unconfiguredNote || (service.connected && (service.health?.login || note))) && (
         <div className="mt-1.5 space-y-1 pl-12">
+          {unconfiguredNote}
           {service.connected && service.health?.login && (
             <p className="truncate text-xs text-muted">Account: {service.health.login}</p>
           )}
