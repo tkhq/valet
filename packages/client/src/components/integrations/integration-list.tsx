@@ -6,8 +6,10 @@ import {
   useSlackUserStatus,
   useSlackWorkspaceUsers,
   useInitiateSlackLink,
+  useQuickSlackLink,
   useVerifySlackLink,
   useUnlinkSlack,
+  type InitiateSlackLinkResult,
 } from '@/api/slack';
 import { useGitHubStatus } from '@/api/github';
 import { usePlugins } from '@/api/plugins';
@@ -378,12 +380,12 @@ function SlackCard() {
         {linking ? (
           <SlackLinkFlow onClose={() => setLinking(false)} />
         ) : (
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <p className="text-xs text-neutral-500 dark:text-neutral-400">
-              Link your Slack account to receive messages
+              We&apos;ll DM you a one-time code on Slack — tap the red badge to jump in.
             </p>
             <Button variant="secondary" size="sm" onClick={() => setLinking(true)}>
-              Link Account
+              DM me on Slack
             </Button>
           </div>
         )}
@@ -392,14 +394,56 @@ function SlackCard() {
   );
 }
 
+/**
+ * Two-step identity-link flow. Step 1 tries a one-click "DM me" — the server
+ * looks the caller up in the workspace by their Valet email and DMs the
+ * code. That covers the common case where Valet and Slack share an email;
+ * when it does not, or when the user asks, we fall back to the manual
+ * workspace-member typeahead. Step 2 verifies the code the bot DMed.
+ *
+ * Design note: even when the DM lands (red badge, unread count, all of it),
+ * the card echoes the exact bot DM text on-screen so the user can complete
+ * the flow without leaving the browser tab.
+ */
 function SlackLinkFlow({ onClose }: { onClose: () => void }) {
   const { data: workspaceUsers, isLoading: usersLoading } = useSlackWorkspaceUsers();
   const initiateLink = useInitiateSlackLink();
+  const quickLink = useQuickSlackLink();
   const verifyLink = useVerifySlackLink();
-  const [step, setStep] = React.useState<'select' | 'verify'>('select');
+  // "intro" is the pre-action state on the connect card: one big "DM me"
+  // button. "search" is the typeahead fallback for users whose Slack email
+  // does not match their Valet email. "verify" is the post-DM code entry.
+  const [step, setStep] = React.useState<'intro' | 'search' | 'verify'>('intro');
   const [search, setSearch] = React.useState('');
   const [selectedUser, setSelectedUser] = React.useState<{ id: string; displayName: string } | null>(null);
+  const [dmPreview, setDmPreview] = React.useState<string | null>(null);
+  const [quickFallbackNote, setQuickFallbackNote] = React.useState<string | null>(null);
   const [code, setCode] = React.useState('');
+  const [copied, setCopied] = React.useState<'dm' | null>(null);
+
+  function acceptInitiateResult(res: InitiateSlackLinkResult, display: string) {
+    setSelectedUser({ id: res.slackUserId, displayName: res.slackDisplayName || display });
+    setDmPreview(res.dmMessageText);
+    setStep('verify');
+  }
+
+  function handleQuickLink() {
+    setQuickFallbackNote(null);
+    quickLink.mutate(undefined, {
+      onSuccess: (res) => {
+        if ('reason' in res) {
+          // Server could not resolve caller's email in the workspace — drop
+          // into the manual typeahead and tell the user why.
+          setQuickFallbackNote(
+            "We couldn't find your Slack account by email. Pick yourself from the list — the DM goes out the same way.",
+          );
+          setStep('search');
+          return;
+        }
+        acceptInitiateResult(res, res.slackDisplayName || 'you');
+      },
+    });
+  }
 
   const filteredUsers = React.useMemo(() => {
     if (!workspaceUsers) return [];
@@ -413,12 +457,12 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
   }, [workspaceUsers, search]);
 
   function handleSelectUser(user: { id: string; displayName: string; realName: string }) {
-    setSelectedUser({ id: user.id, displayName: user.displayName || user.realName });
+    const display = user.displayName || user.realName;
     initiateLink.mutate(
-      { slackUserId: user.id, slackDisplayName: user.displayName || user.realName },
+      { slackUserId: user.id, slackDisplayName: display },
       {
-        onSuccess: () => setStep('verify'),
-      }
+        onSuccess: (res) => acceptInitiateResult(res, display),
+      },
     );
   }
 
@@ -431,12 +475,79 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
     );
   }
 
+  async function handleCopyDm() {
+    if (!dmPreview) return;
+    try {
+      await navigator.clipboard.writeText(dmPreview);
+      setCopied('dm');
+      setTimeout(() => setCopied(null), 1500);
+    } catch {
+      // Clipboard write can be denied (insecure origin, permissions). The
+      // preview is still selectable — silently swallow.
+    }
+  }
+
+  if (step === 'intro') {
+    return (
+      <div className="space-y-3">
+        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          Click below and we&apos;ll DM you a 6-character code on Slack. Come
+          back here and enter it to finish.
+        </p>
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={handleQuickLink} disabled={quickLink.isPending}>
+            {quickLink.isPending ? 'Sending…' : 'DM me the code'}
+          </Button>
+          <button
+            type="button"
+            onClick={() => setStep('search')}
+            className="text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+          >
+            Find me by name
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto text-xs text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
+          >
+            Cancel
+          </button>
+        </div>
+        {quickLink.isError && (
+          <p className="text-xs text-red-600 dark:text-red-400">
+            {(quickLink.error as Error)?.message || "Couldn't send the DM. Try “Find me by name”."}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   if (step === 'verify') {
     return (
       <div className="space-y-3">
         <p className="text-xs text-neutral-500 dark:text-neutral-400">
-          A verification code was sent to <span className="font-medium text-neutral-700 dark:text-neutral-300">{selectedUser?.displayName}</span> via DM. Enter it below.
+          We just DMed <span className="font-medium text-neutral-700 dark:text-neutral-300">{selectedUser?.displayName || 'you'}</span> on Slack. Check for a red badge from the Valet app.
         </p>
+        {dmPreview && (
+          <div className="space-y-1 rounded-md border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-700 dark:bg-neutral-800/50">
+            <div className="flex items-start justify-between gap-2">
+              <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-neutral-700 dark:text-neutral-200">
+                {dmPreview}
+              </p>
+              <button
+                type="button"
+                onClick={handleCopyDm}
+                className="shrink-0 rounded border border-neutral-200 bg-white px-1.5 py-0.5 text-[10px] text-neutral-600 hover:bg-neutral-50 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-700"
+                aria-label="Copy the Slack DM text"
+              >
+                {copied === 'dm' ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <p className="text-[10px] text-neutral-400 dark:text-neutral-500">
+              Exact DM the bot sent — copy it if you need to compare or resend.
+            </p>
+          </div>
+        )}
         <form onSubmit={handleVerify} className="flex items-center gap-2">
           <input
             type="text"
@@ -469,6 +580,9 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="space-y-2">
+      {quickFallbackNote && (
+        <p className="text-xs text-neutral-500 dark:text-neutral-400">{quickFallbackNote}</p>
+      )}
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -478,6 +592,13 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
           autoFocus
           className="flex-1 rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100"
         />
+        <button
+          type="button"
+          onClick={() => setStep('intro')}
+          className="text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+        >
+          Back
+        </button>
         <button
           type="button"
           onClick={onClose}
