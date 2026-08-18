@@ -18,16 +18,18 @@
  */
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
+import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge, type TokenResponse } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { loadAuthConfig } from "../auth/config.js";
+import type { OAuthIdentity, TokenInterpretation } from "@valet/engine";
 import {
   authCodeEnvReady,
   ensureMcpOAuthClient,
   exchangeAuthorizationCode,
+  exchangeAuthorizationCodeRaw,
   findOAuthDeclaration,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
@@ -157,12 +159,13 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     );
   }
   const state = signState<OAuthConnectState>(base, key);
+  const scopesKey = found.oauth.scopesParam ?? "scope";
   const query = new URLSearchParams({
     client_id: process.env[found.oauth.clientIdEnv] ?? "",
     redirect_uri: redirectUri,
     response_type: "code",
     state,
-    ...(found.decl.scopes?.length ? { scope: found.decl.scopes.join(" ") } : {}),
+    ...(found.decl.scopes?.length ? { [scopesKey]: found.decl.scopes.join(" ") } : {}),
     ...found.oauth.extraAuthParams,
   });
   return c.redirect(`${found.oauth.authorizationUrl}?${query}`, 302);
@@ -191,39 +194,74 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   if (!code || !found) return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
 
   const redirectUri = callbackUrl(c.req.url);
-  let tokens;
+  interface SavedCredential {
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: number;
+    scopes?: string[];
+    metadata: Record<string, string>;
+    identity?: OAuthIdentity;
+  }
+  let saved: SavedCredential;
+  const now = Date.now();
   try {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${returnTo}/integrations?error=oauth_state`, 302);
       const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri);
-      tokens = await exchangeCodePkce({
+      const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,
         code,
         redirectUri,
         codeVerifier: verified.codeVerifier,
       });
+      saved = {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
+        scopes: found.decl.scopes,
+        metadata: { connectedVia: "oauth" },
+      };
+    } else if (found.oauth.interpretTokenResponse) {
+      const raw = await exchangeAuthorizationCodeRaw({ oauth: found.oauth, env: process.env, code, redirectUri });
+      const interp: TokenInterpretation = found.oauth.interpretTokenResponse(raw);
+      saved = {
+        accessToken: interp.accessToken,
+        refreshToken: interp.refreshToken,
+        expiresAt: typeof interp.expiresInSec === "number" ? now + interp.expiresInSec * 1000 : undefined,
+        scopes: interp.grantedScopes ?? found.decl.scopes,
+        metadata: { connectedVia: "oauth", ...interp.metadata },
+        identity: interp.identity,
+      };
     } else {
-      tokens = await exchangeAuthorizationCode({
+      // TokenResponse is a minimal type; providers may also return `scope`
+      // per RFC 6749 §5.1 — access it via a widened intersection.
+      const tokens = (await exchangeAuthorizationCode({
         oauth: found.oauth,
         env: process.env,
         code,
         redirectUri,
-      });
+      })) as TokenResponse & { scope?: string };
+      saved = {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
+        scopes: typeof tokens.scope === "string" ? tokens.scope.split(" ") : found.decl.scopes,
+        metadata: { connectedVia: "oauth" },
+      };
     }
   } catch (err) {
     console.error(`oauth callback: token exchange failed for ${verified.service}:`, err);
     return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
   }
 
-  const now = Date.now();
   await engineCredentials.save({ type: "user", id: user.id }, verified.service, {
     type: "oauth2",
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-    scopes: found.decl.scopes,
-    metadata: { connectedVia: "oauth" },
+    accessToken: saved.accessToken,
+    refreshToken: saved.refreshToken,
+    expiresAt: saved.expiresAt,
+    scopes: saved.scopes,
+    metadata: saved.metadata,
   });
 
   return c.redirect(`${returnTo}/integrations?connected=${encodeURIComponent(verified.service)}`, 302);

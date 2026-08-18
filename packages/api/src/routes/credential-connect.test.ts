@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import type { ValetPlugin } from "@valet/engine";
+import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
@@ -44,6 +45,45 @@ function authCodePlugin(url: string): ValetPlugin {
   };
 }
 
+function slackishPlugin(url: string): ValetPlugin {
+  return {
+    name: "slackish",
+    version: "0.0.1",
+    credentials: [
+      {
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        scopes: ["chat:write", "search:read"],
+        oauth: {
+          mode: "authorization_code" as const,
+          authorizationUrl: "https://slack.test/authorize",
+          tokenUrl: `${url}/token`,
+          clientIdEnv: "SLACKISH_ID",
+          clientSecretEnv: "SLACKISH_SECRET",
+          scopesParam: "user_scope",
+          interpretTokenResponse: (raw: unknown): TokenInterpretation => {
+            const r = raw as {
+              ok?: boolean;
+              authed_user?: { id?: string; access_token?: string; scope?: string };
+            };
+            if (!r.ok || typeof r.authed_user?.access_token !== "string") {
+              throw new OAuthInterpretError(
+                "Slack returned no user token. Reinstall the Slack app, then connect again.",
+              );
+            }
+            return {
+              accessToken: r.authed_user.access_token,
+              grantedScopes: r.authed_user.scope?.split(",") ?? [],
+              metadata: { slack_user_id: r.authed_user.id ?? "" },
+              identity: { provider: "slack", externalId: r.authed_user.id ?? "" },
+            };
+          },
+        },
+      },
+    ],
+  };
+}
+
 beforeEach(async () => {
   fake = await startFakeOAuthServer();
 });
@@ -53,6 +93,8 @@ afterEach(async () => {
   await fake.close();
   delete process.env.TEST_GOOGLE_ID;
   delete process.env.TEST_GOOGLE_SECRET;
+  delete process.env.SLACKISH_ID;
+  delete process.env.SLACKISH_SECRET;
 });
 
 describe("GET /api/credentials/:service/connect", () => {
@@ -125,6 +167,18 @@ describe("GET /api/credentials/:service/connect", () => {
     const res = await fetch(`${api.baseUrl}/api/credentials/github/connect`, { redirect: "manual" });
     expect(res.status).toBe(404);
   });
+
+  it("authorization_code mode: scopesParam replaces 'scope' key and has no 'scope=' param", async () => {
+    process.env.SLACKISH_ID = "slack-id";
+    process.env.SLACKISH_SECRET = "slack-secret";
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    const res = await fetch(`${api.baseUrl}/api/credentials/slackish/connect`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.searchParams.get("user_scope")).toBe("chat:write search:read");
+    expect(location.searchParams.has("scope")).toBe(false);
+    expect(location.searchParams.get("client_id")).toBe("slack-id");
+  });
 });
 
 describe("GET /api/credentials/oauth/callback", () => {
@@ -192,6 +246,71 @@ describe("GET /api/credentials/oauth/callback", () => {
       { redirect: "manual" },
     );
     expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
+  });
+
+  it("interpretTokenResponse: saves credential with interpreter fields and redirects to connected", async () => {
+    process.env.SLACKISH_ID = "slack-id";
+    process.env.SLACKISH_SECRET = "slack-secret";
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    fake.tokenResponse = { ok: true, authed_user: { id: "U9", access_token: "xoxp-9", scope: "chat:write,search:read" } };
+
+    const authUrl = await startConnect(api.baseUrl, "slackish");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?connected=slackish");
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "slackish");
+    expect(stored).not.toBeNull();
+    expect(stored?.accessToken).toBe("xoxp-9");
+    expect(stored?.scopes).toEqual(["chat:write", "search:read"]);
+    expect(stored?.metadata?.["slack_user_id"]).toBe("U9");
+  });
+
+  it("interpretTokenResponse: interpreter error redirects to error=oauth_failed with no credential saved", async () => {
+    process.env.SLACKISH_ID = "slack-id";
+    process.env.SLACKISH_SECRET = "slack-secret";
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    fake.tokenResponse = { ok: false, error: "access_denied" };
+
+    const authUrl = await startConnect(api.baseUrl, "slackish");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "slackish");
+    expect(stored).toBeNull();
+  });
+
+  it("standard authorization_code path (no interpretTokenResponse) still works end to end", async () => {
+    process.env.TEST_GOOGLE_ID = "gid";
+    process.env.TEST_GOOGLE_SECRET = "gsecret";
+    api = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
+
+    const authUrl = await startConnect(api.baseUrl, "gmail");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?connected=gmail");
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "gmail");
+    expect(stored).not.toBeNull();
+    expect(stored?.accessToken).toBe("at-1");
+    expect(stored?.scopes).toEqual(["scope-a"]);
+    expect(stored?.metadata?.["connectedVia"]).toBe("oauth");
   });
 
   it("state signed for a different user redirects with error=oauth_state and persists nothing for either user", async () => {
