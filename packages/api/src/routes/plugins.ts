@@ -20,6 +20,7 @@ import { approvalModeForAction, type CredentialOwner, type StoredCredential } fr
 import type { AppEnv } from "../env.js";
 import type {
   ListPluginsResponse,
+  PluginActionServiceSummary,
   PluginActionSummary,
   PluginServiceSummary,
   PluginSummary,
@@ -148,6 +149,19 @@ pluginsRouter.get("/", async (c) => {
       };
     }));
 
+    const actionServices: PluginActionServiceSummary[] = actionPlugins.map((actionPlugin) => ({
+      service: actionPlugin.service,
+      ...(actionPlugin.resolveActions !== undefined ? { dynamic: true as const } : {}),
+      actions: actionPlugin.actions.map((action) => ({
+        id: action.id.includes(".") ? action.id : `${actionPlugin.service}.${action.id}`,
+        name: action.name,
+        riskLevel: action.riskLevel,
+        requiresApproval:
+          approvalModeForAction(action.riskLevel, actionPlugin.defaultApprovalMode) ===
+          "require_approval",
+      })),
+    }));
+
     return {
       name: plugin.name,
       version: plugin.version,
@@ -156,6 +170,7 @@ pluginsRouter.get("/", async (c) => {
       actionCount,
       dynamic: dynamicServices.size > 0 ? true : undefined,
       services,
+      actionServices,
     };
   }));
 

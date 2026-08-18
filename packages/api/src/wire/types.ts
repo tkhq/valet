@@ -1695,6 +1695,16 @@ export interface PluginServiceSummary {
   actions: PluginActionSummary[];
 }
 
+/** A plugin's actions grouped by ActionPlugin routing service — the key
+ * `AssistantBehavior.integrations` entries use. `services[].actions` groups
+ * by CREDENTIAL service instead and omits credential-less plugins, so the
+ * assistant editor reads this list. */
+export interface PluginActionServiceSummary {
+  service: string;
+  dynamic?: true;
+  actions: PluginActionSummary[];
+}
+
 export interface PluginSummary {
   name: string;
   version: string;
@@ -1715,6 +1725,12 @@ export interface PluginSummary {
   dynamic?: true;
   /** Empty when the plugin declares no `credentials` (nothing to connect). */
   services: PluginServiceSummary[];
+  /** Actions grouped by ActionPlugin routing service — one entry per
+   * `ActionPlugin.service`. Includes credential-less plugins that
+   * `services[].actions` omits. The assistant editor reads this list to
+   * populate the integrations allowlist. Present on all responses from v2+
+   * servers; absent on responses from older servers or test stubs. */
+  actionServices?: PluginActionServiceSummary[];
 }
 
 export interface ListPluginsResponse {
