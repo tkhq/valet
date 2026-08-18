@@ -28,13 +28,26 @@ import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "./git
 export interface SkillSourceReaderOptions {
   /** GitHub API base URL for the readers. Tests pass a fixture's URL. */
   apiUrl?: string;
+  /** Sink for the org-source fallback notice. Defaults to `console.warn`. */
+  log?: (message: string) => void;
 }
 
 export function skillSourceReaderProvider(
   deps: GitHubTokenDeps,
   opts: SkillSourceReaderOptions = {},
 ): (source: SkillSourceRow) => Promise<SkillRepoReader> {
+  // ONE reader for every unauthenticated source. Intentional: the reader is
+  // immutable (URL, transport, timeout, and the absent token are all fixed
+  // at construction), so sources cannot observe each other through it. A
+  // reader that grows per-source state must stop being shared here.
   const publicReader = new PublicSkillRepoReader({ apiUrl: opts.apiUrl });
+  const log = opts.log ?? console.warn;
+  // An org source with no App reach falls back BY DESIGN (a public
+  // repository needs no App), so the fallback logs once per source and
+  // again only when its reason changes — not on all of a 15-minute poll's
+  // repeats. Without this line, a misconfigured App (installed, but not on
+  // this repository's owner) reads exactly like "no App" in the logs.
+  const loggedFallbacks = new Map<string, string>();
   return async (source) => {
     if (source.ownerType !== "org") return publicReader;
     const [owner = "", name = ""] = source.repoFullName.split("/");
@@ -48,9 +61,18 @@ export function skillSourceReaderProvider(
       // `auth: "app"` either returns an installation token or throws, but
       // the type keeps `token` nullable; treat null as "no App reach".
       if (token === null) return publicReader;
+      loggedFallbacks.delete(source.id);
       return new PublicSkillRepoReader({ apiUrl: opts.apiUrl, token });
     } catch (err) {
-      if (err instanceof GitHubAuthError) return publicReader;
+      if (err instanceof GitHubAuthError) {
+        if (loggedFallbacks.get(source.id) !== err.message) {
+          loggedFallbacks.set(source.id, err.message);
+          log(
+            `skill sync ${source.id}: reading ${source.repoFullName} unauthenticated — ${err.message}`,
+          );
+        }
+        return publicReader;
+      }
       throw err;
     }
   };

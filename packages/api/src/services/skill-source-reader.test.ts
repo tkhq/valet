@@ -130,6 +130,36 @@ describe("skillSourceReaderProvider", () => {
     expect(commitCall?.authHeader).toBeUndefined();
   });
 
+  it("logs the fallback once per source, not once per poll", async () => {
+    const logged: string[] = [];
+    const readerFor = skillSourceReaderProvider(deps(), {
+      apiUrl: fixture.url,
+      log: (message) => logged.push(message),
+    });
+
+    await readerFor(sourceRow({ ownerType: "org" }));
+    await readerFor(sourceRow({ ownerType: "org" }));
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("acme/skills");
+    expect(logged[0]).toContain("unauthenticated");
+    // The resolver's own message rides along, so the operator can tell
+    // "no App at all" from "App installed but no reach".
+    expect(logged[0]).toContain("GitHub");
+  });
+
+  it("does not log a personal source, which never tries the App", async () => {
+    const logged: string[] = [];
+    const readerFor = skillSourceReaderProvider(deps(), {
+      apiUrl: fixture.url,
+      log: (message) => logged.push(message),
+    });
+
+    await readerFor(sourceRow({ ownerType: "user", ownerId: "u1" }));
+
+    expect(logged).toHaveLength(0);
+  });
+
   it("never authenticates a personal source, even with the App installed", async () => {
     await saveAppConfig({ credentials }, orgId, appConfig);
     await seedInstallation();
