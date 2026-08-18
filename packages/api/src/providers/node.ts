@@ -440,6 +440,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     engineStore,
     actionPluginByService,
+    plugins,
     credentials: engineCredentials,
     // GH-T10: lets a `github` workflow tool-node action resolve through
     // `resolveGitHubToken` (same `key` `engineCredentials`/the sandbox

@@ -74,6 +74,11 @@ interface ConnectDialogProps {
  * OAuth route rather than the generic per-service redirect, because its
  * manifest declares no oauth metadata on purpose — the App's configured
  * permissions govern, not a scope list Valet sends.
+ *
+ * `connect: "unconfigured"` never reaches here in practice — the tile
+ * suppresses its Connect control (`integration-row.tsx`) — but the mapping
+ * stays total: manual is the harmless default, and the server rejects the
+ * save anyway.
  */
 export function connectPath(service: PluginServiceSummary): "github" | "oauth" | "manual" {
   if (service.service === "github") return "github";

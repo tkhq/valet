@@ -583,3 +583,87 @@ describe("the organisation's GitHub App", () => {
     expect(screen.getAllByText(/Org App/)).toHaveLength(1);
   });
 });
+
+/**
+ * Availability tri-state (integration-availability design): the wire says
+ * "unconfigured" when the org/deployment prerequisite is missing. An
+ * unconfigured, unconnected service does not render at all; a leftover
+ * credential keeps its tile for Disconnect, with the admin note and no
+ * Connect control.
+ */
+describe("unconfigured services", () => {
+  const unconfiguredPluginsData: ListPluginsResponse = {
+    plugins: [
+      {
+        name: "slack",
+        version: "0.1.0",
+        actionCount: 11,
+        services: [
+          {
+            service: "slack",
+            type: "bot_token" as const,
+            configKeys: ["accessToken"],
+            connected: false,
+            connect: "unconfigured" as const,
+            actions: [],
+          },
+        ],
+      },
+      {
+        name: "gmail",
+        version: "0.1.0",
+        actionCount: 4,
+        services: [
+          {
+            service: "gmail",
+            type: "oauth2" as const,
+            configKeys: ["accessToken"],
+            connected: true,
+            connect: "unconfigured" as const,
+            actions: [],
+          },
+        ],
+      },
+      {
+        name: "typefully",
+        version: "0.1.0",
+        actionCount: 0,
+        dynamic: true as const,
+        services: [
+          {
+            service: "typefully",
+            type: "api_key" as const,
+            configKeys: ["accessToken"],
+            connected: false,
+            connect: "manual" as const,
+            actions: [],
+          },
+        ],
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    currentPluginsData = unconfiguredPluginsData;
+    currentOrgStatus = { configured: true, installationCount: 1, suspendedCount: 0 };
+    currentOrg = org("member");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  it("hides an unconfigured, unconnected service from the grid", () => {
+    render(<IntegrationsPage />);
+
+    expect(screen.queryByText("Slack")).toBeNull();
+    // A configured manual service still lists.
+    expect(screen.getByText("Typefully")).toBeTruthy();
+  });
+
+  it("keeps a connected-but-unconfigured service visible for Disconnect, with the admin note", () => {
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("Gmail")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect Gmail" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Connect Gmail/ })).toBeNull();
+    expect(screen.getByText(/Not configured for this organization/)).toBeTruthy();
+  });
+});

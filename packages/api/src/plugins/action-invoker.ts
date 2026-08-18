@@ -42,6 +42,7 @@ import {
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
+import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
@@ -95,6 +96,16 @@ export interface ActionInvokerOpts {
   db: AppDb;
   credentials: CredentialStore;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /**
+   * The full assembled plugin set, for the availability gate — a credential
+   * declaration (and its OAuth block) can live on a different plugin than
+   * the action's owner, so the gate must scan the whole registry, exactly
+   * as `/api/plugins` and the session-build gate do. Optional: without it,
+   * the gate falls back to the (deduped) plugins in `actionPluginByService`,
+   * which covers every action-bearing plugin but misses credential-only
+   * ones — production wiring passes the full set.
+   */
+  plugins?: ValetPlugin[];
   clock?: () => number;
   /**
    * Deps for resolving `github` service credentials through the canonical
@@ -202,6 +213,31 @@ async function computeResult(
     };
   }
   const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
+
+  // Availability gate (integration-availability design): a service whose
+  // deployment/org prerequisite is missing must fail the same way here as it
+  // disappears from a live session's `list_tools` — deterministically, with
+  // the corrective action named. Scans the full registry (see
+  // `ActionInvokerOpts.plugins`) because the declaration can live on a
+  // different plugin than the action's owner.
+  const registry = opts.plugins ?? [...new Set([...opts.actionPluginByService.values()].map((e) => e.plugin))];
+  const declared = findCredentialDeclaration(registry, credentialService);
+  if (declared) {
+    const mode = await connectModeFor({
+      plugins: registry,
+      decl: declared,
+      service: credentialService,
+      orgId: ctx.orgId,
+      credentials: opts.credentials,
+      env: process.env,
+    });
+    if (mode === "unconfigured") {
+      return {
+        ok: false,
+        error: `${credentialService} is not configured for this organization. An admin can set it up in Settings → Organization.`,
+      };
+    }
+  }
   // `github` is the only service that resolves a credential identity today.
   // Any other service would IGNORE the selection, and a node that asked to
   // act as the application would silently act as the workflow owner —

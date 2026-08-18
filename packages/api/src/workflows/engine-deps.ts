@@ -84,6 +84,10 @@ export interface WorkflowEngineDepsOpts {
   engineStore: SessionStore;
   /** Assembled plugin action index (plugin-system-v2 plan Task 4) — `invokeAction`'s action resolution seam. */
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /** Full assembled plugin set, for the availability gate (see
+   * `ActionInvokerOpts.plugins`). Optional; the invoker falls back to the
+   * plugins in `actionPluginByService`. */
+  plugins?: ValetPlugin[];
   /** Credential store `invokeAction` scopes a `CredentialProvider` over (Task 3). */
   credentials: CredentialStore;
   /** Threaded straight to `buildActionInvoker` (GH-T10) — lets the `github`
@@ -293,6 +297,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     db: opts.db,
     credentials: opts.credentials,
     actionPluginByService: opts.actionPluginByService,
+    plugins: opts.plugins,
     githubTokenDeps: opts.githubTokenDeps,
   });
 

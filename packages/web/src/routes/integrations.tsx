@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { IntegrationRow, isService } from "~/components/integrations/integration-row";
+import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
 import { displayName } from "~/components/integrations/display-name";
 
 /**
@@ -55,8 +55,12 @@ export function IntegrationsPage() {
   const plugins = data?.plugins ?? [];
   const connectResult = useConnectResult();
 
+  // `hasVisibleSurface` drops plugins whose every service is unconfigured
+  // and unconnected — nothing on such a tile could work until an admin sets
+  // the service up in Settings → Organization.
   const services = plugins
     .filter(isService)
+    .filter(hasVisibleSurface)
     .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
 
   return (

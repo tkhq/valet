@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
-import { assemblePlugins, partitionByName, pluginSessionExtras } from "./assemble.js";
+import { assemblePlugins, partitionByName, pluginSessionExtras, withCredentialRequirement } from "./assemble.js";
 
 function makeAction(id: string): PluginAction {
   return {
@@ -249,5 +249,41 @@ describe("partitionByName", () => {
 
     expect(kept.map((c) => c.id)).toEqual(["1"]);
     expect(shadowed.map((c) => c.id)).toEqual(["2"]);
+  });
+});
+
+describe("withCredentialRequirement", () => {
+  it("infers requiresCredential when the credential decl omits service", () => {
+    // The slack/google shape: the decl relies on the plugin-name default.
+    const plugin = makePlugin("slack", {
+      actions: [makeActionPlugin("slack")],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"] }],
+    });
+
+    expect(withCredentialRequirement(plugin)[0]?.requiresCredential).toBe(true);
+  });
+
+  it("infers requiresCredential from an explicit decl service", () => {
+    const plugin = makePlugin("wrapper", {
+      actions: [makeActionPlugin("svc")],
+      credentials: [{ service: "svc", type: "api_key", configKeys: ["apiKey"] }],
+    });
+
+    expect(withCredentialRequirement(plugin)[0]?.requiresCredential).toBe(true);
+  });
+
+  it("keeps an explicit requiresCredential value", () => {
+    const plugin = makePlugin("slack", {
+      actions: [{ ...makeActionPlugin("slack"), requiresCredential: false }],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"] }],
+    });
+
+    expect(withCredentialRequirement(plugin)[0]?.requiresCredential).toBe(false);
+  });
+
+  it("leaves credential-less plugins unflagged", () => {
+    const plugin = makePlugin("workflows", { actions: [makeActionPlugin("workflows")] });
+
+    expect(withCredentialRequirement(plugin)[0]?.requiresCredential).toBeUndefined();
   });
 });

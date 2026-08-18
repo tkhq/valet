@@ -300,6 +300,93 @@ describe("buildActionInvoker", () => {
 
     expect(a).toEqual(b);
   });
+
+  it("returns a deterministic error for a service whose org prerequisite is unconfigured", async () => {
+    // Availability gate (integration-availability design): the plugin declares
+    // requires.orgCredential and no org credential exists for ctx.orgId.
+    const fixture = countingAction({ id: "gated.ping" });
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const actionPluginByService = new Map([["gated", { plugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+
+    const result = await invoke(
+      { service: "gated", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:gated" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && "error" in result ? result.error : "").toContain("Settings → Organization");
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("gates on a shared oauth declaration held by a different plugin (full registry scan)", async () => {
+    // The declaration for the credential service lives on plugin B; the
+    // action lives on plugin A. The gate must scan the full plugin set, not
+    // just the action's owning plugin, or the env-unset OAuth service slips
+    // through as "manual".
+    const fixture = countingAction({ id: "shared.ping" });
+    const actionPlugin: ActionPlugin = { service: "shared", actions: [fixture.action] };
+    const actionsPlugin: ValetPlugin = { name: "shared-actions", version: "0.0.1", actions: [actionPlugin] };
+    const declPlugin: ValetPlugin = {
+      name: "shared",
+      version: "0.0.1",
+      credentials: [{
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.example.com/auth",
+          tokenUrl: "https://accounts.example.com/token",
+          clientIdEnv: "UNSET_SHARED_ID",
+          clientSecretEnv: "UNSET_SHARED_SECRET",
+        },
+      }],
+    };
+    const actionPluginByService = new Map([["shared", { plugin: actionsPlugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: new FakeCredentialStore(),
+      actionPluginByService,
+      plugins: [actionsPlugin, declPlugin],
+    });
+
+    const result = await invoke(
+      { service: "shared", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:shared" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("executes normally once the org credential exists for the gated service", async () => {
+    const fixture = countingAction({ id: "gated.ping" });
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "gated", { type: "bot_token", accessToken: "org-tok" });
+    const actionPluginByService = new Map([["gated", { plugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "gated", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:gated-ok" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
+  });
 });
 
 /**

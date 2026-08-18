@@ -575,6 +575,13 @@ async function buildInvoker(): Promise<ReturnType<typeof buildActionInvoker>> {
   for (const service of ["github", "gmail", "slack"]) {
     credentials.seed(OWNER, service, { type: "oauth2", accessToken: `${service}-fixture-token` });
   }
+  // The availability gate (integration-availability design) requires a
+  // configured deployment: slack needs the org credential an admin connects,
+  // and gmail needs the Google OAuth client env vars (set in beforeAll).
+  credentials.seed({ type: "org", id: CTX.orgId }, "slack", {
+    type: "bot_token",
+    accessToken: "slack-org-fixture-token",
+  });
   return buildActionInvoker({
     db: appDb,
     credentials,
@@ -609,11 +616,18 @@ describe("shipped templates: tool node contracts", () => {
   let invoke: ReturnType<typeof buildActionInvoker>;
   let githubFixture: { url: string; close: () => Promise<void> } | undefined;
   const previousGithubApiUrl = process.env.GITHUB_API_URL;
+  const previousGoogleEnv = {
+    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+  };
 
   beforeAll(async () => {
     invoke = await buildInvoker();
     githubFixture = startGithubFixture();
     process.env.GITHUB_API_URL = githubFixture.url;
+    // gmail's availability requires the OAuth client env (see buildInvoker).
+    process.env.GOOGLE_CLIENT_ID = "google-fixture-client-id";
+    process.env.GOOGLE_CLIENT_SECRET = "google-fixture-client-secret";
     stubUpstream();
   });
 
@@ -623,6 +637,10 @@ describe("shipped templates: tool node contracts", () => {
     githubFixture = undefined;
     if (previousGithubApiUrl === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = previousGithubApiUrl;
+    for (const [name, value] of Object.entries(previousGoogleEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 
   it("has tool nodes to check", () => {
