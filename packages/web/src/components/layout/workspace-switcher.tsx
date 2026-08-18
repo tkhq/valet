@@ -61,10 +61,17 @@ export function workspaceOptions(
   assistants: AssistantSummary[] | undefined,
   teams: TeamSummary[],
 ): WorkspaceOption[] {
-  const defaultFor = (type: "user" | "team", id?: string): string | undefined =>
-    (assistants ?? []).find(
-      (a) => a.isDefault && a.owner.type === type && (id === undefined || a.owner.id === id),
-    )?.id;
+  // Falls back to the owner's first assistant when none is marked default —
+  // the same rule `defaultAssistantFor` applies. Requiring `isDefault` here
+  // made a workspace with assistants read as one with none, so selecting it
+  // from `/chat` CREATED a duplicate assistant instead of opening one that
+  // already existed.
+  const defaultFor = (type: "user" | "team", id?: string): string | undefined => {
+    const owned = (assistants ?? []).filter(
+      (a) => a.owner.type === type && (id === undefined || a.owner.id === id),
+    );
+    return (owned.find((a) => a.isDefault) ?? owned[0])?.id;
+  };
 
   return [
     { key: "user", label: "Personal", isTeam: false, defaultAssistantId: defaultFor("user") },
