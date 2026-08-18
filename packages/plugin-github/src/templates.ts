@@ -1,28 +1,26 @@
 /**
  * GitHub workflow templates.
  *
- * The first three templates act as the person who owns the workflow: two of
- * them search with the `@me` qualifier, which only resolves against a user
- * token, and the third writes comments that must carry a person's name
- * rather than an application's. So each of their GitHub tool nodes pins
- * `credential: "user"` instead of taking the host's default precedence.
- * GitHub is also the only service that reads that field — every other one
- * refuses it rather than ignore it — so the fifth template's calendar node
- * leaves it off.
+ * The first two templates act as the person who owns the workflow: both
+ * search with the `@me` qualifier, which only resolves against a user
+ * token. So each of their GitHub tool nodes pins `credential: "user"`
+ * instead of taking the host's default precedence. GitHub is also the only
+ * service that reads that field — every other one refuses it rather than
+ * ignore it — so the fourth template's calendar node leaves it off.
  *
- * The fourth template inverts that choice and pins `credential: "app"`
+ * The third template inverts that choice and pins `credential: "app"`
  * everywhere. It posts a machine-written code review, and a machine-written
  * review that carries a person's name reads as that person's judgement. The
  * `app` selection also has no fallback (`api/src/plugins/action-invoker.ts`),
  * so a deployment with no installed application fails the step visibly
  * instead of signing the review with the workflow owner's account.
  *
- * The fifth template returns to `credential: "user"`. It writes the
+ * The fourth template returns to `credential: "user"`. It writes the
  * `assignees` field of a pull request, and GitHub drops an assignee change
  * from an account without push access — which the person who starts the run
  * has and an application often does not.
  *
- * The fifth template also sends Slack messages, through `slack.dm_user` —
+ * The fourth template also sends Slack messages, through `slack.dm_user` —
  * a bot-token action with no `credential` field of its own (`plugin-slack`
  * resolves its own workspace credential; GitHub is the only service that
  * reads the tool node's `credential` field at all). A run that has
@@ -44,9 +42,9 @@
  * to be gone by the time the schedule fires. Install closes that gap: it
  * refuses a scheduled template that has no value for a required field, then
  * rewrites `{{ trigger.data.<field> }}` to the literal value and drops the
- * field (`api/src/workflows/templates.ts`). That is what lets the routing
- * template take its repository and its threshold as configuration instead
- * of freezing them into the definition.
+ * field (`api/src/workflows/templates.ts`). That is what lets a scheduled
+ * template take a repository or a threshold as configuration instead of
+ * freezing it into the definition.
  */
 import type { WorkflowTemplate } from "@valet/engine";
 import type { WorkflowDefinition } from "@valet/workflow";
@@ -209,365 +207,6 @@ const stalePullRequestNudge: WorkflowDefinition = {
     { from: "open_pull_requests", to: "find_stale" },
     { from: "find_stale", to: "anything_stale" },
     { from: "anything_stale", to: "nudge", fromOutput: "true" },
-  ],
-};
-
-/**
- * Routes pull requests nobody has picked up.
- *
- * The shape of the problem decides the shape of the graph.
- *
- * There is no action that requests a reviewer — the plugin never calls
- * `POST /pulls/{n}/requested_reviewers` — so the delivery is a comment that
- * names the reviewer. The comment opens with @handle, which is what makes it
- * a notification rather than a note: GitHub mails the person it mentions.
- * The run adds nothing beside it, and the report to the run owner says who
- * was named rather than who was messaged.
- *
- * The routing table is a CSV file in a repository, not a list in this file.
- * An org changes who owns what far more often than it changes a workflow,
- * and a table that lives in a repository is reviewed like any other change.
- *
- * The run reads the table FIRST and stops when it is empty, because an empty
- * table maps every path to nobody: without that gate a broken configuration
- * would produce a run that posts nothing, reports nothing, and looks healthy.
- *
- * Only one step fans out per pull request, and it runs after the age filter
- * rather than over the whole search, because the search result carries no
- * changed-file list and reading one costs four GitHub calls.
- *
- * A pull request whose paths match no row is reported as unrouted and left
- * alone. A default reviewer would be the easy fallback and the wrong one: a
- * wrongly routed pull request wastes the time of two people and teaches the
- * team to ignore the workflow.
- */
-const unclaimedPullRequestRouting: WorkflowDefinition = {
-  version: "dag/v1",
-  nodes: [
-    {
-      id: "start",
-      type: "trigger",
-      dataSchema: {
-        repositoryOwner: {
-          type: "string",
-          required: true,
-          label: "Repository owner",
-          placeholder: "your-org",
-          description: "The account or organization that holds the repository to sweep.",
-        },
-        repositoryName: {
-          type: "string",
-          required: true,
-          label: "Repository name",
-          placeholder: "platform",
-          description: "One repository per install. Install the template again for a second repository.",
-        },
-        routingOwner: {
-          type: "string",
-          required: true,
-          label: "Routing file owner",
-          placeholder: "your-org",
-          description: "The account or organization that holds the routing file. It can be the same one.",
-        },
-        routingRepository: {
-          type: "string",
-          required: true,
-          label: "Routing file repository",
-          placeholder: "handbook",
-          description: "The repository that holds the routing file. Your GitHub account must be able to read it.",
-        },
-        routingPath: {
-          type: "string",
-          required: true,
-          default: ".github/reviewer-routing.csv",
-          label: "Routing file path",
-          placeholder: ".github/reviewer-routing.csv",
-          description:
-            "A CSV file with the columns path_prefix, area, github_handle, slack_user_id. The run does not read " +
-            "slack_user_id yet. Keep the column, so the file needs no edit when it does.",
-        },
-        minimumOpenDays: {
-          type: "number",
-          required: true,
-          default: 2,
-          label: "Days open before a pull request is routed",
-          description: "A younger pull request is left alone, so its author keeps the first chance to pick a reviewer.",
-        },
-      },
-    },
-    {
-      id: "routing_table",
-      type: "tool",
-      service: "github",
-      action: "read_repo_file",
-      credential: "user",
-      summary: "Read the file that maps a path to an owning area and a person",
-      params: {
-        owner: "{{ trigger.data.routingOwner }}",
-        repo: "{{ trigger.data.routingRepository }}",
-        path: "{{ trigger.data.routingPath }}",
-      },
-    },
-    {
-      // `review:none` drops every pull request a reviewer has already
-      // answered. Oldest first matters more than it looks: the search
-      // returns one page and cannot ask for a second, so whatever the limit
-      // cuts must be the recent end of the list, not the neglected end this
-      // workflow exists to find.
-      id: "open_pull_requests",
-      type: "tool",
-      service: "github",
-      action: "search_issues",
-      credential: "user",
-      summary: "Open pull requests with no review yet, oldest first",
-      params: {
-        q:
-          "repo:{{ trigger.data.repositoryOwner }}/{{ trigger.data.repositoryName }} " +
-          "is:open is:pr draft:false archived:false review:none",
-        sort: "created",
-        order: "asc",
-        limit: 50,
-      },
-    },
-    {
-      // An empty file reads back with no error at all. Every later step
-      // would then behave itself and route nothing, so the failure has to
-      // be made here.
-      id: "routing_table_readable",
-      type: "if",
-      conditions: [
-        { left: "nodes.routing_table.result.content", dataType: "string", operation: "isNotEmpty" },
-      ],
-    },
-    {
-      id: "no_routing_table",
-      type: "stop",
-      outcome: "failure",
-      message:
-        "The routing file {{ trigger.data.routingPath }} in {{ trigger.data.routingOwner }}/" +
-        "{{ trigger.data.routingRepository }} is empty, so no pull request can be routed. Put one row in it " +
-        "for each owned path, with the columns path_prefix, area, github_handle, slack_user_id, then run the " +
-        "workflow again.",
-    },
-    {
-      id: "unclaimed",
-      type: "llm",
-      model: "claude-haiku-4-5",
-      system:
-        "You select pull requests that have waited long enough to need a reviewer. You judge age and " +
-        "nothing else. You never invent a pull request, and you never report one that is not in the list.",
-      prompt: [
-        "The time now is {{ trigger.timestamp }}.",
-        "A pull request qualifies when it was created more than {{ trigger.data.minimumOpenDays }} days before that time.",
-        "",
-        "Open pull requests with no review, with their created_at times:",
-        "{{ nodes.open_pull_requests.result.items }}",
-        "",
-        'Return JSON in a ```json block: { "candidates": [ { "number": ..., "url": ..., "daysOpen": ... } ] }.',
-        "Return an empty candidates array when every pull request is younger than the threshold.",
-      ].join("\n"),
-      outputSchema: {
-        type: "object",
-        properties: {
-          candidates: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                number: { type: "number" },
-                url: { type: "string" },
-                daysOpen: { type: "number" },
-              },
-              required: ["number", "url", "daysOpen"],
-            },
-          },
-        },
-        required: ["candidates"],
-      },
-    },
-    {
-      // The routing decision needs the paths a pull request touches, and the
-      // search result carries none of them. This step also reads back who is
-      // already requested or assigned, which is the last thing that can say
-      // "someone owns this" before a comment goes out.
-      id: "changed_paths",
-      type: "foreach",
-      items: "{{ nodes.unclaimed.result.output.candidates }}",
-      maxItems: 20,
-      concurrency: 3,
-      // Independent pull requests: one deleted branch must not stop the rest.
-      onItemError: "collect",
-      body: {
-        id: "inspect_pull_request",
-        type: "tool",
-        service: "github",
-        action: "inspect_pull_request",
-        credential: "user",
-        summary: "Read one pull request's changed paths and its current reviewers",
-        params: {
-          owner: "{{ trigger.data.repositoryOwner }}",
-          repo: "{{ trigger.data.repositoryName }}",
-          pullNumber: "{{ item.number }}",
-          filesLimit: 50,
-        },
-      },
-    },
-    {
-      id: "route",
-      type: "llm",
-      model: "claude-sonnet-4-5",
-      system:
-        "You route an unclaimed pull request to the area that owns the files it changes. The routing file " +
-        "is your only source of an owner. You never guess a person, you never use a row you did not match, " +
-        "and you never name anybody the routing file does not name. An unrouted pull request costs less " +
-        "than a wrongly routed one.",
-      prompt: [
-        "The routing file is CSV with a header row and the columns path_prefix, area, github_handle, slack_user_id.",
-        "A row owns a file when the file path starts with that row's path_prefix. The longest matching prefix wins.",
-        "",
-        "Routing file:",
-        "{{ nodes.routing_table.result.content }}",
-        "",
-        "The pull requests that were selected, in order, each with its number and its URL:",
-        "{{ nodes.unclaimed.result.output.candidates }}",
-        "",
-        "What was read back for each one, in the SAME order. An entry holds a status, and a data object",
-        "with the pull request in it when the read succeeded:",
-        "{{ nodes.changed_paths.result.items }}",
-        "",
-        "Take the entries one at a time. Take the number and the URL from the selected list at the same position.",
-        "1. If the entry's status is not completed, the pull request could not be read. Add it to unrouted, with the entry's error as the reason.",
-        "2. Drop it when requested_reviewers, requested_teams, or assignees is not empty. Somebody already owns it.",
-        "3. Match every changed path against the routing file. Count the matched files for each area. The area with the most matched files wins. The longest prefix breaks a tie.",
-        "4. If no changed path matches any row, add the pull request to unrouted, and give the paths that matched nothing as the reason. Do not pick a row you did not match.",
-        "5. Otherwise add it to routed, with the github_handle from the winning row.",
-        "",
-        "Write one comment for each routed pull request. It is the only thing that tells that person, so it carries the whole reason.",
-        "comment: a GitHub comment under 80 words. Open with the handle, written with a leading @. Say in one sentence what the pull request changes, from its title, its description and its changed files. Name the area that owns it and the paths that matched. Close by asking the reader to correct {{ trigger.data.routingPath }} in {{ trigger.data.routingOwner }}/{{ trigger.data.routingRepository }} if the area is wrong.",
-        "",
-        'Return JSON in a ```json block: { "routed": [ ... ], "unrouted": [ ... ] }.',
-        "Return both arrays every time. Return an empty array for the one that has nothing in it.",
-      ].join("\n"),
-      outputSchema: {
-        type: "object",
-        properties: {
-          routed: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                number: { type: "number" },
-                url: { type: "string" },
-                area: { type: "string" },
-                githubHandle: { type: "string" },
-                comment: { type: "string" },
-              },
-              required: ["number", "url", "area", "githubHandle", "comment"],
-            },
-          },
-          unrouted: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                number: { type: "number" },
-                url: { type: "string" },
-                reason: { type: "string" },
-              },
-              required: ["number", "url", "reason"],
-            },
-          },
-        },
-        required: ["routed", "unrouted"],
-      },
-    },
-    {
-      // The false branch has no successor on purpose: a day with nothing
-      // unclaimed and nothing unrouted ends in silence. The gate takes both
-      // lists, because a run that routed nothing and found three owner-less
-      // pull requests still has something the workflow owner must see.
-      id: "anything_found",
-      type: "if",
-      combinator: "or",
-      conditions: [
-        { left: "nodes.route.result.output.routed", dataType: "array", operation: "lengthGreaterThan", right: 0 },
-        { left: "nodes.route.result.output.unrouted", dataType: "array", operation: "lengthGreaterThan", right: 0 },
-      ],
-    },
-    {
-      // The comment is the whole notification. It opens with the handle
-      // written as @handle, so GitHub sends that person its own mention
-      // notice. Nothing else in this run reaches the reviewer.
-      id: "comment",
-      type: "foreach",
-      items: "{{ nodes.route.result.output.routed }}",
-      maxItems: 10,
-      concurrency: 2,
-      onItemError: "collect",
-      body: {
-        id: "post_comment",
-        type: "tool",
-        service: "github",
-        action: "create_comment",
-        credential: "user",
-        summary: "Name the reviewer on the pull request, with the context behind the choice",
-        params: {
-          owner: "{{ trigger.data.repositoryOwner }}",
-          repo: "{{ trigger.data.repositoryName }}",
-          issueNumber: "{{ item.number }}",
-          body: "{{ item.comment }}",
-        },
-      },
-    },
-    {
-      // The last node on its branch, so this one can park: no successor can
-      // be starved, and `until_idle` lets a run whose orchestrator refused
-      // the report settle failed instead of green. The two orchestrator
-      // nodes in the assign-reviewers template each have a stop node after
-      // them, so they use `wait.mode: "none"` instead.
-      id: "report",
-      type: "orchestrator",
-      wait: { mode: "until_idle" },
-      prompt: [
-        "I routed the unclaimed pull requests in {{ trigger.data.repositoryOwner }}/{{ trigger.data.repositoryName }}.",
-        "Report this back to me in one short paragraph. Do not comment on a pull request and do not open one.",
-        "",
-        "Start with the pull requests that matched no owner. They are the ones I have to fix in the routing file:",
-        "{{ nodes.route.result.output.unrouted }}",
-        "",
-        "Then the ones that were routed:",
-        "{{ nodes.route.result.output.routed }}",
-        "",
-        "Comments posted: {{ nodes.comment.result.completedCount }} of {{ nodes.comment.result.inputCount }}. Failed: {{ nodes.comment.result.failedCount }}.",
-        "",
-        "What happened to each comment, in the SAME order as the routed list above. An entry holds a",
-        "status, and an error when it failed:",
-        "{{ nodes.comment.result.items }}",
-        "",
-        "A comment that failed is a reviewer nobody told. Take the entries one at a time. Take the pull",
-        "request and the handle from the routed list at the same position, and name each one.",
-        "",
-        "Say it in the first line if any of these dropped work:",
-        "Pull requests left unread by the per-run cap: {{ nodes.changed_paths.result.truncatedCount }}",
-        "Comments dropped by the per-run cap: {{ nodes.comment.result.truncatedCount }}",
-      ].join("\n"),
-    },
-  ],
-  edges: [
-    { from: "start", to: "routing_table" },
-    { from: "start", to: "open_pull_requests" },
-    { from: "routing_table", to: "routing_table_readable" },
-    { from: "routing_table_readable", to: "no_routing_table", fromOutput: "false" },
-    // `unclaimed` waits for the gate as well as the search, so an unusable
-    // routing file stops the run before it spends a single per-pull-request
-    // call.
-    { from: "routing_table_readable", to: "unclaimed", fromOutput: "true" },
-    { from: "open_pull_requests", to: "unclaimed" },
-    { from: "unclaimed", to: "changed_paths" },
-    { from: "changed_paths", to: "route" },
-    { from: "route", to: "anything_found" },
-    { from: "anything_found", to: "comment", fromOutput: "true" },
-    { from: "comment", to: "report" },
   ],
 };
 
@@ -2611,46 +2250,6 @@ export const githubTemplates: WorkflowTemplate[] = [
     },
   },
   {
-    id: "github.unclaimed-pull-request-routing",
-    name: "Route unclaimed pull requests",
-    description:
-      "Every weekday, find the open pull requests in one repository that nobody has picked up, work out which " +
-      "area owns the files they change, and comment on each one naming that area's reviewer, with what it " +
-      "changes and why it came to them. It needs GitHub connected on your own account, and a CSV routing file " +
-      "in a repository you can read.",
-    category: "nudge",
-    apps: ["github", "claude"],
-    steps: [
-      "Read the routing file that maps a path prefix to an owning area and a GitHub handle.",
-      "Search the repository for open pull requests that nobody has reviewed, oldest first.",
-      "Keep the ones that have been open longer than your threshold.",
-      "Read the files each one changes, and who is already requested or assigned.",
-      "Match the changed paths to an owning area, and that area to a person.",
-      "Comment on the pull request naming that person, with what it changes and why it came to them.",
-      "Report what was routed, and what matched no owner, to your orchestrator.",
-    ],
-    caveats: [
-      "The reviewer is told by the comment, and by nothing else. The comment names their handle with a leading @, so GitHub sends them its own notification. This workflow sends no direct message.",
-      "A comment that fails to post is a reviewer nobody told. The report names every one, and the run continues so that one failure does not silence the rest.",
-      "A clean report is not proof that a person was reached. A github_handle that is no longer an account, or a person without access to the repository, renders as plain text: the comment posts, GitHub notifies nobody, and nothing in the run can tell. If a reviewer says they never heard, correct that handle in the routing file.",
-      "You get one report per run, in your orchestrator session: what was routed, what matched no owner, and what the caps dropped.",
-      "It comments on GitHub as you, not as an installed application.",
-      "GitHub reviewer requests are not among this plugin's actions, so the workflow names the reviewer in a comment. Nobody is assigned, and the pull request's reviewer list does not change.",
-      "A pull request whose paths match no row is reported to you and left alone. It never falls back to a default reviewer.",
-      "Each run reads at most 20 pull requests and routes at most 10 of them. The report names what the caps dropped.",
-      "An empty routing file fails the run and names the file to correct. A missing one fails the same way.",
-      "It sweeps one repository per install. Install it again for a second repository.",
-      "A direct message to the reviewer is a later addition, for when Slack is available. The routing file keeps its slack_user_id column, so your file needs no edit on the day that step returns.",
-    ],
-    definition: unclaimedPullRequestRouting,
-    schedule: {
-      name: "Route unclaimed pull requests",
-      cron: "0 15 * * 1-5",
-      timezone: "UTC",
-      description: "Weekdays at 15:00 UTC",
-    },
-  },
-  {
     id: "github.pull-request-review",
     name: "Review a pull request when it opens or updates",
     description:
@@ -2670,20 +2269,9 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Move the findings into the review body when the inline comments cannot be posted.",
     ],
     caveats: [
-      "Installing it does not start it. Open the installed workflow, then Triggers, then New trigger, and subscribe it to github.pull_request.opened, github.pull_request.synchronize, github.pull_request.reopened and github.pull_request.ready_for_review. Until you do, it never runs.",
-      "Set the trigger's repo filter. Without one it reviews every pull request in every repository the webhook reaches.",
-      "The review is advisory and it never approves. The create_review action offers COMMENT and REQUEST_CHANGES only, because an approving review can satisfy branch protection, which is a merge authorization rather than a review remark.",
-      "It posts as the installed GitHub App, not as you, so nobody mistakes it for a colleague's review. If your organization has no GitHub App installed for the repository, the posting step fails and the run says so. Connecting your own GitHub account is still what the install checks for.",
-      "It reads the diff and the pull request, and nothing else. It never opens an unchanged file, so it cannot tell you whether a changed function's callers still hold.",
-      "Each run makes one model call over at most 60 files and 120,000 bytes of diff, which is roughly 30,000 input tokens, plus the pull request description and up to 50 existing review comments. When the model's first reply does not match the expected shape, the run makes a second call that repeats the whole prompt, so the worst case is about twice that. Every push to every open pull request starts a run, so a busy repository is a real bill.",
-      "A run that hits the diff budget says so in the review body: how many files it fetched, in how many the diff was cut short, and in how many it read no diff at all. It never presents a partial read as a whole one. It reports counts and not filenames, because only the counts are measured rather than written by the model.",
-      "A pull request that changes more than 60 files is not reviewed at all. The run posts one comment naming the count and asking for a smaller pull request, and later pushes rewrite that comment instead of adding another.",
-      "When the inline comments cannot be posted, the run posts the same findings in the review body instead. A comment naming a line that is not in the diff is the usual reason, and GitHub then rejects the whole review. Nothing is dropped, but those findings carry no anchor.",
-      "Two pushes close together start two runs. Each one re-reads the head commit before it posts and stops when a newer commit has landed, so the newest push is normally the only one that produces a review. Two pushes far apart produce two reviews, and GitHub marks the older one's comments outdated.",
-      "Each review holds at most 20 findings, on lines the pull request added or changed. A longer reply is refused and asked for again once, and the run fails without posting when the second reply is also too long.",
-      "If your organization requires approval for github.create_review, every run waits for a person. A denied or timed-out request ends the run and posts nothing; it never re-asks through the fallback.",
-      "The review is written from text the pull request author controls — the title, the description, and the diff. A pull request can therefore try to steer what the review says, and on a public repository that includes pull requests from forks. It cannot change the verdict beyond COMMENT and REQUEST_CHANGES, approve, or merge.",
-      "The model can be wrong. Read REQUEST_CHANGES as one reviewer's opinion, and do not make it a merge gate on its own.",
+      "Installing it does not start it. Open the workflow, then Triggers, then New trigger, and subscribe it to github.pull_request.opened, github.pull_request.synchronize, github.pull_request.reopened and github.pull_request.ready_for_review, with a repo filter set — without one it reviews every pull request in every repository the webhook reaches.",
+      "It posts as the installed GitHub App, never approves (COMMENT or REQUEST_CHANGES only), and skips anything past 60 changed files or 120,000 diff bytes with a one-line note instead. Findings are capped at 20 per review and anchored to changed lines; when GitHub rejects an inline anchor, the same findings post in the review body instead.",
+      "The review reads only the diff and the pull request's own text, which its author controls — so treat REQUEST_CHANGES as one reviewer's opinion, not a merge gate, especially on a public repo taking pull requests from forks.",
     ],
     definition: pullRequestReview,
   },
@@ -2714,22 +2302,9 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Write the updated list, reply on the pull request naming the replacement, and DM the new assignee and the author.",
     ],
     caveats: [
-      "It arms no schedule and does not run on install. Open the workflow, then Triggers, then New trigger, and subscribe it to github.pull_request.opened, github.pull_request.ready_for_review, and github.issue_comment.created. Until you do, it never runs.",
-      "It cannot read a GitHub team. No action here lists the members of @your-org/group-one, so this workflow never resolves a group into people by itself. The roster file supplies that, and a person who is not in the roster is never assigned, whatever CODEOWNERS says.",
-      "It does not know anybody's working hours. Nothing in this platform reports a person's timezone, so the roster carries the timezone and the hours. Working hours rank candidates and exclude nobody: a person outside their hours is still assigned when nobody else covers the owner, and the report says so.",
-      "It has no signal for who last worked on the changed code. GitHub's commit list here returns a git author name, not an account, so it cannot be matched to a handle. The only ownership evidence is the CODEOWNERS path match, which is authority and not familiarity. The roster's areas column breaks a tie, and it is something a person wrote down.",
-      "A decline is a model's judgment on one PR comment, not a keyword match. It can read a comment as a decline that was not one, or miss one written unusually. Read the reply this workflow posts on the pull request to confirm what it did.",
-      "Two declines on the same pull request are two independent comment events. Each one excludes only its own commenter — nothing remembers who declined an earlier round beyond what the pull request's own assignee list already shows.",
-      "A person the roster has no slack_user_id for gets no DM, and is assigned or excluded exactly like anybody else — Slack only adds a message on top of what GitHub already does.",
-      "You get a report in your orchestrator session on every run: who was assigned and why, whom GitHub dropped, every candidate that was passed over, and each roster row that could not be used.",
-      "Two judgements decide who is assigned, and a model makes both of them: which CODEOWNERS rule matches a changed path, and which roster row answers for an owner token. Nothing in a workflow can read a GitHub group, so nothing re-derives either answer. The check in front of the write compares counts — how many owners the paths need, how many the choice covers, and how many people the choice holds — and refuses a choice that leaves an owner uncovered. It cannot tell you that the person it did assign is really in the group the roster says they are in.",
-      "The roster is a CSV with the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours and areas. groups holds the CODEOWNERS owner tokens that person answers for, separated by | characters. An owner written in CODEOWNERS as an email address is only coverable when somebody lists that address in their groups column.",
-      "It reads and writes GitHub as you, not as an installed application — an assignee change from an account without push access is accepted and silently dropped. The run reads the pull request back and reports every name that did not stick as a failure.",
-      "Google Calendar must be connected on your own account before you can install this. A failed calendar read excludes that person, so a run without the connection would assign nobody. A person with no calendar_id is assigned with a plain statement that their time was not checked.",
-      `Time off excludes a person when it covers any part of the next ${TIME_OFF_WINDOW_DAYS} days, read from their next 10 calendar events. It cannot set an end to that window, so a person whose next 10 events all fall inside today hides any time off that starts tomorrow.`,
-      "It writes the assignees field, not the reviewer-request field. The two mean different things on GitHub, and a required-reviewer rule reads the one this workflow does not write.",
-      "Assigning replaces the whole assignee list. A pull request that already has an assignee is left alone the first time it opens, and the run stops and says so.",
-      `It assigns at most ${MAX_ASSIGNEES} people, reads at most ${CHANGED_PATHS_LIMIT} changed paths, and checks at most ${MAX_CANDIDATES} calendars per run. A pull request past any of those caps is reported as uncovered or incompletely read, never silently guessed at.`,
+      "It arms no schedule. Open the workflow, then Triggers, then New trigger, and subscribe it to github.pull_request.opened, github.pull_request.ready_for_review, and github.issue_comment.created — until you do, it never runs.",
+      "The roster is the only source of group membership, working hours, calendars and Slack ids — nothing here can read a GitHub team or a timezone on its own. A decline is a model's judgment on one comment, not a keyword match; read the reply it posts on the pull request to confirm what it did.",
+      `It reads and writes GitHub as you, not as an installed application, and assigning replaces the whole assignees field — a pull request that already has one is left alone. It assigns at most ${MAX_ASSIGNEES} people and checks at most ${MAX_CANDIDATES} calendars per run; anything past those caps is reported, never guessed at.`,
     ],
     definition: assignReviewers,
   },

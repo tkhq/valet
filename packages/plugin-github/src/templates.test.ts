@@ -341,61 +341,12 @@ describe("github workflow templates", () => {
     expect([...new Set(services)].sort()).toEqual(["github", "google_calendar", "slack"]);
   });
 
-  it("routes without Slack, so the routing template is validated here too", () => {
-    // It used to send the reviewer a direct message beside the comment,
-    // which made it a cross-service definition this package could not
-    // validate. The comment is now the whole delivery.
-    expect(githubOnly.map((t) => t.id)).toContain("github.unclaimed-pull-request-routing");
-  });
-
   describe.each(githubOnly)("$id", (template) => {
     it("passes the definition validator against the real action list", () => {
       const result = validateWorkflowDefinition(template.definition as WorkflowDefinition, env);
       // The validator's own messages name the node and the corrected path.
       expect(result.ok ? [] : result.errors).toEqual([]);
     });
-  });
-});
-
-// ─── The routing template ────────────────────────────────────────────────
-
-const ROUTING_ID = "github.unclaimed-pull-request-routing";
-
-describe(`${ROUTING_ID} — the comment is the whole delivery`, () => {
-  const definition = definitionOf(ROUTING_ID);
-  const template = templateById(ROUTING_ID);
-
-  it("gives the report the per-comment outcomes it asks the model to name", () => {
-    // The report asks for the reviewers a failed comment left untold. The
-    // counts cannot answer that: `completedCount` and `failedCount` are
-    // numbers, and the status and the error of one attempt live only in
-    // `ForeachResult.items` (`workflow/src/nodes/foreach.ts`). Without that
-    // path the model either drops the names or invents a pair from the
-    // routed list, and the caveat below states the names as fact.
-    const report = orchestratorNode(definition, "report");
-    expect(report.prompt).toContain("{{ nodes.comment.result.items }}");
-    expect(report.prompt).toContain("A comment that failed is a reviewer nobody told");
-    expect(report.prompt).toContain("name each one");
-    // Index-aligned with the routed list, which is how a model turns a
-    // failed entry back into a pull request and a handle.
-    expect(report.prompt).toContain("{{ nodes.route.result.output.routed }}");
-    expect(report.prompt).toContain("SAME order as the routed list");
-  });
-
-  it("collects a failed comment instead of stopping the rest", () => {
-    const comment = definition.nodes.find((n): n is ForeachNode => n.type === "foreach" && n.id === "comment");
-    expect(comment?.onItemError).toBe("collect");
-  });
-
-  it("says that a comment which posts is not proof a person was reached", () => {
-    // The run reads a 201 from `create_comment`, and nothing more. A handle
-    // that is no longer an account renders as plain text, so GitHub
-    // notifies nobody and the report still reads "Failed: 0". The Slack
-    // message used to be the second addressed channel that surfaced a stale
-    // routing row; with it gone the card has to carry the limit.
-    const text = (template.caveats ?? []).join("\n");
-    expect(text).toContain("not proof");
-    expect(text).toContain("correct that handle in the routing file");
   });
 });
 
@@ -413,6 +364,16 @@ describe(REVIEW_ID, () => {
 
   it("arms no schedule, because a review starts from a pull request and not from a clock", () => {
     expect(template.schedule).toBeUndefined();
+  });
+
+  it("keeps the caveats to a couple of paragraphs — a reader has to actually read this", () => {
+    const caveatList = template.caveats ?? [];
+    expect(caveatList.length).toBeLessThanOrEqual(3);
+    for (const entry of caveatList) expect(entry.length).toBeLessThan(400);
+    const caveats = caveatList.join("\n");
+    expect(caveats).toContain("Installing it does not start it");
+    expect(caveats).toContain("github.pull_request.opened");
+    expect(caveats).toContain("never approves");
   });
 
   it("collects nothing at install, so no unbaked reference can survive it", () => {
@@ -884,16 +845,68 @@ const ASSIGN_ID = "github.assign-reviewers";
  * executor evaluates them. `isIfOperationSupported` is asserted beside each
  * use, so a dataType/operation pair the executor would reject fails here as
  * well. */
+/** `asNumber`/`asString`, copied from `packages/workflow/src/nodes/if.ts`
+ * rather than imported — that file exports no per-type comparator, only the
+ * whole node executor. Keeping the coercion identical to the source is the
+ * point: a fixture typed differently from what these coerce must fail the
+ * same way the real gate would fail on a live pull request. */
+function asNumber(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (!Number.isNaN(n)) return n;
+  }
+  return NaN;
+}
+
+function asString(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  return String(v);
+}
+
+/** Mirrors `evaluateCondition` in `packages/workflow/src/nodes/if.ts`,
+ * scoped to the (dataType, operation) pairs `assignReviewers` actually
+ * uses. `exists` is NOT dataType-agnostic in the real executor — it
+ * type-checks (`evalNumber` requires `typeof left === 'number'`,
+ * `evalObject` requires a plain object, `evalBoolean` requires an actual
+ * boolean) — so this dispatches on dataType first, the same way the real
+ * `switch (cond.dataType)` does, rather than checking `operation` alone.
+ * An unhandled pair throws, so a gate that gains an operation this helper
+ * has not been taught fails the test that exercises it instead of
+ * evaluating silently wrong. */
 function evaluateAssignCondition(condition: IfCondition, ctx: TemplateContext): boolean {
   const left = evaluateExpression(parseExpression(condition.left), ctx);
-  if (condition.operation === "exists") return left !== undefined && left !== null;
-  if (condition.dataType === "boolean" && condition.operation === "isTrue") return left === true;
-  if (condition.dataType === "string" && condition.operation === "doesNotContain") {
-    return typeof left === "string" && typeof condition.right === "string" && !left.includes(condition.right);
-  }
-  if (condition.dataType === "array" && condition.operation === "lengthGreaterThan") {
-    const floor = typeof condition.right === "number" ? condition.right : 0;
-    return Array.isArray(left) && left.length > floor;
+  const right = condition.right;
+  switch (condition.dataType) {
+    case "string":
+      switch (condition.operation) {
+        case "exists":
+          return left !== undefined && left !== null;
+        case "isNotEmpty":
+          return typeof left === "string" && left.length > 0;
+        case "equals":
+          return left === right;
+        case "doesNotContain":
+          return !asString(left).includes(asString(right));
+      }
+      break;
+    case "number":
+      if (condition.operation === "exists") return typeof left === "number" && !Number.isNaN(left);
+      break;
+    case "boolean":
+      if (condition.operation === "isTrue") return left === true;
+      if (condition.operation === "isFalse") return left === false;
+      break;
+    case "array":
+      if (condition.operation === "isEmpty") return !Array.isArray(left) || left.length === 0;
+      if (condition.operation === "lengthGreaterThan") return Array.isArray(left) && left.length > asNumber(right);
+      break;
+    case "object":
+      if (condition.operation === "exists") {
+        return left !== null && typeof left === "object" && !Array.isArray(left);
+      }
+      break;
   }
   throw new Error(`this test evaluates no ${condition.dataType}/${condition.operation} condition`);
 }
@@ -1447,6 +1460,21 @@ describe(`${ASSIGN_ID} — decline swap (branch B)`, () => {
     expect(classify?.prompt).toContain("reassignment this workflow itself just posted");
   });
 
+  it("cannot rely on the bot-login check for that guard — the reply posts as a real account", () => {
+    // `reply_on_pr` runs under `credential: "user"`, the run owner's own
+    // GitHub account, so its comment's `user.login` is a real handle that
+    // never contains "[bot]". `comment_not_bot` therefore lets the reply
+    // straight through, same as `commenter_is_assignee` would if the run
+    // owner happens to also be a current assignee. The classifier reading
+    // its own text and answering false is genuinely the only thing that
+    // stops the loop — this pins the fact the comment above only asserts.
+    const reply = toolNode(definition, "reply_on_pr");
+    expect(reply.credential).toBe("user");
+    const gate = assignIfNode("comment_not_bot");
+    expect(gate.conditions[0]?.operation).toBe("doesNotContain");
+    expect(gate.conditions[0]?.right).toBe("[bot]");
+  });
+
   it("names nobody real in the swap branch either", () => {
     const shortlistSwap = definition.nodes.find((n): n is LlmNode => n.type === "llm" && n.id === "shortlist_swap");
     const handles = JSON.stringify(shortlistSwap ?? {}).match(/@[a-z][a-z0-9/-]+/gi) ?? [];
@@ -1479,19 +1507,21 @@ describe(`${ASSIGN_ID} — card copy`, () => {
   });
 
   it("leads the caveats with how to arm it, since install alone does not start it", () => {
-    expect(caveatList[0]).toContain("It arms no schedule and does not run on install");
+    expect(caveatList[0]).toContain("It arms no schedule");
     expect(caveatList[0]).toContain("github.issue_comment.created");
   });
 
-  it("still states the platform gaps the request cannot get around", () => {
-    expect(caveats).toContain("It cannot read a GitHub team.");
-    expect(caveats).toContain("It does not know anybody's working hours.");
-    expect(caveats).toContain("It has no signal for who last worked on the changed code.");
+  it("keeps the caveats to a couple of paragraphs — a reader has to actually read this", () => {
+    expect(caveatList.length).toBeLessThanOrEqual(3);
+    for (const entry of caveatList) expect(entry.length).toBeLessThan(400);
   });
 
-  it("states the decline-classifier's own limit and the cross-round gap", () => {
-    expect(caveats).toContain("A decline is a model's judgment on one PR comment, not a keyword match.");
-    expect(caveats).toContain("Two declines on the same pull request are two independent comment events.");
+  it("still names the roster as the source the platform itself cannot supply", () => {
+    expect(caveats).toContain("The roster is the only source of group membership, working hours, calendars and Slack ids");
+  });
+
+  it("still states the decline-classifier's own limit", () => {
+    expect(caveats).toContain("A decline is a model's judgment on one comment, not a keyword match");
   });
 
   it("no longer claims a swap is unbuilt", () => {
