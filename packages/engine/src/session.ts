@@ -969,16 +969,30 @@ export class Session {
   }
 
   /**
-   * Invalidate the cached command registry and refresh workspace skills from
-   * the host `workspaceSkillsProvider` (if any). Call after workspace prep and
-   * on any event that also refreshes `Session.skills`. Idempotent.
+   * Invalidate the cached command registry, refresh workspace skills from
+   * the host `workspaceSkillsProvider` (if any), and refresh the session's
+   * skill map from the host `skillsProvider` (if any). Call after workspace
+   * prep and on any event that may change the reachable skill set. Idempotent.
    */
   async refreshCommandRegistry(): Promise<void> {
-    const provider = this.options.workspaceSkillsProvider;
-    // Load first, invalidate after: when the provider throws, the previous
+    const workspaceProvider = this.options.workspaceSkillsProvider;
+    const skillsProvider = this.options.skillsProvider;
+    // Load first, invalidate after: when a provider throws, the previous
     // registry (and its skill list) keeps serving — a stale list beats an
     // empty one mid-session. The rejection still reaches the caller.
-    this.workspaceSkillsCache = provider ? await provider() : [];
+    const [workspaceSkills, managedSkills] = await Promise.all([
+      workspaceProvider ? workspaceProvider() : Promise.resolve([]),
+      skillsProvider ? skillsProvider() : Promise.resolve(null),
+    ]);
+    this.workspaceSkillsCache = workspaceSkills;
+    if (managedSkills !== null) {
+      // Replace, not merge: the provider returns the full merged set (plugin
+      // + stored). A deleted or renamed stored skill must drop out here, and
+      // `skill`-tool lookups (thread.ts) read this same map, so both surfaces
+      // stay consistent.
+      this.skills.clear();
+      for (const skill of managedSkills) this.skills.set(skill.name, skill);
+    }
     this.commandRegistryCache = null;
   }
 

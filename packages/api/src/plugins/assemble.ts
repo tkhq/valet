@@ -129,6 +129,26 @@ export function partitionByName<T extends { name: string }>(
 }
 
 /**
+ * The skill set a session sees: every plugin skill, then the stored skills
+ * whose names no plugin skill already holds (first of a repeated stored name
+ * wins). This is `pluginSessionExtras`'s skill rule, exported on its own so
+ * the host's `skillsProvider` (the refresh path behind
+ * `Session.refreshCommandRegistry()`) re-reads stored skills without
+ * rebuilding the plugin tool catalog on every refresh.
+ */
+export function mergedSkillSources(
+  plugins: ValetPlugin[],
+  extraSkills: SkillSource[],
+): { skills: SkillSource[]; shadowed: SkillSource[] } {
+  const pluginSkills = collectSkills(plugins);
+  const { kept, shadowed } = partitionByName(
+    pluginSkills.map((s) => s.name),
+    extraSkills,
+  );
+  return { skills: [...pluginSkills, ...kept], shadowed };
+}
+
+/**
  * Builds the session-facing extras (tools/skills/roles) from an assembled
  * plugin set.
  *
@@ -164,12 +184,7 @@ export function pluginSessionExtras(
           onPinRejected: warnPinRejected,
         })
       : [];
-  const pluginSkills = collectSkills(plugins);
-  const { kept, shadowed } = partitionByName(
-    pluginSkills.map((s) => s.name),
-    extraSkills,
-  );
-  const skills = [...pluginSkills, ...kept];
+  const { skills, shadowed } = mergedSkillSources(plugins, extraSkills);
   const roles = plugins.flatMap((p) => p.roles ?? []);
 
   // The `skill` tool is what makes these skills reachable — without it the

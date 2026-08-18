@@ -277,3 +277,64 @@ describe("Session.commandRegistry — workspace skills provider", () => {
     expect(reg.resolve("skill:deploy-notes")).toBeDefined();
   });
 });
+
+describe("Session.commandRegistry — skills provider", () => {
+  it("refresh replaces the skill set from skillsProvider", async () => {
+    const faux = registerFauxProvider({ provider: "s-msp" });
+    cleanups.push(() => faux.unregister());
+    const { engine } = makeEngine();
+    // The provider simulates the host re-reading the skills table: one skill
+    // existed at build; a second was created (and the first renamed away)
+    // while the session sat in the host cache.
+    let stored: SkillSource[] = [
+      { name: "old-skill", description: "at build", content: "OLD", source: "db" },
+    ];
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+      skills: stored,
+      skillsProvider: async () => stored,
+    });
+
+    // Before any refresh, the construction-time set serves.
+    expect(session.commandRegistry().resolve("skill:old-skill")).toBeDefined();
+
+    stored = [
+      { name: "new-skill", description: "created later", content: "NEW", source: "db" },
+    ];
+    await session.refreshCommandRegistry();
+    const reg = session.commandRegistry();
+    expect(reg.resolve("skill:new-skill")).toBeDefined();
+    // Replace, not merge: the renamed/deleted skill drops out.
+    expect(reg.resolve("skill:old-skill")).toBeUndefined();
+    // The `skill` tool's lookup map sees the same refreshed set.
+    expect(session.skills.get("new-skill")?.content).toBe("NEW");
+    expect(session.skills.has("old-skill")).toBe(false);
+  });
+
+  it("a throwing skillsProvider keeps the previous skill set serving", async () => {
+    const faux = registerFauxProvider({ provider: "s-msp2" });
+    cleanups.push(() => faux.unregister());
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+      skills: [{ name: "kept", description: "still here", content: "KEPT", source: "db" }],
+      skillsProvider: async () => {
+        throw new Error("db unavailable");
+      },
+    });
+
+    await expect(session.refreshCommandRegistry()).rejects.toThrow("db unavailable");
+    expect(session.commandRegistry().resolve("skill:kept")).toBeDefined();
+    expect(session.skills.get("kept")?.content).toBe("KEPT");
+  });
+});
