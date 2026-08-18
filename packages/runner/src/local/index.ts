@@ -41,3 +41,11 @@ export {
   type ToolCall,
   type ToolResult,
 } from "./proxy.js";
+
+export {
+  startTunnel,
+  getTunnelStatus,
+  type TunnelOptions,
+  type InferenceRequest,
+  type TunnelStatus,
+} from "./tunnel.js";

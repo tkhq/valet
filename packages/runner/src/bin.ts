@@ -34,6 +34,7 @@ import {
   getCacheDir,
   getValetDir,
   flushQueue,
+  startTunnel,
 } from "./local/index.js";
 
 // ─── Local Inference Commands ────────────────────────────────────────────
@@ -440,6 +441,80 @@ Commands:
 `);
     }
     process.exit(0);
+  })();
+
+} else if (args[0] === "serve") {
+  // valet serve --model <name> [--connect cloud] [--pool <name>]
+  const { values: serveValues } = parseArgs({
+    args: args.slice(1),
+    options: {
+      model: { type: "string", short: "m" },
+      connect: { type: "string" },
+      pool: { type: "string" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+
+  if (serveValues.help) {
+    console.log(`
+Valet Serve — Expose local model to cloud
+
+Usage:
+  valet serve [OPTIONS]
+
+Options:
+  -m, --model <name>    Model to serve (required)
+  --connect cloud       Connect to Valet cloud as inference endpoint
+  --pool <name>         Register in a named pool (for org clusters)
+  -h, --help            Show this help
+
+Examples:
+  valet serve --model qwen2.5-1.5b --connect cloud
+  valet serve --model llama3.2-3b --connect cloud --pool turnkey-internal
+
+This starts a tunnel that:
+1. Loads the specified local model
+2. Connects to Valet cloud via WebSocket
+3. Receives inference requests from PWA/cloud users
+4. Runs inference locally and streams responses back
+
+Users in the PWA can select "Local Model" to use your hardware.
+`);
+    process.exit(0);
+  }
+
+  if (!serveValues.model) {
+    console.error("Model required: valet serve --model <name>");
+    console.log("\nAvailable models:");
+    for (const [name, info] of Object.entries(MODEL_REGISTRY)) {
+      console.log(`  ${name} (${info.size})`);
+    }
+    process.exit(1);
+  }
+
+  if (serveValues.connect !== "cloud") {
+    console.error("Currently only --connect cloud is supported");
+    process.exit(1);
+  }
+
+  (async () => {
+    try {
+      if (!(await isLoggedIn())) {
+        console.error("Not logged in. Run: valet login");
+        process.exit(1);
+      }
+
+      const modelPath = await resolveModelPath(serveValues.model as string);
+      
+      await startTunnel({
+        modelPath,
+        modelName: serveValues.model as string,
+        pool: serveValues.pool as string | undefined
+      });
+    } catch (err) {
+      console.error("Error:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
   })();
 }
 
