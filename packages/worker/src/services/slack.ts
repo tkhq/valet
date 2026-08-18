@@ -2,6 +2,10 @@ import type { UserIdentityLink } from '@valet/shared';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
+import { slackLinkDmText } from './slack-link-dm.js';
+
+// Re-export so existing callers pick this up via `services/slack.ts` too.
+export { slackLinkDmText };
 
 const SLACK_API = 'https://slack.com/api';
 
@@ -367,18 +371,78 @@ export async function getSlackBotToken(env: Env): Promise<string | null> {
   return install.botToken;
 }
 
+// ─── Slack User Lookup by Email ─────────────────────────────────────────────
+
+/**
+ * Resolve a Slack workspace member by email using `users.lookupByEmail`.
+ * Requires the bot's `users:read.email` scope (present in the manifest).
+ * Returns `null` when the email does not resolve to a workspace member — a
+ * silent "no" the caller uses to fall back to the manual typeahead. Throws
+ * on transport failure or when the bot is missing the scope so the caller
+ * can surface an actionable error rather than "user not found".
+ */
+export async function lookupSlackUserByEmail(
+  env: Env,
+  email: string,
+): Promise<{ id: string; displayName: string } | null> {
+  const botToken = await getSlackBotToken(env);
+  if (!botToken) throw new Error('Slack is not installed for this organization');
+
+  const resp = await fetch(
+    `${SLACK_API}/users.lookupByEmail?email=${encodeURIComponent(email)}`,
+    { method: 'GET', headers: { Authorization: `Bearer ${botToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Slack lookupByEmail HTTP ${resp.status}`);
+
+  const result = (await resp.json()) as {
+    ok: boolean;
+    error?: string;
+    user?: {
+      id: string;
+      name?: string;
+      real_name?: string;
+      profile?: { display_name?: string; real_name?: string };
+    };
+  };
+
+  if (!result.ok) {
+    // Distinguish "no such user in this workspace" from real errors like
+    // missing scope — the first is a normal fallback path; the second is a
+    // configuration bug we should surface.
+    if (result.error === 'users_not_found') return null;
+    if (result.error === 'missing_scope') {
+      throw new Error('Slack bot is missing the users:read.email scope. Reinstall the app to grant it.');
+    }
+    throw new Error(`Slack lookupByEmail error: ${result.error || 'unknown'}`);
+  }
+
+  const u = result.user;
+  if (!u) return null;
+  const displayName =
+    u.profile?.display_name || u.profile?.real_name || u.real_name || u.name || u.id;
+  return { id: u.id, displayName };
+}
+
 // ─── Initiate Slack Link ────────────────────────────────────────────────────
 
 export interface InitiateSlackLinkResult {
   slackUserId: string;
+  slackDisplayName?: string;
   expiresAt: string;
+  /** The exact DM the bot posts to the Slack user. The card echoes this on
+   * screen so the user knows what to look for in Slack and — if the DM does
+   * not arrive — can complete verification without switching apps. */
+  dmMessageText: string;
 }
 
-export async function initiateSlackLink(
+/** Mint a fresh 6-char code, replace any prior pending verification for
+ * `userId`, and DM it to `slackUserId`. Split out so the by-email and
+ * by-typeahead entrypoints share one code path. */
+async function mintCodeAndDm(
   env: Env,
   userId: string,
   slackUserId: string,
-  slackDisplayName?: string,
+  slackDisplayName: string | undefined,
 ): Promise<InitiateSlackLinkResult> {
   const appDb = getDb(env.DB);
   const install = await db.getOrgSlackInstallAny(appDb, env.ENCRYPTION_KEY);
@@ -395,6 +459,7 @@ export async function initiateSlackLink(
   const code = Array.from(bytes).map((b) => chars[b % chars.length]).join('');
 
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+  const dmMessageText = slackLinkDmText(code);
 
   // Delete any existing pending verification for this user
   const existing = await db.getSlackLinkVerification(appDb, userId);
@@ -435,7 +500,9 @@ export async function initiateSlackLink(
     throw new Error(`Failed to open DM with Slack user: ${err instanceof Error ? err.message : 'unknown'}`);
   }
 
-  // Send verification code via DM
+  // Send verification code via DM. Non-fatal on send failure: the
+  // verification row is persisted, so the user can still complete the flow
+  // by reading the code echoed on the connect card.
   try {
     await fetch(`${SLACK_API}/chat.postMessage`, {
       method: 'POST',
@@ -443,16 +510,39 @@ export async function initiateSlackLink(
         'Content-Type': 'application/json; charset=utf-8',
         Authorization: `Bearer ${botToken}`,
       },
-      body: JSON.stringify({
-        channel: dmChannelId,
-        text: `Your Valet verification code is: *${code}*. Paste this in Valet to link your account. Expires in 10 minutes.`,
-      }),
+      body: JSON.stringify({ channel: dmChannelId, text: dmMessageText }),
     });
   } catch {
     // Non-fatal: verification row is created, user can still verify
   }
 
-  return { slackUserId, expiresAt };
+  return { slackUserId, slackDisplayName, expiresAt, dmMessageText };
+}
+
+export async function initiateSlackLink(
+  env: Env,
+  userId: string,
+  slackUserId: string,
+  slackDisplayName?: string,
+): Promise<InitiateSlackLinkResult> {
+  return mintCodeAndDm(env, userId, slackUserId, slackDisplayName);
+}
+
+/**
+ * "One-click" variant: look the caller's Slack user up by their Valet email
+ * and DM them the code. Returns `null` when the email does not resolve to a
+ * workspace member, so the client can drop into the manual typeahead
+ * instead of guessing.
+ */
+export async function initiateSlackLinkByEmail(
+  env: Env,
+  userId: string,
+  email: string,
+): Promise<InitiateSlackLinkResult | null> {
+  if (!email) return null;
+  const match = await lookupSlackUserByEmail(env, email);
+  if (!match) return null;
+  return mintCodeAndDm(env, userId, match.id, match.displayName);
 }
 
 // ─── Verify Slack Link ──────────────────────────────────────────────────────
