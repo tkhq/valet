@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Credential, CredentialProvider, PluginActionContext } from '@valet/engine';
+import type { Credential, CredentialProvider, PluginActionContext, RiskLevel } from '@valet/engine';
 import { mcpActionPlugin } from './action-plugin.js';
 import type { McpTool, McpToolResult } from './types.js';
 
@@ -172,6 +172,67 @@ describe('mcpActionPlugin resolveActions', () => {
     expect(actions[0].riskLevel).toBe('medium'); // no annotations -> default
     expect(actions[1].riskLevel).toBe('critical'); // destructiveHint
     expect(actions[2].riskLevel).toBe('low'); // readOnlyHint
+  });
+
+  // One tool with the given annotations → its derived risk level.
+  async function riskFor(
+    annotations: McpTool['annotations'],
+    defaultRiskLevel: RiskLevel,
+  ): Promise<RiskLevel> {
+    vi.stubGlobal('fetch', makeFetchMock({ tools: [{ name: 'the_tool', annotations }] }));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel,
+    });
+    const actions = await plugin.resolveActions!({
+      credentials: fakeCredentialProvider({ accessToken: 'tok-abc' }),
+    });
+    return actions[0].riskLevel;
+  }
+
+  it('lowers a declared non-destructive idempotent write to medium', async () => {
+    expect(await riskFor({ destructiveHint: false, idempotentHint: true }, 'high')).toBe('medium');
+  });
+
+  it('raises a declared non-destructive open-world write to high', async () => {
+    expect(await riskFor({ destructiveHint: false, openWorldHint: true }, 'medium')).toBe('high');
+  });
+
+  it('raises an open-world write above a low service default (default is not a cap)', async () => {
+    expect(await riskFor({ destructiveHint: false, openWorldHint: true }, 'low')).toBe('high');
+  });
+
+  it('raises an idempotent write above a low service default', async () => {
+    expect(await riskFor({ destructiveHint: false, idempotentHint: true }, 'low')).toBe('medium');
+  });
+
+  it('raises destructiveHint: true to critical above a low service default', async () => {
+    expect(await riskFor({ destructiveHint: true }, 'low')).toBe('critical');
+  });
+
+  it('prefers idempotency over open-world for non-destructive writes', async () => {
+    expect(
+      await riskFor({ destructiveHint: false, idempotentHint: true, openWorldHint: true }, 'high'),
+    ).toBe('medium');
+  });
+
+  it('keeps the service default for a bare destructiveHint: false', async () => {
+    expect(await riskFor({ destructiveHint: false }, 'high')).toBe('high');
+  });
+
+  it('keeps destructiveHint: true critical even when idempotent', async () => {
+    expect(await riskFor({ destructiveHint: true, idempotentHint: true }, 'medium')).toBe(
+      'critical',
+    );
+  });
+
+  it('never moves risk on idempotent/open-world hints without an explicit destructiveHint', async () => {
+    expect(await riskFor({ idempotentHint: true, openWorldHint: true }, 'high')).toBe('high');
+  });
+
+  it('keeps readOnlyHint: true low even when open-world', async () => {
+    expect(await riskFor({ readOnlyHint: true, openWorldHint: true }, 'medium')).toBe('low');
   });
 
   it('throws the connect message when no credential is connected and noAuth is unset', async () => {

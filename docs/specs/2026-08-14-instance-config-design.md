@@ -538,6 +538,18 @@ Rules:
   ("grafana-cloud" → "Grafana Cloud"). The wire carries it as
   `PluginSummary.displayName`; the web client prefers it over its own
   id-derived label.
+- `riskLevel` is the per-service default. Explicit MCP tool annotations
+  override it per tool: `readOnlyHint: true` → `low`;
+  `destructiveHint: true` → `critical`; `destructiveHint: false` with
+  `idempotentHint: true` → `medium`; `destructiveHint: false` with
+  `openWorldHint: true` → `high`. Hints override in both directions:
+  `riskLevel` is the assumption for unannotated tools, not a cap or a
+  floor, so a `low` default does not hold an open-world write at `low`.
+  Absent hints never move risk — the MCP
+  spec defaults (`destructiveHint: true`, `openWorldHint: true`) are not
+  assumed, because an unannotated tool would otherwise surface as
+  `critical`. The mapping lives in `deriveRiskLevel`
+  (`packages/sdk/src/mcp/action-plugin.ts`).
 
 ## Tool policies
 
