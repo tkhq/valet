@@ -22,6 +22,57 @@ const TONE_SECONDS = 0.14;
 const TONE_GAP_SECONDS = 0.1;
 const PEAK_GAIN = 0.12;
 
+/**
+ * Easter egg. When set, the attention sound is Navi from Ocarina of Time
+ * instead of the synth chime. Device-local for the same reason the sound
+ * toggle is: what a machine sounds like belongs to the machine.
+ */
+const NAVI_PREF_KEY = "valet:attention-sound-navi";
+const NAVI_SOUND_URL = "/sounds/hey-listen.mp3";
+/** Tempered. The clip is louder than the chime and it plays uninvited. */
+const NAVI_VOLUME = 0.5;
+
+export function isNaviModeEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(NAVI_PREF_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
+export function setNaviModeEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(NAVI_PREF_KEY, enabled ? "on" : "off");
+  } catch {
+    // Storage unavailable: the choice is in-session only rather than an
+    // error. Same policy as the sound toggle.
+  }
+}
+
+let naviAudio: HTMLAudioElement | null = null;
+
+/**
+ * Test-only. Both audio handles here are module singletons, so without a
+ * reset one test's element (and its mock call counts) bleeds into the next.
+ */
+export function resetAudioForTests(): void {
+  naviAudio = null;
+  ctx = null;
+}
+
+function naviElement(): HTMLAudioElement | null {
+  if (naviAudio) return naviAudio;
+  if (typeof Audio === "undefined") return null;
+  try {
+    naviAudio = new Audio(NAVI_SOUND_URL);
+    naviAudio.volume = NAVI_VOLUME;
+    naviAudio.preload = "auto";
+  } catch {
+    return null;
+  }
+  return naviAudio;
+}
+
 type AudioContextCtor = typeof AudioContext;
 
 function audioContextCtor(): AudioContextCtor | null {
@@ -57,11 +108,46 @@ export function unlock(): void {
 }
 
 /**
- * Play the chime. Never throws and never rejects — this runs inside
- * notification handling, where an audio failure must not take the UI with
- * it. Returns whether a sound was actually started.
+ * Play the attention sound. Never throws and never rejects — this runs
+ * inside notification handling, where an audio failure must not take the UI
+ * with it.
+ *
+ * Returns whether playback was INITIATED, not whether it was heard. The mp3
+ * path can only fail asynchronously (autoplay blocked, file missing), after
+ * this has already returned; that failure retries the synth chime, and if
+ * the chime cannot start either the ping is dropped. Callers must not treat
+ * `true` as proof of sound — the tab-title count in `use-attention-ping.ts`
+ * is the signal that survives every audio failure, by design.
  */
 export function playAttentionChime(): boolean {
+  if (isNaviModeEnabled() && playNaviSound()) return true;
+  return playSynthChime();
+}
+
+/**
+ * The egg. Returns whether playback was initiated; an async rejection (file
+ * missing, autoplay blocked) falls back to the synth chime — see the
+ * contract on `playAttentionChime` for what that does and does not promise.
+ */
+function playNaviSound(): boolean {
+  const el = naviElement();
+  if (!el) return false;
+  try {
+    el.currentTime = 0;
+    // Older engines (and jsdom) return void from play(), not a promise.
+    const playing = el.play() as Promise<void> | undefined;
+    if (playing) {
+      void playing.catch(() => {
+        playSynthChime();
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function playSynthChime(): boolean {
   const c = context();
   if (!c) return false;
   if (c.state === "suspended") {
