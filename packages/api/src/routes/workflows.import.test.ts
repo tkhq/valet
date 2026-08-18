@@ -41,7 +41,9 @@ function useFixture(overrides: Parameters<typeof startGithubFixture>[0] = {}): G
 
 /** GitHub answers the contents endpoint with base64, which is what the
  * reader decodes. A fixture that returned plain text would pass a reader
- * that never decoded anything. */
+ * that never decoded anything. `sha` is on every real file response, and
+ * the reader refuses one without it — skill sync uses it as a manifest key
+ * and cannot tell two versions of a file apart otherwise. */
 function fileResponse(body: string): { body: Record<string, unknown> } {
   return {
     body: {
@@ -49,6 +51,7 @@ function fileResponse(body: string): { body: Record<string, unknown> } {
       encoding: "base64",
       size: Buffer.byteLength(body),
       content: Buffer.from(body, "utf8").toString("base64"),
+      sha: "blob-1",
     },
   };
 }
@@ -185,7 +188,9 @@ describe("GET /api/workflows/import/repo-file", () => {
   it("names the size limit when GitHub serves the entry with no inline body", async () => {
     api = await bootTestApi();
     // How GitHub answers for a file over 1 MB: the entry, with the body left out.
-    useFixture({ getContents: () => ({ body: { type: "file", encoding: "none", content: "", size: 2_000_000 } }) });
+    useFixture({ getContents: () => ({
+        body: { type: "file", encoding: "none", content: "", size: 2_000_000, sha: "blob-big" },
+      }) });
 
     const res = await fetch(
       `${api.baseUrl}/api/workflows/import/repo-file?repo=acme/automations&path=huge.json`,

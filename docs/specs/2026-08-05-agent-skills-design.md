@@ -1,7 +1,7 @@
 # Agent Skills Design — the skill format V2 targets
 
 **Date:** 2026-08-05
-**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync from public and private repositories.
+**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync from public and private repositories, with whole-repository skill discovery.
 **Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, how a repository's skills are mirrored and kept in step, and which parts of the format are not implemented yet.
 
 ## Context
@@ -128,6 +128,79 @@ A `repo` skill is read-only on that page: no Edit, no Delete. The next sync woul
 - **HTTP.** `POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name, for the shadowing reason above. `POST`, `GET`, and `DELETE /api/skills/sources` add, list, and remove a tracked repository, and `POST /api/skills/sources/:id/sync` re-reads one now.
 - **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions.
 
+### How a sync finds the skills
+
+One recursive tree read finds every skill file in the repository: `GET /repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1`, where the tree sha comes free with the commit read that sync already makes. Nobody has to tell Valet which directory holds the skills.
+
+Before this, sync listed one directory and read `<directory>/<entry>/SKILL.md` under each entry of it. That matched the Agent Skills layout, but it made the subdirectory load-bearing: a repository whose skills sat in `04-skills/` imported nothing unless somebody typed `04-skills`, and the sync reported that as success. It also cost one request per candidate directory.
+
+What counts:
+
+- A **skill** is a blob whose file name is exactly `SKILL.md`. Its name is the directory that holds it, at any depth. The match is case-sensitive, because an agent runtime loads `SKILL.md` and nothing else.
+- A **prompt** is a blob ending `.md` whose immediate parent directory is `prompts`. Its name is the file name without `.md`. Only a direct child counts; a file deeper under `prompts/` is text a prompt includes.
+- A symlinked `SKILL.md` is skipped. The blob behind a symlink holds a path string, not the file it points at.
+
+`subpath` is now a FILTER over that scan, not the place sync is told to look. Empty scans the whole repository. A value selects the paths under it, matched on whole segments, so `skills` never picks up `skills-archive/`. A source that already names a subdirectory keeps importing every skill it imported before, at the same path and with the same name; it can now also find skills nested deeper inside that directory.
+
+**Directories that are not scanned.** A whole-repository scan reaches files that are not the repository's own skills, so `services/skill-discovery.ts` skips dependency trees (`node_modules`, `vendor`, `third_party`), build output (`dist`, `build`, `out`, `target`, `coverage`), test trees (`test`, `tests`, `__tests__`, `testdata`, `fixtures`), and downloaded agent plugins (`cache`, `marketplaces`, `external_plugins`). Any dot-prefixed directory is skipped too, except `.claude`, which is the most likely home of a real skill. `examples`, `docs`, and `specs` are deliberately scanned: an examples directory can hold importable skills.
+
+The plugin names are there because `.claude` is open. A downloaded plugin ships its author's skills into `.claude/plugins/cache/<plugin>/<version>/skills/` and `.claude/plugins/marketplaces/<name>/plugins/<plugin>/skills/`, and in a real `.claude` tree those copies can outnumber the owner's own. They are somebody else's skills by the same argument as `node_modules`, and they are worse than a plain over-import: a downloaded copy that shares a name with a skill the owner wrote makes the collision rule below import NEITHER.
+
+The rule applies to a candidate's ANCESTORS, never to the directory the skill is named after. Junk arrives nested — `dist/skills/report/SKILL.md` — while a skill legitimately called `build` sits at `build/SKILL.md`. Over-exclusion is recoverable without a new setting: the rules run below the subdirectory, so a source pointed at `node_modules/@acme/skills` reaches inside deliberately.
+
+Over-exclusion is also reported rather than silent, because the rule is a guess about somebody else's repository. Discovery carries the excluded paths, not only a count. When an excluded path holds a name this source already mirrors, the exclusion is what took the skill away: the row is kept, and the sync warns with the path. A manual sync also returns `discovered` and `excluded`, and the panel prints them under the row when anything was skipped. The counts stay off the source row itself — a repository can hold hundreds of legitimately skipped files, and a standing warning about them teaches people to ignore the row.
+
+**Two files, one name.** A `SKILL.md` outranks a `prompts/<name>.md` of the same name, ranked by kind so the winner never depends on where either file sits. Two files of the SAME kind sharing a name import NEITHER, and the sync warns with both paths. Nothing here can rank them: taking the first by sorted path would make the skill somebody gets depend on the names of unrelated directories, and a file added later could quietly displace the skill they use. A name in that state stays in the upstream set, so the row that already holds it is kept rather than deleted.
+
+**Cost.** The manifest key is the git blob sha, which the tree read carries, so the second compare runs before any file is read. On a repository of eight skills, a commit that moved but changed no skill costs two requests instead of eleven, and a first import costs ten instead of eleven. Content is still one contents read per skill: the tree gives paths and blob shas, never bodies.
+
+That per-skill read is what the tree read does not bound. A tree that is not cut can carry 100,000 entries, so a whole-repository scan could queue an unbounded run of sequential content reads — which an anonymous read (60 requests per hour per IP) cannot finish, and which can outlast the sweep's five-minute claim lease. `MAX_SKILL_CANDIDATES` caps one sync at 300 skill files on both discovery paths, and a repository past it fails with the subdirectory named as the fix. Importing the first 300 of a longer list is not an option, for the truncation reason below.
+
+**When the tree is cut.** GitHub returns at most 100,000 tree entries and reports the cut as `truncated: true`. Sync must never mirror from a cut listing, because the entries left out cannot be told apart from skills the repository no longer holds. So a cut tree falls back to the per-directory walk when the source names a subdirectory to walk — that walk is bounded by the contents endpoint's own 500-entry guard — and fails the sync when it does not.
+
+**When the subdirectory is not there.** A subdirectory that is absent from the tree fails the sync, and reconciles nothing. This is the one guard the tree read had to be given back. The old scan asked the contents endpoint for the subdirectory, so a directory that was renamed, moved, or misspelled answered 404 and the mirrored rows survived for the next attempt. A tree read never 404s on a bad subdirectory: it returns the whole repository, the prefix filter matches nothing, and "the directory is gone" becomes indistinguishable from "the directory is empty". Testing for the directory itself is what tells them apart, and the tree already carries the answer. A subdirectory that IS there and holds no `SKILL.md` is a real emptiness, and the rows are reconciled.
+
+### A delete needs a listing as wide as the one that imported
+
+"Absent from this scan" only means "deleted upstream" when this scan looked everywhere the last one did. Four things can narrow a scan below what mirrored the rows, and each is handled rather than left to read as a deletion. A stale mirror is recoverable on the next sync; a deleted skill is not.
+
+| What narrowed the scan | What the sync does instead |
+| --- | --- |
+| The tree was cut, so discovery fell back to the directory walk | Imports and updates, applies NO deletions, and reports `warning` naming any mirrored skill the walk did not reach |
+| The subdirectory is not in the tree | Fails, reconciles nothing, and names the branch and the re-import as the two fixes |
+| A candidate sits under a directory that is not scanned | Keeps the row whose name it holds, and warns with the path |
+| A file discovery found could not be read | Keeps the row, warns with the path, and marks the sync incomplete |
+
+The directory-walk row is the sharpest of the four. The walk reads ONE level under ONE directory; the tree read that mirrored the rows read every depth. A source whose skills sit at `<dir>/team/escalate/SKILL.md` therefore imports two skills by tree and finds one by walk, and reconciling that difference would delete a skill that is still in the repository. Reporting `warning` on every walk is deliberate: a source whose deletions no longer apply is degraded, and it must not look healthy.
+
+**An incomplete sync records no commit.** The two cheap compares key off `last_sha` and `last_manifest_hash`. Writing either after a partial read tells the next poll that this commit is already mirrored, which is what would make one lost read permanent — only an edit to that exact file would ever retry it. So a sync that could not read a file it discovered leaves both columns where they were, and the next poll reads the commit again.
+
+### What a sync reports when it imports nothing
+
+"Valet could not read the repository", "Valet read it and it holds no `SKILL.md`", and "Valet read it and every skill in it was skipped" are three different outcomes, and `status: "ok"` with zero counts described all three. The panel showed `0 skills · synced just now` and no reason.
+
+Discovery now counts what it found, and the sync reports:
+
+| What happened | `status` | The message on the row |
+| --- | --- | --- |
+| The repository could not be read | `error` | the reader's own text, which names the credential and the action |
+| The configured subdirectory is not in the tree | `error` | that the directory is not there, and to check the branch or re-import without one |
+| Candidates found, and all under directories that are not scanned | `warning` | how many, and to set the subdirectory that holds the skills |
+| No candidate under a configured subdirectory | `warning` | to check the subdirectory, or to import the repository again without one |
+| No candidate anywhere in the repository | `warning` | to add a directory that holds a `SKILL.md` file, or to check the branch |
+| Candidates found, some skipped | `warning` | one line per skipped skill, as before |
+| Skills imported, updated, or deleted | `ok` | none |
+
+The "holds none" message fires only when discovery found zero candidates. A repository that yielded candidates and skipped every one of them reports those per-skill lines alone: a second message about the repository would hide the real reason behind a wrong one.
+
+Each "holds none" message also names how many mirrored skills the sync removed, when it removed any. The count is the part the reader acts on: advice to import the repository again is no use if it arrives without saying that the skills are already gone.
+
+A poll that stops at the head-commit compare keeps the previous poll's warning on the row. It read nothing, so it learned nothing that could clear that report — and without this rule a source whose skills are all broken flipped to a silent `ok` on the next sweep.
+
+Carrying the report forward is not enough on its own, because a failure destroys it: `recordFailure` overwrites `last_error` with the transport message. A source that warns, then errors, then polls a moved commit holding the same skills would take the manifest compare and be written back as `ok`, with the skill still missing, until that file's blob sha changed. So an errored source takes NEITHER cheap compare. It re-reads once, regenerates the report from the repository, and clears the error honestly.
+
+`SkillSourceSyncResponse` carries `discovered` and `excluded`, and the panel prints them under the row after a manual sync when anything was skipped. The list row (`SkillSourceSummary`) has no column for them, so its standing signal stays `status` plus `lastMessage`.
+
 ### Which credential a sync uses
 
 The sweep runs unattended, on a timer, across every org. It has no request context, so the only identity a sync can use is what the source row carries. `packages/api/src/services/skill-source-credential.ts` turns that row into one credential, and it is the only place that choice is made.
@@ -194,7 +267,8 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 - **Bundled resources.** A spec skill may ship `scripts/`, `references/`, and `assets/`. Sync reads `SKILL.md` and nothing else. A skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open. Carrying those files needs its own table, and `github.read_repo_file` decodes as UTF-8, so it cannot carry a binary asset either.
 - **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
-- **Directories of 500 entries or more.** Sync reads one level of the tracked directory through GitHub's contents endpoint and keeps 500 entries. A listing that reaches that cut fails the sync and reconciles nothing, because the entries past it cannot be told apart from skills the repository no longer holds. Track a subdirectory that fits under the cut.
+- **Repositories of 100,000 files or more.** GitHub cuts a recursive tree at 100,000 entries, or 7 MB. A source that names a subdirectory falls back to the per-directory walk, which has its own cut at 500 entries and applies no deletions. A source that tracks the whole repository fails the sync and reconciles nothing, because the entries past the cut cannot be told apart from skills the repository no longer holds. Set the subdirectory that holds the skills.
+- **More than 300 skill files in one repository.** The tree finds them in one request; reading them costs one request each, in sequence. A sync past that cap fails and names the subdirectory as the fix, rather than importing a prefix of the list. Raising it needs the content reads to run in parallel and the sweep's claim lease to cover them.
 - **Workflow import from a private repository.** `GET /api/workflows/import/repo-file` still reads with no credential, so it reaches public repositories only. The reader takes a credential now, and that route has the caller in hand, so the fix is to resolve the caller's own token (`resolveUserApiToken`) and pass it. It must not use the App installation token: that reaches every repository the App covers, and the caller may not.
 - **Write-back.** Sync reads. Nothing pushes a locally written skill into a repository.
 - **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.

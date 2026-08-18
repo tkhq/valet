@@ -1,12 +1,18 @@
 /**
- * Reads a GitHub repository for skill sync. Three operations, all over
- * endpoints the GitHub plugin's own actions already use:
+ * Reads a GitHub repository for skill sync. Four operations:
  *
- *   1. `headSha`      — `GET /repos/{owner}/{repo}/commits/{ref}`
- *   2. `listDirectory` — `GET /repos/{owner}/{repo}/contents/{path}`
- *   3. `readFile`      — the same contents endpoint, on a file path
+ *   1. `head`          — `GET /repos/{owner}/{repo}/commits/{ref}`
+ *   2. `listTree`      — `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1`
+ *   3. `listDirectory` — `GET /repos/{owner}/{repo}/contents/{path}`
+ *   4. `readFile`      — the same contents endpoint, on a file path
  *
- * The paging loop for (2) is `collectDirectoryEntries` from
+ * (2) is how skill sync finds the skills. One recursive tree read returns
+ * every path in the repository, so sync no longer needs to be told which
+ * directory holds the skills, and no longer spends one request per candidate
+ * directory to find out. (3) stays for the one case (2) cannot serve: a
+ * repository large enough for GitHub to cut the tree.
+ *
+ * The paging loop for (3) is `collectDirectoryEntries` from
  * `@valet/plugin-github/repo-contents`, the module behind
  * `github.list_repo_directory`. Only the transport differs: the plugin action
  * builds an Octokit from the caller's stored credential, and this reader
@@ -193,6 +199,80 @@ export class SkillRepoListingTruncatedError extends Error {
   }
 }
 
+/**
+ * Thrown when GitHub cut the recursive tree. GitHub returns at most 100,000
+ * tree entries, or 7 MB, and reports the cut as `truncated: true`.
+ *
+ * Its own class, and a failure rather than a warning, for the reason
+ * `SkillRepoListingTruncatedError` gives: skill sync reads "absent from the
+ * listing" as "deleted upstream", so a cut tree must never reconcile.
+ *
+ * Sync throws this only when the source tracks the whole repository. A source
+ * that names a subdirectory has somewhere smaller to look, so sync reads that
+ * directory through the contents endpoint instead of failing.
+ */
+export class SkillRepoTreeTruncatedError extends Error {
+  readonly code = "skill_repo_tree_truncated";
+  readonly statusCode = 400;
+  constructor(repoFullName: string) {
+    super(
+      `${repoFullName} holds more files than Valet can read in one listing, so Valet read part of it. Nothing was imported, updated, or deleted: the files left out look exactly like skills removed from the repository. Set the subdirectory that holds the skills, by importing its /tree/ URL.`,
+    );
+    this.name = "SkillRepoTreeTruncatedError";
+  }
+}
+
+/**
+ * Thrown when the configured subdirectory is not in the tree at this commit.
+ *
+ * A failure, not an empty result, and it is the one guard that survived the
+ * move to the tree read. The contents endpoint answered 404 for a
+ * subdirectory that was renamed, moved, or misspelled, so the sync failed
+ * and the mirrored rows were kept for the next attempt. A tree read answers
+ * the whole repository instead, so the same mistake now looks like "the
+ * directory is there and holds no skill" — and reconcile deletes every
+ * mirrored row on the strength of it.
+ *
+ * The message names both actions, because the reader does not know which
+ * happened: the branch can be wrong, or the directory can have moved.
+ */
+export class SkillRepoSubpathNotFoundError extends Error {
+  readonly code = "skill_repo_subpath_not_found";
+  readonly statusCode = 404;
+  constructor(repoFullName: string, subpath: string, ref: string) {
+    const where = ref.length > 0 ? ref : "the default branch";
+    super(
+      `${repoFullName} has no directory ${subpath} on ${where}. Nothing was imported, updated, or deleted, so the skills already mirrored from this source are still here. Check the branch, or remove the source and import the repository again without a subdirectory.`,
+    );
+    this.name = "SkillRepoSubpathNotFoundError";
+  }
+}
+
+/**
+ * Thrown when one commit holds more skill files than one sync reads.
+ *
+ * The tree read costs one request, but each skill file costs one more, and
+ * those run one after the other. `MAX_SKILL_CANDIDATES` explains the number.
+ * A failure rather than a partial import, for the reason
+ * `SkillRepoListingTruncatedError` gives: importing the first N of a list
+ * and reconciling makes every file past N look deleted upstream.
+ */
+export class SkillRepoTooManySkillsError extends Error {
+  readonly code = "skill_repo_too_many_skills";
+  readonly statusCode = 400;
+  constructor(repoFullName: string, found: number, limit: number) {
+    super(
+      `${repoFullName} holds ${found} ${SKILL_FILE_NAME} files, and Valet reads at most ${limit} in one sync. Nothing was imported, updated, or deleted: the files left out look exactly like skills removed from the repository. Remove this repository, then import the /tree/ URL of the directory that holds the skills.`,
+    );
+    this.name = "SkillRepoTooManySkillsError";
+  }
+}
+
+/** The file name in the message above. Kept here rather than imported from
+ * `skill-discovery.ts`, so the error module does not depend on the module
+ * that throws it. */
+const SKILL_FILE_NAME = "SKILL.md";
+
 /** Thrown when a request passed `REQUEST_TIMEOUT_MS`. Separate from
  * `SkillRepoReadError` because no response arrived to carry a status. */
 export class SkillRepoTimeoutError extends Error {
@@ -212,15 +292,55 @@ export interface SkillDirectoryListing {
   complete: boolean;
 }
 
+/** A commit and the tree it holds, from one commit read. */
+export interface SkillRepoHead {
+  /** The commit itself. This is what sync stores as `last_sha`. */
+  sha: string;
+  /** `commit.tree.sha`. GitHub's tree endpoint documents a TREE sha as its
+   * input, so the tree read passes this rather than the commit sha. */
+  treeSha: string;
+}
+
+/** One entry of a recursive tree read. */
+export interface SkillTreeEntry {
+  /** Path from the repository root. Never has a leading slash. */
+  path: string;
+  /** `blob` for a file, `tree` for a directory. */
+  type: string;
+  /** Git file mode. `120000` is a symlink, whose blob holds a path string
+   * rather than the file it points at. */
+  mode: string;
+  /** Blob or tree sha. For a blob this is the content identity, which is
+   * what lets sync compare a file without reading it. */
+  sha: string;
+}
+
+export interface SkillTreeListing {
+  entries: SkillTreeEntry[];
+  /** True when GitHub cut the tree. See `SkillRepoTreeTruncatedError`. */
+  truncated: boolean;
+}
+
+/** One file, with the identity the tree read also carries. */
+export interface SkillRepoFile {
+  text: string;
+  /** Git blob sha. Equal to the `sha` of the same path's tree entry, so a
+   * file read through either path produces the same manifest. */
+  blobSha: string;
+}
+
 /** What skill sync needs from a repository host. One implementation ships
  * (`GitHubSkillRepoReader`); tests point it at a fixture server. */
 export interface SkillRepoReader {
-  /** Commit the ref points at. An empty ref means the default branch. */
-  headSha(repoFullName: string, ref: string): Promise<string>;
+  /** Commit the ref points at, and its tree. An empty ref means the default
+   * branch. */
+  head(repoFullName: string, ref: string): Promise<SkillRepoHead>;
+  /** Every path under `treeSha`, in one request. */
+  listTree(repoFullName: string, treeSha: string): Promise<SkillTreeListing>;
   /** One level of `path`. Pass a commit as `ref` to pin the read. */
   listDirectory(repoFullName: string, path: string, ref: string): Promise<SkillDirectoryListing>;
-  /** File body, or null when the path holds no file. */
-  readFile(repoFullName: string, path: string, ref: string): Promise<string | null>;
+  /** File body and blob sha, or null when the path holds no file. */
+  readFile(repoFullName: string, path: string, ref: string): Promise<SkillRepoFile | null>;
 }
 
 export interface GitHubSkillRepoReaderOptions {
@@ -276,19 +396,45 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     this.credential = describeCredential(credential);
   }
 
-  async headSha(repoFullName: string, ref: string): Promise<string> {
+  async head(repoFullName: string, ref: string): Promise<SkillRepoHead> {
     const target = ref.length > 0 ? ref : DEFAULT_REF;
     const url = `${this.apiUrl}/repos/${encodePath(repoFullName)}/commits/${encodePath(target)}`;
-    const data = await this.getJson(url, repoFullName, `${repoFullName}@${target}`);
+    const what = `${repoFullName}@${target}`;
+    const data = await this.getJson(url, repoFullName, what);
     const sha = isRecord(data) ? data.sha : undefined;
     if (typeof sha !== "string" || sha.length === 0) {
-      throw new SkillRepoReadError(
-        `${repoFullName}@${target}`,
-        200,
-        "The commit response carried no sha. Retry the sync.",
-      );
+      throw new SkillRepoReadError(what, 200, "The commit response carried no sha. Retry the sync.");
     }
-    return sha;
+    // The tree sha comes free with the commit, which is why discovery costs
+    // no extra request. Every commit carries one, so an absent value is a
+    // malformed response and not a repository state.
+    const commit = isRecord(data) && isRecord(data.commit) ? data.commit : undefined;
+    const tree = commit !== undefined && isRecord(commit.tree) ? commit.tree : undefined;
+    const treeSha = tree?.sha;
+    if (typeof treeSha !== "string" || treeSha.length === 0) {
+      throw new SkillRepoReadError(what, 200, "The commit response carried no tree sha. Retry the sync.");
+    }
+    return { sha, treeSha };
+  }
+
+  async listTree(repoFullName: string, treeSha: string): Promise<SkillTreeListing> {
+    const url = new URL(
+      `${this.apiUrl}/repos/${encodePath(repoFullName)}/git/trees/${encodePath(treeSha)}`,
+    );
+    url.searchParams.set("recursive", "1");
+    const what = `${repoFullName} tree ${treeSha}`;
+    const data = await this.getJson(url.toString(), repoFullName, what);
+    if (!isRecord(data) || !Array.isArray(data.tree)) {
+      throw new SkillRepoReadError(what, 200, "The tree response carried no entries. Retry the sync.");
+    }
+    const entries: SkillTreeEntry[] = [];
+    for (const raw of data.tree) {
+      if (!isRecord(raw)) continue;
+      const { path, type, mode, sha } = raw;
+      if (typeof path !== "string" || typeof type !== "string" || typeof sha !== "string") continue;
+      entries.push({ path, type, mode: typeof mode === "string" ? mode : "", sha });
+    }
+    return { entries, truncated: data.truncated === true };
   }
 
   async listDirectory(
@@ -306,13 +452,13 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
       throw new SkillRepoReadError(
         `${repoFullName}/${path}`,
         200,
-        `That path is a ${listing.type}, not a directory. Point the source at the directory that holds the skill directories.`,
+        `That path is a ${listing.type}, not a directory. Set the source subdirectory to a directory in the repository, or remove it to scan the whole repository.`,
       );
     }
     return { entries: listing.entries, complete: listing.complete };
   }
 
-  async readFile(repoFullName: string, path: string, ref: string): Promise<string | null> {
+  async readFile(repoFullName: string, path: string, ref: string): Promise<SkillRepoFile | null> {
     const url = this.contentsUrl(repoFullName, path, { ref });
     const what = `${repoFullName}/${path}`;
     const res = await this.get(url, what);
@@ -320,8 +466,17 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     const data = await this.readBody(res, repoFullName, what);
     if (!isRecord(data) || data.type !== "file") return null;
     const raw = typeof data.content === "string" ? data.content : "";
-    if (data.encoding !== "base64") return raw;
-    return Buffer.from(raw.replace(/\n/g, ""), "base64").toString("utf8");
+    const text =
+      data.encoding === "base64"
+        ? Buffer.from(raw.replace(/\n/g, ""), "base64").toString("utf8")
+        : raw;
+    // The blob sha is the manifest key, so a response without one cannot be
+    // mirrored: two different versions of the file would hash the same and
+    // the sync would report no change. GitHub sends `sha` on every file.
+    if (typeof data.sha !== "string" || data.sha.length === 0) {
+      throw new SkillRepoReadError(what, 200, "The file response carried no sha. Retry the sync.");
+    }
+    return { text, blobSha: data.sha };
   }
 
   /** The `ContentsRequest` seam `collectDirectoryEntries` drives. */

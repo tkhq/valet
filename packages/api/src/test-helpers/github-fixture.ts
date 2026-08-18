@@ -62,8 +62,18 @@ export interface GithubFixtureHandlers {
   /** `GET /repos/:owner/:repo` (prebuild orchestration, Task 3 — head-sha
    * resolution reads `default_branch` from here). */
   getRepo?: (owner: string, repo: string) => GithubFixtureResponse;
-  /** `GET /repos/:owner/:repo/commits/:ref` */
+  /** `GET /repos/:owner/:repo/commits/:ref`. Use `commitBody` for the shape
+   * skill sync needs — it reads `commit.tree.sha` as well as `sha`. */
   getCommit?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/git/trees/:sha`. `recursive` is the parsed
+   * `?recursive=` query value, so a fixture can assert the caller asked for
+   * the whole tree rather than one level. */
+  getTree?: (
+    owner: string,
+    repo: string,
+    sha: string,
+    recursive: string | undefined,
+  ) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/contents/:path` — `path` may contain slashes
    * (e.g. `.valet/prebuild.yaml`), so it's reconstructed from the raw
    * request path rather than a single Hono `:path` param. `ref` is the
@@ -127,9 +137,50 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   }),
   updateHookConfig: () => ({ body: { content_type: "json", insecure_ssl: "0", secret: "********" } }),
   getRepo: () => ({ body: { default_branch: "main" } }),
-  getCommit: () => ({ body: { sha: "fixture-head-sha" } }),
+  getCommit: () => ({ body: commitBody("fixture-head-sha") }),
+  getTree: () => ({ body: { sha: "fixture-tree-sha", tree: [], truncated: false } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),
 };
+
+/**
+ * A commit response in the shape GitHub sends. Skill sync reads two fields
+ * from it: the commit `sha`, and `commit.tree.sha`, which it passes to the
+ * tree endpoint. A fixture that answers with the `sha` alone makes the
+ * reader fail, so tests build the body through this.
+ */
+export function commitBody(sha: string, treeSha = `tree-${sha}`): Record<string, unknown> {
+  return { sha, commit: { tree: { sha: treeSha } } };
+}
+
+/** One entry of a git tree response. `mode` defaults to a regular file. */
+export function treeEntry(
+  path: string,
+  opts: { sha?: string; mode?: string; type?: "blob" | "tree" } = {},
+): Record<string, unknown> {
+  return {
+    path,
+    type: opts.type ?? "blob",
+    mode: opts.mode ?? "100644",
+    sha: opts.sha ?? `blob-${path}`,
+  };
+}
+
+/**
+ * A file response from the contents endpoint, in the shape GitHub sends:
+ * base64 content and the git blob sha. The reader compares that sha with the
+ * one the tree carried, so a fixture that leaves it out changes what the
+ * code under test does.
+ */
+export function contentsBody(text: string, blobSha: string): GithubFixtureResponse {
+  return {
+    body: {
+      type: "file",
+      encoding: "base64",
+      content: Buffer.from(text, "utf8").toString("base64"),
+      sha: blobSha,
+    },
+  };
+}
 
 /** Starts a fake GitHub API server on port 0. Callers MUST `await close()`
  * (e.g. in `finally`/`afterEach`) — nothing else stops the listener. */
@@ -262,11 +313,26 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     return c.json(body as object, status ?? 200);
   });
 
+  // Registered before the contents route only for readability; Hono matches
+  // on the path, and the two cannot overlap.
+  app.get("/repos/:owner/:repo/git/trees/:sha", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const sha = c.req.param("sha");
+    const recursive = c.req.query("recursive");
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.getTree(owner, repo, sha, recursive);
+    return c.json(body as object, status ?? 200);
+  });
+
   app.get("/repos/:owner/:repo/contents/*", (c) => {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
     const prefix = `/repos/${owner}/${repo}/contents/`;
-    const path = c.req.path.slice(prefix.length);
+    // The reader percent-encodes each path segment, as GitHub requires. The
+    // handler is given the path the caller meant, so a directory named
+    // `@acme` reaches a fixture as `@acme` and not as `%40acme`.
+    const path = decodeURIComponent(c.req.path.slice(prefix.length));
     const ref = c.req.query("ref");
     record(c, { owner, repo, path });
     const { status, body } = handlers.getContents(owner, repo, path, ref);

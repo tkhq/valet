@@ -1838,7 +1838,8 @@ export interface SkillSourceSummary {
   repo: string;
   /** Branch, tag, or commit. Empty means the default branch. */
   ref: string;
-  /** Directory that holds the skill directories. Empty means the root. */
+  /** Narrows the scan to one directory. Empty scans the whole repository,
+   * which is the normal case: sync finds a `SKILL.md` at any depth. */
   subpath: string;
   ownerType: "user" | "team" | "org";
   ownerId: string;
@@ -1894,6 +1895,23 @@ export interface SkillSourceSyncResponse {
   deleted: number;
   /** One line per skill the sync skipped, each naming the fix. */
   warnings: string[];
+  /** `SKILL.md` files the sync found, before names collided and before any
+   * file was parsed. Zero with `source.status: "ok"` cannot happen: a sync
+   * that finds nothing reports `warning` and says why on
+   * `source.lastMessage`. This count is what separates "the repository holds
+   * no skill" from "it holds skills and every one of them was skipped". */
+  discovered: number;
+  /**
+   * `SKILL.md` files found under a directory the scan skips — dependency
+   * trees, build output, test trees, and downloaded agent plugins.
+   *
+   * Reported here and not on the source row, because a repository can hold
+   * hundreds of these legitimately and a standing warning about them would
+   * train people to ignore the row. The one case that DOES reach the row is
+   * an excluded path whose skill this source already mirrors: that is the
+   * exclusion rule taking a skill away, and it warns per path.
+   */
+  excluded: number;
 }
 
 export interface DeleteSkillSourceResponse {
