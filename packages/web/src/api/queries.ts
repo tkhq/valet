@@ -17,6 +17,8 @@ import type {
   CreateThreadResponse,
   GetSessionResponse,
   ListDecisionsResponse,
+  FilesChangedResponse,
+  SessionLogResponse,
   ListIdentityLinksResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
@@ -52,6 +54,8 @@ export const qk = {
       ? (["sessions", id, "messages", threadId] as const)
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
+  sessionLog: (id: string) => ["sessions", id, "log"] as const,
+  filesChanged: (id: string) => ["sessions", id, "files-changed"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
@@ -108,24 +112,51 @@ export function useSession(id: string, opts?: UseQueryOptions<GetSessionResponse
   });
 }
 
-export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>) {
+/**
+ * The session's threads, newest first, capped server-side (V1 port #13).
+ *
+ * `limit` is part of the query key so raising it refetches instead of
+ * answering from the smaller page's cache. The response carries `total`, so
+ * the sidebar knows whether the cap hid anything.
+ */
+export const DEFAULT_THREAD_LIMIT = 100;
+
+export function useThreads(
+  id: string,
+  opts?: UseQueryOptions<ListThreadsResponse> & { limit?: number },
+) {
+  const { limit = DEFAULT_THREAD_LIMIT, ...queryOpts } = opts ?? {};
+  // The default limit keys to the bare `qk.threads(id)`, so a caller that
+  // asks for the default and one that passes no limit at all share ONE cache
+  // entry — otherwise the same list would be fetched twice per page. A
+  // raised limit gets its own key so it refetches instead of answering from
+  // the smaller page. Both stay under the `qk.threads(id)` prefix, which is
+  // what every existing invalidation matches on.
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threads(id),
-    queryFn: () => api.listThreads(id),
+    queryKey: limit === DEFAULT_THREAD_LIMIT ? qk.threads(id) : [...qk.threads(id), limit],
+    queryFn: () => api.listThreads(id, { limit }),
     enabled: !!id,
-    ...opts,
+    ...queryOpts,
   });
 }
 
 /** Archived threads (`GET /threads?archived=1`) — display state only; an
  * archived thread's history is intact and unarchive restores it to the
  * default list. */
-export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<ListThreadsResponse>>) {
+export function useArchivedThreads(
+  id: string,
+  opts?: Partial<UseQueryOptions<ListThreadsResponse>> & { limit?: number },
+) {
+  // The archived list is capped the same way the main one is. Before the cap
+  // existed this call returned every archived thread; passing no limit now
+  // takes the SERVER's default silently, which would truncate the list with
+  // no way past it. Keying the raised limit mirrors `useThreads`.
+  const { limit = DEFAULT_THREAD_LIMIT, ...queryOpts } = opts ?? {};
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threadsArchived(id),
-    queryFn: () => api.listThreads(id, { archived: true }),
+    queryKey: limit === DEFAULT_THREAD_LIMIT ? qk.threadsArchived(id) : [...qk.threadsArchived(id), limit],
+    queryFn: () => api.listThreads(id, { archived: true, limit }),
     enabled: !!id,
-    ...opts,
+    ...queryOpts,
   });
 }
 
@@ -282,6 +313,61 @@ export function useDecisions(
     queryKey: qk.decisions(sessionId),
     queryFn: () => api.listDecisions(sessionId),
     enabled: !!sessionId,
+    ...opts,
+  });
+}
+
+/**
+ * How often the log and the file list refresh while their panel is open.
+ *
+ * Both are panels a person opens to watch a session work, so they follow the
+ * session without a manual reload. Neither rides the WebSocket: the log is a
+ * page over a durable cursor, and re-reading the page is simpler and cannot
+ * drift from the stored order. Ten seconds is slower than the transcript on
+ * purpose — these are reference surfaces, not the conversation.
+ */
+const INSIGHT_POLL_MS = 10_000;
+
+/**
+ * How many events one log page covers. This is a page of raw engine events,
+ * not of rendered rows: the projection drops the streaming plane, so a page
+ * of 500 events yields fewer rows than that.
+ */
+const LOG_PAGE_EVENTS = 500;
+
+/**
+ * The session's lifecycle and tool log (V1 port #8).
+ *
+ * Passing no `fromOffset` asks the route for the NEWEST page, which is the
+ * point of the panel — a reader opens it to see what the session is doing
+ * now. Reading forward from the start instead would pin the panel to the
+ * session's first minutes and every poll would re-fetch that same page.
+ * The response carries `hasOlder` so the panel can say the page is a
+ * window rather than the whole history.
+ */
+export function useSessionLog(
+  sessionId: string,
+  opts?: UseQueryOptions<SessionLogResponse>,
+) {
+  return useQuery<SessionLogResponse>({
+    queryKey: qk.sessionLog(sessionId),
+    queryFn: () => api.sessionLog(sessionId, { limit: LOG_PAGE_EVENTS }),
+    enabled: !!sessionId,
+    refetchInterval: INSIGHT_POLL_MS,
+    ...opts,
+  });
+}
+
+/** The files this session wrote to (V1 port #4). */
+export function useFilesChanged(
+  sessionId: string,
+  opts?: UseQueryOptions<FilesChangedResponse>,
+) {
+  return useQuery<FilesChangedResponse>({
+    queryKey: qk.filesChanged(sessionId),
+    queryFn: () => api.filesChanged(sessionId),
+    enabled: !!sessionId,
+    refetchInterval: INSIGHT_POLL_MS,
     ...opts,
   });
 }

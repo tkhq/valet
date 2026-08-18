@@ -18,6 +18,7 @@ import {
   usePendingGateForThread,
   useQueueStateForThread,
 } from "~/stores/stream";
+import { ActivityPanel } from "~/components/session/activity-panel";
 import { Composer } from "~/components/session/composer";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
@@ -89,6 +90,10 @@ export function SessionView({
   // make itself (/model command, other tabs, direct API).
   useInvalidateSessionOnModelSwitch(sessionId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
+  // The Activity drawer (log + changed files). Local state, not a search
+  // param: it is a reading aid, not a place, so a shared link should open on
+  // the conversation rather than on somebody else's open drawer.
+  const [activityOpen, setActivityOpen] = useState(false);
   const tab = activeTab ?? localTab;
   const setTab = onTabChange ?? setLocalTab;
   const threads = useThreads(sessionId);
@@ -226,6 +231,8 @@ export function SessionView({
           sandbox={stream.sandbox}
           threadId={effectiveThreadId}
           messages={stream.messages}
+          activityOpen={activityOpen}
+          onToggleActivity={() => setActivityOpen((open) => !open)}
         />
       )}
       <SandboxTabs
@@ -236,21 +243,29 @@ export function SessionView({
         sandbox={stream.sandbox}
       />
       {tab === "chat" ? (
-        <>
-          <MessageList
-            messages={stream.messages}
-            threadId={effectiveThreadId}
-            onOpenChild={onOpenChild}
-            agentBusy={agentBusy}
-          />
-          {stream.error && (
-            <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
-              <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
-            </div>
+        // The drawer sits beside the conversation, not over it: a person
+        // opens the log to read it WHILE the agent works, and an overlay
+        // would hide the thing being explained.
+        <div className="flex-1 flex min-h-0">
+          <div className="flex-1 flex flex-col min-h-0">
+            <MessageList
+              messages={stream.messages}
+              threadId={effectiveThreadId}
+              onOpenChild={onOpenChild}
+              agentBusy={agentBusy}
+            />
+            {stream.error && (
+              <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
+                <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
+              </div>
+            )}
+            {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
+            <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
+          </div>
+          {activityOpen && !panel && (
+            <ActivityPanel sessionId={sessionId} onClose={() => setActivityOpen(false)} />
           )}
-          {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
-          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
-        </>
+        </div>
       ) : null}
     </div>
   );

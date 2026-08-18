@@ -298,6 +298,19 @@ export interface ThreadSummary {
 
 export interface ListThreadsResponse {
   threads: ThreadSummary[];
+  /**
+   * How many threads the session has in the requested set (archived or
+   * not), before the cap. A client shows "load more" when this exceeds
+   * `threads.length`.
+   *
+   * The cap exists because thread creation is not bounded by human
+   * activity: a workflow's `orchestrator` node opens one thread per RUN
+   * (`signal:workflow:{runId}`), so a workflow on a 15-minute schedule adds
+   * ~96 threads a day to the assistant's session. Measured sessions hold
+   * single digits, so nothing needs a cursor — this is a ceiling on an
+   * unbounded render, not a pagination system.
+   */
+  total: number;
 }
 
 export interface CreateThreadRequest {
@@ -516,6 +529,127 @@ export interface DecisionResolution {
 
 export interface ListDecisionsResponse {
   gates: DecisionGate[];
+}
+
+// ── REST: session log ─────────────────────────────────────────────────────
+
+/**
+ * What kind of thing happened, for the log's icon and filter chips. The
+ * engine emits many more event types than this; the log keeps the ones a
+ * person reads to answer "what is this session doing" and drops the
+ * per-token streaming deltas, which are transcript material.
+ *
+ * - `lifecycle` — session, sandbox, and thread state changes.
+ * - `tool` — a tool call started or finished.
+ * - `turn` — a turn or a queued submission started or settled.
+ * - `error` — the engine reported a failure.
+ */
+export type SessionLogKind = "lifecycle" | "tool" | "turn" | "error";
+
+/**
+ * One row of the session log. `offset` is the engine event stream's own
+ * cursor, so a client asks for what came after the last row it holds.
+ */
+export interface SessionLogEntry {
+  /** Opaque cursor. Pass the last one back as `fromOffset` to read forward. */
+  offset: string;
+  /** Engine event type, verbatim (`tool_start`, `sandbox_status`, …). */
+  type: string;
+  kind: SessionLogKind;
+  /** One line naming what happened. */
+  summary: string;
+  /** Second line with the specifics, when there are any. */
+  detail?: string;
+  threadId?: string;
+  at: number;
+}
+
+export interface SessionLogResponse {
+  entries: SessionLogEntry[];
+  /** Cursor to pass as the next `fromOffset`. */
+  nextOffset: string;
+  /**
+   * True when the session has events OLDER than the first entry here.
+   *
+   * A request with no `fromOffset` gets the newest page, so this says the
+   * page is a window on a longer history and not the whole of it. A caller
+   * that renders the page without saying so presents a capped log as a
+   * complete one — and blaming the gap on retention would misattribute it.
+   */
+  hasOlder: boolean;
+  /**
+   * Age of the oldest row the engine still keeps, in days. The engine
+   * deletes events for submissions that settled before this cutoff, so a
+   * log older than this is gone and the panel says so rather than
+   * presenting a truncated history as complete.
+   */
+  retentionDays: number;
+}
+
+// ── REST: files changed ───────────────────────────────────────────────────
+
+/** One file the session wrote to, with its line counts. */
+export interface ChangedFile {
+  path: string;
+  /** Previous path, when the diff records a rename. */
+  previousPath?: string;
+  additions: number;
+  deletions: number;
+  status: "added" | "modified" | "deleted" | "renamed";
+  /** True when the diff recorded a binary change, so the counts are 0. */
+  binary: boolean;
+}
+
+/**
+ * Why the file list is empty. The engine captures a diff of the workspace
+ * against the session's start ref when a submission settles; each reason is
+ * one way that capture did not happen, and each names what the reader can
+ * do about it.
+ */
+export type FilesChangedUnavailable =
+  | "no_repository"
+  | "repository_unreadable"
+  | "no_patches_yet"
+  | "capture_failed"
+  | "storage_unavailable";
+
+export interface FilesChangedResponse {
+  files: ChangedFile[];
+  /** Totals over `files`, so a caller does not re-add them. */
+  additions: number;
+  deletions: number;
+  /**
+   * Absent when `files` holds the answer. Present when the list is empty
+   * for a reason the reader should see instead of an empty table.
+   */
+  unavailable?: FilesChangedUnavailable;
+  /** Sentence for the reader, naming the action that fills the list. */
+  unavailableMessage?: string;
+  /**
+   * True when at least one stored diff hit the engine's size cap, so the
+   * counts below are a floor, not a total.
+   */
+  truncated: boolean;
+  /**
+   * When the served diff was captured. Absent when `files` is empty.
+   *
+   * The list is a snapshot of one settled turn, not a live read, so it
+   * needs a timestamp to be read correctly.
+   */
+  capturedAt?: number;
+  /**
+   * True when a LATER turn settled without capturing a patch, so the served
+   * list predates the session's current state.
+   *
+   * Capture fails for ordinary reasons — the sandbox went away, `git diff`
+   * errored, the blob write failed — and a long-running session is the one
+   * most likely to hit them. Without this flag the panel shows turn 1's
+   * file list as the session's changes and says nothing, which is the exact
+   * silent-subset failure the reason codes exist to prevent.
+   */
+  stale?: boolean;
+  /** Sentence for the reader when `stale` is set, naming what to do. */
+  staleMessage?: string;
 }
 
 /**

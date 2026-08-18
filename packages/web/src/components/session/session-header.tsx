@@ -36,6 +36,7 @@ import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
 import { queueBusy, useQueueStateForThread, type AgentStatus, type ConnectionStatus } from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
+import { ActivityToggle } from "./activity-panel";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { buildTranscript } from "./transcript";
@@ -78,6 +79,8 @@ export function SessionHeader({
   sandbox,
   threadId,
   messages,
+  activityOpen,
+  onToggleActivity,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -87,6 +90,14 @@ export function SessionHeader({
   sandbox?: { state: string; epoch: number };
   threadId?: string;
   messages?: Message[];
+  /** True while the Activity drawer is open. */
+  activityOpen?: boolean;
+  /**
+   * Opens and closes the Activity drawer. Omitted by a host that renders no
+   * drawer, and the control is then omitted too — a button that toggles
+   * nothing is worse than no button.
+   */
+  onToggleActivity?: () => void;
 }) {
   const navigate = useNavigate();
   const del = useDeleteSession();
@@ -396,6 +407,9 @@ export function SessionHeader({
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
         <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
+        {onToggleActivity && (
+          <ActivityToggle open={activityOpen === true} onToggle={onToggleActivity} />
+        )}
         <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
           <Button
             variant="ghost"

@@ -20,6 +20,8 @@ import {
   type CommandRecency,
 } from "~/lib/command-recency";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
+import { useMentionTargets, type MentionTargets } from "~/hooks/use-mention-targets";
+import { applyMention, findMentionQuery, rankMentionTargets } from "~/lib/mention-targets";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
 import {
   acceptImages,
@@ -115,6 +117,12 @@ export function Composer({
   // sends text unchanged.
   const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
   const argMatch = /^\/(\S+) (\S*)$/.exec(text);
+  // `@`-mention autocomplete (V1 port #9). Unlike a slash command, a mention
+  // can sit anywhere in the message, so this needs the caret rather than a
+  // whole-text pattern. The caret is tracked on every event that can move
+  // it — typing, clicking, and arrow keys all do.
+  const [caret, setCaret] = useState(0);
+  const mention = commandQuery === null && argMatch === null ? findMentionQuery(text, caret) : null;
   const { data: commandsData } = useCommands(sessionId);
   const allCommands = commandsData?.commands ?? [];
   // Per-browser last-used ranking for the command popup. Loaded once per
@@ -142,22 +150,35 @@ export function Composer({
         );
       })
     : [];
+  // The two path sources are fetched only once a mention is open, so a
+  // composer nobody has typed `@` into makes no request for them.
+  const mentionTargets = useMentionTargets(sessionId, mention !== null);
+  const mentionMatches = mention !== null ? rankMentionTargets(mentionTargets.targets, mention.query) : [];
   const popupItems: PopupItem[] =
     commandQuery !== null
       ? commandsToItems(filteredCommands, commandRecency)
-      : filteredArgs.map((o) => ({
-          id: o.value,
-          label: o.value,
-          detail: o.label,
-          group: "Arguments",
-        }));
+      : mention !== null
+        ? mentionMatches.map((t) => ({
+            id: t.path,
+            label: t.path,
+            ...(t.detail !== undefined ? { detail: t.detail } : {}),
+            group: t.group,
+          }))
+        : filteredArgs.map((o) => ({
+            id: o.value,
+            label: o.value,
+            detail: o.label,
+            group: "Arguments",
+          }));
   // A command whose first argument is free text (argHint, no options) gets a
   // passive hint row while the argument is still empty — discoverability
   // without pretending we can complete it.
   const argNotice =
     argCommand && argOptions.length === 0 && argPrefix === "" && argCommand.argHint
       ? argCommand.argHint
-      : undefined;
+      : mention !== null && mentionMatches.length === 0
+        ? mentionNotice(mentionTargets, mention.query)
+        : undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const popupOpen = !dismissed && popupItems.length > 0;
@@ -166,7 +187,7 @@ export function Composer({
   useEffect(() => {
     setSelectedIndex(0);
     setDismissed(false);
-  }, [popupItems.length, commandQuery, argPrefix]);
+  }, [popupItems.length, commandQuery, argPrefix, mention?.query]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
   // request fires, so a mount-time consume would miss it.
@@ -385,6 +406,16 @@ export function Composer({
   function insertSelection(id: string) {
     if (commandQuery !== null) {
       setText(`/${id} `);
+    } else if (mention !== null) {
+      // A mention sits inside the message, so only its own token is
+      // replaced — everything the user typed around it stays, and the caret
+      // returns to just after the inserted path.
+      const next = applyMention(text, mention, id);
+      setText(next.text);
+      setCaret(next.caret);
+      requestAnimationFrame(() => {
+        inputRef.current?.setSelectionRange(next.caret, next.caret);
+      });
     } else if (argCommand) {
       setText(`/${argCommand.name} ${id} `);
     }
@@ -467,7 +498,9 @@ export function Composer({
             ariaLabel={
               commandQuery !== null
                 ? `Slash command suggestions for /${commandQuery}`
-                : `Argument suggestions for /${argCommand?.name ?? ""}`
+                : mention !== null
+                  ? `File suggestions for @${mention.query}`
+                  : `Argument suggestions for /${argCommand?.name ?? ""}`
             }
             selectedIndex={selectedIndex}
             onSelect={insertSelection}
@@ -477,7 +510,14 @@ export function Composer({
         <Textarea
           ref={inputRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            setCaret(e.target.selectionStart ?? e.target.value.length);
+          }}
+          // The caret also moves without the text changing — a click, an
+          // arrow key, Home/End. Without these the popup would keep
+          // completing the token the caret has already left.
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
@@ -536,6 +576,30 @@ export function Composer({
       </div>
     </form>
   );
+}
+
+/**
+ * What the popup says when a mention matches nothing.
+ *
+ * Four different states produce an empty match list, and only one of them
+ * means the session has nothing to suggest. Both sources turn on at the
+ * FIRST `@`, so the empty list a user sees on that keystroke is usually two
+ * requests in flight, and a failed request produces the same empty list as
+ * an empty result. Claiming "this session has no repository changes" in
+ * either case states something about the session that nobody checked.
+ *
+ * None of these offer the sandbox workspace: reading that needs a round
+ * trip to a running sandbox, which is not something a keystroke should
+ * start.
+ */
+function mentionNotice(targets: MentionTargets, query: string): string {
+  if (targets.isLoading) return "Loading file suggestions…";
+  if (targets.isError) return "Could not load file suggestions. Type the path instead.";
+  if (targets.targets.length === 0) {
+    return "No files to suggest. This session has no repository changes and no memory documents. Type the path instead.";
+  }
+  if (query === "") return "Type part of a file name.";
+  return `No file matches "${query}". Type the path instead.`;
 }
 
 /**

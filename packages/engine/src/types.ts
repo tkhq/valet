@@ -1229,6 +1229,22 @@ export interface EventStream {
     sessionId: string,
     opts?: { fromOffset?: string; limit?: number },
   ): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
+  /**
+   * Read the NEWEST durable events, up to `limit`, still in offset order —
+   * so the page reads oldest first, like `read`, but is taken from the end
+   * of the log rather than the start.
+   *
+   * `read` pages forward from a cursor, which is right for a consumer that
+   * follows a stream and remembers where it stopped. A reader that holds no
+   * cursor and wants current state needs the other end, and `read` cannot
+   * give it that without walking the whole log. `hasMore` is true when
+   * older durable events exist before the returned page, so a caller can
+   * say the page is a window and not the whole history.
+   */
+  readLatest(
+    sessionId: string,
+    opts?: { limit?: number },
+  ): Promise<{ events: StoredBusEvent[]; nextOffset: string; hasMore: boolean }>;
   /** Live fan-out. Durable events are delivered AFTER their append commits, in offset order per session. */
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe;
   /** Live-only fan-out for text_delta: no append, no offset. */
@@ -1352,6 +1368,26 @@ export interface SessionStore {
   listSessionIdsWithUnsettledSubmissions(): Promise<string[]>;
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
+  /**
+   * The two settled submissions a files-changed view needs, and nothing
+   * else:
+   *
+   * - `captured` — the newest one whose `settlePatch` holds a blob key.
+   *   Its patch is a whole-workspace diff, so it alone answers "what did
+   *   this session change".
+   * - `latestWithPatch` — the newest one that recorded any `settlePatch`
+   *   outcome, captured or not. When it is not `captured`, the served file
+   *   list is older than the session's last turn, and the caller must say
+   *   so rather than presenting a stale subset as current.
+   *
+   * Bounded on purpose. The same answer can be read out of
+   * `listSettledSubmissionsBefore` with an unreachable cutoff, but that
+   * SELECTs every settled row of the session, prompt content included, and
+   * this question is asked on a timer while a panel is open.
+   */
+  latestPatchCaptures(
+    sessionId: string,
+  ): Promise<{ captured: QueueItem | null; latestWithPatch: QueueItem | null }>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /**
    * Max last-touched timestamp across the session's queue items, or null when

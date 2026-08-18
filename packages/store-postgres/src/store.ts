@@ -920,6 +920,35 @@ export class PgSessionStore implements SessionStore {
     return result.rows.map((r) => queueItemRowToItem(rawToQueueItemRow(r)));
   }
 
+  async latestPatchCaptures(
+    sessionId: string,
+  ): Promise<{ captured: QueueItem | null; latestWithPatch: QueueItem | null }> {
+    // Two indexed single-row reads instead of one full scan of the
+    // session's settled history. A files-changed panel polls this while it
+    // is open, so the cost has to be flat in the session's age.
+    const [latestRows, capturedRows] = await Promise.all([
+      this.db.query(
+        `SELECT * FROM engine_queue_items
+         WHERE session_id = $1 AND status = 'settled' AND settle_patch_status IS NOT NULL
+         ORDER BY updated_at DESC LIMIT 1`,
+        [sessionId],
+      ),
+      this.db.query(
+        `SELECT * FROM engine_queue_items
+         WHERE session_id = $1 AND status = 'settled' AND settle_patch_status = 'captured'
+           AND settle_patch_blob_key IS NOT NULL
+         ORDER BY updated_at DESC LIMIT 1`,
+        [sessionId],
+      ),
+    ]);
+    const capturedRaw = capturedRows.rows[0];
+    const latestRaw = latestRows.rows[0];
+    return {
+      captured: capturedRaw ? queueItemRowToItem(rawToQueueItemRow(capturedRaw)) : null,
+      latestWithPatch: latestRaw ? queueItemRowToItem(rawToQueueItemRow(latestRaw)) : null,
+    };
+  }
+
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2", [
       sessionId,

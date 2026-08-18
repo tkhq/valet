@@ -107,6 +107,55 @@ export function runEventStreamContract(name: string, ctx: EventStreamContractCon
       expect(page3.nextOffset).toBe(offsets[4]);
     });
 
+    it("readLatest returns the NEWEST page, still oldest-first, and reports whether older events exist", async () => {
+      const stream = await ctx.factory();
+      const offsets: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const { offset } = await stream.append(ev("sess-1", { timestamp: i }), `key-${i}`);
+        offsets.push(offset);
+      }
+
+      // The distinction that matters: `read` with a limit takes the OLDEST
+      // page, `readLatest` takes the newest. A caller that wants current
+      // state and calls the wrong one is frozen on the session's beginning.
+      const oldest = await stream.read("sess-1", { limit: 2 });
+      expect(oldest.events.map((e) => e.timestamp)).toEqual([0, 1]);
+
+      const newest = await stream.readLatest("sess-1", { limit: 2 });
+      expect(newest.events.map((e) => e.timestamp)).toEqual([3, 4]);
+      expect(newest.nextOffset).toBe(offsets[4]);
+      expect(newest.hasMore).toBe(true);
+
+      const whole = await stream.readLatest("sess-1", { limit: 5 });
+      expect(whole.events.map((e) => e.timestamp)).toEqual([0, 1, 2, 3, 4]);
+      expect(whole.hasMore).toBe(false);
+
+      const overshoot = await stream.readLatest("sess-1", { limit: 50 });
+      expect(overshoot.events.map((e) => e.timestamp)).toEqual([0, 1, 2, 3, 4]);
+      expect(overshoot.hasMore).toBe(false);
+
+      // Following `nextOffset` from the newest page must reach the end, not
+      // loop: there is nothing after the last event.
+      const after = await stream.read("sess-1", { fromOffset: newest.nextOffset });
+      expect(after.events).toEqual([]);
+    });
+
+    it("readLatest on an empty session returns nothing and no cursor", async () => {
+      const stream = await ctx.factory();
+      const page = await stream.readLatest("sess-empty", { limit: 10 });
+      expect(page.events).toEqual([]);
+      expect(page.nextOffset).toBe("");
+      expect(page.hasMore).toBe(false);
+    });
+
+    it("readLatest scopes to one session", async () => {
+      const stream = await ctx.factory();
+      await stream.append(ev("sess-a", { timestamp: 1 }), "a1");
+      await stream.append(ev("sess-b", { timestamp: 2 }), "b1");
+      const a = await stream.readLatest("sess-a", { limit: 10 });
+      expect(a.events.map((e) => e.timestamp)).toEqual([1]);
+    });
+
     it("subscribe({ sessionId }) receives appended events with their offsets, in append order; unsubscribe stops delivery", async () => {
       const stream = await ctx.factory();
       const received: DeliveredBusEvent[] = [];

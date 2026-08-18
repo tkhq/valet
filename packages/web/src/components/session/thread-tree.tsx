@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Plus, RefreshCw, Search, X } from "lucide-react";
 import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import {
+  DEFAULT_THREAD_LIMIT,
   useArchivedThreads,
   useCreateThread,
   useReplaceSandbox,
@@ -130,8 +131,19 @@ export interface ThreadTreeProps {
   showChildren?: boolean;
 }
 
+/** How many more threads each "Show more" press asks for. Starting at the
+ * hook's default keeps the sidebar on the same cache entry as every other
+ * reader of this list. */
+const THREAD_PAGE = DEFAULT_THREAD_LIMIT;
+
 function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
-  const threadsQ = useThreads(sessionId);
+  // The list is capped server-side (V1 port #13) so an assistant whose
+  // workflows have opened thousands of `signal:workflow:` threads does not
+  // render every one. Measured sessions hold single digits, so almost
+  // nobody ever presses the button below — it exists so the cap can never
+  // hide a thread with no way back to it.
+  const [limit, setLimit] = useState(THREAD_PAGE);
+  const threadsQ = useThreads(sessionId, { limit });
   const childrenQ = useOrchestratorChildren({
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
@@ -144,7 +156,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const replaceSandbox = useReplaceSandbox(sessionId);
   const dismissChild = useDismissChild();
   const [showArchived, setShowArchived] = useState(false);
-  const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
+  const [archivedLimit, setArchivedLimit] = useState(THREAD_PAGE);
+  const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived, limit: archivedLimit });
   const navigate = useNavigate({ from: "/chat" });
 
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
@@ -165,6 +178,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     [threadsQ.data],
   );
   const activeThreadId = search.thread ?? threads[0]?.id;
+  // `total` counts what the session HAS; `threads` is what the cap returned.
+  const total = threadsQ.data?.total ?? threads.length;
+  const hiddenCount = Math.max(0, total - threads.length);
+  const archivedLoaded = archivedQ.data?.threads.length ?? 0;
+  const archivedTotal = archivedQ.data?.total ?? archivedLoaded;
+  const archivedHidden = Math.max(0, archivedTotal - archivedLoaded);
   const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
 
   const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
@@ -179,6 +198,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     () => filterThreads(threads, effectiveBucket, query),
     [threads, effectiveBucket, query],
   );
+  // Search and the origin chips run over the LOADED page, not the whole
+  // session. That is fine while nothing is hidden and misleading the moment
+  // something is, so the copy below says which set was searched instead of
+  // reporting "no match" over a set the reader cannot see.
+  const filterActive = query !== "" || effectiveBucket !== "all";
+  const searchIsPartial = hiddenCount > 0 && filterActive;
 
   // Auto-switch when the ACTIVE thread would be filtered out (deep link
   // into an automation thread while the chip says Chat) — the selection
@@ -264,7 +289,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                 )}
               >
                 {f.label}
-                <span className="tabular-nums text-[10px] opacity-70">{counts[f.id]}</span>
+                {/* A "+" because the counts are over the loaded page, so a
+                    capped list undercounts every bucket. */}
+                <span className="tabular-nums text-[10px] opacity-70">
+                  {counts[f.id]}
+                  {hiddenCount > 0 && "+"}
+                </span>
               </button>
             ))}
           </div>
@@ -286,7 +316,10 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           )}
           {!threadsQ.isLoading && !threadsQ.error && visible.length === 0 && threads.length > 0 && (
             <div className="px-4 py-3 text-xs text-muted">
-              No threads match{query ? ` "${query}"` : " this filter"}.
+              No threads match{query ? ` "${query}"` : " this filter"}
+              {searchIsPartial
+                ? ` in the ${threads.length} threads loaded so far. Load the rest to search them.`
+                : "."}
             </div>
           )}
           {visible.map((t) => (
@@ -310,6 +343,16 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
             />
           ))}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setLimit((n) => n + THREAD_PAGE)}
+              disabled={threadsQ.isFetching}
+              className="mt-1 w-full rounded px-4 py-1.5 text-left text-xs text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50"
+            >
+              {filterActive ? "Search" : "Show"} {Math.min(hiddenCount, THREAD_PAGE)} more of {total} threads
+            </button>
+          )}
         </nav>
         <div className="border-t border-line/60 px-2 py-1.5">
           <button
@@ -339,6 +382,18 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                   </button>
                 </li>
               ))}
+              {archivedHidden > 0 && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setArchivedLimit((n) => n + THREAD_PAGE)}
+                    disabled={archivedQ.isFetching}
+                    className="w-full rounded px-2 py-1 text-left text-xs text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50"
+                  >
+                    Show {Math.min(archivedHidden, THREAD_PAGE)} more of {archivedTotal} archived threads
+                  </button>
+                </li>
+              )}
             </ul>
           )}
         </div>

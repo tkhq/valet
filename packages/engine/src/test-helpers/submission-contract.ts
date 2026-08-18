@@ -5,6 +5,7 @@ import type {
   QueueItem,
   SessionData,
   SessionStore,
+  SettlePatchRef,
   SuspendedTurnState,
   ThreadData,
   WriteFence,
@@ -1262,6 +1263,95 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
       const beforePast = await store.listSettledSubmissionsBefore(SESSION_ID, past);
       expect(beforePast).toEqual([]);
+    });
+
+    it("latestPatchCaptures returns the newest captured patch and the newest patch outcome", async () => {
+      // Drives the real lifecycle so the rows are shaped by the production
+      // writer, not by the test.
+      async function settle(patch: SettlePatchRef): Promise<string> {
+        const item = makeItem();
+        await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+        const claimed = await store.claimSubmission({
+          sessionId: SESSION_ID,
+          threadId: THREAD_ID,
+          itemId: item.id,
+          attemptId: `att-${item.id}`,
+          ownerId: "o",
+        });
+        const fence: WriteFence = { itemId: item.id, attemptId: claimed!.attemptId! };
+        await store.reserveSettlement(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" }, fence);
+        await store.finalizeSettlement(SESSION_ID, THREAD_ID, item.id, fence, patch);
+        return item.id;
+      }
+
+      const empty = await store.latestPatchCaptures(SESSION_ID);
+      expect(empty).toEqual({ captured: null, latestWithPatch: null });
+
+      const first = await settle({ status: "captured", blobKey: "patches/s/first.diff", bytes: 10 });
+      const afterFirst = await store.latestPatchCaptures(SESSION_ID);
+      expect(afterFirst.captured?.id).toBe(first);
+      expect(afterFirst.latestWithPatch?.id).toBe(first);
+
+      // Turn 1 captured, turn 2 could not. This is the case that must stay
+      // distinguishable: the newest FILE LIST is still turn 1's, but it is
+      // no longer the session's current state, and a caller that cannot see
+      // the difference serves a stale subset as if it were current.
+      const second = await settle({ status: "failed", reason: "git_diff failed" });
+      const afterSecond = await store.latestPatchCaptures(SESSION_ID);
+      expect(afterSecond.captured?.id).toBe(first);
+      expect(afterSecond.latestWithPatch?.id).toBe(second);
+
+      // A newer capture takes over both.
+      const third = await settle({ status: "captured", blobKey: "patches/s/third.diff", bytes: 20 });
+      const afterThird = await store.latestPatchCaptures(SESSION_ID);
+      expect(afterThird.captured?.id).toBe(third);
+      expect(afterThird.latestWithPatch?.id).toBe(third);
+    });
+
+    it("latestPatchCaptures ignores a captured record with no blob key", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-nokey",
+        ownerId: "o",
+      });
+      const fence: WriteFence = { itemId: item.id, attemptId: claimed!.attemptId! };
+      await store.reserveSettlement(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement(SESSION_ID, THREAD_ID, item.id, fence, { status: "captured" });
+
+      const got = await store.latestPatchCaptures(SESSION_ID);
+      // There is nothing to read without a key, so it is not a usable capture.
+      expect(got.captured).toBeNull();
+      expect(got.latestWithPatch?.id).toBe(item.id);
+    });
+
+    it("latestPatchCaptures scopes to one session", async () => {
+      const OTHER = "sess-patch-other";
+      const OTHER_THREAD = "th-patch-other";
+      await store.saveSession(newSession({ id: OTHER }));
+      await store.saveThread(OTHER, { ...newThread(OTHER_THREAD, "web:default"), sessionId: OTHER });
+
+      const item = makeItem({ threadId: OTHER_THREAD });
+      await store.admitSubmission(OTHER, OTHER_THREAD, item);
+      const claimed = await store.claimSubmission({
+        sessionId: OTHER,
+        threadId: OTHER_THREAD,
+        itemId: item.id,
+        attemptId: "att-other",
+        ownerId: "o",
+      });
+      const fence: WriteFence = { itemId: item.id, attemptId: claimed!.attemptId! };
+      await store.reserveSettlement(OTHER, OTHER_THREAD, item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement(OTHER, OTHER_THREAD, item.id, fence, {
+        status: "captured",
+        blobKey: "patches/other/x.diff",
+      });
+
+      expect((await store.latestPatchCaptures(SESSION_ID)).captured).toBeNull();
+      expect((await store.latestPatchCaptures(OTHER)).captured?.id).toBe(item.id);
     });
 
     // --- Operator surface ---

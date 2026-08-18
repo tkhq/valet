@@ -97,6 +97,17 @@ export class InMemoryEventStream implements EventStream {
     return { events: filtered, nextOffset };
   }
 
+  async readLatest(
+    sessionId: string,
+    opts?: { limit?: number },
+  ): Promise<{ events: StoredBusEvent[]; nextOffset: string; hasMore: boolean }> {
+    const log = this.logs.get(sessionId) ?? [];
+    const limit = opts?.limit ?? 500;
+    const events = limit >= log.length ? [...log] : log.slice(log.length - limit);
+    const nextOffset = events[events.length - 1]?.offset ?? "";
+    return { events, nextOffset, hasMore: events.length < log.length };
+  }
+
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe {
     const sub: Subscription = { filter, callback };
     this.subs.add(sub);

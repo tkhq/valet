@@ -118,6 +118,21 @@ async function loadEngineSession(
   return { session, engineSession };
 }
 
+/**
+ * How many threads one list call returns. The client raises this to show
+ * more; anything absent, unparseable, or out of range falls back to the
+ * default rather than failing the request, because a list page size is not
+ * worth a 400.
+ */
+const THREADS_DEFAULT_LIMIT = 100;
+const THREADS_MAX_LIMIT = 1000;
+
+export function threadLimit(raw: string | undefined): number {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return THREADS_DEFAULT_LIMIT;
+  return Math.min(parsed, THREADS_MAX_LIMIT);
+}
+
 messagesRouter.get("/:id/threads", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
@@ -160,7 +175,27 @@ messagesRouter.get("/:id/threads", async (c) => {
         metaById.get(t.id)?.archivedAt,
       ),
     );
-  const body: ListThreadsResponse = { threads: summaries };
+
+  // Newest first, then capped (V1 port #13). The sort is here, not only in
+  // the client, because the cap has to keep the NEWEST threads: a cap over
+  // the engine's hydration order would drop whichever threads happened to
+  // load last, which is arbitrary.
+  //
+  // Deliberately a cap and not a cursor. Thread counts were measured before
+  // this was written — the busiest session in the sample held five threads —
+  // so a cursor would be machinery for a load nobody carries. What the cap
+  // guards is the one generator that is NOT bounded by human activity: a
+  // workflow `orchestrator` node opens a `signal:workflow:{runId}` thread on
+  // every run.
+  //
+  // The tiebreak is not cosmetic. `store.listThreads` has no ORDER BY, so
+  // two threads created in the same millisecond could come back in either
+  // order, and the cap would then include a different one on each read —
+  // a row appearing and disappearing while nobody did anything. Comparing
+  // ids for a tie is arbitrary but stable, which is the property needed.
+  summaries.sort((a, b) => (b.createdAt - a.createdAt) || a.id.localeCompare(b.id));
+  const limit = threadLimit(c.req.query("limit"));
+  const body: ListThreadsResponse = { threads: summaries.slice(0, limit), total: summaries.length };
   return c.json(body);
 });
 

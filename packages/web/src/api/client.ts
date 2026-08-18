@@ -64,6 +64,8 @@ import type {
   ListCredentialsResponse,
   ListActionLogResponse,
   ListDecisionsResponse,
+  FilesChangedResponse,
+  SessionLogResponse,
   ListGrantsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
@@ -469,11 +471,16 @@ export const api = {
     request<ImportMemoryResponse>("POST", "/memory/import", body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean }) =>
-    request<ListThreadsResponse>(
+  listThreads: (sessionId: string, opts?: { archived?: boolean; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (opts?.archived) query.set("archived", "1");
+    if (opts?.limit !== undefined) query.set("limit", String(opts.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<ListThreadsResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.archived ? "?archived=1" : ""}`,
-    ),
+      `/sessions/${encodeURIComponent(sessionId)}/threads${suffix}`,
+    );
+  },
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
     request<CreateThreadResponse>(
       "POST",
@@ -518,6 +525,17 @@ export const api = {
       "GET",
       `/sessions/${encodeURIComponent(sessionId)}/commands`,
     ),
+
+  // session log + files changed (V1 port #8 and #4)
+  sessionLog: (sessionId: string, opts?: { fromOffset?: string; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (opts?.fromOffset !== undefined) query.set("fromOffset", opts.fromOffset);
+    if (opts?.limit !== undefined) query.set("limit", String(opts.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<SessionLogResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/log${suffix}`);
+  },
+  filesChanged: (sessionId: string) =>
+    request<FilesChangedResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/files-changed`),
 
   // decision gates
   listDecisions: (sessionId: string) =>

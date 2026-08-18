@@ -22,6 +22,7 @@ import { VALET_VERSION } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { messagesRouter } from "./routes/messages.js";
+import { sessionInsightsRouter } from "./routes/session-insights.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
 import { memoryRouter } from "./routes/memory.js";
@@ -223,6 +224,8 @@ export function createApp(
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
+  // Session log + files-changed, same prefix again (V1 port #8 and #4).
+  app.route("/api/sessions", sessionInsightsRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);

@@ -446,6 +446,23 @@ export class InMemorySessionStore implements SessionStore {
       .map((i) => ({ ...i }));
   }
 
+  async latestPatchCaptures(
+    sessionId: string,
+  ): Promise<{ captured: QueueItem | null; latestWithPatch: QueueItem | null }> {
+    const r = this.rows.get(sessionId);
+    if (!r) return { captured: null, latestWithPatch: null };
+    const settled = [...r.queueItems.values()]
+      .filter((i) => i.status === "settled" && i.settlePatch !== undefined)
+      .sort((a, b) => a.updatedAt - b.updatedAt);
+    const latestWithPatch = settled.at(-1) ?? null;
+    const captured =
+      settled.filter((i) => i.settlePatch?.status === "captured" && i.settlePatch.blobKey !== undefined).at(-1) ?? null;
+    return {
+      captured: captured ? { ...captured } : null,
+      latestWithPatch: latestWithPatch ? { ...latestWithPatch } : null,
+    };
+  }
+
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);

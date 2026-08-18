@@ -210,6 +210,25 @@ export class PgEventStream implements EventStream {
     return { events, nextOffset };
   }
 
+  async readLatest(
+    sessionId: string,
+    opts?: { limit?: number },
+  ): Promise<{ events: StoredBusEvent[]; nextOffset: string; hasMore: boolean }> {
+    const limit = opts?.limit ?? 500;
+    // One row over the limit answers `hasMore` without a second COUNT query:
+    // the extra row exists only when older events do. It is dropped below.
+    const result = await this.db.query(
+      `SELECT * FROM engine_events WHERE session_id = $1 ORDER BY seq DESC LIMIT $2`,
+      [sessionId, limit + 1],
+    );
+    const descending = result.rows.map(rawToEventRow).map(rowToStoredEvent);
+    const hasMore = descending.length > limit;
+    // Reverse to offset order, so the page reads oldest first like `read`.
+    const events = descending.slice(0, limit).reverse();
+    const nextOffset = events[events.length - 1]?.offset ?? "";
+    return { events, nextOffset, hasMore };
+  }
+
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe {
     const sub: Subscription = { filter, callback };
     this.subs.add(sub);
