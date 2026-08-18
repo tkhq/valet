@@ -42,6 +42,7 @@ import {
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
+import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
@@ -202,6 +203,29 @@ async function computeResult(
     };
   }
   const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
+
+  // Availability gate (integration-availability design): a service whose
+  // deployment/org prerequisite is missing must fail the same way here as it
+  // disappears from a live session's `list_tools` — deterministically, with
+  // the corrective action named. The owning plugin carries the declaration,
+  // so it is the whole plugin list this check needs.
+  const declared = findCredentialDeclaration([entry.plugin], credentialService);
+  if (declared) {
+    const mode = await connectModeFor({
+      plugins: [entry.plugin],
+      decl: declared,
+      service: credentialService,
+      orgId: ctx.orgId,
+      credentials: opts.credentials,
+      env: process.env,
+    });
+    if (mode === "unconfigured") {
+      return {
+        ok: false,
+        error: `${credentialService} is not configured for this organization. An admin can set it up in Settings → Organization.`,
+      };
+    }
+  }
   // `github` is the only service that resolves a credential identity today.
   // Any other service would IGNORE the selection, and a node that asked to
   // act as the application would silently act as the workflow owner —

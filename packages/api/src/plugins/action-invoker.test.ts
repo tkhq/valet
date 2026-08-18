@@ -300,6 +300,53 @@ describe("buildActionInvoker", () => {
 
     expect(a).toEqual(b);
   });
+
+  it("returns a deterministic error for a service whose org prerequisite is unconfigured", async () => {
+    // Availability gate (integration-availability design): the plugin declares
+    // requires.orgCredential and no org credential exists for ctx.orgId.
+    const fixture = countingAction({ id: "gated.ping" });
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const actionPluginByService = new Map([["gated", { plugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+
+    const result = await invoke(
+      { service: "gated", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:gated" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && "error" in result ? result.error : "").toContain("Settings → Organization");
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("executes normally once the org credential exists for the gated service", async () => {
+    const fixture = countingAction({ id: "gated.ping" });
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "gated", { type: "bot_token", accessToken: "org-tok" });
+    const actionPluginByService = new Map([["gated", { plugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "gated", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:gated-ok" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
+  });
 });
 
 /**
