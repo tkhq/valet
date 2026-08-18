@@ -129,6 +129,52 @@ describe("GET /api/sessions/:id/commands", () => {
     expect(prefixed).toBeDefined();
     expect(prefixed?.source).toBe("skill");
   });
+
+  // Refresh seam (`skillsProvider`): a skill created AFTER the session was
+  // built — while the session sits in the host cache — must appear on the
+  // next commands read. Before this seam, a cached session served the skill
+  // set from its first build forever, so a long-lived session (the
+  // orchestrator especially) only ever showed plugin skills from boot time.
+  it("lists a skill created after the session was built and cached", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+
+    // First read builds and caches the session — no stored skills yet.
+    const before = await getCommands(api.baseUrl, sessionId);
+    expect(before.commands.some((cmd) => cmd.name === "skill:late-arrival")).toBe(false);
+
+    await createSkill(api.providers.db, OWNER, {
+      name: "late-arrival",
+      description: "Created after the session was cached",
+      content: "Do the thing: $1",
+      frontmatter: { invocation: "prompt" },
+    });
+
+    const after = await getCommands(api.baseUrl, sessionId);
+    const cmd = after.commands.find((c) => c.name === "skill:late-arrival");
+    expect(cmd).toBeDefined();
+    expect(cmd?.source).toBe("skill");
+  });
+
+  // The inverse: a deleted skill drops out of a cached session's list.
+  it("drops a skill deleted after the session was built and cached", async () => {
+    api = await bootTestApi();
+    const row = await createSkill(api.providers.db, OWNER, {
+      name: "short-lived",
+      description: "Deleted while the session is cached",
+      content: "Gone soon: $1",
+      frontmatter: { invocation: "prompt" },
+    });
+
+    const sessionId = await createSession(api.baseUrl);
+    const before = await getCommands(api.baseUrl, sessionId);
+    expect(before.commands.some((cmd) => cmd.name === "skill:short-lived")).toBe(true);
+
+    await api.providers.db.delete(skills).where(eq(skills.id, row.id));
+
+    const after = await getCommands(api.baseUrl, sessionId);
+    expect(after.commands.some((cmd) => cmd.name === "skill:short-lived")).toBe(false);
+  });
 });
 
 describe("command_result REST round-trip (Task 11)", () => {

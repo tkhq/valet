@@ -49,6 +49,35 @@ describe("commandsToItems", () => {
     ]);
     expect(items[0].hint).toBe("[model-id]");
   });
+
+  it("floats the group of the most recently used command to the top", () => {
+    // skill:review was used more recently than any builtin — the whole
+    // Skill group rises above Built-in, and groups stay contiguous.
+    const items = commandsToItems(FIXTURE, { "skill:review": 2000, status: 1000 });
+    expect(items.map((i) => i.label)).toEqual(["/skill:review", "/status", "/stop"]);
+    expect(items.map((i) => i.group)).toEqual(["Skill", "Built-in", "Built-in"]);
+  });
+
+  it("orders commands inside a group by recency, never-used last", () => {
+    const items = commandsToItems(FIXTURE, { stop: 500 });
+    // Both builtins beat the never-used skill group only by default order;
+    // within Built-in, stop (used) beats status (never used).
+    expect(items.map((i) => i.label)).toEqual(["/stop", "/status", "/skill:review"]);
+  });
+
+  it("keeps groups contiguous when two groups share one max stamp", () => {
+    // status (builtin) and skill:review (skill) were used in the same ms —
+    // the group tie falls through to SOURCE_ORDER, so Built-in stays whole
+    // and ahead of Skill instead of interleaving.
+    const items = commandsToItems(FIXTURE, { status: 1000, "skill:review": 1000 });
+    expect(items.map((i) => i.group)).toEqual(["Built-in", "Built-in", "Skill"]);
+    expect(items.map((i) => i.label)).toEqual(["/status", "/stop", "/skill:review"]);
+  });
+
+  it("keeps the default source order with no recency", () => {
+    const items = commandsToItems(FIXTURE, {});
+    expect(items.map((i) => i.label)).toEqual(["/status", "/stop", "/skill:review"]);
+  });
 });
 
 describe("CommandPopup — rendering", () => {

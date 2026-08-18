@@ -11,7 +11,7 @@
  * non-owner 404, no-gateway 409, unreachable-backend 502, and a WS
  * round-trip through the api hop to the fake ttyd echo.
  */
-import { createServer, type AddressInfo } from "node:net";
+import { type AddressInfo } from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   VirtualSandbox,
@@ -143,17 +143,6 @@ class HibernatingGatewayTestSandboxProvider implements SandboxProvider {
   async resume(id: string): Promise<void> {
     this.resumeCalls.push(id);
   }
-}
-
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, () => {
-      const port = (srv.address() as AddressInfo).port;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 async function seedSession(
@@ -467,10 +456,12 @@ describe("session gateway reverse-proxy", () => {
 
   it("502s when the gateway endpoint is unreachable", async () => {
     const sessionId = "gw-unreachable";
-    const deadPort = await getFreePort(); // freed immediately; nothing listens on it
-
+    // Port 1 is reserved and never listened on, so the dial is refused
+    // deterministically. A bind-then-free "dead port" is a race: a parallel
+    // test's server can claim the freed port before the proxy dials it and
+    // answer 404 instead (observed in CI shard 4).
     api = await bootTestApi({
-      sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: deadPort }),
+      sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: 1 }),
     });
     await seedSession(api, { id: sessionId, userId: "local-user" });
     await warmSandbox(api, { id: sessionId, userId: "local-user" });
