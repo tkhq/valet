@@ -401,7 +401,22 @@ export async function submitSessionPrompt(
   const receipt =
     outcome && outcome.kind === "execute"
       ? await engineSession.prompt(promptContent, { threadId: thread.id })
-      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : promptContent, {});
+      : await thread.submitPrompt(
+          outcome?.kind === "expand"
+            ? attachments && attachments.length > 0
+              ? {
+                  text: outcome.text,
+                  attachments: attachments.map(att => ({
+                    type: "image" as const,
+                    url: att.url,
+                    mimeType: att.mimeType,
+                    name: att.name,
+                  })),
+                }
+              : outcome.text
+            : promptContent,
+          {},
+        );
 
   await db
     .update(agentSessions)

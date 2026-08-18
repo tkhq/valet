@@ -183,26 +183,4 @@ describe("Image attachments", () => {
   });
 });
 
-async function waitForStatus(
-  events: BusEvent[],
-  threadId: string,
-  status: string,
-  timeoutMs = 2000,
-  check?: () => boolean,
-): Promise<void> {
-  const start = Date.now();
-  return new Promise((resolve, reject) => {
-    const tick = () => {
-      if (check?.() === false) {
-        setTimeout(tick, 10);
-        return;
-      }
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error(`timeout waiting for status ${status}`));
-        return;
-      }
-      setTimeout(tick, 10);
-    };
-    tick();
-  });
-}
+

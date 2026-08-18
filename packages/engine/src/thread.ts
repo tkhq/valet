@@ -2104,13 +2104,21 @@ export class Thread {
       "attachments" in item.content &&
       Array.isArray(item.content.attachments)
     ) {
-      attachments = item.content.attachments.map((att) => ({
-        type: "image" as const,
-        url: att.url,
-        data: att.data,
-        mimeType: att.mimeType,
-        name: att.name,
-      }));
+      // Runtime validation of each attachment element to guard against malformed wire data
+      const validated: MessageEntry["attachments"] = [];
+      for (const att of item.content.attachments) {
+        if (typeof att === "object" && att !== null && typeof att.mimeType === "string") {
+          validated.push({
+            type: "image" as const,
+            url: att.url,
+            data: att.data,
+            mimeType: att.mimeType,
+            name: att.name,
+          });
+        }
+        // Skip malformed elements silently; real issues will surface in model calls
+      }
+      attachments = validated.length > 0 ? validated : undefined;
     }
     
     const userEntry: MessageEntry = {
@@ -3732,12 +3740,18 @@ export function entriesToAgentMessages(
           if (att.type === "image") {
             // If we have binary data, convert to base64; otherwise use the URL directly
             let imageData: string;
+            // att.data is set when a tool returns binary attachment data (e.g. screenshot utilities)
             if (att.data instanceof Uint8Array) {
               imageData = Buffer.from(att.data).toString("base64");
             } else if (att.url) {
               // Extract base64 payload from data: URL
-              const match = att.url.match(/^data:[^;]+;base64,(.+)$/);
-              imageData = match ? match[1] : att.url;
+              const match = att.url.match(/^data:([^;]+);base64,([A-Za-z0-9+/]+=*)$/);
+              if (!match) {
+                // Invalid data: URL format — skip this attachment and log a warning
+                console.warn(`[engine] skipping attachment with invalid data: URL format: ${att.url}`);
+                continue;
+              }
+              imageData = match[2];
             } else {
               // Skip attachments without data
               continue;
