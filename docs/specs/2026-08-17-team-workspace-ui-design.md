@@ -63,10 +63,39 @@ the switcher — legible and trustworthy.
    assistant create used to silently revert the selection; the failure
    now shows below the nav.
 
+## Known limits
+
+An adversarial review (2026-08-17) confirmed four limits this pass ships
+with. All four predate it or extend documented contracts; they are
+listed so the next pass starts here.
+
+1. **Sandbox-facing routes authorize on `agentSessions.userId`, not the
+   owner.** `POST /:id/sandbox-jwt`, `POST /:id/sandbox/replace`, the
+   gateway proxy, and the channels gate callback all check the userId
+   column only. This predates the move feature (team assistants already
+   had owner ≠ userId), but a move makes it common for standalone
+   sessions: team members cannot replace a moved session's sandbox, and
+   the original creator keeps sandbox access after leaving the team.
+   Fix belongs in `session-access.ts` consumers, not per-route patches.
+2. **A personal take rebinds the sandbox identity.** The userId re-stamp
+   that gives the mover admin rights also makes the next engine build
+   resolve git/GitHub credentials as the mover. That is usually what
+   "taking a session" should mean; it is a surprise when the mover lacks
+   access to the bound repos.
+3. **Open WebSockets survive a move.** `canViewSession` runs at
+   handshake only — the same "drops access on the next reconnect"
+   contract that team-leave has. A viewer with the session open keeps
+   streaming until reconnect.
+4. **The move's busy gate has a small TOCTOU window.** A submission
+   admitted between the unsettled-check and the cache eviction runs on
+   the evicted session. The same window exists on the profile path; a
+   store-level guard would close both.
+
 ## Out of scope (deferred)
 
-- **Team credentials and delegation** — Phase A of
-  `2026-07-21-team-resources-design.md`. Needs its own backend pass.
+- **Team credentials and delegation** — Phase A of the team-resources
+  design (commit 5feeb49c; the spec file is not in this tree — land it
+  with the implementation). Needs its own backend pass.
 - **Skills catalog asymmetry** — the personal workspace shows a union
   (yours + teams + org) while team workspaces pin. Fixing it needs a
   server-side "workspace + org" scope; until then the union view keeps
