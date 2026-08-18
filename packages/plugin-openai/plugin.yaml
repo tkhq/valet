@@ -1,0 +1,6 @@
+name: openai
+version: 0.0.1
+description: OpenAI media tools — image generation and editing, transcription, text to speech
+icon: "\U0001F3A8"
+iconSlug: openai
+v2: true

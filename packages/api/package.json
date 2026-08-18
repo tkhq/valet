@@ -58,6 +58,7 @@
     "@valet/plugin-google-workspace": "workspace:*",
     "@valet/plugin-linear": "workspace:*",
     "@valet/plugin-notion": "workspace:*",
+    "@valet/plugin-openai": "workspace:*",
     "@valet/plugin-personas": "workspace:*",
     "@valet/plugin-sandbox-tunnels": "workspace:*",
     "@valet/plugin-sentry": "workspace:*",

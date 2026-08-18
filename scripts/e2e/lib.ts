@@ -127,6 +127,7 @@ const TESTED_PLUGINS = [
   "@valet/plugin-google-calendar",
   "@valet/plugin-google-workspace",
   "@valet/plugin-linear",
+  "@valet/plugin-openai",
   "@valet/plugin-slack",
   "@valet/plugin-telegram",
 ];
