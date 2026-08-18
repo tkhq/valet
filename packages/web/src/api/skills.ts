@@ -44,6 +44,41 @@ export function useSkills(
   });
 }
 
+/**
+ * The WHOLE catalog for one owner scope, not one page. Follows `nextCursor`
+ * until the server runs out, so a caller that classifies a name as
+ * unknown-to-the-catalog (the assistant editor's dangling-skill chips) never
+ * mislabels a name that lives past the first page. `complete` is false while
+ * pages are still loading, so callers can hold that classification until the
+ * catalog is whole.
+ *
+ * `limit: 100` per request keeps the round trips low; the server caps the
+ * page size, so a smaller server cap only means more pages, never a miss.
+ */
+export function useAllSkills(
+  query: Omit<SkillListQuery, "cursor" | "limit"> = {},
+  opts?: Partial<UseQueryOptions<{ skills: ListSkillsResponse["skills"]; complete: boolean }>>,
+) {
+  return useQuery<{ skills: ListSkillsResponse["skills"]; complete: boolean }>({
+    queryKey: ["skills", "list-all", query],
+    queryFn: async () => {
+      const skills: ListSkillsResponse["skills"] = [];
+      let cursor: string | undefined;
+      // Bound the loop so a server that never stops returning a cursor cannot
+      // hang the page. 100 pages of 100 is 10k skills — far past any real
+      // catalog.
+      for (let page = 0; page < 100; page++) {
+        const res = await api.listSkills({ ...query, limit: 100, cursor });
+        skills.push(...res.skills);
+        if (!res.nextCursor) return { skills, complete: true };
+        cursor = res.nextCursor;
+      }
+      return { skills, complete: false };
+    },
+    ...opts,
+  });
+}
+
 export function useSkill(name: string, opts?: Partial<UseQueryOptions<GetSkillResponse>>) {
   return useQuery<GetSkillResponse>({
     queryKey: qkSkills.detail(name),

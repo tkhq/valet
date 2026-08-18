@@ -25,7 +25,8 @@ import { assistantSessionId, type Principal, type Session } from "@valet/engine"
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, assistants, type AssistantRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
-import type { AssistantSummary } from "../wire/types.js";
+import type { AssistantBehavior, AssistantSummary } from "../wire/types.js";
+import { parseAssistantBehavior, serializeAssistantBehavior } from "./behavior.js";
 
 /** Raised when a request would leave a principal with no default assistant. */
 export class DefaultAssistantArchiveError extends Error {
@@ -55,6 +56,11 @@ export function toAssistantSummary(row: AssistantRow): AssistantSummary {
     id: row.id,
     owner: { type: row.ownerType, id: row.ownerId },
     ...(row.name !== null ? { name: row.name } : {}),
+    ...(row.personality !== null ? { personality: row.personality } : {}),
+    ...(() => {
+      const behavior = parseAssistantBehavior(row.behavior, row.id);
+      return behavior !== null ? { behavior } : {};
+    })(),
     sessionId: row.sessionId,
     isDefault: row.isDefault,
     createdAt: row.createdAt,
@@ -104,6 +110,8 @@ function newAssistantRow(args: {
   principal: Principal;
   name: string | null;
   isDefault: boolean;
+  personality?: string | null;
+  behavior?: string | null;
 }): AssistantRow {
   const id = `asst_${randomUUID()}`;
   return {
@@ -112,6 +120,8 @@ function newAssistantRow(args: {
     ownerType: args.principal.type,
     ownerId: args.principal.id,
     name: args.name,
+    personality: args.personality ?? null,
+    behavior: args.behavior ?? null,
     sessionId: assistantSessionId(id),
     isDefault: args.isDefault,
     createdAt: Date.now(),
@@ -261,15 +271,32 @@ export async function listAssistantsForOwners(
  * it strands. A concurrent creation can take the default slot between the
  * check and the insert; the partial unique index catches that, and the
  * retry re-inserts the SAME id as an ordinary assistant.
+ *
+ * `config.personality` is the raw persona text. It is trimmed and an empty
+ * result stored as null — the same normalization `patchAssistant` applies, so
+ * `POST { personality: "" }` and a later clear both leave the memory-file
+ * fallback in play at wake. `config.behavior` is the parsed
+ * `AssistantBehavior`; this function serializes it to JSON before writing so
+ * callers never touch the wire format directly.
  */
 export async function createAssistant(
   db: AppDb,
   orgId: string,
   principal: Principal,
   name: string | null,
+  config?: { personality?: string | null; behavior?: AssistantBehavior | null },
 ): Promise<AssistantRow> {
   const hasDefault = (await findDefaultAssistant(db, orgId, principal)) !== undefined;
-  const row = newAssistantRow({ orgId, principal, name, isDefault: !hasDefault });
+  const trimmedPersonality =
+    config?.personality == null ? null : config.personality.trim() || null;
+  const row = newAssistantRow({
+    orgId,
+    principal,
+    name,
+    isDefault: !hasDefault,
+    personality: trimmedPersonality,
+    behavior: serializeAssistantBehavior(config?.behavior),
+  });
 
   const inserted = await db.insert(assistants).values(row).onConflictDoNothing().returning();
   if (inserted[0]) return inserted[0];
@@ -286,7 +313,8 @@ export async function createAssistant(
 }
 
 /**
- * Rename and/or promote one assistant, atomically.
+ * Rename, promote, and/or rewrite persona/behavior for one assistant,
+ * atomically.
  *
  * Promotion demotes the previous default in the SAME transaction. Between
  * the two statements the principal briefly holds no default, and that gap
@@ -297,11 +325,17 @@ export async function createAssistant(
  *
  * Promoting the current default is a no-op by construction: the demote
  * clears it and the promote sets it again.
+ *
+ * `personality` and `behavior` are optional in the patch object. When
+ * present they overwrite the stored value; `null` clears it. Absent means
+ * "do not touch". This function serializes `AssistantBehavior` to JSON via
+ * `serializeAssistantBehavior`; the route then evicts the cached engine
+ * session so the next wake picks up the new persona and filters.
  */
 export async function patchAssistant(
   db: AppDb,
   row: AssistantRow,
-  patch: { name?: string; isDefault?: true },
+  patch: { name?: string; isDefault?: true; personality?: string | null; behavior?: AssistantBehavior | null },
 ): Promise<AssistantRow> {
   if (row.archivedAt !== null) throw new ArchivedAssistantError();
 
@@ -320,6 +354,19 @@ export async function patchAssistant(
     }
     if (patch.name !== undefined) {
       await tx.update(assistants).set({ name: patch.name }).where(eq(assistants.id, row.id));
+    }
+    if (patch.personality !== undefined) {
+      const trimmed = patch.personality === null ? null : patch.personality.trim();
+      await tx
+        .update(assistants)
+        .set({ personality: trimmed === "" ? null : trimmed })
+        .where(eq(assistants.id, row.id));
+    }
+    if (patch.behavior !== undefined) {
+      await tx
+        .update(assistants)
+        .set({ behavior: serializeAssistantBehavior(patch.behavior) })
+        .where(eq(assistants.id, row.id));
     }
 
     const updated = await tx.select().from(assistants).where(eq(assistants.id, row.id)).limit(1);

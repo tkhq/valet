@@ -2,8 +2,8 @@
  * Assistants — the named agents a principal owns.
  *
  *   GET    /api/assistants        → list, optionally filtered by owner
- *   POST   /api/assistants        → create one
- *   PATCH  /api/assistants/:id    → rename, or promote to default
+ *   POST   /api/assistants        → create one, with optional personality/behavior
+ *   PATCH  /api/assistants/:id    → rename, promote to default, set personality/behavior
  *   DELETE /api/assistants/:id    → archive (never destroy)
  *
  * Authorization is the session rule, unchanged: reading follows
@@ -32,6 +32,8 @@ import {
   patchAssistant,
   toAssistantSummary,
 } from "../assistants/service.js";
+import { validateAssistantBehavior } from "../assistants/behavior.js";
+import { PERSONALITY_INJECT_CAP } from "../assistants/persona.js";
 import { assistantOwner, canAdministerAssistantOwner, canViewAssistantOwner } from "../assistants/access.js";
 import { listTeamsForUser } from "../services/teams.js";
 import type {
@@ -125,20 +127,36 @@ assistantsRouter.post("/", async (c) => {
   if (body.name !== undefined && typeof body.name !== "string") {
     return c.json({ error: "name must be a string." }, 400);
   }
+  if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
+    return c.json({ error: "personality must be a string." }, 400);
+  }
+  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
+    return c.json(
+      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
+      400,
+    );
+  }
+  if (body.behavior !== undefined && body.behavior !== null) {
+    const err = validateAssistantBehavior(body.behavior);
+    if (err) return c.json({ error: err }, 400);
+  }
 
   if (!(await canAdministerAssistantOwner(db, owner, user.id))) {
     return c.json({ error: "owner not found" }, 404);
   }
 
-  const row = await createAssistant(db, user.orgId, owner, body.name ?? null);
+  const row = await createAssistant(db, user.orgId, owner, body.name ?? null, {
+    personality: body.personality ?? null,
+    behavior: body.behavior ?? null,
+  });
   const response: CreateAssistantResponse = toAssistantSummary(row);
   return c.json(response, 201);
 });
 
-// ── Patch (rename / promote) ──────────────────────────────────────────────
+// ── Patch (rename / promote / personality / behavior) ─────────────────────
 
 assistantsRouter.patch("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
 
   let body: PatchAssistantRequest;
@@ -156,8 +174,26 @@ assistantsRouter.patch("/:id", async (c) => {
       400,
     );
   }
-  if (body.name === undefined && body.isDefault === undefined) {
-    return c.json({ error: "Send a name, or isDefault: true." }, 400);
+  if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
+    return c.json({ error: "personality must be a string, or null to clear it." }, 400);
+  }
+  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
+    return c.json(
+      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
+      400,
+    );
+  }
+  if (body.behavior !== undefined && body.behavior !== null) {
+    const err = validateAssistantBehavior(body.behavior);
+    if (err) return c.json({ error: err }, 400);
+  }
+  if (
+    body.name === undefined &&
+    body.isDefault === undefined &&
+    body.personality === undefined &&
+    body.behavior === undefined
+  ) {
+    return c.json({ error: "Send a name, isDefault: true, personality, or behavior." }, 400);
   }
 
   const row = await loadAssistant(db, c.req.param("id"));
@@ -169,6 +205,12 @@ assistantsRouter.patch("/:id", async (c) => {
   try {
     const updated = await patchAssistant(db, row, body);
     const response: PatchAssistantResponse = toAssistantSummary(updated);
+    if (body.personality !== undefined || body.behavior !== undefined) {
+      // Cache-only eviction (never destroy(): that would kill a running
+      // turn). The next wake rebuilds with the new persona and filters —
+      // the same seam PATCH /api/orchestrator/info uses.
+      engineHost.evictCache(updated.sessionId);
+    }
     return c.json(response);
   } catch (err) {
     if (err instanceof ArchivedAssistantError) {

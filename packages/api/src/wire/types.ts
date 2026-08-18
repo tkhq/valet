@@ -190,6 +190,33 @@ export interface AssistantOwner {
   id: string;
 }
 
+/** Which skills reach the assistant's session. Absent or `mode: "all"` is
+ * today's behavior: every skill the owner can reach. Names are the merge
+ * key stored skills already shadow plugin skills by. */
+export type AssistantSkillsBehavior =
+  | { mode: "all" }
+  | { mode: "allowlist"; names: string[] };
+
+/** One attached integration. `service` is the ActionPlugin routing key
+ * (e.g. "github"). `excludeActions` holds fully-qualified action ids
+ * (e.g. "github.create_issue"), the same ids the action-policy tables use. */
+export interface AssistantIntegrationEntry {
+  service: string;
+  excludeActions?: string[];
+}
+
+export type AssistantIntegrationsBehavior =
+  | { mode: "all" }
+  | { mode: "allowlist"; entries: AssistantIntegrationEntry[] };
+
+/** Per-assistant behavior config (`docs/specs/2026-08-18-assistant-editor-design.md`).
+ * A null/absent field means "everything", which is what every pre-existing
+ * assistant has. */
+export interface AssistantBehavior {
+  skills?: AssistantSkillsBehavior;
+  integrations?: AssistantIntegrationsBehavior;
+}
+
 export interface AssistantSummary {
   id: string;
   owner: AssistantOwner;
@@ -205,6 +232,11 @@ export interface AssistantSummary {
    * per owner. */
   isDefault: boolean;
   createdAt: number;
+  /** Absent until someone sets it. When absent the session falls back to the
+   * owner's assistant/personality.md memory file. */
+  personality?: string;
+  /** Absent means every skill and integration (the pre-config behavior). */
+  behavior?: AssistantBehavior;
 }
 
 export interface ListAssistantsResponse {
@@ -216,6 +248,8 @@ export interface ListAssistantsResponse {
 export interface CreateAssistantRequest {
   name?: string;
   owner?: AssistantOwner;
+  personality?: string;
+  behavior?: AssistantBehavior;
 }
 
 export type CreateAssistantResponse = AssistantSummary;
@@ -226,6 +260,10 @@ export type CreateAssistantResponse = AssistantSummary;
 export interface PatchAssistantRequest {
   name?: string;
   isDefault?: true;
+  /** null clears back to the memory-file fallback. */
+  personality?: string | null;
+  /** null clears back to "everything". */
+  behavior?: AssistantBehavior | null;
 }
 
 export type PatchAssistantResponse = AssistantSummary;
@@ -1657,6 +1695,16 @@ export interface PluginServiceSummary {
   actions: PluginActionSummary[];
 }
 
+/** A plugin's actions grouped by ActionPlugin routing service — the key
+ * `AssistantBehavior.integrations` entries use. `services[].actions` groups
+ * by CREDENTIAL service instead and omits credential-less plugins, so the
+ * assistant editor reads this list. */
+export interface PluginActionServiceSummary {
+  service: string;
+  dynamic?: true;
+  actions: PluginActionSummary[];
+}
+
 export interface PluginSummary {
   name: string;
   version: string;
@@ -1677,6 +1725,12 @@ export interface PluginSummary {
   dynamic?: true;
   /** Empty when the plugin declares no `credentials` (nothing to connect). */
   services: PluginServiceSummary[];
+  /** Actions grouped by ActionPlugin routing service — one entry per
+   * `ActionPlugin.service`. Includes credential-less plugins that
+   * `services[].actions` omits. The assistant editor reads this list to
+   * populate the integrations allowlist. Present on all responses from v2+
+   * servers; absent on responses from older servers or test stubs. */
+  actionServices?: PluginActionServiceSummary[];
 }
 
 export interface ListPluginsResponse {

@@ -38,7 +38,7 @@ import {
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
-import type { RepoBinding } from "../wire/types.js";
+import type { AssistantBehavior, RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
 import {
@@ -60,6 +60,8 @@ import { listLlmProviders, parseModelId, providerNamespace } from "../services/l
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, orgs, users } from "../schema/index.js";
 import { loadAssistant } from "../assistants/service.js";
+import { applyBehaviorToPlugins, filterSkillSources, parseAssistantBehavior } from "../assistants/behavior.js";
+import { personaPrefixText } from "../assistants/persona.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
@@ -78,9 +80,6 @@ import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } fro
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
-/** Personality is capped at injection time (assistant-centered web UI
- * decision 5), independent of any cap the memory service itself applies. */
-const PERSONALITY_INJECT_CAP = 500;
 
 export interface EngineHostOpts {
   engineStore: SessionStore;
@@ -727,13 +726,14 @@ export class EngineHost {
     owner: Principal,
     orgId: string,
     pins: readonly PinnedActionSpec[] = [],
+    behavior: AssistantBehavior | null = null,
   ): Promise<PluginSessionExtras> {
     // Availability gate (integration-availability design): a service whose
     // deployment/org prerequisite is missing never reaches the catalog, so
     // `list_tools` has nothing to hide. Per-build, not process-static: the
     // org-credential half of availability changes when an admin connects or
     // removes the org app.
-    const plugins = gateUnavailableActions(
+    const gated = gateUnavailableActions(
       this.opts.plugins ?? [],
       await unavailableServiceSet({
         plugins: this.opts.plugins ?? [],
@@ -742,10 +742,14 @@ export class EngineHost {
         env: process.env,
       }),
     );
+    // Behavior filter AFTER availability gating: both subtract, order only
+    // matters for the wrapper identity, and gating first keeps its
+    // unavailable-service messages accurate.
+    const plugins = applyBehaviorToPlugins(gated, behavior);
     if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
     return pluginSessionExtras(
       plugins,
-      await listSkillSourcesFor(this.opts.db, owner, orgId),
+      filterSkillSources(await listSkillSourcesFor(this.opts.db, owner, orgId), behavior),
       pins,
     );
   }
@@ -767,12 +771,19 @@ export class EngineHost {
   private skillsProviderFor(
     owner: Principal,
     orgId: string,
+    behavior: AssistantBehavior | null = null,
   ): (() => Promise<SkillSource[]>) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
     const plugins = this.opts.plugins ?? [];
+    // Closure captures build-time behavior on purpose: every behavior PATCH
+    // evicts the cached session (assistant-editor design, Task 2), so a stale
+    // closure never outlives its config.
     return async () =>
-      mergedSkillSources(plugins, await listSkillSourcesFor(db, owner, orgId)).skills;
+      mergedSkillSources(
+        applyBehaviorToPlugins(plugins, behavior),
+        filterSkillSources(await listSkillSourcesFor(db, owner, orgId), behavior),
+      ).skills;
   }
 
   /**
@@ -1345,10 +1356,11 @@ export class EngineHost {
     const workspace = join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
 
+    const behavior = parseAssistantBehavior(assistant.behavior, assistant.id);
     const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
-    const personaPrefix = await this.resolvePersonaPrefix(db, scope, assistant.name);
+    const personaPrefix = await this.resolvePersonaPrefix(db, scope, assistant.name, assistant.personality);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
@@ -1368,7 +1380,7 @@ export class EngineHost {
     // workflow editor panel always opens the caller's OWN default assistant
     // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
-    const extras = await this.sessionExtras(principal, meta.orgId, pins);
+    const extras = await this.sessionExtras(principal, meta.orgId, pins, behavior);
 
     // The profile comes from the app row, not from the caller's meta. An
     // assistant session is woken by many callers — the web, a channel
@@ -1396,7 +1408,7 @@ export class EngineHost {
       false,
     );
     const policyResolver = this.getPolicyResolver();
-    const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
+    const skillsProvider = this.skillsProviderFor(principal, meta.orgId, behavior);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -1476,29 +1488,27 @@ export class EngineHost {
   /**
    * `You are {name}. {personality}` prefix for the assistant's
    * `systemPrompt` (assistant-centered web UI decision 5): `name` from
-   * `assistants.name`, `personality` from the `assistant/personality.md`
-   * memory file, capped at `PERSONALITY_INJECT_CAP` chars. Absent name →
-   * `""` (neutral persona, unchanged) regardless of whether a personality
-   * file exists — the identity step always sets name first, so an orphaned
-   * personality file without a name shouldn't happen, but if it ever does
+   * `assistants.name`, `personality` from the row when set, or from the
+   * `assistant/personality.md` memory file as the pre-config fallback. Absent
+   * name → `""` (neutral persona, unchanged) regardless of whether a
+   * personality exists — the identity step always sets name first, so an
+   * orphaned personality without a name shouldn't happen, but if it ever does
    * we don't want a prefix with no name in it.
    */
   private async resolvePersonaPrefix(
     db: AppDb,
     scope: MemoryScope,
     name: string | null,
+    rowPersonality: string | null,
   ): Promise<string> {
     if (!name) return "";
-
-    // Own-scope only (never a team member's file — `readOwnFile` bypasses
-    // `readFile`'s team read-union entirely): the persona prefix is
-    // per-user, so a team `assistant/personality.md` must never substitute
-    // for the caller's own (missing) one.
+    // The row wins when set (assistant editor design): per-assistant persona.
+    // Null falls back to the owner's own file, the pre-config behavior —
+    // own-scope only, never a team member's file (readOwnFile bypasses the
+    // team read-union).
+    if (rowPersonality !== null) return personaPrefixText(name, rowPersonality);
     const row = await readOwnFile(db, scope, "assistant/personality.md");
-    const personality = row ? row.content.slice(0, PERSONALITY_INJECT_CAP) : "";
-
-    const sentence = personality ? `You are ${name}. ${personality}` : `You are ${name}.`;
-    return `${sentence}\n\n`;
+    return personaPrefixText(name, row ? row.content : "");
   }
 
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */
