@@ -111,6 +111,9 @@ importers:
       '@valet/plugin-notion':
         specifier: workspace:*
         version: link:../plugin-notion
+      '@valet/plugin-openai':
+        specifier: workspace:*
+        version: link:../plugin-openai
       '@valet/plugin-personas':
         specifier: workspace:*
         version: link:../plugin-personas
