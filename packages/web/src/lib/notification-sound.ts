@@ -22,6 +22,48 @@ const TONE_SECONDS = 0.14;
 const TONE_GAP_SECONDS = 0.1;
 const PEAK_GAIN = 0.12;
 
+/**
+ * Easter egg. When set, the attention sound is Navi from Ocarina of Time
+ * instead of the synth chime. Device-local for the same reason the sound
+ * toggle is: what a machine sounds like belongs to the machine.
+ */
+const NAVI_PREF_KEY = "valet:attention-sound-navi";
+const NAVI_SOUND_URL = "/sounds/hey-listen.mp3";
+/** Tempered. The clip is louder than the chime and it plays uninvited. */
+const NAVI_VOLUME = 0.5;
+
+export function isNaviModeEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(NAVI_PREF_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
+export function setNaviModeEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(NAVI_PREF_KEY, enabled ? "on" : "off");
+  } catch {
+    // Storage unavailable: the choice is in-session only rather than an
+    // error. Same policy as the sound toggle.
+  }
+}
+
+let naviAudio: HTMLAudioElement | null = null;
+
+function naviElement(): HTMLAudioElement | null {
+  if (naviAudio) return naviAudio;
+  if (typeof Audio === "undefined") return null;
+  try {
+    naviAudio = new Audio(NAVI_SOUND_URL);
+    naviAudio.volume = NAVI_VOLUME;
+    naviAudio.preload = "auto";
+  } catch {
+    return null;
+  }
+  return naviAudio;
+}
+
 type AudioContextCtor = typeof AudioContext;
 
 function audioContextCtor(): AudioContextCtor | null {
@@ -62,6 +104,34 @@ export function unlock(): void {
  * it. Returns whether a sound was actually started.
  */
 export function playAttentionChime(): boolean {
+  if (isNaviModeEnabled() && playNaviSound()) return true;
+  return playSynthChime();
+}
+
+/**
+ * The egg. Returns whether playback was started; an async rejection (file
+ * missing, autoplay blocked) falls back to the synth chime so the ping is
+ * never silently lost to the joke.
+ */
+function playNaviSound(): boolean {
+  const el = naviElement();
+  if (!el) return false;
+  try {
+    el.currentTime = 0;
+    // Older engines (and jsdom) return void from play(), not a promise.
+    const playing = el.play() as Promise<void> | undefined;
+    if (playing) {
+      void playing.catch(() => {
+        playSynthChime();
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function playSynthChime(): boolean {
   const c = context();
   if (!c) return false;
   if (c.state === "suspended") {
