@@ -6,6 +6,12 @@ import { useSessions } from "~/api/queries";
 import { useListOwner } from "~/lib/use-list-owner";
 import { Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { NewSessionDialog } from "~/components/new-session-dialog";
+import {
+  WorkspaceClause,
+  useActiveWorkspace,
+  workspaceName,
+  type ActiveWorkspace,
+} from "~/components/workspace-clause";
 import { RunStateBadge } from "~/components/run-state-badge";
 import { relativeTime } from "~/lib/relative-time";
 
@@ -54,17 +60,31 @@ export function sortByAttention(sessions: readonly SessionSummary[]): SessionSum
   });
 }
 
+/** The empty state names the workspace it is empty IN — an empty team list
+ * otherwise reads as the switcher not working, which is exactly the report
+ * that motivated the workspace clause. */
+function emptyLabel(ws: ActiveWorkspace | undefined): string {
+  if (ws !== undefined && (ws.kind === "team" || ws.hasTeams)) {
+    return `No sessions in ${workspaceName(ws)} yet.`;
+  }
+  return "No standalone sessions.";
+}
+
 export function SessionsPage() {
   const [newOpen, setNewOpen] = useState(false);
   // Scoped by the nav's workspace switcher, like every other list.
   const owner = useListOwner();
+  const ws = useActiveWorkspace();
   const { data, isLoading, error, refetch } = useSessions(owner);
   const sessions = sortByAttention(data?.sessions ?? []);
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex items-center justify-between px-6 py-4 border-b border-line">
-        <h1 className="text-lg font-semibold tracking-tight text-ink">Sessions</h1>
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-lg font-semibold tracking-tight text-ink">Sessions</h1>
+          <WorkspaceClause />
+        </div>
         <Button size="sm" onClick={() => setNewOpen(true)}>
           <Plus className="h-4 w-4" aria-hidden />
           <span>New session</span>
@@ -83,8 +103,7 @@ export function SessionsPage() {
         )}
         {!isLoading && !error && sessions.length === 0 && (
           <EmptyRow className="py-0">
-            No standalone sessions. A standalone session is for direct work and automation.
-            Select{" "}
+            {emptyLabel(ws)} A standalone session is for direct work and automation. Select{" "}
             <button
               type="button"
               onClick={() => setNewOpen(true)}

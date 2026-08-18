@@ -3,10 +3,21 @@ import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRo
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
+import { useActiveWorkspace } from "~/components/workspace-clause";
 
 type TargetChoice =
   | { kind: "orchestrator"; orchestrator: "user" | "org" }
+  | { kind: "orchestrator"; orchestrator: "team"; teamId: string }
   | { kind: "workflow"; workflowId: string };
+
+/** What the dialog targets before anyone touches it: the active workspace's
+ * assistant. The subscription's owner follows its target server-side, so
+ * this is how a subscription is born in the workspace the switcher names. */
+function targetFor(scopedTeamId: string | undefined): TargetChoice {
+  return scopedTeamId !== undefined
+    ? { kind: "orchestrator", orchestrator: "team", teamId: scopedTeamId }
+    : { kind: "orchestrator", orchestrator: "user" };
+}
 
 /**
  * Create dialog for an event subscription. Offers only catalog keys, so a
@@ -23,10 +34,20 @@ export function SubscriptionCreateDialog({
   const catalogQ = useEventCatalog();
   const workflowsQ = useWorkflows();
   const create = useCreateEventSubscription();
+  const ws = useActiveWorkspace();
+  const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
+  const scopedTeamId = scopedTeam?.id;
 
+  // The default is computed ONCE, at mount. The panel mounts this dialog
+  // only while it is open, so mount time IS open time — and nothing may
+  // rewrite the target afterwards. An effect used to re-derive it whenever
+  // the workspace resolved, which silently replaced a target the user had
+  // already picked when the teams query landed late. If the workspace is
+  // still unknown at open, the default is your own assistant and the team
+  // option appears (unselected) when the query lands.
   const [name, setName] = useState("");
   const [keys, setKeys] = useState<Set<string>>(new Set());
-  const [target, setTarget] = useState<TargetChoice>({ kind: "orchestrator", orchestrator: "user" });
+  const [target, setTarget] = useState<TargetChoice>(() => targetFor(scopedTeamId));
   const [error, setError] = useState<string | null>(null);
 
   const workflows = workflowsQ.data?.workflows ?? [];
@@ -34,12 +55,6 @@ export function SubscriptionCreateDialog({
   const targetReady = target.kind === "orchestrator" || target.workflowId.length > 0;
   const canSubmit = name.trim().length > 0 && keys.size > 0 && targetReady && !create.isPending;
 
-  function reset() {
-    setName("");
-    setKeys(new Set());
-    setTarget({ kind: "orchestrator", orchestrator: "user" });
-    setError(null);
-  }
 
   function toggleKey(key: string) {
     setKeys((cur) => {
@@ -56,25 +71,16 @@ export function SubscriptionCreateDialog({
     create.mutate(
       { name: name.trim(), eventKeys: [...keys], target },
       {
-        onSuccess: () => {
-          reset();
-          onOpenChange(false);
-        },
+        onSuccess: () => onOpenChange(false),
         onError: (err) => setError(errorText(err)),
       },
     );
   }
 
-  function handleOpenChange(next: boolean) {
-    // Closing via Cancel, the overlay, or Escape must not leave a stale
-    // error or stale field values for the next "New subscription" open —
-    // the dialog stays mounted between opens.
-    if (!next) reset();
-    onOpenChange(next);
-  }
-
+  // No reset machinery: closing unmounts the dialog (the panel mounts it
+  // only while open), so the next open starts from a fresh mount.
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="New subscription"
         description="Pick the events to match and what a match runs."
@@ -134,8 +140,24 @@ export function SubscriptionCreateDialog({
                   checked={target.kind === "orchestrator" && target.orchestrator === "user"}
                   onChange={() => setTarget({ kind: "orchestrator", orchestrator: "user" })}
                 />
-                Notify your orchestrator
+                Notify your assistant
               </label>
+              {/* Only the active workspace's team is offered. Targeting a
+                  different team is a workspace change, not a form field —
+                  the switcher answers "whose", everywhere. */}
+              {scopedTeam && (
+                <label className="flex items-center gap-2 text-sm text-ink">
+                  <input
+                    type="radio"
+                    name="subscription-target"
+                    checked={target.kind === "orchestrator" && target.orchestrator === "team"}
+                    onChange={() =>
+                      setTarget({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })
+                    }
+                  />
+                  Notify {scopedTeam.name}&apos;s assistant
+                </label>
+              )}
               <label className="flex items-center gap-2 text-sm text-ink">
                 <input
                   type="radio"
@@ -143,7 +165,7 @@ export function SubscriptionCreateDialog({
                   checked={target.kind === "orchestrator" && target.orchestrator === "org"}
                   onChange={() => setTarget({ kind: "orchestrator", orchestrator: "org" })}
                 />
-                Notify the org orchestrator
+                Notify the org assistant
               </label>
               <label className="flex items-center gap-2 text-sm text-ink">
                 <input
@@ -179,7 +201,7 @@ export function SubscriptionCreateDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="secondary" onClick={() => handleOpenChange(false)}>
+          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button type="button" disabled={!canSubmit} onClick={submit}>

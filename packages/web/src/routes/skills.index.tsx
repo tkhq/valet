@@ -11,6 +11,7 @@ import {
   type SkillGridFilters,
 } from "~/components/skills/skill-grid";
 import { SkillSourcesPanel } from "~/components/skills/skill-sources-panel";
+import { WorkspaceClause } from "~/components/workspace-clause";
 import {
   currentCursor,
   formatCursorStack,
@@ -116,7 +117,10 @@ export function SkillsIndexPage() {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-6 py-10">
         <div className="flex items-end justify-between gap-4">
-          <h1 className="font-display text-2xl text-ink">Skills</h1>
+          <div className="flex items-baseline gap-3">
+            <h1 className="font-display text-2xl text-ink">Skills</h1>
+            <WorkspaceClause />
+          </div>
           <Button size="sm" className="shrink-0" asChild>
             <Link to="/skills/new">New skill</Link>
           </Button>

@@ -13,31 +13,47 @@ import {
   ErrorRow,
   LoadingRow,
   Switch,
+  Tooltip,
 } from "~/components/primitives";
 import {
   useDeleteEventSubscription,
   useEventSubscriptions,
   usePatchEventSubscription,
 } from "~/api/events";
-import { useMe } from "~/api/settings";
+import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
+import { OwnerBadge } from "~/components/owner-badge";
+import { eligibleTeams } from "~/components/session/assistant-rail";
 import { SubscriptionCreateDialog } from "./subscription-create-dialog";
 
-/** An org-owned subscription is everyone's to manage; a personal one is
- * only its creator's — mirrors the server's `canMutateSubscription`. */
-function canMutate(sub: EventSubscriptionWire, userId: string | undefined): boolean {
-  return sub.ownerType === "org" || sub.ownerId === userId;
+/** Mirrors the server's `canMutateSubscription`: an org-owned subscription
+ * is everyone's to manage, a team's belongs to its members, and a personal
+ * one to its owner. */
+export function canMutate(
+  sub: EventSubscriptionWire,
+  userId: string | undefined,
+  memberTeamIds: ReadonlySet<string>,
+): boolean {
+  if (sub.ownerType === "org") return true;
+  if (sub.ownerType === "team") return memberTeamIds.has(sub.ownerId);
+  return sub.ownerId === userId;
 }
 
 function describeTarget(
   target: EventSubscriptionTargetWire,
   workflowNames: Map<string, string>,
+  teamNames: Map<string, string>,
 ): string {
   if (target.kind === "workflow") {
     return `Run workflow: ${workflowNames.get(target.workflowId) ?? target.workflowId}`;
   }
-  return target.orchestrator === "org" ? "Notify org orchestrator" : "Notify your orchestrator";
+  if (target.orchestrator === "org") return "Notify the org assistant";
+  if (target.orchestrator === "team") {
+    const name = target.teamId !== undefined ? teamNames.get(target.teamId) : undefined;
+    return name !== undefined ? `Notify ${name}'s assistant` : "Notify the team's assistant";
+  }
+  return "Notify your assistant";
 }
 
 /**
@@ -50,11 +66,27 @@ export function SubscriptionsPanel() {
   const subsQ = useEventSubscriptions();
   const workflowsQ = useWorkflows();
   const meQ = useMe();
+  const teamsQ = useTeams();
   const [creating, setCreating] = useState(false);
 
   const workflowNames = useMemo(
     () => new Map((workflowsQ.data?.workflows ?? []).map((w) => [w.id, w.name])),
     [workflowsQ.data],
+  );
+  const orgQ = useOrg();
+  const teamNames = useMemo(
+    () => new Map((teamsQ.data?.teams ?? []).map((t) => [t.id, t.name])),
+    [teamsQ.data],
+  );
+  // Membership, not visibility: an org admin sees every team in the org,
+  // but only a member may manage a team's subscriptions. `eligibleTeams` is
+  // the one encoding of that rule (callerRole plus the org feature gate).
+  const memberTeamIds = useMemo(
+    () =>
+      new Set(
+        eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations).map((t) => t.id),
+      ),
+    [teamsQ.data, orgQ.data],
   );
 
   return (
@@ -83,13 +115,19 @@ export function SubscriptionsPanel() {
               key={sub.id}
               sub={sub}
               workflowNames={workflowNames}
-              mutable={canMutate(sub, meQ.data?.id)}
+              teamNames={teamNames}
+              viewerId={meQ.data?.id}
+              mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
             />
           ))}
         </div>
       )}
 
-      <SubscriptionCreateDialog open={creating} onOpenChange={setCreating} />
+      {/* Mounted only while open: the dialog computes its default target at
+          mount, so mount time must be open time (see its header comment).
+          Also keeps its catalog/workflow queries off the tab's initial
+          load. */}
+      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} />}
     </div>
   );
 }
@@ -97,10 +135,15 @@ export function SubscriptionsPanel() {
 function SubscriptionRow({
   sub,
   workflowNames,
+  teamNames,
+  viewerId,
   mutable,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
+  teamNames: Map<string, string>;
+  /** The caller's user id; undefined while `useMe` loads. */
+  viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
 }) {
@@ -114,9 +157,27 @@ function SubscriptionRow({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
-          <Badge variant={sub.ownerType === "org" ? "accent" : "neutral"} className="shrink-0">
-            {sub.ownerType === "org" ? "Org" : "Personal"}
-          </Badge>
+          {/* Ownership varies row to row here, so it is badged: "Org" for
+              org-owned, the team's name for a team's (`OwnerBadge`), and
+              "Personal" for a COLLEAGUE's — the list carries every
+              subscription in the org, so an unbadged row means yours only
+              because everyone else's personal rows say whose kind they
+              are. */}
+          {sub.ownerType === "org" && (
+            <Badge variant="accent" className="shrink-0">
+              Org
+            </Badge>
+          )}
+          {sub.ownerType === "team" && (
+            <OwnerBadge ownerType={sub.ownerType} ownerId={sub.ownerId} />
+          )}
+          {sub.ownerType === "user" && viewerId !== undefined && sub.ownerId !== viewerId && (
+            <Tooltip content="A colleague's personal subscription. Only they can change it.">
+              <Badge variant="neutral" className="shrink-0">
+                Personal
+              </Badge>
+            </Tooltip>
+          )}
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           {sub.eventKeys.map((k) => (
@@ -124,7 +185,9 @@ function SubscriptionRow({
               {k}
             </span>
           ))}
-          <span className="text-xs text-muted">→ {describeTarget(sub.target, workflowNames)}</span>
+          <span className="text-xs text-muted">
+            → {describeTarget(sub.target, workflowNames, teamNames)}
+          </span>
           {sub.filters.length > 0 && (
             <span className="text-xs text-muted">
               · {sub.filters.length} filter{sub.filters.length === 1 ? "" : "s"}

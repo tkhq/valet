@@ -11,9 +11,11 @@
  * so mutate controls render by default; one test flips ownership to prove
  * they gate on it.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import type { ReactNode } from "react";
+import type { EventSubscriptionWire, TeamSummary } from "@valet/api/wire";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { TooltipProvider } from "~/components/primitives";
 
 const catalogData = {
   services: [
@@ -90,12 +92,12 @@ const eventDetailData = {
   ],
 };
 
-const subscriptionsData = {
+const subscriptionsData: { subscriptions: EventSubscriptionWire[] } = {
   subscriptions: [
     {
       id: "sub_1",
       name: "PR alerts",
-      ownerType: "user" as const,
+      ownerType: "user",
       ownerId: "u1",
       eventKeys: ["github.pr.opened"],
       filters: [],
@@ -165,16 +167,70 @@ vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
 }));
 
+// Teams back the subscription owner badges and the workspace-scoped create
+// target. Mutable so team cases can add fixtures; reset in afterEach.
+let teamsData: { teams: TeamSummary[] } = { teams: [] };
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
+  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+  useOrg: () => ({
+    data: { features: { organizations: true } },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
+// `OwnerBadge` reads the assistants list to link a team badge to the team's
+// assistant; no assistant fixtures needed — an unlinked badge still names
+// the owner.
+vi.mock("~/api/assistants", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/assistants")>();
+  return {
+    ...actual,
+    useAssistants: () => ({ data: { assistants: [] }, isLoading: false, error: null }),
+  };
+});
+
+// The create dialog inherits the switcher's workspace. Mutable for the
+// team-scope case; reset in afterEach (isolate: false shares the registry).
+let scopeTeamId: string | undefined;
+vi.mock("~/lib/workspace-scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/workspace-scope")>();
+  return {
+    ...actual,
+    useWorkspaceScope: () => ({
+      key: scopeTeamId ?? "user",
+      teamId: scopeTeamId,
+      available: ["user"],
+      setKey: () => {},
+    }),
+  };
+});
+
 import { EventsPage } from "./events.index";
+
+function team(id: string, name: string, callerRole: "admin" | "member" | null): TeamSummary {
+  return {
+    id,
+    orgId: "org_1",
+    name,
+    origin: "local",
+    externalId: null,
+    createdAt: 0,
+    memberCount: 3,
+    callerRole,
+  };
+}
 
 beforeEach(() => {
   patchMutate.mockClear();
   createMutate.mockClear();
   deleteMutate.mockClear();
+});
+
+afterEach(() => {
+  teamsData = { teams: [] };
+  scopeTeamId = undefined;
 });
 
 describe("EventsPage — Activity", () => {
@@ -221,7 +277,13 @@ describe("EventsPage — Activity", () => {
 
 describe("EventsPage — Subscriptions", () => {
   function openSubscriptionsTab() {
-    render(<EventsPage />);
+    // `TooltipProvider` because `OwnerBadge` (team badges) renders a Radix
+    // tooltip — same wrapper `-workflows.index.test.tsx` uses.
+    render(
+      <TooltipProvider>
+        <EventsPage />
+      </TooltipProvider>,
+    );
     fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
   }
 
@@ -247,9 +309,17 @@ describe("EventsPage — Subscriptions", () => {
       expect(screen.queryByRole("button", { name: "PR alerts actions" })).toBeNull();
       const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
       expect(toggle.disabled).toBe(true);
+      // The list carries every subscription in the org, so a colleague's
+      // personal row is badged — an unbadged row must mean the viewer's own.
+      expect(screen.getByText("Personal")).toBeTruthy();
     } finally {
       subscriptionsData.subscriptions[0].ownerId = "u1";
     }
+  });
+
+  it("the viewer's own personal subscription carries no badge", () => {
+    openSubscriptionsTab();
+    expect(screen.queryByText("Personal")).toBeNull();
   });
 
   it("creates a subscription from a name, catalog-picked keys, and the default target", async () => {
@@ -272,6 +342,73 @@ describe("EventsPage — Subscriptions", () => {
         expect.anything(),
       ),
     );
+  });
+
+  it("badges a team-owned subscription with the team's name and lets a member manage it", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    subscriptionsData.subscriptions[0].ownerType = "team";
+    subscriptionsData.subscriptions[0].ownerId = "t_eng";
+    try {
+      openSubscriptionsTab();
+      expect(screen.getByText("Engineering")).toBeTruthy();
+      const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
+      expect(toggle.disabled).toBe(false);
+    } finally {
+      subscriptionsData.subscriptions[0].ownerType = "user";
+      subscriptionsData.subscriptions[0].ownerId = "u1";
+    }
+  });
+
+  it("keeps a non-member's hands off a team subscription (org admin included)", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", null)] };
+    subscriptionsData.subscriptions[0].ownerType = "team";
+    subscriptionsData.subscriptions[0].ownerId = "t_eng";
+    try {
+      openSubscriptionsTab();
+      const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
+      expect(toggle.disabled).toBe(true);
+      expect(screen.queryByRole("button", { name: "PR alerts actions" })).toBeNull();
+    } finally {
+      subscriptionsData.subscriptions[0].ownerType = "user";
+      subscriptionsData.subscriptions[0].ownerId = "u1";
+    }
+  });
+
+  it("in a team workspace, the create dialog targets the team's assistant by default", async () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    scopeTeamId = "t_eng";
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+
+    // The team option exists and is preselected.
+    const teamRadio = screen.getByRole("radio", {
+      name: /Notify Engineering's assistant/,
+    }) as HTMLInputElement;
+    expect(teamRadio.checked).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Subscription name"), {
+      target: { value: "Team PRs" },
+    });
+    fireEvent.click(screen.getByText("github.pr.merged"));
+    fireEvent.click(screen.getByRole("button", { name: "Create subscription" }));
+
+    await waitFor(() =>
+      expect(createMutate).toHaveBeenCalledWith(
+        {
+          name: "Team PRs",
+          eventKeys: ["github.pr.merged"],
+          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+        },
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("personal workspace: no team target is offered", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    expect(screen.queryByRole("radio", { name: /Engineering's assistant/ })).toBeNull();
   });
 
   it("deletes a subscription after the confirm dialog", async () => {

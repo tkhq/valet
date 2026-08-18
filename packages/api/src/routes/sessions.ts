@@ -464,10 +464,11 @@ sessionsRouter.patch("/:id", async (c) => {
   const wantsModel = body.model !== undefined;
   const wantsTitle = body.title !== undefined;
   const wantsProfile = body.profile !== undefined;
+  const wantsOwner = body.teamId !== undefined;
   // A body with no field at all keeps the message this guard has always
   // sent. The model picker is still the only caller that can omit a field
   // by accident, and a contract test pins this exact response.
-  if (!wantsModel && !wantsTitle && !wantsProfile) {
+  if (!wantsModel && !wantsTitle && !wantsProfile && !wantsOwner) {
     return c.json({ error: "model is required" }, 400);
   }
   if (wantsModel && (typeof body.model !== "string" || body.model.length === 0)) {
@@ -502,11 +503,67 @@ sessionsRouter.patch("/:id", async (c) => {
     }
     if (body.profile !== row.profile) nextProfile = body.profile;
   }
-  if (nextProfile !== undefined) {
+  // Owner move (team-workspace-ui design, decision 5): a team id moves the
+  // session to that team, `null` to the CALLER's own workspace — on a
+  // team-owned session the mover is a team or org admin, and taking a
+  // session personal makes it theirs. Validated like the create route:
+  // membership of the target team, 404 for a non-member or unknown id.
+  let nextOwner: Principal | undefined;
+  if (wantsOwner) {
+    if (body.teamId !== null && (typeof body.teamId !== "string" || body.teamId.length === 0)) {
+      return c.json(
+        { error: "teamId must be a team id, or null to move the session to your own workspace." },
+        400,
+      );
+    }
+    // An assistant's session is ADDRESSED by its owner (`assistant:{id}`):
+    // the assistants table, the rail, and orchestrator resolution all answer
+    // from that owner. Moving only the session row desyncs them — every
+    // teammate keeps seeing the assistant but 404s opening it. The web UI
+    // hides the action; the API is the contract, so it refuses too.
+    if (parseAssistantSessionId(id) !== null) {
+      return c.json(
+        { error: "an assistant's session cannot be moved. It belongs to the assistant's owner." },
+        400,
+      );
+    }
+    // A child session is listed nowhere on its own — it nests under the
+    // parent via child_watches, which a move does not touch. Moving one
+    // strands it: gone from every workspace list, still nested under the
+    // OLD owner's chat.
+    const watch = await db
+      .select({ childSessionId: childWatches.childSessionId })
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, id))
+      .limit(1);
+    if (watch.length > 0) {
+      return c.json(
+        { error: "a child session follows its parent and cannot be moved." },
+        400,
+      );
+    }
+    if (typeof body.teamId === "string") {
+      if (!(await isTeamMember(db, body.teamId, userId))) {
+        return c.json({ error: "team not found" }, 404);
+      }
+      nextOwner = { type: "team", id: body.teamId };
+    } else {
+      nextOwner = { type: "user", id: userId };
+    }
+    // An unchanged owner is not a change — no eviction, no mid-turn refusal.
+    if (nextOwner.type === row.ownerType && nextOwner.id === row.ownerId) {
+      nextOwner = undefined;
+    }
+  }
+  // One busy gate for both mutation kinds: a profile change replaces the
+  // sandbox, an owner move evicts the cached engine session (skills and
+  // credential context bind to the owner at build) — neither may land under
+  // a running turn.
+  if (nextProfile !== undefined || nextOwner !== undefined) {
     const busy = await engineStore.listUnsettledSubmissions(id);
     if (busy.length > 0) {
       return c.json(
-        { error: "a turn is running. Wait for it to finish, then change the profile." },
+        { error: "a turn is running. Wait for it to finish, then retry the change." },
         409,
       );
     }
@@ -544,13 +601,27 @@ sessionsRouter.patch("/:id", async (c) => {
   // The writes land after every validation, so a rejected model never
   // leaves a half-applied patch behind.
   let effectiveRow = row;
-  if (nextTitle !== undefined || nextProfile !== undefined) {
+  if (nextTitle !== undefined || nextProfile !== undefined || nextOwner !== undefined) {
     const now = Date.now();
+    // A personal move also re-stamps `userId`: `canViewSession` and
+    // `canAdministerSession` key user-owned rows off that column, so leaving
+    // the original creator there would hand the session to somebody who no
+    // longer owns it and lock out the mover. A team move leaves it alone —
+    // on team rows the column only records the first actor.
+    const ownerCols =
+      nextOwner !== undefined
+        ? {
+            ownerType: nextOwner.type,
+            ownerId: nextOwner.id,
+            ...(nextOwner.type === "user" ? { userId: nextOwner.id } : {}),
+          }
+        : {};
     await db
       .update(agentSessions)
       .set({
         ...(nextTitle !== undefined ? { title: nextTitle } : {}),
         ...(nextProfile !== undefined ? { profile: nextProfile } : {}),
+        ...ownerCols,
         updatedAt: now,
       })
       .where(eq(agentSessions.id, id));
@@ -558,13 +629,19 @@ sessionsRouter.patch("/:id", async (c) => {
       ...row,
       ...(nextTitle !== undefined ? { title: nextTitle } : {}),
       ...(nextProfile !== undefined ? { profile: nextProfile } : {}),
+      ...ownerCols,
       updatedAt: now,
     };
   }
 
-  if (nextProfile !== undefined) {
-    // Drop the cached session so the next build reads the new profile.
+  // Drop the cached session so the next build reads the new row: the
+  // profile is frozen into the sandbox opts, and the owner binds the skills
+  // provider and credential context.
+  if (nextOwner !== undefined || nextProfile !== undefined) {
     engineHost.evictCache(id);
+  }
+
+  if (nextProfile !== undefined) {
     if (hadSandbox) {
       // The old container still runs the old profile. Rebuild from the
       // updated row, then replace the sandbox so the change is live now

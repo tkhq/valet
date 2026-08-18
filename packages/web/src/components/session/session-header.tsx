@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import {
   Check,
   ClipboardCopy,
+  FolderInput,
   MoreHorizontal,
   Moon,
   RefreshCw,
@@ -36,6 +37,7 @@ import { ApiError } from "~/api/client";
 import { queueBusy, useQueueStateForThread, type AgentStatus, type ConnectionStatus } from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
 import { ModelPicker } from "./model-picker";
+import { MoveSessionDialog } from "./move-session-dialog";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
 import { useCopyToClipboard } from "~/lib/use-copy";
@@ -108,18 +110,25 @@ export function SessionHeader({
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [moving, setMoving] = useState(false);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
   // one edit sends one PATCH.
   const editOpen = useRef(false);
 
   async function destroy() {
-    // A team's assistant is shared, so the prompt names what everyone else
-    // loses rather than describing a private session.
+    // Three prompts for three losses. A team ASSISTANT is a shared
+    // conversation, so the prompt names what the team loses. A team-owned
+    // STANDALONE session (reachable since "Move to workspace…") is still a
+    // session — its prompt keeps the sandbox/child-session warning and adds
+    // who else loses it. A personal session keeps the original warning.
+    const teamNote = `Everyone on ${team?.name ?? "the team"} loses`;
     const prompt =
-      teamId !== null
-        ? `Delete ${title}? Everyone on ${team?.name ?? "the team"} loses this conversation and its threads.`
-        : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
+      isAssistantSession && teamId !== null
+        ? `Delete ${title}? ${teamNote} this conversation and its threads.`
+        : teamId !== null
+          ? `Delete this session permanently? ${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
+          : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
     if (!confirm(prompt)) return;
     try {
       await del.mutateAsync(session.id);
@@ -234,7 +243,11 @@ export function SessionHeader({
   // the viewer's OWN assistant, so a bare `startsWith("orchestrator:")` test
   // titled every team assistant with the viewer's personal assistant name.
   const assistant = assistants.data?.assistants.find((a) => a.sessionId === session.id);
-  const teamId = assistant?.owner.type === "team" ? assistant.owner.id : null;
+  // The row's own `owner` covers standalone sessions, which have no
+  // assistant entry: a team-owned standalone session must badge its team
+  // and gate its admin controls exactly like a team assistant does.
+  const owner = assistant?.owner ?? session.owner;
+  const teamId = owner.type === "team" ? owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
   // Your own assistant is recognised without waiting on the list:
   // `GET /orchestrator/info` answers with the very session id it names.
@@ -437,19 +450,44 @@ export function SessionHeader({
                   <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
                   Replace sandbox
                 </DropdownMenuItem>
+                {/* Standalone sessions only: an assistant's session is
+                    addressed by its owner, so its owner is structural (the
+                    API refuses too). Gated on the assistants list having
+                    RESOLVED — while it loads, `isAssistantSession` is false
+                    for every session, and the item would flash on assistant
+                    pages. */}
+                {!isAssistantSession && assistants.data !== undefined && (
+                  <DropdownMenuItem onSelect={() => setMoving(true)}>
+                    <FolderInput className="h-3.5 w-3.5 mr-2" aria-hidden />
+                    Move to workspace…
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="text-danger-500"
                   disabled={del.isPending}
                   onSelect={() => void destroy()}
                 >
                   <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-                  {teamId !== null ? "Delete this team's assistant…" : "Delete session…"}
+                  {/* Only an assistant session IS the team's assistant. A
+                      team-owned standalone session is a session; calling it
+                      the assistant would threaten the wrong thing. */}
+                  {isAssistantSession && teamId !== null
+                    ? "Delete this team's assistant…"
+                    : "Delete session…"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </>
         )}
       </div>
+      {moving && (
+        <MoveSessionDialog
+          sessionId={session.id}
+          owner={owner}
+          open={moving}
+          onOpenChange={setMoving}
+        />
+      )}
     </header>
   );
 }

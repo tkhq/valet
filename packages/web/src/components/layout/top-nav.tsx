@@ -130,9 +130,11 @@ export function TopNav() {
    * the choice. A team a person belongs to should have an assistant, so this
    * creates it rather than refusing.
    *
-   * Failure is silent by design here. The mutation surfaces its own error
-   * state, and the workspace list still shows the selection; a dropdown is
-   * the wrong place to report a failed write.
+   * Failure is not silent: the strip beside the switcher reports it (the
+   * dropdown itself is closed by then, so it cannot). Without that report,
+   * a failed create left `/chat` on the previous conversation, the scope
+   * re-derived from it and overwrote the selection — the switcher looked
+   * broken and said nothing.
    */
   const createWorkspaceAssistant = useCallback(
     (workspace: WorkspaceOption) => {
@@ -176,10 +178,22 @@ export function TopNav() {
       <WorkspaceSwitcher
         options={options}
         activeKey={scope.key}
-        onSelect={scope.setKey}
+        onSelect={(key) => {
+          // Any new selection retires the previous failure. Without this a
+          // single failed create pinned "Cannot open that workspace" beside
+          // the switcher for the rest of the visit — no later selection
+          // mutates (and so clears) the error unless it also needs a create.
+          createAssistant.reset();
+          scope.setKey(key);
+        }}
         navigateOnSelect={onChat}
         onCreateAssistant={createWorkspaceAssistant}
       />
+      {createAssistant.error != null && (
+        <span role="status" className="shrink-0 truncate max-w-[18rem] text-xs text-danger-500">
+          Cannot open that workspace. Select it again to retry.
+        </span>
+      )}
 
       {/*
        * Six labelled links do not fit beside the logo and the icons on a

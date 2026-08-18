@@ -101,7 +101,13 @@ vi.mock("~/api/settings", () => ({
   // renders. `useOrg` is read by the editor to decide whether the org scope
   // is open to this caller — a member here, which is the common case.
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-  useOrg: () => ({ data: { callerRole: "member" }, isLoading: false, error: null }),
+  // `features` present because the header's `WorkspaceClause` reads it;
+  // organizations ON so the team fixtures stay eligible.
+  useOrg: () => ({
+    data: { callerRole: "member", features: { organizations: true } },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 // The badge links by assistant id, so it reads the assistants list to find

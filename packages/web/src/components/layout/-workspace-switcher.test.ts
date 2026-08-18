@@ -72,4 +72,14 @@ describe("workspaceOptions", () => {
   it("offers Personal alone before the assistants list resolves", () => {
     expect(workspaceOptions(undefined, []).map((o) => o.label)).toEqual(["Personal"]);
   });
+
+  it("falls back to the owner's first assistant when none is marked default", () => {
+    // A workspace with assistants must never read as one with none —
+    // selecting it from /chat would create a duplicate assistant.
+    const options = workspaceOptions(
+      [assistant("mine", ME, true), assistant("plat-a", { type: "team", id: "t1" })],
+      [team("t1", "Platform")],
+    );
+    expect(options[1]?.defaultAssistantId).toBe("plat-a");
+  });
 });

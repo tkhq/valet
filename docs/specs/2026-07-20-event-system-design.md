@@ -283,7 +283,12 @@ first UI over this system. Two tabs:
   so "why didn't my trigger fire" is answerable from the page.
 - **Subscriptions** — list, create, enable/disable, and delete over the
   CRUD routes. The create dialog offers only catalog keys. Targets: the
-  caller's orchestrator, the org orchestrator, or an owned workflow.
+  caller's assistant, the active team's assistant (offered only while a
+  team workspace is selected in the nav switcher — see
+  2026-08-17-team-workspace-ui-design.md), the org assistant, or an owned
+  workflow. The UI says "assistant"; the wire keeps `orchestrator`. Rows
+  badge team owners with the team's name and a colleague's personal
+  subscription with "Personal"; an unbadged row is the caller's own.
 
 Subscription filters are API-only for now: a row shows its filter count,
 and the create dialog does not build filters yet.

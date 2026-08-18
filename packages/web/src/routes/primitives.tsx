@@ -65,7 +65,7 @@ function Primitives() {
         <Section title="Inputs">
           <div className="grid gap-3 max-w-sm">
             <div className="grid gap-1">
-              <Label htmlFor="name">Workspace path</Label>
+              <Label htmlFor="name">Working directory</Label>
               <Input id="name" placeholder="/tmp/valet/dogfood" />
             </div>
             <div className="grid gap-1">
