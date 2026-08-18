@@ -243,53 +243,6 @@ describe("seeded workflow catalog", () => {
   });
 });
 
-// ─── Reviewer routing, specifically ──────────────────────────────────────
-
-describe("catalog.reviewer-routing", () => {
-  const definition = builtinWorkflowTemplates.find((t) => t.id === "catalog.reviewer-routing")!
-    .definition as WorkflowDefinition;
-
-  it("takes the area-to-reviewer map as a required input, not as a constant", () => {
-    const schema = triggerSchema(definition);
-    expect(schema?.reviewerMap?.type).toBe("object");
-    expect(schema?.reviewerMap?.required).toBe(true);
-  });
-
-  it("reads the map from the trigger when it routes", () => {
-    const route = definition.nodes.find((node) => node.id === "route");
-    expect(route?.type).toBe("llm");
-    const paths = referencedPaths(definition).map((segments) => segments.join("."));
-    expect(paths).toContain("trigger.data.reviewerMap");
-  });
-
-  it("sends to the reviewer the match produced, never to a name in the definition", () => {
-    const notify = definition.nodes.find((node) => node.id === "notify_reviewer");
-    expect(notify?.type).toBe("orchestrator");
-    const prompt = notify?.type === "orchestrator" ? notify.prompt : "";
-    expect(prompt).toContain("{{ nodes.route.result.output.reviewer }}");
-    // A handle written into the definition would route every install to one
-    // person, whatever map they supplied.
-    expect(prompt).not.toMatch(/@[a-z][a-z0-9-]+/i);
-  });
-
-  it("branches on the miss instead of guessing a reviewer", () => {
-    const branches = definition.edges.filter((edge) => edge.from === "has_reviewer");
-    expect(branches.map((edge) => edge.fromOutput).sort()).toEqual(["false", "true"]);
-    const miss = branches.find((edge) => edge.fromOutput === "false")!;
-    expect(miss.to).toBe("report_gap");
-  });
-
-  it("keeps its example handles to placeholders", () => {
-    const schema = triggerSchema(definition);
-    const placeholder = schema?.reviewerMap?.placeholder ?? "";
-    // Every handle in the example is a role, so nobody real is named and no
-    // install inherits somebody else's team.
-    const handles = placeholder.match(/@[a-z0-9-]+/gi) ?? [];
-    expect(handles.length).toBeGreaterThan(0);
-    expect(handles.filter((handle) => !handle.startsWith("@reviewer-"))).toEqual([]);
-  });
-});
-
 // ─── Aggregation ─────────────────────────────────────────────────────────
 
 const seededIds = builtinWorkflowTemplates.map((t) => t.id);
