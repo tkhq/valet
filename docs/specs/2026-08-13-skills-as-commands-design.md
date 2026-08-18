@@ -174,3 +174,12 @@ Recorded at implementation time (2026-08-13):
   because its workspace cannot contain `.valet/prompts`.
 - Skills agent actions use snake_case params (`arg_hint`, `owner_type`),
   matching the existing action-parameter convention.
+- (2026-08-17) Stored skills originally reached a session only at build,
+  through `sessionExtras` — a cached session (the orchestrator especially)
+  never saw skills created or deleted after its build, so its command list
+  served only boot-time plugin skills. `CreateSessionOptions.skillsProvider`
+  closes this: `Session.refreshCommandRegistry()` (every
+  `GET /:id/commands`, every attachment `ready` transition) re-reads the
+  stored skills through the host's `skillsProviderFor` and replaces the
+  session's skill map, so the registry and `skill`-tool lookups stay
+  consistent with the database.

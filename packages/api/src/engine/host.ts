@@ -74,7 +74,7 @@ import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
-import { pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
+import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
@@ -554,6 +554,7 @@ export class EngineHost {
     // user IS this session's owner, and the same `{ user, meta.userId }`
     // scope the session's credentials already use is the honest one here.
     const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId);
+    const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId);
 
     const engine = new Engine({
       providers: {
@@ -650,6 +651,7 @@ export class EngineHost {
             tools: extras.tools.length ? extras.tools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
+            ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
             ...(commandOptions ?? {}),
@@ -670,6 +672,7 @@ export class EngineHost {
           tools: extras.tools.length ? extras.tools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
+          ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
           ...(commandOptions ?? {}),
@@ -701,8 +704,8 @@ export class EngineHost {
    * instance `pluginCatalogTools` returns, so it must stay scoped to this
    * one session's credential context — a shared/cached catalog would leak
    * one user's resolved tool list into every other session. The skill read
-   * is per-build for the same reason a session's memory snapshot is: an
-   * edit reaches a session at its next build, not mid-run.
+   * here seeds the session at build; `skillsProviderFor` (below) re-reads it
+   * on registry refreshes so later skill edits reach a cached session too.
    *
    * `opts.db` is optional (tests that wire no db), so an absent db means
    * "plugin skills only" — the same graceful degradation `mintSandboxEnv`
@@ -745,6 +748,31 @@ export class EngineHost {
       await listSkillSourcesFor(this.opts.db, owner, orgId),
       pins,
     );
+  }
+
+  /**
+   * The engine `skillsProvider` for a session owned by `owner`: re-reads the
+   * stored skills that owner can reach and merges them under the plugin set
+   * with the same shadow rule `sessionExtras` applies
+   * (`mergedSkillSources`). `Session.refreshCommandRegistry()` invokes it —
+   * on every `GET /:id/commands` and on each attachment `ready` transition —
+   * so a skill created, edited, or deleted after the session was built
+   * reaches a long-lived cached session (the orchestrator especially: it
+   * lives in the host cache indefinitely, so without this it would only ever
+   * see the skills that existed at its first build).
+   *
+   * `undefined` without a db — the session then keeps its construction-time
+   * skill set, the same graceful degradation `sessionExtras` applies.
+   */
+  private skillsProviderFor(
+    owner: Principal,
+    orgId: string,
+  ): (() => Promise<SkillSource[]>) | undefined {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    const plugins = this.opts.plugins ?? [];
+    return async () =>
+      mergedSkillSources(plugins, await listSkillSourcesFor(db, owner, orgId)).skills;
   }
 
   /**
@@ -1368,6 +1396,7 @@ export class EngineHost {
       false,
     );
     const policyResolver = this.getPolicyResolver();
+    const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -1395,6 +1424,10 @@ export class EngineHost {
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
+      // The orchestrator lives in the host cache indefinitely, so this
+      // refresh seam is what lets skills created after its first wake show
+      // up in its slash-command list.
+      ...(skillsProvider ? { skillsProvider } : {}),
       toolConfig: {
         apiBaseUrl,
         internalToken: internalToken(),
@@ -1878,6 +1911,7 @@ export class EngineHost {
     // it here and on to `createSession` below. A child of a team-owned
     // session gets that team's skills, not the spawning user's.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
+    const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
@@ -1952,6 +1986,7 @@ export class EngineHost {
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
+      ...(skillsProvider ? { skillsProvider } : {}),
       ...(specProvider ? { specProvider } : {}),
       ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
     };
@@ -2026,6 +2061,7 @@ export class EngineHost {
     // A run started from a team-owned workflow therefore reads the team's
     // skills, not those of whoever last edited the workflow.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
+    const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
@@ -2055,6 +2091,7 @@ export class EngineHost {
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
+      ...(skillsProvider ? { skillsProvider } : {}),
       ...(opts.title ? { metadata: { title: opts.title } } : {}),
     };
 
