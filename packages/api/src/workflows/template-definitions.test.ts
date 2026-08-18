@@ -390,12 +390,12 @@ describe("template requirements", () => {
 
   it("flips a service to connected once the caller has it", () => {
     const assign = ownedById("github.assign-reviewers");
-    const connected = new Set(["github", "google_calendar"]);
+    const connected = new Set(["github", "google_calendar", "slack"]);
     const required = templateRequirements(assign.definition, actionPluginByService, connected);
     expect(required.filter((r) => !r.connected)).toEqual([]);
     // The calendar service is named by its READ key, which is the key the
     // connect flow writes as well.
-    expect(required.map((r) => r.service).sort()).toEqual(["github", "google_calendar"]);
+    expect(required.map((r) => r.service).sort()).toEqual(["github", "google_calendar", "slack"]);
   });
 
   /**
@@ -424,26 +424,34 @@ describe("template requirements", () => {
   });
 
   /**
-   * Slack is not available in this deployment, and `SERVICES_NOT_READY`
-   * (`templates.ts`) hides every template whose `requires` names it. These
-   * two used Slack only to TELL somebody something, so they now report
-   * through the run owner's orchestrator — a node type, not a service, and
-   * therefore a delivery that appears in no requirement.
-   *
-   * One slack tool node left in either definition puts the card back behind
-   * the same wall and the work is undone, so this is the assertion that the
-   * change held. `templates.test.ts` runs the gallery listing itself.
+   * The routing template still delivers through a GitHub comment alone — no
+   * action here requests a review, so the comment IS the delivery, and
+   * nothing about that needed Slack to fix. `github.assign-reviewers` is no
+   * longer in this set: it now DMs through Slack in addition to its
+   * orchestrator report, which is the assertion right after this one.
    */
-  it.each([
-    "github.assign-reviewers",
-    "github.unclaimed-pull-request-routing",
-  ])("%s needs no Slack, and still reports somewhere a person reads", (id) => {
-    const { definition } = ownedById(id);
+  it("the routing template still needs no Slack, and still reports somewhere a person reads", () => {
+    const { definition } = ownedById("github.unclaimed-pull-request-routing");
     const required = templateRequirements(definition, actionPluginByService, nothingConnected);
     expect(required.map((r) => r.service)).not.toContain("slack");
     expect(toolNodesOf(definition).map((node) => node.service)).not.toContain("slack");
     // Dropping the message without keeping the report would be a run that
     // tells nobody anything.
+    expect(definition.nodes.some((node) => node.type === "orchestrator")).toBe(true);
+  });
+
+  /**
+   * `SERVICES_NOT_READY` (`templates.ts`) no longer names Slack, and this
+   * template is the reason it was there: it restores the direct message
+   * the original request asked for, on top of the orchestrator report that
+   * covered for it while Slack was unavailable. A slack tool node removed
+   * from the definition would put this template's own gap back, silently.
+   */
+  it("github.assign-reviewers needs Slack now, and still reports through the orchestrator too", () => {
+    const { definition } = ownedById("github.assign-reviewers");
+    const required = templateRequirements(definition, actionPluginByService, nothingConnected);
+    expect(required.map((r) => r.service)).toContain("slack");
+    expect(toolNodesOf(definition).map((node) => node.service)).toContain("slack");
     expect(definition.nodes.some((node) => node.type === "orchestrator")).toBe(true);
   });
 });

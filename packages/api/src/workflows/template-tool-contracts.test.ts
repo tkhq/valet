@@ -239,6 +239,15 @@ const WEBHOOK_PAYLOAD: Record<string, unknown> = {
     head: { ref: "fix/flake", sha: "d3adb33fd3adb33fd3adb33fd3adb33fd3adb33f" },
     base: { ref: "main" },
   },
+  // An `issue_comment` event's shape, added for the assign-reviewers
+  // template's decline-swap branch. `issue.pull_request` existing (not
+  // `pull_request` at the top level) is how GitHub says the commented-on
+  // issue is a pull request.
+  issue: {
+    number: 42,
+    pull_request: { url: "https://api.github.com/repos/acme/widgets/pulls/42" },
+  },
+  comment: { user: { login: "octocat" }, body: "sorry, can't get to this one" },
 };
 
 /**
@@ -322,10 +331,28 @@ const NODE_RESULTS: Record<string, unknown> = {
     },
     usage: {},
   },
-  // The same template's read-back comparison node.
+  // The same template's read-back comparison node. `landed` is what the DM
+  // to the pull request author's foreach body reads.
   confirm: {
     text: "",
-    output: { summary: "Assigned reviewer-one for @example-org/group-one." },
+    output: { summary: "Assigned reviewer-one for @example-org/group-one.", landed: ["reviewer-one"] },
+    usage: {},
+  },
+  // The decline-swap branch's own selection and read-back nodes — `assign_swap`
+  // writes `assignees` (keepers plus the replacement) and `reply_on_pr` reads
+  // `newAssignees` (the replacement alone).
+  select_swap: {
+    text: "",
+    output: {
+      assignees: ["reviewer-one", "reviewer-two"],
+      newAssignees: ["reviewer-two"],
+      failureReason: "Every required owner is covered.",
+    },
+    usage: {},
+  },
+  confirm_swap: {
+    text: "",
+    output: { landed: ["reviewer-two"] },
     usage: {},
   },
 };
