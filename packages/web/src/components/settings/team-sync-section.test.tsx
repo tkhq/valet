@@ -97,4 +97,29 @@ describe("TeamSyncSection writes", () => {
     render(<TeamSyncSection />);
     expect(screen.getByText("features.ssoTeamSync must be a boolean")).toBeTruthy();
   });
+
+  it("keeps a failed PATCH from escaping as an unhandled rejection", async () => {
+    // react-query stores the failure and the row renders `patchOrg.error`;
+    // the promise itself must still be handled, or every failed flip prints
+    // an unhandled-rejection error at runtime.
+    mutateAsync.mockRejectedValueOnce(new Error("boom"));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      ssoTeamSync = true;
+      render(<TeamSyncSection />);
+      fireEvent.click(screen.getByRole("switch", { name: "Team sync" }));
+      await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+      // Two macrotask turns: Node reports an orphaned rejection only after
+      // the microtask queue that produced it has drained.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });

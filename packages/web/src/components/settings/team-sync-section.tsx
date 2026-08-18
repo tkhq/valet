@@ -42,8 +42,14 @@ export function TeamSyncSection() {
   const enabled = orgQ.data.features.ssoTeamSync === true;
 
   async function apply(next: boolean) {
-    await patchOrg.mutateAsync({ features: { ssoTeamSync: next } });
-    setConfirmOn(false);
+    try {
+      await patchOrg.mutateAsync({ features: { ssoTeamSync: next } });
+      setConfirmOn(false);
+    } catch {
+      // react-query stores the failure, and the row (or the still-open
+      // dialog) renders `patchOrg.error`. This catch only keeps the
+      // rejection from escaping the `void apply(...)` call sites below.
+    }
   }
 
   return (
