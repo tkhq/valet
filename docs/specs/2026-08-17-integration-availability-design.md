@@ -146,7 +146,13 @@ disconnect), but sessions stop receiving the tools.
 - Unconfigured and **connected** → the tile renders with Disconnect and a
   note naming the fix for the cause that blocks it (generalizing the GitHub
   org-note slot). See "Two causes, three notes" below.
-- `"org"` → the tile renders with no connect control and the note
+- `"org"` → the tile renders with no token entry. When the provider
+  declares an `identityLink` and `GET /api/me/identity-links` reports its
+  transport ready, the tile carries the member's own step instead: the
+  pairing block (`identity-link-block.tsx`) — "Link account" starts the
+  identity-link code flow and shows the code, the provider's delivery
+  instructions, and the expiry; a linked account reads "Linked as
+  <externalId>" with Unlink. Providers with no identity link get the note
   "Provided by your organization. An admin manages it in Settings →
   Organization." A leftover user credential keeps its Disconnect.
 
