@@ -362,6 +362,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     engineStore,
     actionPluginByService,
+    plugins,
     credentials: engineCredentials,
     // Same key BOTH consumers get at real boot (`providers/node.ts` derives
     // one key for `EngineHost` and the workflow action invoker). Without

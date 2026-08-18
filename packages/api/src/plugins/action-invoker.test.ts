@@ -325,6 +325,46 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(0);
   });
 
+  it("gates on a shared oauth declaration held by a different plugin (full registry scan)", async () => {
+    // The declaration for the credential service lives on plugin B; the
+    // action lives on plugin A. The gate must scan the full plugin set, not
+    // just the action's owning plugin, or the env-unset OAuth service slips
+    // through as "manual".
+    const fixture = countingAction({ id: "shared.ping" });
+    const actionPlugin: ActionPlugin = { service: "shared", actions: [fixture.action] };
+    const actionsPlugin: ValetPlugin = { name: "shared-actions", version: "0.0.1", actions: [actionPlugin] };
+    const declPlugin: ValetPlugin = {
+      name: "shared",
+      version: "0.0.1",
+      credentials: [{
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.example.com/auth",
+          tokenUrl: "https://accounts.example.com/token",
+          clientIdEnv: "UNSET_SHARED_ID",
+          clientSecretEnv: "UNSET_SHARED_SECRET",
+        },
+      }],
+    };
+    const actionPluginByService = new Map([["shared", { plugin: actionsPlugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: new FakeCredentialStore(),
+      actionPluginByService,
+      plugins: [actionsPlugin, declPlugin],
+    });
+
+    const result = await invoke(
+      { service: "shared", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:shared" },
+      userOwner,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("executes normally once the org credential exists for the gated service", async () => {
     const fixture = countingAction({ id: "gated.ping" });
     const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };

@@ -96,6 +96,16 @@ export interface ActionInvokerOpts {
   db: AppDb;
   credentials: CredentialStore;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /**
+   * The full assembled plugin set, for the availability gate — a credential
+   * declaration (and its OAuth block) can live on a different plugin than
+   * the action's owner, so the gate must scan the whole registry, exactly
+   * as `/api/plugins` and the session-build gate do. Optional: without it,
+   * the gate falls back to the (deduped) plugins in `actionPluginByService`,
+   * which covers every action-bearing plugin but misses credential-only
+   * ones — production wiring passes the full set.
+   */
+  plugins?: ValetPlugin[];
   clock?: () => number;
   /**
    * Deps for resolving `github` service credentials through the canonical
@@ -207,12 +217,14 @@ async function computeResult(
   // Availability gate (integration-availability design): a service whose
   // deployment/org prerequisite is missing must fail the same way here as it
   // disappears from a live session's `list_tools` — deterministically, with
-  // the corrective action named. The owning plugin carries the declaration,
-  // so it is the whole plugin list this check needs.
-  const declared = findCredentialDeclaration([entry.plugin], credentialService);
+  // the corrective action named. Scans the full registry (see
+  // `ActionInvokerOpts.plugins`) because the declaration can live on a
+  // different plugin than the action's owner.
+  const registry = opts.plugins ?? [...new Set([...opts.actionPluginByService.values()].map((e) => e.plugin))];
+  const declared = findCredentialDeclaration(registry, credentialService);
   if (declared) {
     const mode = await connectModeFor({
-      plugins: [entry.plugin],
+      plugins: registry,
       decl: declared,
       service: credentialService,
       orgId: ctx.orgId,
