@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import {
   Check,
   ClipboardCopy,
+  FolderInput,
   MoreHorizontal,
   Moon,
   RefreshCw,
@@ -36,6 +37,7 @@ import { ApiError } from "~/api/client";
 import { queueBusy, useQueueStateForThread, type AgentStatus, type ConnectionStatus } from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
 import { ModelPicker } from "./model-picker";
+import { MoveSessionDialog } from "./move-session-dialog";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
 import { useCopyToClipboard } from "~/lib/use-copy";
@@ -108,6 +110,7 @@ export function SessionHeader({
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [moving, setMoving] = useState(false);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
   // one edit sends one PATCH.
@@ -234,7 +237,11 @@ export function SessionHeader({
   // the viewer's OWN assistant, so a bare `startsWith("orchestrator:")` test
   // titled every team assistant with the viewer's personal assistant name.
   const assistant = assistants.data?.assistants.find((a) => a.sessionId === session.id);
-  const teamId = assistant?.owner.type === "team" ? assistant.owner.id : null;
+  // The row's own `owner` covers standalone sessions, which have no
+  // assistant entry: a team-owned standalone session must badge its team
+  // and gate its admin controls exactly like a team assistant does.
+  const owner = assistant?.owner ?? session.owner;
+  const teamId = owner.type === "team" ? owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
   // Your own assistant is recognised without waiting on the list:
   // `GET /orchestrator/info` answers with the very session id it names.
@@ -437,6 +444,14 @@ export function SessionHeader({
                   <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
                   Replace sandbox
                 </DropdownMenuItem>
+                {/* Standalone sessions only: an assistant's session is
+                    addressed by its owner, so its owner is structural. */}
+                {!isAssistantSession && (
+                  <DropdownMenuItem onSelect={() => setMoving(true)}>
+                    <FolderInput className="h-3.5 w-3.5 mr-2" aria-hidden />
+                    Move to workspace…
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="text-danger-500"
                   disabled={del.isPending}
@@ -450,6 +465,14 @@ export function SessionHeader({
           </>
         )}
       </div>
+      {moving && (
+        <MoveSessionDialog
+          sessionId={session.id}
+          owner={owner}
+          open={moving}
+          onOpenChange={setMoving}
+        />
+      )}
     </header>
   );
 }

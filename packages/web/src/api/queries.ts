@@ -233,6 +233,21 @@ export function useRenameSession(sessionId: string) {
   });
 }
 
+/** PATCH /:id with a `teamId` — move the session to a team's workspace, or
+ * (`null`) to the caller's own. `["sessions"]` is a prefix of every scoped
+ * list key, so one invalidation refreshes the workspace it left and the one
+ * it joined. */
+export function useMoveSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchSessionResponse, Error, string | null>({
+    mutationFn: (teamId) => api.patchSession(sessionId, { teamId }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
 /** PATCH /:id with a `profile` — turn the sandbox's terminal and VS Code
  * server on or off. The server replaces a running sandbox, so the session
  * row and the live `sandbox.status` both change. */
