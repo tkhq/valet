@@ -6,10 +6,15 @@
  * code-server behind the gateway) rather than the "headless" server-side
  * default. Task 11 adds an optional repo picker over `useRepos()`.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { GetPrebuildForRepoResponse, GetReposResponse } from "@valet/api/wire";
+import type {
+  GetPrebuildForRepoResponse,
+  GetReposResponse,
+  ListTeamsResponse,
+  TeamSummary,
+} from "@valet/api/wire";
 
 const navigate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
@@ -42,7 +47,51 @@ vi.mock("~/api/repos", () => ({
   }),
 }));
 
+// The dialog inherits the workspace: `useWorkspaceScope` for the teamId it
+// submits, `useTeams`/`useOrg` for the scope line that names the team.
+// Mutable state + afterEach reset, same shape as `reposData` above.
+let scopeTeamId: string | undefined;
+let teamsData: ListTeamsResponse = { teams: [] };
+let organizationsEnabled = false;
+vi.mock("~/lib/workspace-scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/workspace-scope")>();
+  return {
+    ...actual,
+    useWorkspaceScope: () => ({
+      key: scopeTeamId ?? "user",
+      teamId: scopeTeamId,
+      available: ["user"],
+      setKey: () => {},
+    }),
+  };
+});
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useOrg: () => ({
+      data: { features: { organizations: organizationsEnabled } },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
+
 import { NewSessionDialog } from "./new-session-dialog";
+
+function team(id: string, name: string): TeamSummary {
+  return {
+    id,
+    orgId: "org_1",
+    name,
+    origin: "local",
+    externalId: null,
+    createdAt: 0,
+    memberCount: 3,
+    callerRole: "member",
+  };
+}
 
 function repo(fullName: string, opts: { installed?: boolean; defaultBranch?: string } = {}) {
   return {
@@ -63,6 +112,14 @@ describe("NewSessionDialog", () => {
     prebuildByRepo.clear();
   });
 
+  // `isolate: false` shares the worker's module registry, so the scope mock
+  // can outlive this file — the reset must too.
+  afterEach(() => {
+    scopeTeamId = undefined;
+    teamsData = { teams: [] };
+    organizationsEnabled = false;
+  });
+
   it("submits with profile: full", async () => {
     render(<NewSessionDialog open onOpenChange={() => {}} />);
     const user = userEvent.setup();
@@ -70,6 +127,37 @@ describe("NewSessionDialog", () => {
     expect(mutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({ profile: "full" }),
     );
+  });
+
+  it("personal scope: create body carries no teamId key at all", async () => {
+    render(<NewSessionDialog open onOpenChange={() => {}} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /create/i }));
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    const body = mutateAsync.mock.calls[mutateAsync.mock.calls.length - 1][0];
+    expect("teamId" in body).toBe(false);
+  });
+
+  it("team scope: submits the scoped teamId and names the team", async () => {
+    scopeTeamId = "t_eng";
+    teamsData = { teams: [team("t_eng", "Engineering")] };
+    organizationsEnabled = true;
+    render(<NewSessionDialog open onOpenChange={() => {}} />);
+
+    // The scope line states where the session is born.
+    expect(screen.getByText("Engineering")).toBeTruthy();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /create/i }));
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    expect(mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ teamId: "t_eng" }));
+  });
+
+  it("personal scope with teams: the scope line says how to change it", () => {
+    teamsData = { teams: [team("t_eng", "Engineering")] };
+    organizationsEnabled = true;
+    render(<NewSessionDialog open onOpenChange={() => {}} />);
+    expect(screen.getByText(/stays in your personal workspace/i)).toBeTruthy();
   });
 
   it("no repo selected: create body carries no repos key at all (regression pin)", async () => {
@@ -125,7 +213,7 @@ describe("NewSessionDialog", () => {
     await user.click(screen.getByRole("option", { name: /acme\/api/i }));
 
     expect(screen.getByText("acme/api")).toBeTruthy();
-    const workspaceInput = screen.getByLabelText("Workspace path") as HTMLInputElement;
+    const workspaceInput = screen.getByLabelText("Working directory") as HTMLInputElement;
     expect(workspaceInput.value).toBe("/workspace/api");
     const refInput = screen.getByLabelText("Branch for acme/api") as HTMLInputElement;
     expect(refInput.value).toBe("develop");
@@ -139,7 +227,7 @@ describe("NewSessionDialog", () => {
     };
     render(<NewSessionDialog open onOpenChange={() => {}} />);
     const user = userEvent.setup();
-    const workspaceInput = screen.getByLabelText("Workspace path");
+    const workspaceInput = screen.getByLabelText("Working directory");
     await user.clear(workspaceInput);
     await user.type(workspaceInput, "/custom/path");
 

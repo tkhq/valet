@@ -13,6 +13,8 @@ import {
 import { useCreateSession } from "~/api/queries";
 import { useRepoPrebuild, useRepos } from "~/api/repos";
 import { relativeTime } from "~/lib/relative-time";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { CreateScopeLine } from "~/components/workspace-clause";
 
 const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
 const MAX_REPOS = 5;
@@ -43,6 +45,10 @@ export function NewSessionDialog({
   const navigate = useNavigate();
   const create = useCreateSession();
   const reposQ = useRepos();
+  // The nav's switcher answers "whose session is this" — the dialog passes
+  // that answer through and states it (`CreateScopeLine`) instead of asking
+  // again with an owner dropdown. See `workspace-scope.tsx`.
+  const scope = useWorkspaceScope();
   const [workspace, setWorkspace] = useState(DEFAULT_WORKSPACE);
   const [workspaceTouched, setWorkspaceTouched] = useState(false);
   const [rows, setRows] = useState<RepoRow[]>([]);
@@ -90,6 +96,7 @@ export function NewSessionDialog({
     if (!ws) return;
     try {
       const body: CreateSessionRequest = { workspace: ws, profile: "full" };
+      if (scope.teamId !== undefined) body.teamId = scope.teamId;
       if (rows.length > 0) {
         const repoBindings: RepoBinding[] = rows.map((r) => ({
           host: "github",
@@ -116,10 +123,15 @@ export function NewSessionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="New session"
-        description="The agent runs bash, read, write, and edit tools against this workspace inside a Docker sandbox."
+        description="The agent runs bash, read, write, and edit tools against this directory inside a Docker sandbox."
       >
+        <CreateScopeLine what="session" />
         <div className="grid gap-1">
-          <Label htmlFor="workspace">Workspace path</Label>
+          {/* "Working directory", not "workspace" — that word names the
+              switcher scope now (one name for one thing; CLAUDE.md
+              terminology note). The field itself is unchanged: the
+              in-sandbox path the tools run against. */}
+          <Label htmlFor="workspace">Working directory</Label>
           <Input
             id="workspace"
             value={workspace}
