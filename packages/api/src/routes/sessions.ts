@@ -503,16 +503,6 @@ sessionsRouter.patch("/:id", async (c) => {
     }
     if (body.profile !== row.profile) nextProfile = body.profile;
   }
-  if (nextProfile !== undefined) {
-    const busy = await engineStore.listUnsettledSubmissions(id);
-    if (busy.length > 0) {
-      return c.json(
-        { error: "a turn is running. Wait for it to finish, then change the profile." },
-        409,
-      );
-    }
-  }
-
   // Owner move (team-workspace-ui design, decision 5): a team id moves the
   // session to that team, `null` to the CALLER's own workspace — on a
   // team-owned session the mover is a team or org admin, and taking a
@@ -523,6 +513,32 @@ sessionsRouter.patch("/:id", async (c) => {
     if (body.teamId !== null && (typeof body.teamId !== "string" || body.teamId.length === 0)) {
       return c.json(
         { error: "teamId must be a team id, or null to move the session to your own workspace." },
+        400,
+      );
+    }
+    // An assistant's session is ADDRESSED by its owner (`assistant:{id}`):
+    // the assistants table, the rail, and orchestrator resolution all answer
+    // from that owner. Moving only the session row desyncs them — every
+    // teammate keeps seeing the assistant but 404s opening it. The web UI
+    // hides the action; the API is the contract, so it refuses too.
+    if (parseAssistantSessionId(id) !== null) {
+      return c.json(
+        { error: "an assistant's session cannot be moved. It belongs to the assistant's owner." },
+        400,
+      );
+    }
+    // A child session is listed nowhere on its own — it nests under the
+    // parent via child_watches, which a move does not touch. Moving one
+    // strands it: gone from every workspace list, still nested under the
+    // OLD owner's chat.
+    const watch = await db
+      .select({ childSessionId: childWatches.childSessionId })
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, id))
+      .limit(1);
+    if (watch.length > 0) {
+      return c.json(
+        { error: "a child session follows its parent and cannot be moved." },
         400,
       );
     }
@@ -539,15 +555,15 @@ sessionsRouter.patch("/:id", async (c) => {
       nextOwner = undefined;
     }
   }
-  if (nextOwner !== undefined) {
-    // Refused mid-turn for the same reason a profile change is: the engine
-    // session binds skills and credential context to its owner at build, so
-    // the move evicts the cached session, and a running turn must not lose
-    // it under itself.
+  // One busy gate for both mutation kinds: a profile change replaces the
+  // sandbox, an owner move evicts the cached engine session (skills and
+  // credential context bind to the owner at build) — neither may land under
+  // a running turn.
+  if (nextProfile !== undefined || nextOwner !== undefined) {
     const busy = await engineStore.listUnsettledSubmissions(id);
     if (busy.length > 0) {
       return c.json(
-        { error: "a turn is running. Wait for it to finish, then move the session." },
+        { error: "a turn is running. Wait for it to finish, then retry the change." },
         409,
       );
     }
@@ -618,15 +634,14 @@ sessionsRouter.patch("/:id", async (c) => {
     };
   }
 
-  if (nextOwner !== undefined) {
-    // The cached engine session still holds the old owner's skills provider
-    // and credential context; the next touch rebuilds from the updated row.
+  // Drop the cached session so the next build reads the new row: the
+  // profile is frozen into the sandbox opts, and the owner binds the skills
+  // provider and credential context.
+  if (nextOwner !== undefined || nextProfile !== undefined) {
     engineHost.evictCache(id);
   }
 
   if (nextProfile !== undefined) {
-    // Drop the cached session so the next build reads the new profile.
-    engineHost.evictCache(id);
     if (hadSandbox) {
       // The old container still runs the old profile. Rebuild from the
       // updated row, then replace the sandbox so the change is live now

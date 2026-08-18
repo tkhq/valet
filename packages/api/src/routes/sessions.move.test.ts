@@ -9,7 +9,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, childWatches, teamMembers, teams } from "../schema/index.js";
 import type { PatchSessionResponse } from "../wire/types.js";
 
 async function seedSession(
@@ -148,6 +148,46 @@ describe("PATCH /api/sessions/:id — teamId (move between workspaces)", () => {
     expect(res.status).toBe(200);
     // A move evicts the cache; it must not materialize the engine session.
     expect(api.providers.engineHost.isLive("mv-cold")).toBe(false);
+  });
+
+  it("refuses to move an assistant's session — the owner is structural", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_asst", ["local-user"]);
+    await seedSession(api, {
+      id: "assistant:as_move",
+      owner: { type: "user", id: "local-user" },
+    });
+
+    const res = await patch(api, "assistant:as_move", { teamId: "team_asst" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("assistant");
+    expect(await storedOwner(api, "assistant:as_move")).toEqual({
+      type: "user",
+      id: "local-user",
+    });
+  });
+
+  it("refuses to move a child session — it follows its parent", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_child", ["local-user"]);
+    await seedSession(api, { id: "mv-parent", owner: { type: "user", id: "local-user" } });
+    await seedSession(api, { id: "mv-child", owner: { type: "user", id: "local-user" } });
+    await api.providers.db.insert(childWatches).values({
+      childSessionId: "mv-child",
+      queueItemId: "qi-mv-child",
+      parentSessionId: "mv-parent",
+      parentThreadId: "web:default",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      createdAt: Date.now(),
+    });
+
+    const res = await patch(api, "mv-child", { teamId: "team_child" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("child session");
+    expect(await storedOwner(api, "mv-child")).toEqual({ type: "user", id: "local-user" });
   });
 
   it("404s for another user's personal session — org admin included", async () => {
