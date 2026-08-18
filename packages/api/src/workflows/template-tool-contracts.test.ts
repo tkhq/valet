@@ -184,6 +184,10 @@ const ITEM_ALIAS: Record<string, unknown> = {
   slackUserId: "U0FIXTURE1",
   comment: "The area that owns these paths should read this.",
   message: "A pull request is waiting for your review.",
+  // A Google calendar id is an address. The action puts it in the request
+  // path, so a value that is not one fails the fixture route rather than
+  // the mapping under test.
+  calendarId: "reviewer-one@example.com",
 };
 
 /** What a body sees when it interpolates the WHOLE alias. One template's
@@ -307,6 +311,23 @@ const NODE_RESULTS: Record<string, unknown> = {
     head: { ref: "fix/flake", sha: "d3adb33fd3adb33fd3adb33fd3adb33fd3adb33f" },
     patch_summary: { limit_bytes: 120000, included_bytes: 24, truncated_files: 0, omitted_files: 0 },
   },
+  // The assign-reviewers template's selection node. `assignees` must be the
+  // array `github.update_pull_request` writes, not its JSON text, because a
+  // single-expression param keeps the value's type.
+  select: {
+    text: "",
+    output: {
+      assignees: ["reviewer-one"],
+      failureReason: "Every required owner is covered.",
+    },
+    usage: {},
+  },
+  // The same template's read-back comparison node.
+  confirm: {
+    text: "",
+    output: { summary: "Assigned reviewer-one for @example-org/group-one." },
+    usage: {},
+  },
 };
 
 function paramRenderContext(definition: WorkflowDefinition): TemplateContext {
@@ -427,8 +448,27 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** `GET /calendars/{id}/events` — the vendor's own field names, so the
+ * action's mapping from these to its `data` keys is what runs. One event
+ * that reads as time away from work, because that is the only kind the
+ * template asks the calendar about. */
+const CALENDAR_EVENTS_BODY = {
+  items: [
+    {
+      id: "evt_fixture_1",
+      status: "confirmed",
+      summary: "Away",
+      start: { date: "2026-08-15" },
+      end: { date: "2026-08-18" },
+      attendees: [{ email: "reviewer-one@example.com", responseStatus: "accepted" }],
+      organizer: { email: "reviewer-one@example.com" },
+      htmlLink: "https://calendar.google.test/event?eid=evt_fixture_1",
+    },
+  ],
+};
+
 /**
- * Serves Slack and Gmail from one router.
+ * Serves Google Calendar, Slack and Gmail from one router.
  *
  * GitHub is NOT served here. Its actions go through Octokit, which uses the
  * same global `fetch` this replaces, so a loopback fixture is only
@@ -444,6 +484,10 @@ function stubUpstream(): void {
   const realFetch = globalThis.fetch;
   vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (url.includes("googleapis.com/calendar/v3/calendars/")) {
+      return json(CALENDAR_EVENTS_BODY);
+    }
 
     if (url.includes("/gmail/v1/users/me/labels")) {
       return json({ labels: [{ id: "Label_7", name: "Bulk", type: "user" }] });
@@ -572,8 +616,14 @@ const CTX: ActionInvocationContext = { userId: "u1", orgId: "org1", owner: RUN_O
 async function buildInvoker(): Promise<ReturnType<typeof buildActionInvoker>> {
   const { appDb } = await freshTestPgDb();
   const credentials = new SeededCredentialStore();
-  for (const service of ["github", "gmail", "slack"]) {
-    credentials.seed(OWNER, service, { type: "oauth2", accessToken: `${service}-fixture-token` });
+  for (const service of ["github", "gmail", "slack", "google_calendar"]) {
+    credentials.seed(OWNER, service, {
+      type: "oauth2",
+      accessToken: `${service}-fixture-token`,
+      // `slack.dm_owner` resolves the owner's Slack id off the credential and
+      // refuses to send without one. Every other action here ignores this.
+      metadata: { owner_slack_user_id: "U0FIXTUREOWNER" },
+    });
   }
   // The availability gate (integration-availability design) requires a
   // configured deployment: slack needs the org credential an admin connects,

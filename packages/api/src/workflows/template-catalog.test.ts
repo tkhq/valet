@@ -28,10 +28,18 @@ import {
   type WorkflowInputDefinition,
   type WorkflowNode,
 } from "@valet/workflow";
-import type { ValetPlugin, WorkflowTemplate } from "@valet/engine";
+import type { ActionPlugin, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { builtinWorkflowTemplates } from "./template-definitions.js";
-import { CATALOG_SOURCE, findCatalogTemplate, listCatalogTemplates, toolNodesOf } from "./templates.js";
+import { bundledPlugins } from "../plugins/registry.gen.js";
+import {
+  CATALOG_SOURCE,
+  bakeInputs,
+  findCatalogTemplate,
+  listCatalogTemplates,
+  templateInputs,
+  toolNodesOf,
+} from "./templates.js";
 
 // A seeded template names no action, so the environment needs no action
 // hook. The model hook is real: a model id that leaves the catalog must
@@ -286,22 +294,27 @@ describe("catalog.reviewer-routing", () => {
 
 const seededIds = builtinWorkflowTemplates.map((t) => t.id);
 
-function pluginWith(id: string): ValetPlugin {
+function templateWith(id: string, rank?: number): WorkflowTemplate {
   return {
-    name: "fixture",
-    version: "0.0.1",
-    templates: [
-      {
-        id,
-        name: id,
-        description: id,
-        category: "test",
-        apps: [],
-        steps: ["one"],
-        definition: { version: "dag/v1", nodes: [{ id: "t", type: "trigger" }], edges: [] },
-      },
-    ],
+    id,
+    name: id,
+    description: id,
+    category: "test",
+    apps: [],
+    steps: ["one"],
+    ...(rank !== undefined ? { rank } : {}),
+    definition: { version: "dag/v1", nodes: [{ id: "t", type: "trigger" }], edges: [] },
   };
+}
+
+function pluginWith(id: string): ValetPlugin {
+  return { name: "fixture", version: "0.0.1", templates: [templateWith(id)] };
+}
+
+/** One plugin holding several templates, so the order under test is the
+ * aggregation's own and not an accident of plugin order. */
+function pluginHolding(templates: WorkflowTemplate[]): ValetPlugin {
+  return { name: "fixture", version: "0.0.1", templates };
 }
 
 describe("listCatalogTemplates", () => {
@@ -320,6 +333,156 @@ describe("listCatalogTemplates", () => {
     expect(() => listCatalogTemplates([pluginWith(seededIds[0]!)])).toThrow(
       new RegExp(`${seededIds[0]!.replace(".", "\\.")}.*fixture.*${CATALOG_SOURCE}`, "s"),
     );
+  });
+});
+
+// ─── Order ───────────────────────────────────────────────────────────────
+
+/**
+ * Gallery order is `WorkflowTemplate.rank` and nothing else.
+ *
+ * Before this field the order fell out of plugin registration order and
+ * array position: no author could read it, and no author could change it
+ * without editing the host. These tests pin the three rules a reader has to
+ * be able to rely on — ranked first, unranked after, and source order
+ * everywhere the ranks say nothing.
+ */
+describe("gallery order", () => {
+  it("puts a ranked template before every unranked one, wherever it was declared", () => {
+    const owned = listCatalogTemplates([
+      pluginHolding([templateWith("fixture.one"), templateWith("fixture.two"), templateWith("fixture.last", 1)]),
+    ]);
+    expect(owned[0]!.template.id).toBe("fixture.last");
+  });
+
+  it("sorts ranked templates by their number", () => {
+    const owned = listCatalogTemplates([
+      pluginHolding([templateWith("fixture.third", 30), templateWith("fixture.first", 1), templateWith("fixture.second", 20)]),
+    ]);
+    expect(owned.slice(0, 3).map((o) => o.template.id)).toEqual([
+      "fixture.first",
+      "fixture.second",
+      "fixture.third",
+    ]);
+  });
+
+  it("leaves unranked templates in aggregation order, so one rank moves one card", () => {
+    const unranked = listCatalogTemplates([
+      pluginHolding([templateWith("fixture.one"), templateWith("fixture.two"), templateWith("fixture.three")]),
+    ]).map((o) => o.template.id);
+
+    const ranked = listCatalogTemplates([
+      pluginHolding([templateWith("fixture.one"), templateWith("fixture.two"), templateWith("fixture.three", 1)]),
+    ]).map((o) => o.template.id);
+
+    expect(unranked).toEqual(["fixture.one", "fixture.two", "fixture.three", ...seededIds]);
+    expect(ranked).toEqual(["fixture.three", "fixture.one", "fixture.two", ...seededIds]);
+  });
+
+  it("keeps two templates that claim one rank in source order", () => {
+    const owned = listCatalogTemplates([
+      pluginHolding([templateWith("fixture.a", 1), templateWith("fixture.b", 1)]),
+    ]);
+    expect(owned.slice(0, 2).map((o) => o.template.id)).toEqual(["fixture.a", "fixture.b"]);
+  });
+
+  it("puts the shipped assign-reviewers template first", () => {
+    // The gallery's first card, and the reason `rank` exists. Read off the
+    // real registry, not a fixture: a rank another template takes later
+    // must fail here.
+    expect(listCatalogTemplates(bundledPlugins)[0]!.template.id).toBe("github.assign-reviewers");
+  });
+});
+
+// ─── What install leaves on the run form ─────────────────────────────────
+
+/**
+ * Install BAKES a supplied value into the definition and drops the field
+ * from `dataSchema`. A workflow left with no `dataSchema` gets no run form
+ * at all, so a field baked by accident is a field the person can never
+ * answer again.
+ *
+ * The install dialog sends every DECLARED DEFAULT plus whatever the reader
+ * typed, so a per-run field that declares a default is baked on every
+ * install without anybody choosing it. That is the shape this pins, on the
+ * real registry rather than a fixture.
+ */
+describe("install keeps the per-run fields on the run form", () => {
+  const owned = findCatalogTemplate(bundledPlugins, "github.assign-reviewers");
+  const template = owned!.template;
+  // Narrowed here rather than at the manifest, the same way `seeded` above
+  // narrows: `WorkflowTemplate.definition` is `unknown` so the engine gains
+  // no dependency on @valet/workflow. The first test below checks the shape
+  // this assumes.
+  const definition = template.definition as WorkflowDefinition;
+
+  // Unlike `env` above, this one carries the action map, so the save-time
+  // param lint runs against the real action schemas.
+  const actionPluginByService = new Map<
+    string,
+    { plugin: ValetPlugin; actionPlugin: ActionPlugin }
+  >();
+  for (const plugin of bundledPlugins) {
+    for (const actionPlugin of plugin.actions ?? []) {
+      actionPluginByService.set(actionPlugin.service, { plugin, actionPlugin });
+    }
+  }
+  const actionEnv = buildValidateEnvironment(actionPluginByService);
+
+  /** What the dialog posts: declared defaults, plus the install-time
+   * answers a reader gives. The per-run fields are left empty, which is
+   * what their own descriptions tell the reader to do. */
+  function dialogPayload(): Record<string, string | number | boolean> {
+    const values: Record<string, string | number | boolean> = {};
+    for (const input of templateInputs(triggerSchema(definition))) {
+      if (input.default !== undefined) values[input.name] = input.default;
+    }
+    values.repositoryOwner = "example-org";
+    values.repositoryName = "platform";
+    values.rosterOwner = "example-org";
+    values.rosterRepository = "handbook";
+    return values;
+  }
+
+  it("carries a dag/v1 definition, which the narrowing above assumes", () => {
+    expect(isRecord(template.definition)).toBe(true);
+    expect(definition.version).toBe("dag/v1");
+  });
+
+  it("bakes the repository and the file paths, and nothing else", () => {
+    const baked = bakeInputs(definition, dialogPayload());
+    expect(Object.keys(triggerSchema(baked) ?? {})).toEqual(["pullNumber", "excludeHandles"]);
+  });
+
+  it("leaves the pull request number a run can still answer", () => {
+    // The failure this pins: a baked number re-assigns one pull request on
+    // every run, forever, and the card's own copy promises a run form.
+    const baked = bakeInputs(definition, dialogPayload());
+    const assign = nodesById(baked).get("assign");
+    const params = assign && "params" in assign ? assign.params : undefined;
+    expect(isRecord(params) ? params.pullNumber : "").toBe("{{ trigger.data.pullNumber }}");
+    expect(isRecord(params) ? params.owner : "").toBe("example-org");
+  });
+
+  it("leaves the exclude field, which is the only answer to a decline", () => {
+    // No node type parks on an inbound Slack message, so the template's
+    // stated mitigation for "sorry, cannot do" is a second run with the
+    // handle excluded. Baking this field removes that mitigation.
+    const baked = bakeInputs(definition, dialogPayload());
+    expect(triggerSchema(baked)?.excludeHandles).toBeDefined();
+    expect(JSON.stringify(baked)).toContain("{{ trigger.data.excludeHandles }}");
+  });
+
+  it("still validates once the install-time values are written in", () => {
+    // Baking rewrites the very params the save-time action-schema lint
+    // reads, and install re-validates before it writes anything. The
+    // environment carries the real action map, so `getActionParams` runs —
+    // a bare environment skips that lint and would prove nothing.
+    const baked = bakeInputs(definition, dialogPayload());
+    const result = validateWorkflowDefinition(baked, actionEnv);
+    // Print the validator's own messages on failure — they name the node
+    // and the corrected path.
+    expect(result.ok ? [] : result.errors).toEqual([]);
   });
 });
 

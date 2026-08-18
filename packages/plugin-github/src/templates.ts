@@ -17,6 +17,11 @@
  * so a deployment with no installed application fails the step visibly
  * instead of signing the review with the workflow owner's account.
  *
+ * The fifth template returns to `credential: "user"`. It writes the
+ * `assignees` field of a pull request, and GitHub drops an assignee change
+ * from an account without push access — which the person who starts the run
+ * has and an application often does not.
+ *
  * Template-path rules these definitions obey (dag/v1):
  *   - a tool node's result IS the action's `data` payload, read at
  *     `nodes.<id>.result.<field>`;
@@ -1064,6 +1069,854 @@ const pullRequestReview: WorkflowDefinition = {
   ],
 };
 
+/**
+ * People one run may put in the `assignees` field.
+ *
+ * The cap is in the selection step's `outputSchema`, not only in its prompt
+ * text, because `github.update_pull_request` forwards the array it is given and
+ * GitHub accepts ten names. The number in the caveats and the number the
+ * schema enforces are therefore the same number.
+ *
+ * Three is the ceiling the coverage rule needs: two owners are the case the
+ * request describes, and the third leaves room for a repository whose
+ * CODEOWNERS names three owners that no two people cover between them. The
+ * cap counts PEOPLE, not owners. One roster row that answers for five
+ * owners covers all five inside a cap of three. A pull request that needs a
+ * fourth PERSON is reported as uncovered rather than half-assigned.
+ */
+const MAX_ASSIGNEES = 3;
+
+/**
+ * Days ahead the time-off rule looks.
+ *
+ * The calendar read has no `timeMax` — this language has no arithmetic, so
+ * the run cannot name a time some days after its own clock, and the event
+ * count is the only window it can set. The window that decides an exclusion
+ * is therefore applied in the selection prompt, where a model compares two
+ * dates it was given.
+ *
+ * Three days, because the request asks that a reviewer is not assigned a
+ * review while they are away, and a review lands over the days after the
+ * assignment rather than in the minute of it. A shorter window assigns
+ * somebody who leaves tomorrow. A longer one excludes people for time off
+ * that ends before the review starts.
+ */
+const TIME_OFF_WINDOW_DAYS = 3;
+
+/**
+ * Roster rows one run carries into the selection step.
+ *
+ * The shortlist step matches the whole roster and then cuts to this number,
+ * so the cut falls on people who cover an owner somebody else also covers.
+ */
+const MAX_CANDIDATES = 12;
+
+/**
+ * Changed paths read for the CODEOWNERS match.
+ *
+ * `inspect_pull_request` returns `files_complete: false` when this cut the
+ * list, and the report says so — a pull request whose unread paths belong to
+ * a fourth owner would otherwise be assigned as if that owner did not exist.
+ */
+const CHANGED_PATHS_LIMIT = 100;
+
+/**
+ * Assigns reviewers to one pull request, and tells them on Slack.
+ *
+ * Four requirements went into this, and the platform can meet two of them.
+ *
+ * CODEOWNERS is readable: `read_repo_file` returns the file, and matching a
+ * changed path against it is text work a model does. What GitHub will not
+ * give us is the membership of `@org/team` — this plugin has no action that
+ * calls `/orgs/{org}/teams/{slug}/members`, and no action returns a user's
+ * email either. So the three identifiers for one person — a GitHub login, a
+ * Slack user id, a calendar address — cannot be joined by anything here.
+ *
+ * That is why the run takes a roster file. It is a CSV in a repository, like
+ * the routing template's table, and it supplies exactly the joins the
+ * platform cannot make: which owner tokens a person answers for, their Slack
+ * id, their calendar, their timezone and their working hours. CODEOWNERS
+ * still decides WHICH owners a pull request needs. The roster decides WHO is
+ * in one.
+ *
+ * The assignment is written to `assignees` and read back.
+ * `update_pull_request` returns four fields and none of them is the
+ * assignee list, and GitHub drops an assignee change from an account
+ * without push access without failing the call. A second
+ * `inspect_pull_request` is the only way the run can tell a name that
+ * landed from a name that did not.
+ *
+ * Two requirements the platform cannot meet, and the template says so rather
+ * than pretend. Nothing reports a person's timezone — Slack carries one and
+ * this plugin's user mapping drops it — so the roster carries it. And no
+ * workflow step can wait for an inbound Slack message: `wait` counts down a
+ * duration, `approval` waits on the approvals path, and nothing in the Slack
+ * plugin resolves either. So "swap the reviewer who declines" is a run-form
+ * input instead of a loop, and the caveats say why.
+ *
+ * The rest of the work is model judgement, and the template says that too.
+ * dag/v1 has no map, no filter and no arithmetic, so matching a changed path
+ * against a gitignore-style CODEOWNERS pattern, and deciding which roster row
+ * answers for which owner token, both happen inside a prompt. What the
+ * DEFINITION owns is the gate in front of the write, and that gate compares
+ * numbers the two model calls report. It can catch a selection that drops an
+ * owner or adds a person nobody needed. It cannot re-derive who belongs to a
+ * group, because nothing here can read a group.
+ *
+ * The order of the last five nodes carries the rule the request states in
+ * its own words: assign, read back, tell only the people who landed. A DM
+ * that arrives for an assignment GitHub silently dropped is worse than no DM
+ * at all.
+ */
+const assignReviewers: WorkflowDefinition = {
+  version: "dag/v1",
+  nodes: [
+    {
+      id: "start",
+      type: "trigger",
+      dataSchema: {
+        repositoryOwner: {
+          type: "string",
+          required: true,
+          label: "Repository owner",
+          placeholder: "your-org",
+          description: "The account or organization that holds the pull request.",
+        },
+        repositoryName: {
+          type: "string",
+          required: true,
+          label: "Repository name",
+          placeholder: "platform",
+          description: "The repository that holds the pull request.",
+        },
+        pullNumber: {
+          // `number`, not `integer`: both are accepted, and only `number`
+          // is in every consumer's copy of the input-definition type.
+          //
+          // No `default`, on purpose. See the note above the schema: a
+          // declared default is pre-filled by the install dialog and then
+          // baked, and a baked pull request number pins every later run to
+          // the same pull request.
+          type: "number",
+          required: true,
+          label: "Pull request number",
+          placeholder: "4211",
+          description:
+            "Leave this empty when you install. The run form asks which pull request to assign each time you start the workflow.",
+        },
+        codeownersPath: {
+          type: "string",
+          required: true,
+          default: ".github/CODEOWNERS",
+          label: "CODEOWNERS path",
+          placeholder: ".github/CODEOWNERS",
+          description:
+            "GitHub reads CODEOWNERS from CODEOWNERS, .github/CODEOWNERS or docs/CODEOWNERS. Name the one your repository uses.",
+        },
+        rosterOwner: {
+          type: "string",
+          required: true,
+          label: "Roster file owner",
+          placeholder: "your-org",
+          description: "The account or organization that holds the reviewer roster. It can be the same one.",
+        },
+        rosterRepository: {
+          type: "string",
+          required: true,
+          label: "Roster file repository",
+          placeholder: "handbook",
+          description: "The repository that holds the roster. Your GitHub account must be able to read it.",
+        },
+        rosterPath: {
+          type: "string",
+          required: true,
+          default: ".github/reviewer-roster.csv",
+          label: "Roster file path",
+          placeholder: ".github/reviewer-roster.csv",
+          description:
+            "A CSV file with the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, areas.",
+        },
+        excludeHandles: {
+          // No `default`, for the reason `pullNumber` has none. A default
+          // of "" is still a value the install dialog pre-fills and install
+          // bakes, and baking it removes the exclude field from the run
+          // form — the one field the "a reviewer declined" caveat tells the
+          // reader to use.
+          //
+          // Nothing breaks when a run leaves it empty: the reference sits
+          // in a prompt line with text around it, and a template with text
+          // around it renders an absent value as an empty string
+          // (`renderTemplate`, `workflow/src/dag/expression.ts`).
+          type: "string",
+          required: false,
+          label: "Handles to exclude",
+          placeholder: "handle-one, handle-two",
+          description:
+            "GitHub handles this run must not assign, separated by commas. Leave this empty when you install. The run form asks for it each time, which is how you run again after somebody declines.",
+        },
+      },
+    },
+    {
+      id: "codeowners",
+      type: "tool",
+      service: "github",
+      action: "read_repo_file",
+      credential: "user",
+      summary: "Read the CODEOWNERS file that says which owners a path needs",
+      params: {
+        owner: "{{ trigger.data.repositoryOwner }}",
+        repo: "{{ trigger.data.repositoryName }}",
+        path: "{{ trigger.data.codeownersPath }}",
+      },
+    },
+    {
+      id: "roster",
+      type: "tool",
+      service: "github",
+      action: "read_repo_file",
+      credential: "user",
+      summary: "Read the roster that maps an owner token to a person, a Slack id and a calendar",
+      params: {
+        owner: "{{ trigger.data.rosterOwner }}",
+        repo: "{{ trigger.data.rosterRepository }}",
+        path: "{{ trigger.data.rosterPath }}",
+      },
+    },
+    {
+      // The changed paths are what CODEOWNERS is matched against, and this
+      // is also the only action that reports who is already assigned. The
+      // gate below needs both, so one call answers two questions.
+      id: "pull_request",
+      type: "tool",
+      service: "github",
+      action: "inspect_pull_request",
+      credential: "user",
+      summary: "Read the pull request, its changed paths, and who already owns it",
+      params: {
+        owner: "{{ trigger.data.repositoryOwner }}",
+        repo: "{{ trigger.data.repositoryName }}",
+        pullNumber: "{{ trigger.data.pullNumber }}",
+        filesLimit: CHANGED_PATHS_LIMIT,
+      },
+    },
+    {
+      // Either file reads back empty with no error at all. Every later step
+      // would then behave itself and assign nobody, so the failure is made
+      // here where the message can name the file to correct.
+      id: "inputs_readable",
+      type: "if",
+      conditions: [
+        { left: "nodes.codeowners.result.content", dataType: "string", operation: "isNotEmpty" },
+        { left: "nodes.roster.result.content", dataType: "string", operation: "isNotEmpty" },
+      ],
+    },
+    {
+      id: "no_inputs",
+      type: "stop",
+      outcome: "failure",
+      message:
+        "One of the two files this run reads is empty. Put an owner rule in {{ trigger.data.codeownersPath }} in " +
+        "{{ trigger.data.repositoryOwner }}/{{ trigger.data.repositoryName }}. Put one row per reviewer in " +
+        "{{ trigger.data.rosterPath }} in {{ trigger.data.rosterOwner }}/{{ trigger.data.rosterRepository }}, with " +
+        "the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, areas. Then start the " +
+        "workflow again.",
+    },
+    {
+      // A failed `pull_request` does not stop the run: a failed node is
+      // terminal, so the edges below it resolve, and `assignable` still
+      // becomes runnable through the file gate. Every condition it reads
+      // would then miss and answer false, and the run would tell the person
+      // their pull request is closed or already assigned when the truth is
+      // that nobody could read it. This gate splits the two, so each stop
+      // node names the action that fixes its own case.
+      id: "pull_request_read",
+      type: "if",
+      conditions: [{ left: "nodes.pull_request.result.state", dataType: "string", operation: "exists" }],
+    },
+    {
+      id: "pull_request_unread",
+      type: "stop",
+      outcome: "failure",
+      message:
+        "Pull request {{ trigger.data.pullNumber }} in {{ trigger.data.repositoryOwner }}/" +
+        "{{ trigger.data.repositoryName }} could not be read. Check that the number is right. Check that your " +
+        "GitHub account can read the repository. Then start the workflow again.",
+    },
+    {
+      // `update_pull_request` REPLACES the assignee list, so a pull request that
+      // already has one must not reach it. The other two conditions are
+      // cheaper than the model call they stand in front of.
+      id: "assignable",
+      type: "if",
+      conditions: [
+        { left: "nodes.pull_request.result.state", dataType: "string", operation: "equals", right: "open" },
+        { left: "nodes.pull_request.result.draft", dataType: "boolean", operation: "isFalse" },
+        { left: "nodes.pull_request.result.assignees", dataType: "array", operation: "isEmpty" },
+      ],
+    },
+    {
+      id: "not_assignable",
+      type: "stop",
+      outcome: "failure",
+      message:
+        "Pull request {{ trigger.data.pullNumber }} was read, and it was not assigned. It is closed, it is a draft, " +
+        "or somebody is assigned to it already. Assigning replaces the whole assignee list, so this run never " +
+        "writes over one. To reassign it, clear the assignees field on the pull request, then start the workflow " +
+        "again.",
+    },
+    {
+      // One model call answers two questions that share their whole input:
+      // which owners the changed paths need, and which roster rows can
+      // cover one. The count it reports is checked against the selection
+      // step's own count further down, so a dropped owner cannot pass
+      // unnoticed between the two calls.
+      id: "shortlist",
+      type: "llm",
+      model: "claude-sonnet-4-5",
+      system:
+        "You read a CODEOWNERS file and a reviewer roster, and you report what they say. You never invent an owner, " +
+        "a person or a group. A person you cannot find in the roster does not exist.",
+      prompt: [
+        "CODEOWNERS syntax:",
+        "- A line that is empty, or that starts with #, is not a rule.",
+        "- A rule is a path pattern, then one or more owners separated by spaces.",
+        "- An owner is written @handle, @org/team, or as an email address.",
+        "- Patterns follow gitignore syntax. A pattern with no slash matches a name at any depth. A pattern that ends with / matches a directory and everything under it.",
+        "- The LAST rule in the file that matches a path decides that path's owners. An earlier rule adds nothing.",
+        "",
+        "CODEOWNERS file, read from {{ trigger.data.codeownersPath }}:",
+        "{{ nodes.codeowners.result.content }}",
+        "",
+        "The pull request, its title, its description and the paths it changes:",
+        "{{ nodes.pull_request.result }}",
+        "",
+        "The roster is CSV with a header row and the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, areas.",
+        "groups holds the owner tokens that person answers for, separated by | characters. calendar_id, timezone, work_hours and areas can be empty.",
+        "",
+        "Roster file:",
+        "{{ nodes.roster.result.content }}",
+        "",
+        // The run form collects this per run, and most runs leave it empty.
+        // An absent value renders as nothing here, so the line has to read
+        // correctly with nothing after the colon.
+        "Handles this run must not assign, separated by commas. The line is empty when there are none:",
+        "{{ trigger.data.excludeHandles }}",
+        "",
+        "Do this in order.",
+        "1. Take each changed path. Find the last CODEOWNERS rule that matches it. Collect that rule's owner tokens. A path that matches no rule goes in unmatchedPaths.",
+        "2. requiredOwners is every owner token you collected, with duplicates removed, sorted. requiredOwnerCount is how many entries it holds. Count them; do not estimate.",
+        "3. Read the roster. A row covers an owner token when the token is the row's github_handle written with a leading @, or when the token is one of the row's groups entries.",
+        "4. Drop a row when its github_handle is the pull request author, or when the exclude list names it.",
+        `5. Drop a row that has no slack_user_id, and put its handle in rosterProblems with the text "add a slack_user_id". This workflow tells every assignee on Slack, so a person it cannot tell is a person it does not assign.`,
+        "6. Build candidates from the rows that are left, each with the owner tokens it covers. Keep the rows that cover an owner token no other row covers. Then keep the rest.",
+        `7. Return at most ${MAX_CANDIDATES} candidates. Put every candidate you cut in rosterProblems with the text "cut by the candidate cap".`,
+        "8. withCalendar is the candidates whose calendar_id is not empty, in the same order as candidates. Copy the whole candidate object into it.",
+        "",
+        'Return JSON in a ```json block.',
+        "Return every field. Return an empty array for a field that has nothing in it.",
+      ].join("\n"),
+      outputSchema: {
+        type: "object",
+        properties: {
+          requiredOwners: { type: "array", items: { type: "string" } },
+          requiredOwnerCount: { type: "number" },
+          unmatchedPaths: { type: "array", items: { type: "string" } },
+          candidates: {
+            type: "array",
+            maxItems: MAX_CANDIDATES,
+            items: {
+              type: "object",
+              properties: {
+                handle: { type: "string" },
+                coversOwners: { type: "array", items: { type: "string" } },
+                slackUserId: { type: "string" },
+                calendarId: { type: "string" },
+                timezone: { type: "string" },
+                workHours: { type: "string" },
+                areas: { type: "string" },
+              },
+              required: ["handle", "coversOwners", "slackUserId", "calendarId", "timezone", "workHours", "areas"],
+            },
+          },
+          withCalendar: {
+            type: "array",
+            maxItems: MAX_CANDIDATES,
+            items: {
+              type: "object",
+              properties: {
+                handle: { type: "string" },
+                calendarId: { type: "string" },
+              },
+              required: ["handle", "calendarId"],
+            },
+          },
+          rosterProblems: { type: "array", items: { type: "string" } },
+        },
+        required: [
+          "requiredOwners",
+          "requiredOwnerCount",
+          "unmatchedPaths",
+          "candidates",
+          "withCalendar",
+          "rosterProblems",
+        ],
+      },
+    },
+    {
+      // One calendar per candidate that named one. The action reads a named
+      // calendar only when that calendar is shared with the connected Google
+      // account, so a failure here is common and is not a run failure:
+      // `collect` keeps the other reads, and the selection step below treats
+      // a failed read as "not available to assign" rather than as "free".
+      //
+      // This is the first shipped template with a google_calendar node. A
+      // read here could not work at all until the plugin stored its
+      // credential under the key its actions read
+      // (`plugin-google-calendar/src/plugin.ts`), and
+      // `api/src/plugins/credential-service-alignment.test.ts` now holds
+      // the two keys together for every bundled plugin.
+      id: "availability",
+      type: "foreach",
+      items: "{{ nodes.shortlist.result.output.withCalendar }}",
+      maxItems: MAX_CANDIDATES,
+      concurrency: 3,
+      onItemError: "collect",
+      body: {
+        // No `credential` here. Only github resolves an identity for a tool
+        // node (`api/src/plugins/action-invoker.ts`), and google_calendar
+        // refuses the field rather than accept a selection it would ignore.
+        id: "read_calendar",
+        type: "tool",
+        service: "google_calendar",
+        action: "calendar.list_events",
+        summary: "Read one candidate's next events, to find time away from work",
+        params: {
+          calendarId: "{{ item.calendarId }}",
+          // No `timeMax`: this language has no arithmetic, so the run cannot
+          // name a time some days after its own clock. The events come back
+          // in start order from now, so this count is the HORIZON. The
+          // window that decides an exclusion is TIME_OFF_WINDOW_DAYS, and
+          // the selection prompt applies it to the dates in these events.
+          timeMin: "{{ trigger.timestamp }}",
+          maxResults: 10,
+          singleEvents: true,
+        },
+      },
+    },
+    {
+      id: "select",
+      type: "llm",
+      model: "claude-sonnet-4-5",
+      system:
+        "You choose the reviewers for one pull request. Covering every required owner is the only thing that lets " +
+        "you choose anybody: when one owner is left uncovered, you assign nobody and you say which owner and why. " +
+        "You never name a person who is not in the candidate list. A pull request with no reviewer costs less than " +
+        "a pull request with the wrong one.",
+      prompt: [
+        "The time now is {{ trigger.timestamp }}.",
+        "",
+        // The owner LIST, and never the count the gate compares against. A
+        // step shown the target number reports that number back, and the
+        // cross-check below would then be reading its own answer.
+        "The owners the changed paths need: {{ nodes.shortlist.result.output.requiredOwners }}",
+        "Changed paths that matched no owner rule: {{ nodes.shortlist.result.output.unmatchedPaths }}",
+        "",
+        "The candidates, each with the owner tokens it covers:",
+        "{{ nodes.shortlist.result.output.candidates }}",
+        "",
+        "The candidates whose calendar was read, in order:",
+        "{{ nodes.shortlist.result.output.withCalendar }}",
+        "",
+        "What each of those calendar reads returned, in the SAME order. An entry holds a status, and an events list when the read succeeded:",
+        "{{ nodes.availability.result.items }}",
+        "Calendars left unread by the per-run cap: {{ nodes.availability.result.truncatedCount }}",
+        "Calendar reads that failed: {{ nodes.availability.result.failedCount }}",
+        "",
+        "Coverage rule. Read it before you read anything else.",
+        "- Every owner in the required list must be covered by at least one person you assign.",
+        "- A person covers an owner when that owner is in their coversOwners list.",
+        "- When two owners are required, one person who covers both is the answer. When no one person covers both, take one person for each.",
+        `- Assign at most ${MAX_ASSIGNEES} people. When covering every owner needs more than ${MAX_ASSIGNEES} people, cover nothing: report every owner as uncovered.`,
+        "- Assign nobody who covers no required owner. Every person you assign must be the one who covers an owner that nobody else you assign covers.",
+        "- When an owner has no candidate left after the availability rule below, that owner is uncovered.",
+        "- When one owner is uncovered, assignees is empty. Do not assign the people who would have covered the others.",
+        "",
+        "Availability rule, for each candidate.",
+        "- The candidate is not in the calendar list: they can be assigned. Set availabilityChecked to false.",
+        `- The candidate is in the calendar list and their entry's status is completed: read the events. An event that reads as time away from work, and that covers any part of the ${TIME_OFF_WINDOW_DAYS} days after the time now, excludes them. Set availabilityChecked to true.`,
+        `- An event that ends before the time now does not exclude anybody. An event that starts more than ${TIME_OFF_WINDOW_DAYS} days after the time now does not exclude anybody either.`,
+        "- The candidate is in the calendar list and their entry's status is not completed: exclude them. A check was asked for and could not be made, so their time is unknown.",
+        "- Never copy an event title, an event description or an attendee into any field you return. Write only that the calendar shows time away.",
+        "",
+        "Working-hours rule.",
+        "- A candidate's timezone and work_hours come from the roster. work_hours reads like 09:00-17:00 in that timezone.",
+        "- Convert the time now into the candidate's timezone. Set withinWorkingHours.",
+        "- Working hours rank candidates; they do not exclude anybody. When two candidates cover the same owner, take the one inside their working hours.",
+        "- When the only candidate for an owner is outside their working hours, assign them, and say so in their reason.",
+        "- A candidate whose timezone or work_hours is empty gets withinWorkingHours false and no penalty. Say in their reason that their hours are not known.",
+        "",
+        "Context rule. The areas column is a note that person wrote about the code they know. Use it to break a tie and for nothing else. This workflow does not know who last changed these files.",
+        "",
+        "Then fill in the output.",
+        "- assignees holds the github_handle of each person you chose, and nothing else.",
+        "- assigneeCount is how many entries assignees holds. Count them; do not estimate.",
+        "- coveredOwners holds each required owner that at least one person in assignees covers. coveredOwnerCount is how many entries it holds. Count them; do not estimate.",
+        "- selection holds one entry per person in assignees.",
+        "- uncovered holds one entry per required owner nobody covers, with the reason.",
+        "- excluded holds each candidate you did not choose, with the reason.",
+        "- failureReason is a message for the person who started the run. When an owner is uncovered, say which owners, why each one is uncovered, and what to put in the roster to fix it. When every owner is covered, write: Every required owner is covered.",
+        "",
+        'Return JSON in a ```json block. Return every field, and an empty array for a field that has nothing in it.',
+      ].join("\n"),
+      outputSchema: {
+        type: "object",
+        properties: {
+          assignees: { type: "array", maxItems: MAX_ASSIGNEES, items: { type: "string" } },
+          assigneeCount: { type: "number" },
+          coveredOwners: { type: "array", items: { type: "string" } },
+          coveredOwnerCount: { type: "number" },
+          selection: {
+            type: "array",
+            maxItems: MAX_ASSIGNEES,
+            items: {
+              type: "object",
+              properties: {
+                handle: { type: "string" },
+                slackUserId: { type: "string" },
+                coversOwners: { type: "array", items: { type: "string" } },
+                availabilityChecked: { type: "boolean" },
+                withinWorkingHours: { type: "boolean" },
+                reason: { type: "string" },
+              },
+              required: [
+                "handle",
+                "slackUserId",
+                "coversOwners",
+                "availabilityChecked",
+                "withinWorkingHours",
+                "reason",
+              ],
+            },
+          },
+          uncovered: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { owner: { type: "string" }, reason: { type: "string" } },
+              required: ["owner", "reason"],
+            },
+          },
+          excluded: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { handle: { type: "string" }, reason: { type: "string" } },
+              required: ["handle", "reason"],
+            },
+          },
+          failureReason: { type: "string" },
+        },
+        required: [
+          "assignees",
+          "assigneeCount",
+          "coveredOwners",
+          "coveredOwnerCount",
+          "selection",
+          "uncovered",
+          "excluded",
+          "failureReason",
+        ],
+      },
+    },
+    {
+      // Three conditions, and each one closes a different way to reach the
+      // write with an assignment nobody asked for.
+      //
+      // The FIRST compares two counts from two separate model calls. The
+      // selection step is never shown the target number — only the owner
+      // list — so a choice that quietly drops an owner has to report a
+      // smaller count of its own to get here. This catches under-coverage.
+      // It cannot catch a step that misreads a roster row and believes a
+      // candidate covers an owner they do not, because nothing in a
+      // workflow can read a group. The caveats say so.
+      //
+      // The SECOND makes the empty case fail. When no CODEOWNERS rule
+      // matches any changed path, both counts are zero and the comparison
+      // is true — and assigning somebody there would be a guess, because
+      // nothing said they own the code.
+      //
+      // The THIRD catches over-assignment, which the count comparison is
+      // blind to: a choice that covers both owners AND carries a third
+      // name satisfies the first two conditions. A minimal cover never
+      // needs more people than there are owners, because each person in one
+      // is the only one covering some owner. So the number of people may
+      // not pass the number of owners, and a rider fails here.
+      id: "coverage_met",
+      type: "if",
+      conditions: [
+        {
+          left:
+            "nodes.shortlist.result.output.requiredOwnerCount == nodes.select.result.output.coveredOwnerCount",
+          dataType: "boolean",
+          operation: "isTrue",
+        },
+        { left: "nodes.select.result.output.assignees", dataType: "array", operation: "lengthGreaterThan", right: 0 },
+        {
+          left:
+            "nodes.select.result.output.assigneeCount <= nodes.shortlist.result.output.requiredOwnerCount",
+          dataType: "boolean",
+          operation: "isTrue",
+        },
+      ],
+    },
+    {
+      // `continue` on a message step, so a Slack that cannot deliver does
+      // not swallow the run's outcome. It DOES swallow this message, and
+      // that happens for more than an unconnected Slack: `dm_owner` also
+      // refuses when the owner has not linked a Slack identity. So the stop
+      // node below carries the same reason text, and it runs either way.
+      // Nothing else on this branch reports, so a reason that lived only
+      // here would be lost.
+      id: "report_gap",
+      type: "tool",
+      service: "slack",
+      action: "dm_owner",
+      onError: "continue",
+      summary: "Tell the person who started the run why nobody was assigned",
+      params: {
+        text:
+          "Pull request {{ trigger.data.pullNumber }} in {{ trigger.data.repositoryOwner }}/" +
+          "{{ trigger.data.repositoryName }} was not assigned.\n\n{{ nodes.select.result.output.failureReason }}",
+      },
+    },
+    {
+      id: "assignment_failed",
+      type: "stop",
+      outcome: "failure",
+      message:
+        "Nobody was assigned to pull request {{ trigger.data.pullNumber }}, because at least one owner of the " +
+        "changed paths has no reviewer this run could use.\n\n" +
+        "{{ nodes.select.result.output.failureReason }}\n\n" +
+        "To fix it, add a row for the owner named above to {{ trigger.data.rosterPath }} in " +
+        "{{ trigger.data.rosterOwner }}/{{ trigger.data.rosterRepository }}. Then start the workflow again.",
+    },
+    {
+      // The whole array in one call. The action replaces the assignee list,
+      // so a call per person would leave each one holding the pull request
+      // alone. `update_pull_request` sends assignees to the issues endpoint
+      // itself, because GitHub's pulls endpoint rejects that field.
+      id: "assign",
+      type: "tool",
+      service: "github",
+      action: "update_pull_request",
+      credential: "user",
+      summary: "Write the chosen reviewers into the pull request's assignees field",
+      params: {
+        owner: "{{ trigger.data.repositoryOwner }}",
+        repo: "{{ trigger.data.repositoryName }}",
+        pullNumber: "{{ trigger.data.pullNumber }}",
+        assignees: "{{ nodes.select.result.output.assignees }}",
+      },
+    },
+    {
+      // GitHub drops an assignee change from an account without push access,
+      // and answers 200. `update_pull_request` returns the number, the url,
+      // the title and the state, and no assignee list, so this read is the
+      // only thing in the run that knows what landed. `filesLimit: 1`
+      // because none of the file work is wanted a second time.
+      id: "verify",
+      type: "tool",
+      service: "github",
+      action: "inspect_pull_request",
+      credential: "user",
+      summary: "Read the pull request back, to see which names GitHub kept",
+      params: {
+        owner: "{{ trigger.data.repositoryOwner }}",
+        repo: "{{ trigger.data.repositoryName }}",
+        pullNumber: "{{ trigger.data.pullNumber }}",
+        filesLimit: 1,
+      },
+    },
+    {
+      id: "confirm",
+      type: "llm",
+      model: "claude-haiku-4-5",
+      system:
+        "You compare two lists of GitHub handles and you write short messages about the result. You never add a " +
+        "handle that is not in one of the two lists. You never write a Slack user id that is not in the data you " +
+        "were given. You never state a cause you were not given.",
+      prompt: [
+        "The handles this run tried to assign:",
+        "{{ nodes.select.result.output.assignees }}",
+        "",
+        "Why each one was chosen:",
+        "{{ nodes.select.result.output.selection }}",
+        "",
+        "The handles the pull request carries now, read back from GitHub:",
+        "{{ nodes.verify.result.assignees }}",
+        "",
+        "The pull request: {{ nodes.pull_request.result.url }}",
+        "Its title: {{ nodes.pull_request.result.title }}",
+        "It changes these paths: {{ nodes.pull_request.result.files }}",
+        "Changed paths that matched no owner rule: {{ nodes.shortlist.result.output.unmatchedPaths }}",
+        "Every changed path was read: {{ nodes.pull_request.result.files_complete }}",
+        "Roster rows that could not be used: {{ nodes.shortlist.result.output.rosterProblems }}",
+        "Candidates that were not chosen: {{ nodes.select.result.output.excluded }}",
+        "",
+        "1. A handle is landed when the read-back list holds it. Put the rest in dropped.",
+        // The `notify` foreach sends each message to `item.slackUserId`, so
+        // this field IS the delivery address. Nothing downstream checks it
+        // against the selection, and a transposed id delivers one person's
+        // review assignment to an unrelated Slack account. The instruction
+        // to copy it is therefore the only thing holding the address.
+        "2. Take each landed person's slackUserId from the selection entry that carries the same handle. Copy it exactly. Never write an id you did not read in that list. This id is the Slack account the message goes to, so a wrong id sends this message to the wrong person.",
+        "3. Write one message for each landed person, under 60 words. Give the pull request URL and title, one sentence on what it changes, the owner they were chosen for, and whether their availability was checked. Say it plainly when it was not.",
+        "4. Write summary for the person who started the run, under 140 words. Name who was assigned and for which owner. Name every dropped handle and say GitHub accepted the call and kept the name off; the usual reason is that the account writing it has no push access, or that the person is not a collaborator on the repository. Do not state which. Name the changed paths that matched no owner rule, the roster rows that could not be used, and each excluded candidate with its reason.",
+        "",
+        'Return JSON in a ```json block. Return every field, and an empty array for a field that has nothing in it.',
+      ].join("\n"),
+      outputSchema: {
+        type: "object",
+        properties: {
+          landed: {
+            type: "array",
+            maxItems: MAX_ASSIGNEES,
+            items: {
+              type: "object",
+              properties: {
+                handle: { type: "string" },
+                slackUserId: { type: "string" },
+                message: { type: "string" },
+              },
+              required: ["handle", "slackUserId", "message"],
+            },
+          },
+          dropped: { type: "array", items: { type: "string" } },
+          summary: { type: "string" },
+        },
+        required: ["landed", "dropped", "summary"],
+      },
+    },
+    {
+      // Only the landed people. A person GitHub kept off the pull request
+      // must not be told they are on it.
+      id: "notify",
+      type: "foreach",
+      items: "{{ nodes.confirm.result.output.landed }}",
+      maxItems: MAX_ASSIGNEES,
+      concurrency: 2,
+      // A stale id in the roster fails its own message. Collecting the
+      // failure keeps the other reviewers told.
+      onItemError: "collect",
+      body: {
+        id: "send_dm",
+        type: "tool",
+        service: "slack",
+        action: "dm_user",
+        summary: "Tell one assignee on Slack, with the reason they were chosen",
+        params: {
+          user: "{{ item.slackUserId }}",
+          text: "{{ item.message }}",
+        },
+      },
+    },
+    {
+      id: "requester_dm",
+      type: "tool",
+      service: "slack",
+      action: "dm_owner",
+      // The report node below holds the same content. A Slack failure must
+      // not cost the run its report.
+      onError: "continue",
+      summary: "Send the person who started the run the list of assignees",
+      params: {
+        text:
+          "Pull request {{ trigger.data.pullNumber }} in {{ trigger.data.repositoryOwner }}/" +
+          "{{ trigger.data.repositoryName }}.\n\n{{ nodes.confirm.result.output.summary }}",
+      },
+    },
+    {
+      id: "report",
+      type: "orchestrator",
+      wait: { mode: "until_idle" },
+      prompt: [
+        "I assigned reviewers to pull request {{ trigger.data.pullNumber }} in " +
+          "{{ trigger.data.repositoryOwner }}/{{ trigger.data.repositoryName }}.",
+        "Report this back to me in one short paragraph. Do not comment on the pull request and do not open one.",
+        "",
+        "Start with anything that did not work. These are the ones I have to act on:",
+        "Names GitHub did not keep: {{ nodes.confirm.result.output.dropped }}",
+        "Roster rows that could not be used: {{ nodes.shortlist.result.output.rosterProblems }}",
+        "Changed paths that matched no owner rule: {{ nodes.shortlist.result.output.unmatchedPaths }}",
+        "Every changed path was read: {{ nodes.pull_request.result.files_complete }}",
+        "",
+        "Then who was assigned, and why:",
+        "{{ nodes.select.result.output.selection }}",
+        "Owners the changed paths need: {{ nodes.shortlist.result.output.requiredOwners }}",
+        "The pull request carries these assignees now: {{ nodes.verify.result.assignees }}",
+        "",
+        "Slack messages sent: {{ nodes.notify.result.completedCount }} of {{ nodes.notify.result.inputCount }}. Failed: {{ nodes.notify.result.failedCount }}.",
+        "Calendars read: {{ nodes.availability.result.completedCount }} of {{ nodes.availability.result.inputCount }}. Failed: {{ nodes.availability.result.failedCount }}.",
+        "",
+        "Say it in the first line if any of these dropped work:",
+        "Calendars left unread by the per-run cap: {{ nodes.availability.result.truncatedCount }}",
+        "Slack messages dropped by the per-run cap: {{ nodes.notify.result.truncatedCount }}",
+      ].join("\n"),
+    },
+    {
+      // After the report, so the report is delivered either way. A run that
+      // assigned two of three people did not do what it was asked to do, and
+      // it must not settle green.
+      id: "everyone_landed",
+      type: "if",
+      conditions: [{ left: "nodes.confirm.result.output.dropped", dataType: "array", operation: "isEmpty" }],
+    },
+    {
+      id: "assignment_dropped",
+      type: "stop",
+      outcome: "failure",
+      message:
+        "GitHub kept at least one chosen reviewer off pull request {{ trigger.data.pullNumber }}. It accepts the " +
+        "call and drops the name when the account has no push access to the repository, or when the person is not " +
+        "a collaborator on it. The names are in the report. To fix it, give your GitHub account push access, or " +
+        "add the person to the repository, then start the workflow again.",
+    },
+  ],
+  edges: [
+    { from: "start", to: "codeowners" },
+    { from: "start", to: "roster" },
+    { from: "start", to: "pull_request" },
+    { from: "codeowners", to: "inputs_readable" },
+    { from: "roster", to: "inputs_readable" },
+    { from: "inputs_readable", to: "no_inputs", fromOutput: "false" },
+    // The read gate waits for the file gate as well as the pull request, so
+    // an unusable roster stops the run before the first model call. The
+    // file-gate edge is also what carries the run to this gate when
+    // `pull_request` FAILED: a failed node activates no outgoing edge.
+    { from: "inputs_readable", to: "pull_request_read", fromOutput: "true" },
+    { from: "pull_request", to: "pull_request_read" },
+    { from: "pull_request_read", to: "pull_request_unread", fromOutput: "false" },
+    { from: "pull_request_read", to: "assignable", fromOutput: "true" },
+    { from: "assignable", to: "not_assignable", fromOutput: "false" },
+    { from: "assignable", to: "shortlist", fromOutput: "true" },
+    { from: "shortlist", to: "availability" },
+    { from: "availability", to: "select" },
+    { from: "select", to: "coverage_met" },
+    { from: "coverage_met", to: "report_gap", fromOutput: "false" },
+    { from: "report_gap", to: "assignment_failed" },
+    { from: "coverage_met", to: "assign", fromOutput: "true" },
+    { from: "assign", to: "verify" },
+    { from: "verify", to: "confirm" },
+    { from: "confirm", to: "notify" },
+    { from: "notify", to: "requester_dm" },
+    { from: "requester_dm", to: "report" },
+    { from: "report", to: "everyone_landed" },
+    // The true branch has no successor on purpose: an assignment that landed
+    // whole is the end of the run.
+    { from: "everyone_landed", to: "assignment_dropped", fromOutput: "false" },
+  ],
+};
+
 export const githubTemplates: WorkflowTemplate[] = [
   {
     id: "github.daily-dev-digest",
@@ -1192,5 +2045,75 @@ export const githubTemplates: WorkflowTemplate[] = [
       "The model can be wrong. Read REQUEST_CHANGES as one reviewer's opinion, and do not make it a merge gate on its own.",
     ],
     definition: pullRequestReview,
+  },
+  {
+    id: "github.assign-reviewers",
+    // First card in the gallery. It is the template a reader can act on
+    // without waiting for a schedule, and the one the most people asked
+    // for. Ranking is data (`WorkflowTemplate.rank`): the number lives
+    // here, and no host code names this template.
+    rank: 1,
+    name: "Assign reviewers to a pull request",
+    // The description, the steps and the caveats all carry the same four
+    // gaps, because a reader meets them in that order and may stop at any
+    // one of them.
+    //
+    // The card clamps the description to TWO LINES, so only the opening
+    // survives on the card face. The roster is therefore named in the first
+    // clause rather than merely in the first paragraph: a second sentence
+    // is already below the clamp at common card widths. `templates.test.ts`
+    // pins the roster inside the opening, and not just somewhere in the
+    // string, because "somewhere in the string" was true while the card
+    // still showed none of it.
+    description:
+      "Choose reviewers for one pull request from CODEOWNERS and a CSV roster you maintain, write them into the " +
+      "assignees field, and tell each one on Slack. The roster supplies what no action here can read: who is in " +
+      "each owner group, and each person's calendar, timezone and working hours. It needs GitHub, Slack and " +
+      "Google Calendar connected on your own account. It cannot wait for a reply, so a reviewer who declines " +
+      "needs a second run.",
+    category: "review",
+    apps: ["github", "slack", "google_calendar", "claude"],
+    steps: [
+      "Read CODEOWNERS and the reviewer roster from repositories you can read.",
+      "Read the pull request, the paths it changes, and who is assigned to it already.",
+      "Match the changed paths against CODEOWNERS to get the owner tokens the pull request needs.",
+      "Find the roster rows that answer for those owner tokens. The roster is the only source of group membership: no action here reads a GitHub team.",
+      `Read each shortlisted person's calendar for time away from work in the next ${TIME_OFF_WINDOW_DAYS} days. A person with no calendar in the roster is not checked.`,
+      "Choose the smallest set of people that covers every owner. Time off excludes a person. Working hours and the roster's areas column only break a tie, and both come from the roster.",
+      "Message you and assign nobody when one owner has no reviewer.",
+      "Write the chosen people into the pull request's assignees field, then read it back.",
+      "Send each assignee a Slack message, and send you the list.",
+      "End the run. Nothing waits for a reply, so a reviewer who declines needs a second run with their handle in the exclude field.",
+    ],
+    // Order is part of the statement. The first four lines are the four
+    // things the request asked for that this platform cannot do, because a
+    // reader stops reading a list of twenty-three. Everything after them is
+    // a limit of the workflow rather than a gap against the request.
+    caveats: [
+      "It cannot read a GitHub team. No action here lists the members of @your-org/group-one, so this workflow never resolves a group into people by itself. The roster file supplies that, and a person who is not in the roster is never assigned, whatever CODEOWNERS says.",
+      "It does not know anybody's working hours. Nothing in this platform reports a person's timezone, so the roster carries the timezone and the hours. Working hours rank candidates and exclude nobody: a person outside their hours is still assigned when nobody else covers the owner, and the report says so. The hours judgement is arithmetic a model does on the run clock.",
+      "It has no signal for who last worked on the changed code. GitHub's commit list here returns a git author name, not an account, so it cannot be matched to a handle. The only ownership evidence is the CODEOWNERS path match, which is authority and not familiarity. The roster's areas column breaks a tie, and it is something a person wrote down.",
+      "It cannot swap a reviewer who declines. No workflow step can wait for an inbound Slack message: the wait step counts down a duration, and nothing in the Slack integration answers a workflow. When somebody declines, start the workflow again with their handle in the exclude field, and the next best candidate is chosen.",
+      "Two judgements decide who is assigned, and a model makes both of them: which CODEOWNERS rule matches a changed path, and which roster row answers for an owner token. Nothing in a workflow can read a GitHub group, so nothing re-derives either answer. The check in front of the write compares counts — how many owners the paths need, how many the choice covers, and how many people the choice holds. It refuses a choice that leaves an owner uncovered, and it refuses a choice that names more people than the changed paths have owners. Below that number it cannot see a name nobody needed: when one person covers three owners, a choice of that person plus two people no owner needed still holds three names for three owners, and it passes. Assigning nobody who is not needed is model judgement, like the coverage match itself. It cannot tell you that the person it did assign is really in the group the roster says they are in, and it does not re-read the roster to check that each name it writes came from a row. A wrong roster row, or an unusual CODEOWNERS pattern, produces a confident-looking assignment. The run reads the pull request back afterwards, so a name GitHub does not know is reported to you as dropped.",
+      "The roster is a CSV with the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours and areas. groups holds the CODEOWNERS owner tokens that person answers for, separated by | characters. An owner written in CODEOWNERS as an email address is only coverable when somebody lists that address in their groups column.",
+      "A roster row with no slack_user_id is not assigned, and the report names it. This workflow tells every assignee on Slack, so it does not assign a person it cannot tell.",
+      "A slack_user_id in the roster is the id form (U... or W...), not an email address and not a display name. A stale id fails that one message and leaves the others.",
+      "It reads GitHub and assigns as you, not as an installed application. The Slack messages arrive from the app, not from you.",
+      "Slack must be connected on your own account. A workflow run cannot see an org-wide connection. Slack also needs your organization's Slack app connected first, which an admin does in Settings, then Organization. Until both are done, this template cannot be installed.",
+      "Google Calendar must be connected on your own account before you can install this. The gallery still shows the card and offers a Connect Google Calendar button; it withholds the install until the connection exists. A failed calendar read excludes that person, so a run without the connection would assign nobody. Leaving calendar_id empty for everybody turns the reads off; it does not remove the connection the install asks for. Signing in with Google is not the same thing: that token carries sign-in scopes only. Connect Google Calendar on the Integrations page.",
+      "The time-off check reads each person's calendar with your own Google account, so it only works for a calendar that is shared with you at reader level or better. A free-busy-only share is not enough. A person with no calendar_id is assigned with a plain statement that their time was not checked. A calendar that could not be read excludes that person, because a check was asked for and could not be made.",
+      "The calendar step sends the events it reads into a model prompt, titles, descriptions and attendees included. Nothing in a workflow can strip those fields first. The output says only that a calendar shows time away, and never repeats a title, but the prompt still carries them. Name a calendar in the roster only when you accept that.",
+      `Time off excludes a person when it covers any part of the next ${TIME_OFF_WINDOW_DAYS} days. Time off later than that does not exclude anybody, because a review that is assigned today is read in the days after today. The dates are arithmetic a model does on the run clock, over the events it was given.`,
+      "It reads the next 10 events from the run time forward, in start order, and there is no way to set an end to that window. A person whose next 10 events all fall inside today hides any time off that starts tomorrow.",
+      "It writes the assignees field, not the reviewer-request field. Assigning is what this plugin's actions can do; requesting a review is not among them. The two fields mean different things on GitHub, and a required-reviewer rule reads the one this workflow does not write.",
+      "Assigning replaces the whole assignee list. A pull request that already has an assignee is left alone, and the run stops and says so.",
+      "GitHub accepts an assignee change from an account without push access and then drops it, with no error. The run reads the pull request back and reports every name that did not stick as a failure. The run ends failed when any name was dropped.",
+      `It assigns at most ${MAX_ASSIGNEES} people. The cap counts people and not owners: one person who answers for five owner groups covers all five. A pull request that needs more than ${MAX_ASSIGNEES} people to cover its owners is reported as uncovered, and nobody is assigned.`,
+      "When one required owner has no reviewer left, it assigns nobody. It never assigns the people who would have covered the other owners, and it never falls back to a default reviewer. The reason names the uncovered owner and reaches you two ways: a Slack message, and the run's own failure message. The Slack message needs your Slack identity linked in Settings, then Integrations, then Slack. The failure message needs nothing, so the reason survives a Slack that cannot deliver.",
+      `It reads at most ${CHANGED_PATHS_LIMIT} changed paths. The report says when the pull request changes more, because an owner of an unread path is an owner this run never saw.`,
+      `Each run makes three model calls plus a report to your orchestrator, and up to ${MAX_CANDIDATES} calendar reads.`,
+      "It assigns one pull request per run. Leave the pull request number and the exclude field empty when you install, and the run form asks for both every time you start it. A value you type at install is written into the workflow instead, and the run form then stops asking for that field. Everything else — the repository, the CODEOWNERS path and the roster location — is meant to be set at install. It arms no schedule.",
+    ],
+    definition: assignReviewers,
   },
 ];

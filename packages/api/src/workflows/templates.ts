@@ -46,6 +46,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, lockTeamForOwnership } from "../services/teams.js";
+import { unavailableServiceSet } from "../services/integration-availability.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
 import { newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
@@ -118,11 +119,39 @@ export function listPluginTemplates(plugins: ValetPlugin[]): OwnedTemplate[] {
 export const CATALOG_SOURCE = "workflows catalog";
 
 /**
- * Everything the gallery can offer: each loaded plugin's templates first,
- * in plugin order, then the seeded catalog.
+ * Rank of a template that declares none.
  *
- * The seeded catalog goes LAST so a plugin that ships a better template for
- * the same job appears above the generic one.
+ * `Number.MAX_SAFE_INTEGER` and not `Infinity`, because the comparator
+ * subtracts: `Infinity - Infinity` is NaN, and a NaN comparator leaves the
+ * order of two unranked templates up to the sort implementation.
+ */
+const UNRANKED = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Gallery order, in one place.
+ *
+ * `WorkflowTemplate.rank` is the whole rule: lower first, unranked last,
+ * and source order everywhere the ranks tie. `Array.prototype.sort` is
+ * stable, so the source order the aggregation produced — plugin order, then
+ * the seeded catalog — survives as the tie-break. Ranking one template
+ * therefore moves that one template and nothing else.
+ *
+ * The order is DATA. A template that belongs at the top says so in its own
+ * manifest, and this function never learns any template's id.
+ */
+function byRank(templates: OwnedTemplate[]): OwnedTemplate[] {
+  return [...templates].sort((a, b) => (a.template.rank ?? UNRANKED) - (b.template.rank ?? UNRANKED));
+}
+
+/**
+ * Everything the gallery can offer, in the order the gallery shows it:
+ * ranked templates first (see `byRank`), then everything unranked in
+ * aggregation order — each loaded plugin's templates in plugin order, then
+ * the seeded catalog.
+ *
+ * The seeded catalog is aggregated LAST so a plugin that ships a better
+ * template for the same job appears above the generic one without either
+ * side needing a rank.
  *
  * A seeded id that a plugin already claims THROWS, for the reason
  * `listPluginTemplates` throws on a repeated plugin id: the id is the
@@ -144,7 +173,7 @@ export function listCatalogTemplates(plugins: ValetPlugin[]): OwnedTemplate[] {
     ownerById.set(template.id, CATALOG_SOURCE);
     out.push({ pluginName: CATALOG_SOURCE, template });
   }
-  return out;
+  return byRank(out);
 }
 
 export function findCatalogTemplate(plugins: ValetPlugin[], id: string): OwnedTemplate | null {
@@ -199,11 +228,19 @@ function credentialServiceFor(
  * state. `connectedServices` is the caller's own credential set — the same
  * read `/api/plugins` uses, so the gallery and the integrations page never
  * disagree about what is connected.
+ *
+ * `unavailableServices` is the set this deployment or organization has not
+ * configured (`unavailableServiceSet`, integration-availability design).
+ * A service in it can never be connected by the reader, so the card must
+ * say who configures it rather than offer a connect path. An absent set
+ * means the caller knows of no unconfigured service, which is the right
+ * answer for a caller with no organization in hand.
  */
 export function templateRequirements(
   definition: WorkflowDefinition,
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
   connectedServices: ReadonlySet<string>,
+  unavailableServices: ReadonlySet<string> = new Set(),
 ): WorkflowTemplateRequirement[] {
   const byService = new Map<string, WorkflowTemplateRequirement>();
   for (const node of toolNodesOf(definition)) {
@@ -218,6 +255,7 @@ export function templateRequirements(
       service,
       connected: required ? connectedServices.has(service) : true,
       ...(dynamic ? { dynamic: true } : {}),
+      ...(unavailableServices.has(service) ? { unconfigured: true } : {}),
     });
   }
   return [...byService.values()];
@@ -357,6 +395,7 @@ export function summarizeTemplate(
   owned: OwnedTemplate,
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
   connectedServices: ReadonlySet<string>,
+  unavailableServices: ReadonlySet<string> = new Set(),
 ): { ok: true; value: SummarizeResult } | { ok: false; errors: string[] } {
   const validation = validateDefinitionInput(
     owned.template.definition,
@@ -377,7 +416,12 @@ export function summarizeTemplate(
         description: owned.template.description,
         steps: owned.template.steps,
         schedule: schedule ? { cron: schedule.cron, timezone: schedule.timezone ?? DEFAULT_TIMEZONE } : null,
-        requires: templateRequirements(definition, actionPluginByService, connectedServices),
+        requires: templateRequirements(
+          definition,
+          actionPluginByService,
+          connectedServices,
+          unavailableServices,
+        ),
         inputs: templateInputs(triggerDataSchema(definition)),
         // The author's own caveats come first: they carry knowledge the
         // definition cannot show. The derived ones follow, and cannot go
@@ -392,7 +436,7 @@ export function summarizeTemplate(
 }
 
 /**
- * The gallery listing.
+ * The gallery listing, in gallery order (`listCatalogTemplates`).
  *
  * A template whose definition fails validation is EXCLUDED and logged with
  * the plugin name, the template id, and the validator's errors. Nothing
@@ -400,6 +444,12 @@ export function summarizeTemplate(
  * create path would refuse, and hiding one broken card is better than
  * failing the whole page. The template-contract test fails CI on the same
  * condition, so a broken template never reaches a deployment silently.
+ *
+ * The caller is named by user AND organization, because a card reports two
+ * different states. `connected` is the person's own credential set. A
+ * service this organization has not configured is reported separately
+ * (`WorkflowTemplateRequirement.unconfigured`): the person cannot connect
+ * it, and the card must say who can.
  */
 /**
  * Services a template may name but that a person cannot use yet.
@@ -422,14 +472,23 @@ function requiredServices(summary: WorkflowTemplateSummary): string[] {
 
 export async function listWorkflowTemplateSummaries(
   deps: TemplateServiceDeps,
-  userId: string,
+  caller: { userId: string; orgId: string },
 ): Promise<WorkflowTemplateSummary[]> {
-  const owner: CredentialOwner = { type: "user", id: userId };
+  const owner: CredentialOwner = { type: "user", id: caller.userId };
   const connected = new Set((await deps.credentials.list(owner)).map((cred) => cred.service));
+  // The same resolver the integrations page, the manual-save gate, the
+  // session tool gate and the workflow invoker use, so all five agree on
+  // what this deployment can offer.
+  const unavailable = await unavailableServiceSet({
+    plugins: deps.plugins,
+    orgId: caller.orgId,
+    credentials: deps.credentials,
+    env: process.env,
+  });
 
   const summaries: WorkflowTemplateSummary[] = [];
   for (const owned of listCatalogTemplates(deps.plugins)) {
-    const result = summarizeTemplate(owned, deps.actionPluginByService, connected);
+    const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
     if (!result.ok) {
       console.error(
         `workflow templates: hiding "${owned.template.id}" from "${owned.pluginName}" — ` +

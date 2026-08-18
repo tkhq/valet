@@ -48,6 +48,22 @@ export interface WorkflowTemplate {
   description: string;
   /** Gallery grouping key, e.g. "Daily digest". */
   category: string;
+  /**
+   * Where this template sits in the gallery. Lower comes first.
+   *
+   * Order is a property of the template, not of the host: the plugin that
+   * knows a template is the one to reach for declares it here, and the host
+   * sorts by it. Without this field the gallery order was an accident of
+   * plugin registration order and array position, which no author could
+   * read and no author could change without editing the host.
+   *
+   * A template with no rank sorts AFTER every ranked one, and keeps its
+   * source order among the other unranked ones. Adding a rank therefore
+   * moves one template and leaves the rest where they were. Two templates
+   * that claim one rank keep their source order as well, so a repeated
+   * number is untidy rather than wrong.
+   */
+  rank?: number;
   /** Optional emoji or icon key for the card. */
   icon?: string;
   /**

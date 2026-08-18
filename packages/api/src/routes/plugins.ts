@@ -86,8 +86,9 @@ pluginsRouter.get("/", async (c) => {
     // so that same expression is the only correct join between a credential
     // declaration and the tools connecting it unlocks. Anything looser (say,
     // grouping by plugin) would let a row advertise tools its token cannot
-    // reach — google-calendar declares the credential as "google-calendar"
-    // and reads "google_calendar", so it must resolve to nothing here.
+    // reach: a plugin whose credential declaration names a key none of its
+    // actions read must resolve to nothing here, not to that plugin's
+    // whole action list.
     const actionsByCredentialKey = new Map<string, PluginActionSummary[]>();
     for (const actionPlugin of actionPlugins) {
       const key = actionPlugin.credentialService ?? actionPlugin.service;

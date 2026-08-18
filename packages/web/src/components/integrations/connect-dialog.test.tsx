@@ -325,25 +325,25 @@ describe("the choice reaches the connect call", () => {
 });
 
 describe("a service whose metadata supports no claim", () => {
-  /** The google-calendar shape: no action reads the key this credential writes. */
-  const calendar = (): PluginServiceSummary =>
-    gmail({ service: "google-calendar", actions: [], scopes: undefined });
+  /** The skewed shape: no action reads the key this credential writes. */
+  const skewed = (): PluginServiceSummary =>
+    gmail({ service: "skewed", actions: [], scopes: undefined });
 
   it("says so instead of naming tools", () => {
-    show(calendar(), "Google Calendar");
+    show(skewed(), "Skewed");
     expect(screen.getByText("Valet cannot confirm which tools this connection unlocks.")).toBeTruthy();
     expect(screen.queryAllByText("Asks you first")).toHaveLength(0);
   });
 
   it("names the corrective action", () => {
-    show(calendar(), "Google Calendar");
+    show(skewed(), "Skewed");
     expect(
-      screen.getByText("Do not connect Google Calendar here until a maintainer corrects that name."),
+      screen.getByText("Do not connect Skewed here until a maintainer corrects that name."),
     ).toBeTruthy();
   });
 
   it("refuses to start the connection", () => {
-    show(calendar(), "Google Calendar");
+    show(skewed(), "Skewed");
     const button = screen.getByRole("button", { name: "Continue" });
     expect(button.hasAttribute("disabled")).toBe(true);
     fireEvent.click(button);

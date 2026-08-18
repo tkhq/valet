@@ -176,6 +176,68 @@ describe("TemplateGallery", () => {
     expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
   });
 
+  it("renders the templates in the order the server sent them", () => {
+    // The server decides the order (`WorkflowTemplate.rank`). The gallery
+    // must not re-sort it, or a template ranked first would not appear
+    // first.
+    templatesQuery.data = { templates: [batchAction, memorySweep] };
+    render(<TemplateGallery />);
+
+    const names = screen.getAllByText(/Batch action over inputs|Nightly memory sweep/);
+    expect(names.map((n) => n.textContent)).toEqual([
+      "Batch action over inputs",
+      "Nightly memory sweep",
+    ]);
+  });
+
+  describe("a service this organization has not configured", () => {
+    const needsSlackSetup: WorkflowTemplateSummary = {
+      ...triageDigest,
+      requires: [
+        { service: "github", connected: true },
+        { service: "slack", connected: false, unconfigured: true },
+      ],
+    };
+
+    it("names the setup instead of offering a link that goes nowhere", () => {
+      templatesQuery.data = { templates: [needsSlackSetup] };
+      render(<TemplateGallery />);
+
+      expect(screen.queryByText("Connect Slack")).toBeNull();
+      expect(screen.queryByText("Connect integrations")).toBeNull();
+      expect(
+        screen.getByText(
+          "Slack is not configured for this organization. An admin can set this up in Settings → Organization.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("offers no install, because the first run would fail on the missing token", () => {
+      templatesQuery.data = { templates: [needsSlackSetup] };
+      render(<TemplateGallery />);
+
+      expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
+    });
+
+    it("still links the services the reader can connect", () => {
+      templatesQuery.data = {
+        templates: [
+          {
+            ...triageDigest,
+            requires: [
+              { service: "github", connected: false },
+              { service: "slack", connected: false, unconfigured: true },
+            ],
+          },
+        ],
+      };
+      render(<TemplateGallery />);
+
+      expect(screen.getByText("Connect GitHub")).toBeTruthy();
+      expect(screen.getByText(/Slack is not configured for this organization/)).toBeTruthy();
+    });
+  });
+
   it("shows the steps and the limits before installing", () => {
     templatesQuery.data = { templates: [batchAction] };
     render(<TemplateGallery />);
@@ -249,6 +311,142 @@ describe("TemplateGallery", () => {
         params: { workflowId: "wf_new" },
       }),
     );
+  });
+
+  describe("what install takes now, and what the run form keeps", () => {
+    /**
+     * Install BAKES every value it is given: the server writes it into the
+     * definition and drops the field from the trigger schema, so the
+     * installed workflow never asks for it again. A workflow left with no
+     * trigger schema gets no run form at all.
+     *
+     * The server only REFUSES a missing required field for a scheduled
+     * template (`resolveInstallValues`), because a scheduled run applies no
+     * defaults and has nobody to ask. The dialog used to refuse for every
+     * template, which forced per-run answers — a pull request number, a
+     * brief, a spec — into the definition and froze the workflow on the
+     * first one.
+     */
+    const scheduledWithField: WorkflowTemplateSummary = {
+      ...batchAction,
+      id: "scheduled-batch",
+      schedule: { cron: "0 6 * * *", timezone: "UTC" },
+    };
+
+    it("installs a manual template with the field left empty, leaving it to each run", async () => {
+      templatesQuery.data = { templates: [batchAction] };
+      render(<TemplateGallery />);
+      fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+
+      const install = screen.getByRole("button", { name: "Install" }) as HTMLButtonElement;
+      expect(install.disabled).toBe(false);
+      fireEvent.click(install);
+
+      await waitFor(() => expect(installMutateAsync).toHaveBeenCalledTimes(1));
+      // Nothing baked, so the field survives on the installed workflow.
+      expect(installMutateAsync.mock.calls[0]![0]).toEqual({
+        templateId: "batch-action-over-inputs",
+        body: { inputs: {} },
+      });
+    });
+
+    it("still refuses a scheduled template with an empty required field", () => {
+      // A scheduled run has no form, so this value has to be baked. The
+      // server refuses the install; the dialog refuses it first.
+      templatesQuery.data = { templates: [scheduledWithField] };
+      render(<TemplateGallery />);
+      fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+
+      expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+      fireEvent.change(screen.getByLabelText("What to do with each row *"), {
+        target: { value: "Tier each account" },
+      });
+      expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    });
+
+    it("says which way each field goes, before the reader types in one", () => {
+      templatesQuery.data = { templates: [batchAction] };
+      render(<TemplateGallery />);
+      fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+      expect(
+        within(screen.getByRole("dialog")).getByText(
+          "A field you fill in is written into the workflow. A field you leave empty is asked for each time you start the workflow.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("tells a scheduled template's reader why every field is needed now", () => {
+      templatesQuery.data = { templates: [scheduledWithField] };
+      render(<TemplateGallery />);
+      fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+      expect(
+        within(screen.getByRole("dialog")).getByText(
+          "This workflow runs on a schedule. A scheduled run has no form to ask, so every required field has to be set now.",
+        ),
+      ).toBeTruthy();
+    });
+  });
+
+  describe("a card the caller cannot install", () => {
+    /**
+     * The steps and the caveats live ONLY in the install dialog. A card
+     * that offered no way into that dialog left its reader with two clamped
+     * lines of description — and that reader is the one deciding whether to
+     * connect a service, or to ask an admin for one. The first card in the
+     * gallery is exactly such a card wherever the org Slack app is not set
+     * up.
+     */
+    const blocked: WorkflowTemplateSummary = {
+      ...triageDigest,
+      requires: [
+        { service: "github", connected: false },
+        { service: "slack", connected: false, unconfigured: true },
+      ],
+    };
+
+    it("still lets the reader read the steps and the limits", () => {
+      templatesQuery.data = {
+        templates: [{ ...blocked, caveats: ["It cannot read a GitHub team."] }],
+      };
+      render(<TemplateGallery />);
+      expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+      const dialog = within(screen.getByRole("dialog"));
+      expect(dialog.getByText("Read open pull requests")).toBeTruthy();
+      expect(dialog.getByText("It cannot read a GitHub team.")).toBeTruthy();
+    });
+
+    it("refuses the install in the dialog, naming who can unblock each service", () => {
+      templatesQuery.data = { templates: [blocked] };
+      render(<TemplateGallery />);
+      fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+
+      const dialog = within(screen.getByRole("dialog"));
+      expect((dialog.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+      expect(dialog.getByText("You cannot install this yet")).toBeTruthy();
+      // The caller's own gap, and the corrective action they can take.
+      expect(
+        dialog.getByText(
+          "GitHub is not connected on your account. Connect it on the Integrations page, then install this template.",
+        ),
+      ).toBeTruthy();
+      // The org's gap, and who can take that one.
+      expect(dialog.getByText(/Slack is not configured for this organization/)).toBeTruthy();
+    });
+
+    it("offers no second control on a card that can be installed", () => {
+      templatesQuery.data = { templates: [batchAction] };
+      render(<TemplateGallery />);
+      expect(screen.getByRole("button", { name: "Use template" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "What it does" })).toBeNull();
+    });
   });
 
   it("keeps the dialog open with the server's message when the install fails", async () => {

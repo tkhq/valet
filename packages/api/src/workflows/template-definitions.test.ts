@@ -44,6 +44,7 @@ import type { ActionPlugin, ValetPlugin, WorkflowTemplate } from "@valet/engine"
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { nextFireAt } from "./schedule-service.js";
 import { buildValidateEnvironment } from "./validation-env.js";
+import { templateRequirements, toolNodesOf } from "./templates.js";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -345,6 +346,71 @@ describe("plugin workflow templates", () => {
       const next = nextFireAt(template.schedule.cron, template.schedule.timezone ?? "UTC", Date.now());
       expect(next.ok ? null : next.error).toBeNull();
     });
+  });
+});
+
+// ─── The install gate ────────────────────────────────────────────────────────
+
+/**
+ * A template's tool node is only usable when the credential the action READS
+ * is a credential the connect flow can WRITE. Those two keys are computed by
+ * different expressions — `ActionPlugin.credentialService ?? .service` for
+ * the read, `CredentialDeclaration.service ?? plugin.name` for the write —
+ * and when a plugin lets them drift, `credentialServiceFor` finds no
+ * declaration, reports the service as not required, and the gallery offers
+ * the template to somebody who can never run it. Every service a template
+ * names must therefore be reported as required until the caller connects it.
+ */
+describe("template requirements", () => {
+  const nothingConnected = new Set<string>();
+
+  it.each(owned)("$template.id reports every service it needs", ({ definition }) => {
+    const services = new Set(toolNodesOf(definition).map((node) => node.service));
+    const required = templateRequirements(definition, actionPluginByService, nothingConnected);
+    for (const service of services) {
+      const entry = actionPluginByService.get(service);
+      // A service with no credential declaration at all (the workflows
+      // plugin's own actions) needs nothing connected, and is reported
+      // connected on purpose.
+      const declaresNothing = (entry?.plugin.credentials ?? []).length === 0;
+      if (declaresNothing) continue;
+      expect(required.find((r) => r.service === service)).toEqual(
+        expect.objectContaining({ service, connected: false }),
+      );
+    }
+  });
+
+  it("flips a service to connected once the caller has it", () => {
+    const assign = owned.find((o) => o.template.id === "github.assign-reviewers");
+    if (!assign) throw new Error("no github.assign-reviewers template");
+    const connected = new Set(["github", "slack", "google_calendar"]);
+    const required = templateRequirements(assign.definition, actionPluginByService, connected);
+    expect(required.filter((r) => !r.connected)).toEqual([]);
+    // The calendar service is named by its READ key, which is the key the
+    // connect flow writes as well.
+    expect(required.map((r) => r.service).sort()).toEqual(["github", "google_calendar", "slack"]);
+  });
+
+  /**
+   * A service the organization has not configured is not a service the
+   * reader can connect: the integrations page hides it. The requirement
+   * must therefore carry the two states apart, so the card can offer a
+   * connect link for one and name the admin's setup for the other.
+   */
+  it("marks a service this organization has not configured", () => {
+    const assign = owned.find((o) => o.template.id === "github.assign-reviewers");
+    if (!assign) throw new Error("no github.assign-reviewers template");
+    const required = templateRequirements(
+      assign.definition,
+      actionPluginByService,
+      new Set(["github", "google_calendar"]),
+      new Set(["slack"]),
+    );
+    const slack = required.find((r) => r.service === "slack");
+    expect(slack).toEqual({ service: "slack", connected: false, unconfigured: true });
+    // Every other service stays as it was: an unconfigured one is reported,
+    // not spread.
+    expect(required.filter((r) => r.unconfigured === true).map((r) => r.service)).toEqual(["slack"]);
   });
 });
 
