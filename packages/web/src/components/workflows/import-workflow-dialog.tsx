@@ -274,8 +274,9 @@ export function ImportWorkflowDialog({
                   />
                 </div>
                 <p className="text-xs text-muted">
-                  Valet reads public repositories only, without a credential. To import from a
-                  private repository, open the file on GitHub and paste it on the other tab.
+                  Valet reads the repository with your own GitHub connection, so a private
+                  repository you can see on GitHub imports here. Connect GitHub in Settings if you
+                  have not. Without a connection Valet reads public repositories only.
                 </p>
               </div>
             )}

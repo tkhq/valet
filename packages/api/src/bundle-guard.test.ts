@@ -21,6 +21,17 @@ describe.skipIf(!bundleExists)("built bundle guards", () => {
     expect(src).not.toMatch(/["']tsx["']\s*,/); // spawn("tsx", ...) / execa
   });
 
+  it("left no .md/.sql read for the bundle to perform at runtime", () => {
+    // The one assertion that catches an asset the inliner missed. A
+    // surviving `new URL("....md", import.meta.url)` resolves against the
+    // BUNDLE's own directory, so the server dies on its first boot with an
+    // ENOENT for a file that only exists in the source tree. Every other
+    // guard here passed while exactly that read was in the bundle.
+    const src = readFileSync(bundlePath, "utf8");
+    const survivor = /new URL\(\s*['"][^'"]*\.(?:md|sql)['"]\s*,\s*import\.meta\.url/.exec(src);
+    expect(survivor?.[0]).toBeUndefined();
+  });
+
   it("inlined the engine + app migration SQL into the bundle", () => {
     const src = readFileSync(bundlePath, "utf8");
     // DDL text that lives ONLY in the .sql files (not in any .ts source),

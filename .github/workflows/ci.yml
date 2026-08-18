@@ -80,27 +80,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # The tests need this, and it is not obvious why.
+      # No build step here, deliberately. Every workspace package resolves
+      # from source, so a test imports one without waiting for an emit.
+      # Until that was true, each shard paid a full `tsc --build` before it
+      # could import `@valet/sdk/mcp`, and a fresh clone could not run
+      # `pnpm test` at all.
       #
-      # About fifteen workspace packages point `main`/`exports` at `dist`
-      # (`@valet/sdk`, `@valet/shared`, most `plugin-*`), while others point
-      # at `src` (`@valet/engine`, `@valet/api`, `@valet/workflow`). The ones
-      # that resolve to `dist` cannot be imported until something emits it,
-      # and `tsc --build` is that something.
-      #
-      # It used to happen by accident: Typecheck ran ahead of Test in ONE
-      # job, so the emit it performs as a side effect was already on disk.
-      # Splitting the jobs removed that, and the shards failed with
-      # `ERR_MODULE_NOT_FOUND` for `@valet/sdk/mcp`.
-      #
-      # So the dependency is stated here instead of inherited. The proper
-      # fix is to make every package resolve from source the way `engine`
-      # already does — every package here is private and none is published —
-      # which would delete this step. See the PR for why that is a change
-      # worth making on its own.
-      - name: Build workspace packages
-        run: pnpm typecheck
-
       # No `--` before the flag. pnpm drops what follows it here, and vitest
       # would then run the WHOLE suite in every shard — four times the work,
       # all green, with nothing to show that sharding never happened.

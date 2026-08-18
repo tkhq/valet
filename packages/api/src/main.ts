@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { createApp, type AuthWiring } from "./app.js";
 import { selectServerAdapter } from "./server-adapter.js";
 import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
+import { resolvePgDataDir } from "./providers/data-dir-lock.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
@@ -133,7 +134,7 @@ export async function startServer(): Promise<ServerHandle> {
 const port = Number.parseInt(process.env.PORT ?? "8787", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
 const databaseUrl = process.env.DATABASE_URL;
-const pgDataDir = process.env.VALET_PG_DATA_DIR ?? resolve(dataDir, "pg");
+const pgDataDir = resolvePgDataDir(dataDir);
 const blobsRoot = process.env.VALET_BLOBS_DIR ?? resolve(dataDir, "blobs");
 if (!process.env.VALET_ENCRYPTION_KEY) {
   console.warn("VALET_ENCRYPTION_KEY is unset — using an insecure default. Set it before storing real credentials.");
@@ -242,6 +243,7 @@ try {
   providers = await buildNodeProviders({
     databaseUrl,
     pgDataDir,
+    lockPort: port,
     blobsRoot,
     encryptionKey,
     anthropicApiKey,
@@ -261,6 +263,12 @@ try {
     console.error(e.message);
     process.exit(1);
   }
+  // A `DataDirLockError` (a second API process on the embedded database)
+  // falls through to the rethrow on purpose. Both callers already turn a
+  // boot rejection into its message alone: the direct-entry guard at the
+  // bottom of this file prints `FATAL: <message>`, and the serve command
+  // prints it and returns a usage exit code. Exiting here would take that
+  // choice away from them.
   throw e;
 }
 
@@ -545,6 +553,13 @@ async function close(): Promise<void> {
     console.error("otel shutdown failed:", err);
   }
   await server.close();
+  try {
+    // Last, after every reader of the database has stopped. A hard kill
+    // skips this; the next boot then reclaims the lock from the dead pid.
+    providers.dataDirLock?.release();
+  } catch (err) {
+    console.error("data-dir lock release failed:", err);
+  }
 }
 
 // Last-resort guards. A single bad request must not take down the server

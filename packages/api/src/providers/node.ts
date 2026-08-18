@@ -50,6 +50,7 @@ import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
+import { acquireDataDirLock, type HeldDataDirLock } from "./data-dir-lock.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import { buildSandboxProvider, resolveChildRetentionMs, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
@@ -169,6 +170,22 @@ export interface NodeProviderOpts {
    *   by `reconcileInstanceConfig`; the policy engine reads them at runtime.
    */
   instanceConfig?: InstanceConfig;
+  /**
+   * Whether to take the one-owner lock on `pgDataDir` before PGlite opens
+   * it (`providers/data-dir-lock.ts`). Default `true`. Ignored when
+   * `databaseUrl` is set — a Postgres server owns its own concurrency.
+   *
+   * Set `false` only where the caller has already proven the directory is
+   * private to this process, such as a test that opens a fresh temporary
+   * directory it created itself.
+   */
+  lockPgDataDir?: boolean;
+  /**
+   * The HTTP port this server listens on. Recorded in the lock file so a
+   * refused boot can say which server is in the way. Nothing reads it back
+   * as configuration.
+   */
+  lockPort?: number;
 }
 
 /**
@@ -203,9 +220,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   mkdirSync(opts.blobsRoot, { recursive: true });
 
   let source: Pool | PGlite;
+  let dataDirLock: HeldDataDirLock | null = null;
   if (opts.databaseUrl) {
     source = new Pool({ connectionString: opts.databaseUrl });
   } else {
+    // BEFORE the directory is created or opened, not after. A second API
+    // process used to lose the race for the HTTP port, stay alive, and keep
+    // this directory open; the next boot then wrote over a live database.
+    // The lock refuses that boot and names the process to stop.
+    if (opts.lockPgDataDir ?? true) {
+      dataDirLock = acquireDataDirLock({ pgDataDir: opts.pgDataDir, port: opts.lockPort });
+    }
     mkdirSync(opts.pgDataDir, { recursive: true });
     // Bundled single-binary: PGlite's default `import.meta.url`-relative wasm
     // load resolves to the bundle's own dir, so hand it the sibling
@@ -612,5 +637,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
+    dataDirLock,
   };
 }

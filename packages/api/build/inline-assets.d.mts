@@ -10,7 +10,8 @@ export function inlineAssetContent(sourceFile: string, literal: string): string;
 
 /**
  * Rewrite a source file's text, inlining every matching `.md`/`.sql` read as a
- * JSON string literal. Throws on a dynamic (template-literal) asset read.
+ * JSON string literal. Throws on a dynamic (template-literal) asset read, and
+ * on an asset read whose call shape it cannot rewrite.
  */
 export function transformSource(sourceFile: string, source: string): string;
 

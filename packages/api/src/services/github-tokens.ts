@@ -282,9 +282,30 @@ async function performRefresh(
 
 // ── User-credential health ─────────────────────────────────────────────
 
-type UserCredResult =
-  | { ok: true; token: string; source: "user" | "pat"; login?: string }
-  | { ok: false; reason: string };
+/**
+ * Why a user credential could not produce a token. The `reason` is prose for
+ * a `GitHubAuthError`; `gap` is the same fact in a form a caller can branch
+ * on, and the difference matters to a message a person reads:
+ *
+ *   - `absent` — nothing is connected. "Connect GitHub" is the fix.
+ *   - `unusable` — a credential EXISTS but cannot read repositories. It shows
+ *     as connected on the Integrations page, so "connect GitHub" reads as
+ *     wrong advice. The fix is to connect it again with repository access.
+ *
+ * A GitHub social sign-in writes an `identityOnly` credential for every user
+ * (`auth/provisioning.ts`), so `unusable` is the common state, not a rare
+ * one. `login` carries the account name when the credential names one.
+ */
+export type UserCredentialGap = "absent" | "unusable";
+
+export interface UserCredentialMiss {
+  ok: false;
+  gap: UserCredentialGap;
+  reason: string;
+  login?: string;
+}
+
+type UserCredResult = { ok: true; token: string; source: "user" | "pat"; login?: string } | UserCredentialMiss;
 
 /** Resolves the user's `github` credential to a healthy token, refreshing a
  * stale App-OAuth credential in-place. Returns `{ ok: false, reason }` (the
@@ -297,11 +318,15 @@ async function resolveUserCredential(
   userId: string | undefined,
 ): Promise<UserCredResult> {
   if (!userId) {
-    return { ok: false, reason: "no user is associated with this request to resolve a user GitHub credential" };
+    return {
+      ok: false,
+      gap: "absent",
+      reason: "no user is associated with this request to resolve a user GitHub credential",
+    };
   }
   const cred = await deps.credentials.get(userOwner(userId), GITHUB_CREDENTIAL_SERVICE);
   if (!cred || !cred.accessToken) {
-    return { ok: false, reason: "no GitHub account is connected for this user" };
+    return { ok: false, gap: "absent", reason: "no GitHub account is connected for this user" };
   }
 
   const metadata = cred.metadata;
@@ -310,11 +335,18 @@ async function resolveUserCredential(
   if (isRecord(metadata) && metadata.identityOnly === true) {
     return {
       ok: false,
+      gap: "unusable",
+      login,
       reason: "the connected GitHub account is identity-only (sign-in scopes) and cannot access repositories; reconnect GitHub with repo access",
     };
   }
   if (isRecord(metadata) && metadata.refreshFailedAt !== undefined && metadata.refreshFailedAt !== null) {
-    return { ok: false, reason: "the connected GitHub credential needs to be reconnected (a previous token refresh failed)" };
+    return {
+      ok: false,
+      gap: "unusable",
+      login,
+      reason: "the connected GitHub credential needs to be reconnected (a previous token refresh failed)",
+    };
   }
 
   // PAT: no expiry and no refresh token → always fresh.
@@ -329,11 +361,21 @@ async function resolveUserCredential(
 
   // Stale App-OAuth credential.
   if (!cred.refreshToken) {
-    return { ok: false, reason: "the connected GitHub credential has expired and cannot be refreshed; reconnect GitHub" };
+    return {
+      ok: false,
+      gap: "unusable",
+      login,
+      reason: "the connected GitHub credential has expired and cannot be refreshed; reconnect GitHub",
+    };
   }
   const rotated = await refreshSingleFlight(deps, orgId, userId, cred);
   if (!rotated || !rotated.accessToken) {
-    return { ok: false, reason: "the connected GitHub credential could not be refreshed; reconnect GitHub" };
+    return {
+      ok: false,
+      gap: "unusable",
+      login,
+      reason: "the connected GitHub credential could not be refreshed; reconnect GitHub",
+    };
   }
   return { ok: true, token: rotated.accessToken, source: "user", login: loginOf(rotated.metadata) ?? login };
 }
@@ -372,17 +414,36 @@ export interface ApiListToken {
   login?: string;
 }
 
-/** Narrow read-only wrapper over `resolveUserCredential`'s health check, for
- * callers (Task 7's repo listing) that only want "does this user have a
- * healthy API-capable credential" without the STRICT-throw behavior
- * `resolveGitHubToken({ auth: "user" })` has. `null` on any unhealthy/absent
- * reason — reuses the exact same health rules, does not duplicate them. */
+/**
+ * Narrow read-only wrapper over `resolveUserCredential`'s health check, for
+ * callers that only want "does this user have a healthy API-capable
+ * credential" without the STRICT-throw behavior
+ * `resolveGitHubToken({ auth: "user" })` has. Reuses the exact same health
+ * rules, and does not duplicate them.
+ *
+ * The miss KEEPS its `gap`, so a caller that reports the outcome to a person
+ * can tell "nothing is connected" from "a connected account cannot read
+ * repositories". Those two need different advice, and a `null` cannot carry
+ * the difference. `resolveUserApiToken` below is the older, flattened form
+ * for callers that only branch on success.
+ */
+export async function resolveUserApiCredential(
+  deps: GitHubTokenDeps,
+  orgId: string,
+  userId: string | undefined,
+): Promise<{ ok: true; token: string; login?: string } | UserCredentialMiss> {
+  const result = await resolveUserCredential(deps, orgId, userId);
+  return result.ok ? { ok: true, token: result.token, login: result.login } : result;
+}
+
+/** `resolveUserApiCredential` with the miss flattened to `null`, for callers
+ * (Task 7's repo listing) that only take the healthy branch. */
 export async function resolveUserApiToken(
   deps: GitHubTokenDeps,
   orgId: string,
   userId: string | undefined,
 ): Promise<ApiListToken | null> {
-  const result = await resolveUserCredential(deps, orgId, userId);
+  const result = await resolveUserApiCredential(deps, orgId, userId);
   return result.ok ? { token: result.token, login: result.login } : null;
 }
 

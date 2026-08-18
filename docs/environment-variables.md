@@ -11,7 +11,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `ANTHROPIC_API_KEY` | Yes | Anthropic key for the agent loop. The server exits without it. You can add org-level LLM providers in the UI |
 | `PORT` | No | HTTP port (default `8787`. `make dev-local` sets `8788`) |
 | `DATABASE_URL` | No | Postgres connection string. Set → node-postgres. Unset → embedded PGlite under the data dir |
-| `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, serve.lock |
+| `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, pg.lock |
 | `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually |
 | `VALET_ENCRYPTION_KEY` | Prod | AES-256-GCM key for credentials at rest (warned if unset) |
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |

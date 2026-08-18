@@ -12,19 +12,22 @@
  *   API key.
  * - After listening, an implicit `local` profile is written to the CLI config
  *   so the other subcommands can talk to it out of the box.
- * - A `serve.lock` pidfile guards the data dir against two concurrent serves
- *   sharing one PGlite instance.
+ * - The one-owner lock on the PGlite data dir is NOT taken here. It is taken
+ *   by `buildNodeProviders` (`providers/data-dir-lock.ts`), so `valet serve`,
+ *   `tsx watch src/main.ts` and the bundled binary all share one guard, one
+ *   lock file and one refusal message. This command only turns that refusal
+ *   into a clean exit code.
  *
  * The heavy server boot (`startServer`) is imported lazily so unrelated
  * subcommands never pay for it.
  */
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig, saveConfig, type ValetConfig } from "../config.js";
 import { printErr, printLine } from "../output.js";
 import { resolveDataDir, type SandboxKind } from "../resolve.js";
 import { ExitCode } from "../exit.js";
 import { detectDockerDaemon } from "../docker-detect.js";
+import { DataDirLockError } from "../../providers/data-dir-lock.js";
 import type { CliContext } from "../types.js";
 import type { ServerHandle } from "../../main.js";
 
@@ -32,13 +35,6 @@ import type { ServerHandle } from "../../main.js";
 const SERVE_DEFAULT_PORT = 8788;
 
 const SANDBOX_KINDS: readonly SandboxKind[] = ["docker", "local", "kubernetes"];
-
-/** The `serve.lock` pidfile shape. */
-export interface ServeLock {
-  pid: number;
-  port: number;
-  startedAt: string;
-}
 
 export interface ServeFlags {
   port?: string;
@@ -156,92 +152,6 @@ export function upsertLocalProfile(config: ValetConfig, port: number): ValetConf
   };
 }
 
-/** Parse a `serve.lock` file body; `undefined` if malformed or missing fields. */
-export function parseLock(raw: string): ServeLock | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== "object") return undefined;
-  const obj = parsed as Record<string, unknown>;
-  if (typeof obj.pid !== "number" || typeof obj.port !== "number" || typeof obj.startedAt !== "string") {
-    return undefined;
-  }
-  // A non-positive pid must read as malformed: `process.kill(0/-n, 0)` probes
-  // a process GROUP (usually alive), so a corrupted lock with pid<=0 would
-  // wedge serve/reset on this data dir forever instead of being reclaimed.
-  if (!Number.isInteger(obj.pid) || obj.pid <= 0) return undefined;
-  return { pid: obj.pid, port: obj.port, startedAt: obj.startedAt };
-}
-
-/** True if a pid is alive (signal 0 probe). `EPERM` means it exists but isn't
- * ours — still alive. Any other error → dead/absent. */
-export function defaultIsPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/** Whether a lock is owned by a still-running process (a live owner blocks a
- * second serve on the same data dir). `isAlive` is injectable for tests. */
-export function isLiveLock(lock: ServeLock, isAlive: (pid: number) => boolean = defaultIsPidAlive): boolean {
-  return isAlive(lock.pid);
-}
-
-/** Read + parse the lock at `path`; `undefined` if absent or malformed. */
-export function readLock(path: string): ServeLock | undefined {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return undefined;
-  }
-  return parseLock(raw);
-}
-
-/**
- * Atomically claim the serve lock at `path`. The create uses `O_EXCL`
- * (`flag: "wx"`) so create-if-absent is a single syscall — two serves racing
- * to boot on the same data dir cannot both succeed, closing the TOCTOU where a
- * plain read-then-write would let both open PGlite on one dir. If a lock
- * already exists: a live owner → `"busy"`; a stale (dead-pid) or malformed lock
- * is removed and the atomic create retried once. `isAlive` is injectable for
- * tests.
- */
-export function claimServeLock(
-  path: string,
-  lock: ServeLock,
-  isAlive: (pid: number) => boolean = defaultIsPidAlive,
-): "claimed" | "busy" {
-  const body = `${JSON.stringify(lock, null, 2)}\n`;
-  try {
-    writeFileSync(path, body, { flag: "wx" });
-    return "claimed";
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
-  const cur = readLock(path);
-  if (cur && isLiveLock(cur, isAlive)) return "busy";
-  // Stale (dead pid) or malformed lock — remove and retry the atomic create.
-  try {
-    unlinkSync(path);
-  } catch {
-    // Raced away; the retry below resolves the outcome.
-  }
-  try {
-    writeFileSync(path, body, { flag: "wx" });
-    return "claimed";
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return "busy";
-    throw err;
-  }
-}
-
 export async function run(args: string[], ctx: CliContext): Promise<number> {
   const flags = parseServeFlags(args);
 
@@ -293,8 +203,6 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
       : `database: embedded pglite (${settings.dataDir})`,
   );
 
-  const lockPath = join(settings.dataDir, "serve.lock");
-
   // Publish resolved values into the environment BEFORE booting — startServer
   // reads them from process.env.
   process.env.PORT = String(settings.port);
@@ -310,45 +218,19 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
     process.env.VALET_LOCAL_AUTH = "1";
   }
 
-  // Remove the pidfile on ANY exit path (signal, crash-after-close, normal) —
-  // only if we still own it (a parseable lock whose pid is ours), so we never
-  // delete a fresher serve's lock nor another process's unparseable one.
-  const removeLock = (): void => {
-    try {
-      const cur = readLock(lockPath);
-      if (cur && cur.pid === process.pid) unlinkSync(lockPath);
-    } catch {
-      // best-effort
-    }
-  };
-
-  // ── serve.lock: refuse to share a live data dir (the one-owner rule).
-  // claimServeLock does an ATOMIC O_EXCL create so two serves booting on the
-  // same dir can't both win — closing the check-and-claim race where both open
-  // PGlite. A stale (dead-pid) or malformed lock is reclaimed automatically.
-  mkdirSync(settings.dataDir, { recursive: true });
-  const lock: ServeLock = { pid: process.pid, port: settings.port, startedAt: new Date().toISOString() };
-  if (claimServeLock(lockPath, lock) === "busy") {
-    const cur = readLock(lockPath);
-    printErr(
-      `serve: another valet serve${cur ? ` (pid ${cur.pid}, port ${cur.port})` : ""} already owns ${settings.dataDir}. ` +
-        `Stop it first, or run with a different --data-dir.`,
-    );
-    return ExitCode.Usage;
-  }
-  // Register cleanup BEFORE booting so an in-boot process.exit (e.g. startServer
-  // aborting on a missing ANTHROPIC_API_KEY) still drops the lock we just claimed.
-  process.on("exit", removeLock);
-
-  // Lazy: keep the heavy server graph off every other subcommand's path. If the
-  // boot throws, drop the lock we just claimed so a failed boot leaves no stale
-  // lock we own.
+  // Lazy: keep the heavy server graph off every other subcommand's path.
   let handle: ServerHandle;
   try {
     const { startServer } = await import("../../main.js");
     handle = await startServer();
   } catch (err) {
-    removeLock();
+    // The one-owner rule, refused by `buildNodeProviders`. Its message names
+    // the process to stop and the command to see it, so print that alone —
+    // a stack trace adds nothing a reader can act on.
+    if (err instanceof DataDirLockError) {
+      printErr(`serve: ${err.message}`);
+      return ExitCode.Usage;
+    }
     throw err;
   }
 
@@ -371,15 +253,10 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   return await new Promise<number>((resolveExit) => {
     const onSignal = (signal: NodeJS.Signals): void => {
       printLine(`\nReceived ${signal}, shutting down (sessions evicted, durable state kept)...`);
-      void handle
-        .close()
-        .then(removeLock)
-        .finally(() => resolveExit(ExitCode.OK));
-      // Hard-exit if close() hangs (containers can be slow to stop).
-      setTimeout(() => {
-        removeLock();
-        process.exit(1);
-      }, 5_000).unref();
+      void handle.close().finally(() => resolveExit(ExitCode.OK));
+      // Hard-exit if close() hangs (containers can be slow to stop). The
+      // lock's own `process.on("exit")` hook still drops it.
+      setTimeout(() => process.exit(1), 5_000).unref();
     };
     process.on("SIGINT", () => onSignal("SIGINT"));
     process.on("SIGTERM", () => onSignal("SIGTERM"));

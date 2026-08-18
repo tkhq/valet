@@ -73,6 +73,14 @@ async function apiError(verb: string, res: Response): Promise<PluginActionResult
   };
 }
 
+/**
+ * The bytes go into a `Blob`, and `Buffer.from` is what makes that typecheck
+ * everywhere this file compiles. A `Uint8Array` carries an `ArrayBufferLike`
+ * buffer, which the `Blob` constructor does not accept; the DOM name for the
+ * accepted shape (`BlobPart`) is unavailable in a program that excludes the
+ * DOM library, and `@valet/api` excludes it. `Buffer` is a Node global with
+ * an `ArrayBuffer` behind it, so it satisfies both programs.
+ */
 async function readSandboxFile(
   ctx: PluginActionContext,
   path: string,
@@ -206,7 +214,7 @@ const editImage = action(
     form.append("quality", args.quality ?? "auto");
     form.append(
       "image",
-      new Blob([source as BlobPart], { type: mimeFromPath(args.image_path) }),
+      new Blob([Buffer.from(source)], { type: mimeFromPath(args.image_path) }),
       args.image_path.slice(args.image_path.lastIndexOf("/") + 1),
     );
     const res = await fetch(`${OPENAI_API_URL}/v1/images/edits`, {
@@ -247,7 +255,7 @@ const transcribeAudio = action(
     if (args.language) form.append("language", args.language);
     form.append(
       "file",
-      new Blob([audio as BlobPart]),
+      new Blob([Buffer.from(audio)]),
       args.audio_path.slice(args.audio_path.lastIndexOf("/") + 1),
     );
     const res = await fetch(`${OPENAI_API_URL}/v1/audio/transcriptions`, {

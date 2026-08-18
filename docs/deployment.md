@@ -19,8 +19,8 @@ Sandboxes default to the Docker backend, so a Docker daemon must be
 reachable. Set `BETTER_AUTH_SECRET` to enable real auth; see
 [environment-variables.md](environment-variables.md) for the full list.
 
-`serve` holds an exclusive `serve.lock` per data dir — two servers can never
-share one PGlite. Client commands (`valet login`, `sessions`, `send`, `chat`,
+Every server holds an exclusive `pg.lock` beside its PGlite data dir — two
+servers can never share one PGlite. Client commands (`valet login`, `sessions`, `send`, `chat`,
 `gates`) work against any instance via named profiles in
 `~/.valet/config.json`. The full command reference is
 [`docs/cli.md`](cli.md).

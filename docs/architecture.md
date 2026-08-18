@@ -375,9 +375,11 @@ per OS/arch, embedding the web client's build):
 | `valet status` / `config` / `reset` | Health + version skew, edit serve config, wipe local state |
 | `valet mcp setup` | Wire a local agent (Claude Code) to the instance's `/mcp` endpoint |
 
-Option precedence is flag > env > config file > default. `serve` claims an
-exclusive `serve.lock` pidfile per data dir so two servers never share one
-PGlite.
+Option precedence is flag > env > config file > default. Every server claims
+an exclusive `pg.lock` pidfile beside its PGlite data dir so two servers never
+share one PGlite. The lock is taken by `buildNodeProviders`
+(`packages/api/src/providers/data-dir-lock.ts`), which covers `valet serve`,
+`tsx watch src/main.ts` and the bundled binary alike.
 
 ## Deployment
 

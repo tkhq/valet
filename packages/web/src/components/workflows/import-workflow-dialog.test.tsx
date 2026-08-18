@@ -176,15 +176,17 @@ describe("ImportWorkflowDialog — repository", () => {
     expect(screen.getByText(/acme\/automations\/workflows\/deploy.json/)).toBeTruthy();
   });
 
-  it("states the public-repository limit before the user tries a private one", () => {
+  it("states whose GitHub connection the read uses, before the user tries a private repository", () => {
     renderDialog();
     fireEvent.click(screen.getByRole("tab", { name: "Repository" }));
-    expect(screen.getByText(/public repositories only/)).toBeTruthy();
+    expect(screen.getByText(/with your own GitHub connection/)).toBeTruthy();
+    expect(screen.getByText(/Without a connection Valet reads public repositories only/)).toBeTruthy();
   });
 
   it("shows the server's message when the file cannot be read", async () => {
+    // The server's own wording for a caller who read with no credential.
     const refusal =
-      "Valet found no file at deploy.json in acme/private. Valet reads public repositories only, so a private repository, a wrong branch and a misspelled path look the same here.";
+      "Valet found no file at deploy.json in acme/private. Valet read the repository with no GitHub credential, so it reads public repositories only. To import from a private repository, connect GitHub in Settings → Connected accounts.";
     vi.spyOn(api, "getWorkflowImportFile").mockRejectedValue(
       new ApiError(404, "GET /workflows/import/repo-file → 404", { error: refusal }),
     );

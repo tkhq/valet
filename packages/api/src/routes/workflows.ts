@@ -54,11 +54,16 @@ import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
 import { parseRepoInput, SkillSourceInputError } from "../services/skill-sources.js";
 import {
+  describeCredential,
   GitHubSkillRepoReader,
   SkillRepoReadError,
   SkillRepoTimeoutError,
+  type SkillRepoCredential,
+  type SkillRepoCredentialDescriptor,
   type SkillRepoFile,
 } from "../services/skill-repo-reader.js";
+import { resolveUserApiCredential, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type {
   AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
@@ -271,23 +276,142 @@ workflowsRouter.get("/runs", async (c) => {
 // ── Import ────────────────────────────────────────────────────────────────
 
 /**
- * Reads one file out of a PUBLIC GitHub repository, so the import dialog can
- * take a definition that lives in version control.
+ * What the import read used, and what to tell the caller about it.
  *
- * PUBLIC REPOSITORIES ONLY. The reader accepts a credential (skill sync
- * gives it one), and this route does not pass one yet. That is a gap, not a
- * rule: this route has the caller in `c.var.user`, so the correct credential
- * here is that person's own, through `resolveUserApiToken`, passed as
- * `{ kind: "user", token, ownerScope: "user" }` — the caller reads their own
- * error here, which is what `ownerScope` selects the wording for.
+ * `credential` goes to the reader. `state` goes to the message, and carries
+ * one case the reader's own descriptor cannot: a credential that EXISTS but
+ * cannot read repositories. The read still happens anonymously in that case,
+ * so every public repository imports; only the wording changes.
+ */
+interface ImportRead {
+  credential: SkillRepoCredential;
+  state: ImportCredentialState;
+}
+
+/**
+ * The four states an import read can be in, from the caller's side.
  *
- * Do NOT reach for `services/skill-source-credential.ts` when you close the
- * gap. That module re-checks team and org membership because a source row
- * outlives the membership that justified it; this route is authenticated per
- * request, so the caller's membership is already live. And do NOT resolve
- * the org App installation token, which reaches every repository the App is
- * installed on and would let a caller read a repository they cannot see on
- * GitHub.
+ * `unusable` is not an edge case. A GitHub social sign-in writes an
+ * identity-only credential for every user (`auth/provisioning.ts`), and the
+ * Integrations page renders that as connected. Folding it into "no
+ * credential" tells such a caller to connect an account they can see is
+ * already connected, and hides the step that works: connect it again, with
+ * repository access.
+ */
+type ImportCredentialState = SkillRepoCredentialDescriptor | { kind: "unusable"; login?: string };
+
+/**
+ * The caller's own GitHub credential for one import read.
+ *
+ * Never throws, and never climbs. `resolveUserApiCredential` reads one
+ * person's own credential and nothing else.
+ *
+ * A THROWN failure is a different state and is reported as a different one.
+ * A wrong `VALET_ENCRYPTION_KEY` makes the credential store throw a raw
+ * crypto error, and "connect GitHub" is the wrong advice for that. It
+ * becomes `unavailable`, whose message names the encryption key. The error
+ * itself goes to the server log only, because it names no action a caller
+ * can take.
+ */
+async function importCredential(deps: GitHubTokenDeps, orgId: string, userId: string): Promise<ImportRead> {
+  try {
+    const resolved = await resolveUserApiCredential(deps, orgId, userId);
+    if (resolved.ok) {
+      const credential: SkillRepoCredential =
+        resolved.login === undefined
+          ? { kind: "user", token: resolved.token, ownerScope: "user" }
+          : { kind: "user", token: resolved.token, ownerScope: "user", login: resolved.login };
+      return { credential, state: describeCredential(credential) };
+    }
+    // No token either way, so the read is anonymous either way. Only the
+    // 404's advice differs.
+    if (resolved.gap === "unusable") {
+      const state: ImportCredentialState =
+        resolved.login === undefined ? { kind: "unusable" } : { kind: "unusable", login: resolved.login };
+      return { credential: { kind: "none" }, state };
+    }
+    return { credential: { kind: "none" }, state: { kind: "none" } };
+  } catch (err) {
+    console.error(
+      "workflow import: cannot read the GitHub credential:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return { credential: { kind: "unavailable" }, state: { kind: "unavailable" } };
+  }
+}
+
+/**
+ * The 404 for a file GitHub did not serve.
+ *
+ * GitHub answers 404 both for a path that is not there and for one the
+ * credential cannot see, so the response alone cannot tell a private
+ * repository from a spelling mistake. Valet knows which credential the read
+ * used, and that is what picks the action to name. The four cases each get
+ * their own, because each needs a different thing done:
+ *
+ *   - read with the caller's own account → get access on GitHub, or fix the
+ *     name. The account is named, so the caller can see they are signed in
+ *     to GitHub as somebody else.
+ *   - a credential that cannot read repositories → connect GitHub AGAIN,
+ *     with repository access. Telling this caller to connect contradicts
+ *     their own Integrations page, which shows GitHub as connected.
+ *   - read with no credential → connect GitHub, or fix the name.
+ *   - read with a credential the server cannot decrypt → the encryption key
+ *     changed; connect GitHub again.
+ *
+ * The wording differs from skill sync's for the same states. Skill sync
+ * writes to a source row that a whole team reads on a later poll, so it says
+ * "sync again". An import has one person in front of it now.
+ */
+function importMissMessage(where: string, credential: ImportCredentialState): string {
+  const head = `Valet found no file at ${where}.`;
+  if (credential.kind === "user") {
+    const account =
+      credential.login === undefined
+        ? "your connected GitHub account"
+        : `your connected GitHub account ${credential.login}`;
+    return `${head} Valet read the repository with ${account}. That account cannot see the file, or the repository, the path or the branch has a spelling mistake. Check the three names, or get access to the repository on GitHub, then import again.`;
+  }
+  if (credential.kind === "unusable") {
+    const account = credential.login === undefined ? "Your GitHub account" : `Your GitHub account ${credential.login}`;
+    return `${head} ${account} is connected for sign-in only, so Valet read the repository with no credential and reads public repositories only. Connect GitHub again in Settings → Connected accounts and give it repository access, then import again. If the repository is public, check the repository, the path and the branch for a spelling mistake.`;
+  }
+  if (credential.kind === "unavailable") {
+    return `${head} Valet has a GitHub credential for you but cannot read it. This occurs after a change to the server encryption key. Connect GitHub again in Settings → Connected accounts, then import again.`;
+  }
+  return `${head} Valet read the repository with no GitHub credential, so it reads public repositories only. To import from a private repository, connect GitHub in Settings → Connected accounts. If the repository is public, check the repository, the path and the branch for a spelling mistake, then import again.`;
+}
+
+/**
+ * Reads one file out of a GitHub repository, so the import dialog can take a
+ * definition that lives in version control.
+ *
+ * ## The read uses the CALLER's own GitHub credential
+ *
+ * The route is authenticated per request, so `c.var.user` names the person
+ * asking, and `resolveUserApiCredential` reads that person's own credential. A
+ * private repository they can see on GitHub imports; one they cannot see
+ * does not. The read can reach nothing the caller could not already read on
+ * GitHub with their own account.
+ *
+ * `services/skill-source-credential.ts` is the wrong module here. It
+ * re-checks team and org membership because a skill-source row syncs
+ * unattended for as long as it exists and outlives the membership that
+ * justified it. Nothing outlives this request.
+ *
+ * The org App installation token is also wrong, and worse: it reaches every
+ * repository the App is installed on, so it would let a caller read a
+ * repository they cannot see on GitHub. `resolveUserApiCredential` never
+ * climbs to it — it is the health-checked read of one person's own
+ * credential and nothing else.
+ *
+ * ## No credential is still a supported state
+ *
+ * A caller who has not connected GitHub reads anonymously, and every public
+ * repository imports exactly as before. So does a caller whose only GitHub
+ * credential came from a social sign-in. The 404 then names which of the
+ * four cases the caller is in, because each has a different action — see
+ * `importMissMessage`.
  *
  * The file is returned as TEXT. The client owns the one parser that reads
  * both a pasted file and this response, so the two sources cannot drift into
@@ -326,11 +450,23 @@ workflowsRouter.get("/import/repo-file", async (c) => {
   }
 
   const at = parsed.ref === "" ? "" : ` at ${parsed.ref}`;
+  const user = c.var.user;
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const read = await importCredential(
+    { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) },
+    user.orgId,
+    user.id,
+  );
   let file: SkillRepoFile | null;
   try {
     // Constructed per request so the GitHub base URL is read now, not at
-    // module load — the same rule `repos/github-host.ts` follows.
-    file = await new GitHubSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
+    // module load — the same rule `repos/github-host.ts` follows. The
+    // credential belongs to this one reader and this one request.
+    file = await new GitHubSkillRepoReader({ credential: read.credential }).readFile(
+      parsed.repoFullName,
+      parsed.subpath,
+      parsed.ref,
+    );
   } catch (err) {
     // The reader words its own messages for the skill sync sweep, which
     // tells the reader to wait for the next poll. An import has a person in
@@ -342,9 +478,17 @@ workflowsRouter.get("/import/repo-file", async (c) => {
       );
     }
     if (err instanceof SkillRepoReadError) {
+      // The hourly request budget differs by credential: GitHub gives an
+      // anonymous caller 60 per hour and an authenticated one 5000. A
+      // caller who has connected GitHub cannot act on the 60, so say the
+      // number that applies to them.
+      const budget =
+        read.state.kind === "user"
+          ? "GitHub limits a connected account to 5000 requests each hour."
+          : "Valet read the repository with no GitHub credential, and GitHub limits that to 60 requests each hour. Connect GitHub in Settings → Connected accounts to raise it.";
       return c.json(
         {
-          error: `GitHub refused to serve ${parsed.repoFullName}/${parsed.subpath}. Valet reads public repositories without a credential, and GitHub limits that to 60 requests each hour. Wait, then try the import again.`,
+          error: `GitHub refused to serve ${parsed.repoFullName}/${parsed.subpath}. ${budget} Wait, then try the import again.`,
         },
         502,
       );
@@ -352,12 +496,13 @@ workflowsRouter.get("/import/repo-file", async (c) => {
     throw err;
   }
 
-  // One message covers every miss: unauthenticated, a private repository, a
-  // wrong branch, a misspelled path and a directory all answer the same way.
+  // A private repository, a wrong branch, a misspelled path and a directory
+  // all look the same from GitHub. What separates them for the reader is
+  // which credential the read used, so the message is built from that.
   if (file === null) {
     return c.json(
       {
-        error: `Valet found no file at ${parsed.subpath} in ${parsed.repoFullName}${at}. Valet reads public repositories only, so a private repository, a wrong branch and a misspelled path look the same here. Check the repository, the path and the branch, and make the repository public.`,
+        error: importMissMessage(`${parsed.subpath} in ${parsed.repoFullName}${at}`, read.state),
       },
       404,
     );

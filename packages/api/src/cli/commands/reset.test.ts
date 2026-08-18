@@ -3,18 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExitCode } from "../exit.js";
-import type { ServeLock } from "./serve.js";
+import { pgDataDirLockPath, resolvePgDataDir, type DataDirLock } from "../../providers/data-dir-lock.js";
 import { runReset, type ResetDeps } from "./reset.js";
 
 let dir: string;
 
-/** Seed a data dir with config.json, a pg/ dir, and (optionally) a serve.lock. */
-function seed(lock?: ServeLock): void {
+/** Seed a data dir with config.json, a pg/ dir, and (optionally) a lock. */
+function seed(lock?: DataDirLock): void {
   writeFileSync(join(dir, "config.json"), JSON.stringify({ profiles: { a: { url: "http://a" } } }));
   mkdirSync(join(dir, "pg"), { recursive: true });
   writeFileSync(join(dir, "pg", "data.bin"), "durable");
   writeFileSync(join(dir, "blobs.db"), "blob");
-  if (lock) writeFileSync(join(dir, "serve.lock"), JSON.stringify(lock));
+  if (lock) writeFileSync(pgDataDirLockPath(resolvePgDataDir(dir, {})), JSON.stringify(lock));
 }
 
 function deps(over: Partial<ResetDeps> = {}): ResetDeps {
@@ -26,7 +26,14 @@ function deps(over: Partial<ResetDeps> = {}): ResetDeps {
   };
 }
 
-const LOCK: ServeLock = { pid: 4242, port: 8788, startedAt: "2026-07-17T00:00:00.000Z" };
+// `startedAt` is NOW on purpose: `isLiveLock` reads a lock written before the
+// current boot of the machine as stale, whatever its pid says.
+const LOCK: DataDirLock = { pid: 4242, port: 8788, startedAt: new Date().toISOString() };
+
+/** Where `runReset` looks for the one-owner lock, for this test's data dir. */
+function lockFile(): string {
+  return pgDataDirLockPath(resolvePgDataDir(dir, {}));
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "valet-reset-"));
@@ -39,13 +46,13 @@ afterEach(() => {
 });
 
 describe("runReset live-lock guard", () => {
-  it("refuses when a LIVE serve.lock owns the dir and wipes nothing", async () => {
+  it("refuses when a LIVE lock owns the dir and wipes nothing", async () => {
     seed(LOCK);
     const code = await runReset(deps({ isAlive: (pid) => pid === LOCK.pid }), { yes: true, dataDir: dir });
     expect(code).toBe(ExitCode.Usage);
     // untouched.
     expect(existsSync(join(dir, "pg", "data.bin"))).toBe(true);
-    expect(existsSync(join(dir, "serve.lock"))).toBe(true);
+    expect(existsSync(lockFile())).toBe(true);
     expect(existsSync(join(dir, "config.json"))).toBe(true);
   });
 
@@ -54,12 +61,12 @@ describe("runReset live-lock guard", () => {
     const code = await runReset(deps({ isAlive: () => false }), { yes: true, dataDir: dir });
     expect(code).toBe(ExitCode.OK);
     expect(existsSync(join(dir, "pg"))).toBe(false);
-    expect(existsSync(join(dir, "serve.lock"))).toBe(false);
+    expect(existsSync(lockFile())).toBe(false);
   });
 
   it("wipes when the lock is malformed", async () => {
     seed();
-    writeFileSync(join(dir, "serve.lock"), "not json");
+    writeFileSync(lockFile(), "not json");
     const code = await runReset(deps({ isAlive: () => true }), { yes: true, dataDir: dir });
     expect(code).toBe(ExitCode.OK);
     expect(existsSync(join(dir, "pg"))).toBe(false);

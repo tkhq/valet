@@ -3,16 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "valet": {
-    "plugin": "./dist/plugin.js"
+    "plugin": "./src/plugin.ts"
   },
   "exports": {
-    "./plugin": {
-      "types": "./dist/plugin.d.ts",
-      "default": "./dist/plugin.js"
-    }
+    "./plugin": "./src/plugin.ts"
   },
   "scripts": {
     "build": "tsc",

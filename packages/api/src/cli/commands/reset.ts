@@ -2,15 +2,16 @@
  * `valet reset` — wipe local durable/runtime state for an instance's data dir.
  *
  * Safety rails:
- * - **Refuses while a live `valet serve` owns the dir.** It reads
- *   `join(dataDir, "serve.lock")`, parses it with `parseLock`, and if
+ * - **Refuses while a live server owns the dir.** It reads the one-owner lock
+ *   beside the PGlite data dir (`providers/data-dir-lock.ts`), and if
  *   `isLiveLock` is true (the pid is still running) it refuses with `Usage`. A
- *   stale (dead-pid), malformed, or absent lock does NOT block.
+ *   stale (dead-pid), malformed, or absent lock does NOT block. The lock is
+ *   taken by any server on this dir, not only by `valet serve`.
  * - **Requires confirmation.** Interactive `y/N` prompt unless `--yes`. A
  *   non-TTY invocation without `--yes` refuses (rather than hang) with `Usage`.
  *
  * Wipe scope — SCOPED, not a full-dir nuke. We remove every entry in the data
- * dir EXCEPT `config.json`, so the PGlite state (`pg/`), the `serve.lock`, and
+ * dir EXCEPT `config.json`, so the PGlite state (`pg/`), its lock file, and
  * any durable/runtime dirs are cleared while the user's saved profiles + serve
  * defaults survive. Rationale: the plan says "wipes dataDir", but nuking
  * `config.json` would silently delete every `valet login` profile — a
@@ -27,7 +28,13 @@ import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine } from "../output.js";
 import { resolveDataDir } from "../resolve.js";
 import type { CliContext } from "../types.js";
-import { defaultIsPidAlive, isLiveLock, readLock } from "./serve.js";
+import {
+  defaultIsPidAlive,
+  isLiveLock,
+  pgDataDirLockPath,
+  readLock,
+  resolvePgDataDir,
+} from "../../providers/data-dir-lock.js";
 
 /** The single file the wipe preserves. */
 const PRESERVE = "config.json";
@@ -54,10 +61,10 @@ export interface ResetOpts {
  * `config.json`. Returns the process exit code.
  */
 export async function runReset(deps: ResetDeps, opts: ResetOpts): Promise<number> {
-  // ── Refuse while a live serve owns the dir.
-  const lock = readLock(join(opts.dataDir, "serve.lock"));
+  // ── Refuse while a live server owns the dir.
+  const lock = readLock(pgDataDirLockPath(resolvePgDataDir(opts.dataDir)));
   if (lock && isLiveLock(lock, deps.isAlive)) {
-    printErr(`valet reset: a valet serve (pid ${lock.pid}) is running; stop it first`);
+    printErr(`valet reset: a Valet server (pid ${lock.pid}) uses this data dir. Stop it, then reset again.`);
     return ExitCode.Usage;
   }
 

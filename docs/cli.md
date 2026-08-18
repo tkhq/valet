@@ -82,10 +82,13 @@ Boots the full product with packaged defaults:
   `--data-dir` or `VALET_DATA_DIR`). The server boots embedded PGlite
   unless `serve.databaseUrl` or `DATABASE_URL` points at real Postgres.
 
-`serve` claims an exclusive `serve.lock` pidfile in the data dir, so two
-servers can never share one PGlite instance. If the lock's pid is still
-running, a second `serve` refuses to start. A stale or malformed lock is
-reclaimed automatically.
+Every server claims an exclusive `pg.lock` pidfile beside its PGlite data dir,
+so two servers can never share one PGlite instance. If the lock's pid is still
+running, a second server refuses to start, and the refusal names the process to
+stop. A stale (dead-pid) or malformed lock is reclaimed automatically, so a
+server stopped with `kill -9` does not block the next one. The lock is claimed
+by the server boot, not by this command, so `make dev-local` and the bundled
+binary are guarded the same way.
 
 ### `valet config get|set serve.<field> [value]`
 
@@ -145,8 +148,8 @@ permissions (`0600`).
 ### `valet reset [--yes]`
 
 Wipe the local runtime state under the data dir: PGlite, blobs, and the
-serve lock. **`config.json` is preserved**, so your saved profiles
-survive. The command refuses while a live `valet serve` owns the dir, and
+database lock. **`config.json` is preserved**, so your saved profiles
+survive. The command refuses while a live server owns the dir, and
 requires confirmation (interactive `y/N`, or `--yes` non-interactively).
 
 ## Exit Codes

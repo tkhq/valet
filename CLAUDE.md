@@ -20,20 +20,18 @@ make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Do
 
 ### Start the local stack cleanly (one stack at a time)
 
-The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns `~/.valet/pg`. PGlite allows exactly one owner. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
+The stack assumes ports 8788 (api) and 5173 (web) are free. PGlite allows exactly one owner of `~/.valet/pg`, and a second api does not fail cleanly on its own: it can lose the port race but keep running and hold the database.
 
-1. Check the ports: `lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN`.
-2. If a listener exists, find its checkout: `lsof -p <pid> | grep cwd`. A stack from another worktree serves stale code, so your changes do not appear in the UI.
-3. If the old stack is stale, kill its listeners.
-4. Confirm nothing still holds the database: `lsof +D ~/.valet/pg` must return nothing. An orphaned api process here makes the next api crash at startup.
-5. Run `make dev-local`.
-6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
+The api enforces the one-owner rule itself. Before it opens `~/.valet/pg` it takes a lock (`~/.valet/pg.lock`, from `packages/api/src/providers/data-dir-lock.ts`), and it refuses to boot while another live process holds one. The refusal names the process id to stop and the command to see it, so you no longer look for that process by hand. A process stopped with `kill -9` leaves a lock whose pid is dead; the next boot reclaims it and starts. The lock is taken by `buildNodeProviders`, so `make dev-local`, `valet serve` and the bundled binary all get the same guard.
+
+1. Run `make dev-local`.
+2. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
 
 Symptom → cause:
 
+- `Another process uses the Valet database directory` → a second api holds `~/.valet/pg`. Stop the process the message names, then start again.
 - Vite proxy `ECONNREFUSED /api/...` → the api is down (crashed, or it lost the port race to another stack).
-- PGlite WASM `Aborted()` stack trace at api startup → another process owns `~/.valet/pg` (step 4).
-- The UI does not show your changes → :5173 is served from a different checkout (step 2).
+- The UI does not show your changes → :5173 is served from a different checkout. Find the listener with `lsof -nP -iTCP:5173 -sTCP:LISTEN`, then `lsof -p <pid> | grep cwd` for its checkout.
 
 `make e2e` isolates its own state (scratch `VALET_DATA_DIR`, random ports 18790+), so it can run beside the dev stack — but Docker-heavy suites can flake from daemon contention while the dev stack's sandboxes run. If a Docker row goes red during concurrent work, re-run it in isolation before you treat it as real: `make e2e E2E_ARGS="--only <suite-id>"`.
 
@@ -187,4 +185,4 @@ docs/plans/         # implementation plans
 
 ### Adding a plugin (v2)
 
-`packages/plugin-<name>/` with `plugin.yaml` (`v2: true`; `enabled: false` to park it) + `package.json` (`"valet": { "plugin": "./dist/plugin.js" }`, `./plugin` export, `@valet/engine` dep, sibling-matching scripts) + `tsconfig.json` referencing workspace deps. `src/plugin.ts` default-exports the `ValetPlugin` manifest — actions via `ActionPlugin`/`mcpActionPlugin`, skills/roles via `loadSkillFromMarkdown`/`loadRoleFromMarkdown`. Add to root `tsconfig.json` references and `packages/api/package.json` deps, then `make generate-registries` + `pnpm typecheck`.
+`packages/plugin-<name>/` with `plugin.yaml` (`v2: true`; `enabled: false` to park it) + `package.json` (`"valet": { "plugin": "./src/plugin.ts" }`, a `./plugin` export that names the same source file, `@valet/engine` dep, sibling-matching scripts). Every workspace package resolves from source — point a new one at `src`, never at `dist`, or its tests cannot import it until something emits + `tsconfig.json` referencing workspace deps. `src/plugin.ts` default-exports the `ValetPlugin` manifest — actions via `ActionPlugin`/`mcpActionPlugin`, skills/roles via `loadSkillFromMarkdown`/`loadRoleFromMarkdown`. Add to root `tsconfig.json` references and `packages/api/package.json` deps, then `make generate-registries` + `pnpm typecheck`.

@@ -56,6 +56,29 @@ function fileResponse(body: string): { body: Record<string, unknown> } {
   };
 }
 
+/** Give the signed-in caller (`local-user`) a healthy personal GitHub
+ * credential, the way the GitHub connect flow does. A credential with no
+ * `expiresAt` and no refresh token reads as a PAT, which never goes stale. */
+async function connectGithub(target: TestApi, token: string, login: string): Promise<void> {
+  await target.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+    type: "oauth2",
+    accessToken: token,
+    metadata: { login },
+  });
+}
+
+/** The credential a GitHub SOCIAL SIGN-IN leaves behind
+ * (`auth/provisioning.ts`): a real row, with sign-in scopes only. The
+ * Integrations page shows this as connected, so a 404 that tells the caller
+ * to connect GitHub contradicts what they can see. */
+async function signInWithGithub(target: TestApi, login: string): Promise<void> {
+  await target.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+    type: "oauth2",
+    accessToken: "gho_identity_only",
+    metadata: { login, identityOnly: true },
+  });
+}
+
 function action(id: string): PluginAction {
   return {
     id,
@@ -107,7 +130,7 @@ describe("GET /api/workflows/import/repo-file", () => {
     expect(call?.query.ref).toBe("release");
   });
 
-  it("sends no credential, because this path reads public repositories only", async () => {
+  it("reads anonymously for a caller who has not connected GitHub", async () => {
     api = await bootTestApi();
     const f = useFixture({ getContents: () => fileResponse(JSON.stringify(IMPORTABLE)) });
 
@@ -120,7 +143,40 @@ describe("GET /api/workflows/import/repo-file", () => {
     expect(call?.authHeader).toBeUndefined();
   });
 
-  it("names the public-repository rule when GitHub has no such file", async () => {
+  it("reads with the caller's own GitHub credential when they have one", async () => {
+    api = await bootTestApi();
+    await connectGithub(api, "ghu_caller_token", "octocat");
+    const f = useFixture({ getContents: () => fileResponse(JSON.stringify(IMPORTABLE)) });
+
+    const res = await fetch(
+      `${api.baseUrl}/api/workflows/import/repo-file?repo=acme/private&path=deploy.json`,
+      { headers: HEADERS },
+    );
+    expect(res.status).toBe(200);
+    const call = f.calls.find((c) => c.path.includes("/contents/"));
+    // The caller's token, and never the org App installation token — that
+    // one reaches every repository the App is installed on.
+    expect(call?.authHeader).toBe("Bearer ghu_caller_token");
+  });
+
+  it("names the connected account in the 404 when that account cannot see the file", async () => {
+    api = await bootTestApi();
+    await connectGithub(api, "ghu_caller_token", "octocat");
+    useFixture({ getContents: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+    const res = await fetch(
+      `${api.baseUrl}/api/workflows/import/repo-file?repo=acme/private&path=deploy.json`,
+      { headers: HEADERS },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("your connected GitHub account octocat");
+    expect(body.error).toContain("get access to the repository on GitHub");
+    // The anonymous advice must not appear for a connected caller.
+    expect(body.error).not.toContain("connect GitHub in Settings");
+  });
+
+  it("names connecting GitHub in the 404 when the caller read anonymously", async () => {
     api = await bootTestApi();
     useFixture({ getContents: () => ({ status: 404, body: { message: "Not Found" } }) });
 
@@ -130,8 +186,64 @@ describe("GET /api/workflows/import/repo-file", () => {
     );
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("public repositories only");
-    expect(body.error).toContain("make the repository public");
+    expect(body.error).toContain("no GitHub credential");
+    expect(body.error).toContain("connect GitHub in Settings → Connected accounts");
+  });
+
+  it("reads anonymously with an identity-only credential, and never sends its token", async () => {
+    api = await bootTestApi();
+    await signInWithGithub(api, "octocat");
+    const f = useFixture({ getContents: () => fileResponse(JSON.stringify(IMPORTABLE)) });
+
+    const res = await fetch(
+      `${api.baseUrl}/api/workflows/import/repo-file?repo=acme/automations&path=deploy.json`,
+      { headers: HEADERS },
+    );
+    // A public repository still imports, exactly as before.
+    expect(res.status).toBe(200);
+    const call = f.calls.find((c) => c.path.includes("/contents/"));
+    // The sign-in token cannot read repositories. Sending it would only earn
+    // a 401 in place of a working anonymous read.
+    expect(call?.authHeader).toBeUndefined();
+  });
+
+  it("names reconnecting with repository access when the credential is sign-in only", async () => {
+    api = await bootTestApi();
+    await signInWithGithub(api, "octocat");
+    useFixture({ getContents: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+    const res = await fetch(
+      `${api.baseUrl}/api/workflows/import/repo-file?repo=acme/private&path=deploy.json`,
+      { headers: HEADERS },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("octocat");
+    expect(body.error).toContain("connected for sign-in only");
+    // The action that WORKS is named: connect again, with repository access.
+    expect(body.error).toContain("give it repository access");
+    // And the action that does not work is not: this caller's Integrations
+    // page already shows GitHub as connected.
+    expect(body.error).not.toContain("To import from a private repository, connect GitHub");
+  });
+
+  it("names the encryption key in the 404 when the credential cannot be read", async () => {
+    api = await bootTestApi();
+    // What a changed `VALET_ENCRYPTION_KEY` looks like from the route: the
+    // store throws rather than answering. "Connect GitHub" is the wrong
+    // advice for that, so it gets its own message.
+    api.providers.engineCredentials.get = () =>
+      Promise.reject(new Error("unable to decrypt the stored credential"));
+    useFixture({ getContents: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+    const res = await fetch(
+      `${api.baseUrl}/api/workflows/import/repo-file?repo=acme/private&path=deploy.json`,
+      { headers: HEADERS },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("cannot read it");
+    expect(body.error).toContain("server encryption key");
   });
 
   it("refuses a path that holds a directory, not a file", async () => {

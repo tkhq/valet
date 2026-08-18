@@ -11,6 +11,7 @@ import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { SourceService } from "../bakes/source-service.js";
 import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import type { HeldDataDirLock } from "./data-dir-lock.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -85,4 +86,11 @@ export interface Providers {
   /** TTL-cached resolved tool counts for connected dynamic services
    * (`/api/plugins`'s `toolCount` field — see `plugins/dynamic-tool-count.ts`). */
   dynamicToolCounts: DynamicToolCounts;
+
+  /** The one-owner lock on the embedded PGlite data directory
+   * (`providers/data-dir-lock.ts`). `null` or absent when the process
+   * connects to a real Postgres, or when the caller opted out. `main.ts`
+   * releases it on a graceful shutdown; a boot that finds the lock held by a
+   * DEAD process reclaims it, which is what makes a hard kill survivable. */
+  dataDirLock?: HeldDataDirLock | null;
 }
