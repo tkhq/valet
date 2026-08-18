@@ -43,7 +43,10 @@ function callerOwner(user: { id: string; orgId: string }): WorkflowOwner {
 
 templatesRouter.get("/", async (c) => {
   const resp: ListWorkflowTemplatesResponse = {
-    templates: await listWorkflowTemplateSummaries(templateDeps(c.var.providers), c.var.user.id),
+    templates: await listWorkflowTemplateSummaries(templateDeps(c.var.providers), {
+      userId: c.var.user.id,
+      orgId: c.var.user.orgId,
+    }),
   };
   return c.json(resp);
 });

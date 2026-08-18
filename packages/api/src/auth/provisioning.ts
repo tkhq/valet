@@ -120,9 +120,18 @@ export interface ProvisioningDeps {
 
 /** Google plugins' credential-read keys (`ActionPlugin.service`, underscored —
  * see packages/plugin-google-calendar/src/actions/actions.ts and
- * plugin-google-workspace's equivalent). Neither plugin's `name` (hyphenated,
- * used only by the connect-UI's default) is a real read-time key; a single
- * Google login doubles as connecting both integrations, so both get the token. */
+ * plugin-google-workspace's equivalent). A single Google login doubles as
+ * connecting both integrations, so both get the token.
+ *
+ * The token this writes carries the SIGN-IN scopes only (better-auth's Google
+ * defaults are email, profile and openid, and `AuthConfig.social.google` adds
+ * none). It authenticates the person; it does not read a calendar. The
+ * calendar scopes come from the Integrations connect flow, which writes
+ * "google_calendar" as well (`plugin-google-calendar/src/plugin.ts`
+ * declares that key). Both flows therefore write one row, and the LAST write
+ * wins: a first Google account link after a calendar connect replaces the
+ * scoped token with this one. `account.create.after` fires on the first link
+ * only, so it cannot happen twice. */
 const GOOGLE_CREDENTIAL_SERVICES = ["google_calendar", "google_workspace"];
 const GITHUB_CREDENTIAL_SERVICE = "github";
 

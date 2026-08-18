@@ -8,7 +8,7 @@
  *
  * The fixtures mirror real shapes in the fleet: gmail (13 tools, 4 gated),
  * slack (11 tools, none gated), linear (tools resolve after connecting) and
- * google-calendar (declares a credential key its own tools never read).
+ * a skewed plugin (declares a credential key its own tools never read).
  */
 import { describe, expect, it } from "vitest";
 import type { PluginActionSummary, PluginServiceSummary } from "@valet/api/wire";
@@ -53,9 +53,9 @@ describe("toolDisclosure", () => {
   });
 
   it("refuses to describe a service that declares no actions and resolves none", () => {
-    // The google-calendar shape: the credential key it writes is not the key
-    // its actions read, so the wire reports no actions for it.
-    expect(toolDisclosure(service({ service: "google-calendar" })).kind).toBe("unknown");
+    // The skewed shape: the credential key it writes is not the key its
+    // actions read, so the wire reports no actions for it.
+    expect(toolDisclosure(service({ service: "skewed" })).kind).toBe("unknown");
   });
 });
 
@@ -76,7 +76,7 @@ describe("summaryLines", () => {
   });
 
   it("names the gap instead of guessing when the metadata supports no claim", () => {
-    const lines = summaryLines(toolDisclosure(service({ service: "google-calendar" })), "Google Calendar");
+    const lines = summaryLines(toolDisclosure(service({ service: "skewed" })), "Skewed");
     expect(lines[0]).toBe("Valet cannot confirm which tools this connection unlocks.");
     // The repo rule: a user-facing problem names the corrective action.
     expect(lines.some((l) => l.includes("until a maintainer corrects that name"))).toBe(true);
@@ -117,7 +117,7 @@ describe("capabilityLines", () => {
   });
 
   it("claims nothing when the metadata supports nothing", () => {
-    const lines = capabilityLines(toolDisclosure(service({ service: "google-calendar" })), "Google Calendar");
+    const lines = capabilityLines(toolDisclosure(service({ service: "skewed" })), "Skewed");
     expect(lines).toEqual(["Valet cannot list what this connection lets your assistant do."]);
   });
 });

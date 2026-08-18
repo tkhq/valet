@@ -252,6 +252,44 @@ const notesPlugin: ValetPlugin = {
   templates: [notesTemplate, notesNightly, brokenTemplate],
 };
 
+/**
+ * The shape slack ships: a credential an ADMIN has to connect for the whole
+ * organization before anybody can connect their own. Until that happens the
+ * service resolves "unconfigured" (integration-availability design) and the
+ * integrations page hides it, so the person reading a template card has no
+ * page that would let them connect it.
+ */
+const orgGatedActions: ActionPlugin = {
+  service: "chat",
+  actions: [action("chat.post", "low", Type.Object({ text: Type.String() }))],
+};
+
+const chatTemplate: WorkflowTemplate = {
+  id: "chat-note",
+  name: "Chat note",
+  description: "Posts one message.",
+  category: "Chat",
+  apps: ["chat"],
+  steps: ["Post"],
+  definition: definition(
+    [
+      { id: "start", type: "trigger" },
+      { id: "post", type: "tool", service: "chat", action: "post", params: { text: "hello" } },
+    ],
+    [{ from: "start", to: "post" }],
+  ),
+};
+
+const chatPlugin: ValetPlugin = {
+  name: "chat",
+  version: "0.0.1",
+  actions: [orgGatedActions],
+  credentials: [
+    { type: "bot_token", service: "chat", configKeys: ["accessToken"], requires: { orgCredential: true } },
+  ],
+  templates: [chatTemplate],
+};
+
 // ─── Harness ─────────────────────────────────────────────────────────────
 
 let db: AppDb;
@@ -318,35 +356,59 @@ describe("listPluginTemplates", () => {
 
 describe("listWorkflowTemplateSummaries", () => {
   it("reports an unconnected service, and flips it once connected", async () => {
-    const before = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const before = await listWorkflowTemplateSummaries(deps(), OWNER);
     const sweepBefore = before.find((t) => t.id === "gmail-sweep");
     expect(sweepBefore?.requires).toEqual([{ service: "gmail", connected: false }]);
 
     await connect("gmail");
-    const after = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const after = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(after.find((t) => t.id === "gmail-sweep")?.requires).toEqual([{ service: "gmail", connected: true }]);
   });
 
   it("treats a service that declares no credential as needing nothing", async () => {
-    const list = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(list.find((t) => t.id === "notes-echo")?.requires).toEqual([{ service: "notes", connected: true }]);
   });
 
   it("marks a service that resolves its actions at run time", async () => {
-    const list = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(list.find((t) => t.id === "linear-digest")?.requires).toEqual([
       { service: "linear", connected: false, dynamic: true },
     ]);
   });
 
+  /**
+   * An organization that has not set the service up is NOT a reason to drop
+   * the card. The person cannot connect the service, so a card offering
+   * "Connect chat" would send them to a page that hides it. The card is
+   * kept and the state is reported, which is what lets the gallery name the
+   * admin's setup instead of a link.
+   */
+  it("keeps a template whose service the organization has not configured, and says so", async () => {
+    const list = await listWorkflowTemplateSummaries(deps([chatPlugin]), OWNER);
+    expect(list.map((t) => t.id)).toContain("chat-note");
+    expect(list.find((t) => t.id === "chat-note")?.requires).toEqual([
+      { service: "chat", connected: false, unconfigured: true },
+    ]);
+  });
+
+  it("stops calling a service unconfigured once the organization connects it", async () => {
+    await credentials.save({ type: "org", id: OWNER.orgId }, "chat", {
+      type: "bot_token",
+      accessToken: "chat-org-token",
+    });
+    const list = await listWorkflowTemplateSummaries(deps([chatPlugin]), OWNER);
+    expect(list.find((t) => t.id === "chat-note")?.requires).toEqual([{ service: "chat", connected: false }]);
+  });
+
   it("hides a template whose definition does not validate", async () => {
-    const list = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(list.map((t) => t.id)).not.toContain("broken");
     expect(list.map((t) => t.id)).toContain("notes-echo");
   });
 
   it("derives the caveats the definition can prove, after the author's own", async () => {
-    const list = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
 
     expect(list.find((t) => t.id === "gmail-sweep")?.caveats).toEqual([
       "Each run processes at most 25 items. The workflow reports the count it did not process.",
@@ -367,7 +429,7 @@ describe("listWorkflowTemplateSummaries", () => {
       caveats: ["It sorts at most 25 messages per run.", "It reads linear only to name the issue."],
     };
     const plugin: ValetPlugin = { ...gmailPlugin, templates: [spelledOut] };
-    const list = await listWorkflowTemplateSummaries(deps([plugin, linearPlugin, notesPlugin]), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps([plugin, linearPlugin, notesPlugin]), OWNER);
     // "25" appears in the author's line, so the derived foreach line is
     // dropped rather than said twice.
     expect(list.find((t) => t.id === "gmail-sweep-documented")?.caveats).toEqual(spelledOut.caveats);
@@ -380,7 +442,7 @@ describe("listWorkflowTemplateSummaries", () => {
       caveats: ["This sends mail through gmail.send_email."],
     };
     const plugin: ValetPlugin = { ...gmailPlugin, templates: [documented] };
-    const list = await listWorkflowTemplateSummaries(deps([plugin]), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps([plugin]), OWNER);
     // An approval gate on an unattended run is the one thing card copy
     // must never be able to hide, so this line is never suppressed.
     expect(list[0]?.caveats).toHaveLength(2);
@@ -395,12 +457,12 @@ describe("listWorkflowTemplateSummaries", () => {
       schedule: { name: "Blast", cron: "0 9 * * *", timezone: "UTC", description: "Daily at 09:00" },
     };
     const plugin: ValetPlugin = { ...gmailPlugin, templates: [scheduledBlast] };
-    const list = await listWorkflowTemplateSummaries(deps([plugin]), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps([plugin]), OWNER);
     expect(list[0]?.caveats[0]).toContain("a scheduled run then waits until a person answers");
   });
 
   it("carries the schedule the gallery shows, and null when there is none", async () => {
-    const list = await listWorkflowTemplateSummaries(deps(), OWNER.userId);
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(list.find((t) => t.id === "gmail-sweep")?.schedule).toEqual({ cron: "0 12 * * 1-5", timezone: "UTC" });
     expect(list.find((t) => t.id === "linear-digest")?.schedule).toBeNull();
   });

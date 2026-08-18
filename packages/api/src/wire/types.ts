@@ -1353,6 +1353,18 @@ export interface WorkflowTemplateRequirement {
    * when the definition is saved, and can still fail on the first run.
    */
   dynamic?: true;
+  /**
+   * Set when this deployment or organization has not configured the service
+   * — the same "unconfigured" state `PluginServiceSummary.connect` reports,
+   * from the same resolver (integration-availability design).
+   *
+   * `connected` is false for such a service and stays false: the
+   * integrations page hides an unconfigured service, so there is no page
+   * that would let the reader connect it. Without this field the gallery
+   * offered "Connect Slack" and sent the reader to a page with no Slack on
+   * it. With it, the card names the setup an admin has to do instead.
+   */
+  unconfigured?: true;
 }
 
 /**
@@ -1636,11 +1648,10 @@ export interface PluginServiceSummary {
    * service` on each `ActionPlugin`, the same expression `invokeAction` uses
    * to scope a credential provider. The join is deliberate, not incidental:
    * it makes the list true by construction. When a plugin's credential
-   * declaration and its `ActionPlugin` disagree about the key (they do for
-   * google-calendar, which writes "google-calendar" and reads
-   * "google_calendar"), this array comes back EMPTY rather than borrowing
-   * the plugin's actions — an empty array is the honest report that this
-   * token unlocks nothing, and the UI says so instead of inventing a list.
+   * declaration and its `ActionPlugin` disagree about the key, this array
+   * comes back EMPTY rather than borrowing the plugin's actions — an empty
+   * array is the honest report that this token unlocks nothing, and the UI
+   * says so instead of inventing a list.
    *
    * Always empty for a `dynamic` service: its actions do not exist until a
    * credential is connected and the upstream server is asked.

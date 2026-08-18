@@ -8,9 +8,17 @@
  * thing they installed, not a list they have to search.
  *
  * The fields come from the server as resolved `inputs` (label, placeholder,
- * required), not as a raw trigger schema: a scheduled run applies no schema
- * defaults, so these values are written into the definition at install
- * rather than read from the trigger at run time.
+ * required), not as a raw trigger schema. A value typed here is BAKED: the
+ * server writes it into the definition and drops the field from the trigger
+ * schema, so the installed workflow never asks for it again. That is what a
+ * scheduled template needs, because a scheduled run applies no schema
+ * defaults and has no form to ask. For a manual template it is a choice,
+ * and the note above the fields says so — an empty field stays on the run
+ * form.
+ *
+ * The dialog also opens for a template the caller cannot install, because
+ * the steps and the limits live nowhere else. Install is refused here, with
+ * the services to connect and who can connect them.
  *
  * `required` here means "required TO INSTALL", which only a scheduled
  * template has. Its runs arrive on a timer with no form to answer, so a
@@ -33,6 +41,13 @@ import { displayName } from "~/components/integrations/display-name";
 import { apiErrorMessage } from "~/api/policies";
 import { useInstallTemplate } from "~/api/templates";
 import { describeCadence } from "./cadence";
+import {
+  isInstallable,
+  missingNote,
+  missingServices,
+  unconfiguredNote,
+  unconfiguredServices,
+} from "./template-requirements";
 
 /** Declared defaults, and nothing else. */
 function initialValues(inputs: WorkflowTemplateInput[]): Record<string, unknown> {
@@ -44,14 +59,20 @@ function initialValues(inputs: WorkflowTemplateInput[]): Record<string, unknown>
 }
 
 /**
- * True while a field the INSTALL cannot proceed without is still empty.
+ * True while a required field this install cannot do without is still
+ * empty. A boolean is never empty — `false` is an answer.
  *
- * Only a scheduled template has such a field. See the file header: an
- * unscheduled template asks for the same values on the run form, so holding
- * the install button hostage to them blocks the ordinary case of installing
- * a template in order to read it and change it.
+ * `scheduled` is the whole rule, and it mirrors the server's:
+ * `resolveInstallValues` refuses a missing required field for a SCHEDULED
+ * template only, because a scheduled run applies no schema defaults and has
+ * no form to ask. A manual template bakes what the installer supplied and
+ * leaves the rest on the run form.
  *
- * A boolean is never empty — `false` is an answer.
+ * Gating every required field on every template was the bug this replaces.
+ * It forced the installer to answer per-RUN fields — a pull request number,
+ * a brief, a spec — and install then baked each answer into the definition
+ * and dropped it from `dataSchema`. The installed workflow had no run form
+ * left, so it repeated the one pull request, or the one brief, forever.
  */
 function hasEmptyRequired(
   inputs: WorkflowTemplateInput[],
@@ -65,6 +86,17 @@ function hasEmptyRequired(
     if (typeof value === "number") return Number.isNaN(value);
     return typeof value !== "string" || value.trim().length === 0;
   });
+}
+
+/**
+ * How the values in this dialog reach a run, in one sentence the reader
+ * meets BEFORE they type. Install writes every value it is given into the
+ * definition itself, so a field answered here is answered once and for all.
+ */
+function inputNote(scheduled: boolean): string {
+  return scheduled
+    ? "This workflow runs on a schedule. A scheduled run has no form to ask, so every required field has to be set now."
+    : "A field you fill in is written into the workflow. A field you leave empty is asked for each time you start the workflow.";
 }
 
 export function InstallTemplateDialog({
@@ -83,6 +115,16 @@ export function InstallTemplateDialog({
     initialValues(template.inputs),
   );
   const [error, setError] = useState<string | null>(null);
+  // `null`, not `undefined`: the wire always carries the field and uses
+  // null for "arms no schedule" (`WorkflowTemplateSummary`).
+  const scheduled = template.schedule !== null;
+  const missing = missingServices(template.requires);
+  const unconfigured = unconfiguredServices(template.requires);
+  // The gallery opens this dialog for a card it cannot install, so the
+  // reader can read the steps and the limits before they decide to connect
+  // a service. Install is refused here rather than on the card, and the
+  // refusal names what to do about it.
+  const installable = isInstallable(template.requires);
 
   async function submit() {
     setError(null);
@@ -148,6 +190,11 @@ export function InstallTemplateDialog({
 
         {template.inputs.length > 0 && (
           <div className="grid gap-3 border-t border-line pt-4">
+            {/* Above the fields, because it changes what the reader types
+                into them. Install writes a value into the definition and
+                the run form stops asking for that field, so "leave it
+                empty" is a real choice and not an oversight. */}
+            <p className="text-xs leading-relaxed text-muted">{inputNote(scheduled)}</p>
             {template.inputs.map((input) => (
               <TemplateField
                 key={input.name}
@@ -168,6 +215,21 @@ export function InstallTemplateDialog({
           </div>
         )}
 
+        {/* The reason Install is refused, in the same place a failed
+            install reports its own reason. Each line names the corrective
+            action and who can take it. */}
+        {!installable && (
+          <div className="grid gap-1 rounded border border-line bg-ink-wash px-3 py-2">
+            <p className="text-xs font-medium text-ink">You cannot install this yet</p>
+            {missing.length > 0 && (
+              <p className="text-xs leading-relaxed text-muted">{missingNote(missing)}</p>
+            )}
+            {unconfigured.length > 0 && (
+              <p className="text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>
+            )}
+          </div>
+        )}
+
         {error && (
           <div
             role="alert"
@@ -183,7 +245,11 @@ export function InstallTemplateDialog({
           </Button>
           <Button
             onClick={() => void submit()}
-            disabled={install.isPending || hasEmptyRequired(template.inputs, values, template.schedule !== null)}
+            disabled={
+              install.isPending ||
+              !installable ||
+              hasEmptyRequired(template.inputs, values, scheduled)
+            }
           >
             {install.isPending ? "Installing…" : "Install"}
           </Button>

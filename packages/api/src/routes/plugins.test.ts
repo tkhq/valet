@@ -458,7 +458,7 @@ describe("GET /api/plugins — actions a credential unlocks", () => {
   });
 
   it("reports no actions when the credential key the tools read differs from the one declared", async () => {
-    // The google-calendar shape: the connect UI writes the declaration's key
+    // The skewed shape: the connect UI writes the declaration's key
     // while the actions read `credentialService`. Connecting the declared key
     // unlocks nothing, so the row must not borrow the plugin's action list.
     const plugin: ValetPlugin = {
