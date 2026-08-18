@@ -27,6 +27,7 @@ import {
   filesFromList,
   readFailure,
   readImage,
+  toPromptAttachments,
   transferHasFiles,
   IMAGE_ACCEPT_ATTRIBUTE,
   IMAGE_ATTACHMENTS_ENABLED,
@@ -312,11 +313,8 @@ export function Composer({
   async function submit() {
     const t = text.trim();
     if (!t || send.isPending || !threadId) return;
-    // Held images go with the message. `send.mutateAsync` cannot carry them
-    // yet — see IMAGE_ATTACHMENTS_ENABLED — so the composer keeps the
-    // intake dark rather than dropping pictures on the floor. When the
-    // request body gains `attachments`, pass
-    // `toPromptAttachments(pendingImages)` on the call below.
+    // Held images go with the message. Convert them to the wire format
+    // and pass them in the request body.
     const pendingImages = images;
     setText("");
     setImages([]);
@@ -327,7 +325,11 @@ export function Composer({
     // the server's persisted copy.
     const localId = addUserMessage(sessionId, t, threadId);
     try {
-      const res = await send.mutateAsync({ text: t, threadId });
+      const res = await send.mutateAsync({
+        text: t,
+        threadId,
+        attachments: pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined,
+      });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of

@@ -222,3 +222,4 @@ export {
   type SummarizeResult,
   type Turn,
 } from "./compaction.js";
+export { entriesToAgentMessages } from "./thread.js";

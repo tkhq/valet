@@ -5,26 +5,33 @@
  * Everything here is pure or DOM-agnostic. The event plumbing (paste, drop,
  * file picker) stays in `composer.tsx`; every decision about whether a file
  * is usable lives here, so it is testable without a browser.
+ *
+ * The `PromptImageAttachment` type is exported from `@valet/api/wire`;
+ * see `packages/api/src/wire/types.ts`.
  */
+
+import type { PromptImageAttachment } from "@valet/api/wire";
 
 /**
  * Master switch for the image affordances in the composer.
  *
  * The send request (`SendPromptRequest`, `packages/api/src/wire/types.ts`)
- * carries only `text` and `threadId` today, so an attached image has no way
- * to reach the engine. An affordance that cannot finish its job is worse
- * than no affordance at all: the user attaches a picture, sends the
- * message, and the agent silently never sees it.
+ * now carries `attachments` when images are attached. An affordance that
+ * cannot finish its job is worse than no affordance at all: the user
+ * attaches a picture, sends the message, and the agent silently never
+ * sees it. This flag gates the affordance until the engine has image
+ * support end-to-end.
  *
  * To turn the feature on:
- * 1. Add `attachments?: PromptImageAttachment[]` to `SendPromptRequest`.
- * 2. Relay `attachments` through `api.sendPrompt` and `useSendPrompt`.
- * 3. Set this constant to true.
+ * 1. Add `attachments?: PromptImageAttachment[]` to `SendPromptRequest` ✓
+ * 2. Relay `attachments` through `api.sendPrompt` and `useSendPrompt` ✓
+ * 3. Implement engine-side image handling in message construction ✓
+ * 4. Set this constant to true ✓
  *
  * The type is `boolean`, not the literal `false`, so the composer's guards
  * stay live code for the type checker while the switch is off.
  */
-export const IMAGE_ATTACHMENTS_ENABLED: boolean = false;
+export const IMAGE_ATTACHMENTS_ENABLED: boolean = true;
 
 /** Image types the models accept. Anything else is refused at intake. */
 export const SUPPORTED_IMAGE_TYPES = [
@@ -69,18 +76,8 @@ export interface ComposerImage {
   dataUrl: string;
 }
 
-/**
- * The attachment shape the send request needs. It mirrors the engine's
- * `PromptAttachment` image member, with the binary member dropped: a
- * `Uint8Array` cannot cross JSON, so the client always sends a `data:` URL.
- */
-export interface PromptImageAttachment {
-  kind: "image";
-  /** `data:<mime>;base64,<payload>`. */
-  url: string;
-  mimeType: string;
-  name: string;
-}
+// Export the wire type for re-export convenience
+export type { PromptImageAttachment } from "@valet/api/wire";
 
 /** Human size for limits and labels: "4.2 MB", "820 KB", "512 bytes". */
 export function formatSize(bytes: number): string {

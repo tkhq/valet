@@ -366,6 +366,7 @@ export async function submitSessionPrompt(
   row: typeof agentSessions.$inferSelect,
   text: string,
   threadId?: string,
+  attachments?: SendPromptRequest["attachments"],
 ): Promise<SendPromptResponse | null> {
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -383,10 +384,24 @@ export async function submitSessionPrompt(
   // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
   //   requested thread, text unchanged.
   const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
+  
+  // Build the prompt content: text alone or text + attachments.
+  const promptContent = attachments && attachments.length > 0
+    ? {
+        text,
+        attachments: attachments.map(att => ({
+          type: "image" as const,
+          url: att.url,
+          mimeType: att.mimeType,
+          name: att.name,
+        })),
+      }
+    : text;
+
   const receipt =
     outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(text, { threadId: thread.id })
-      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : text, {});
+      ? await engineSession.prompt(promptContent, { threadId: thread.id })
+      : await thread.submitPrompt(outcome?.kind === "expand" ? outcome.text : promptContent, {});
 
   await db
     .update(agentSessions)
@@ -414,7 +429,7 @@ messagesRouter.post("/:id/messages", async (c) => {
     return c.json({ error: "text is required" }, 400);
   }
 
-  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId);
+  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId, body.attachments);
   if (!resp) return c.json({ error: "thread not found" }, 404);
   return c.json(resp, 202);
 });

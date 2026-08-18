@@ -448,10 +448,20 @@ export interface ListMessagesResponse {
   nextCursor?: string;
 }
 
+export interface PromptImageAttachment {
+  kind: "image";
+  /** `data:<mime>;base64,<payload>`. */
+  url: string;
+  mimeType: string;
+  name: string;
+}
+
 export interface SendPromptRequest {
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
+  /** Image attachments for the message. */
+  attachments?: PromptImageAttachment[];
 }
 
 export interface SendPromptResponse {
