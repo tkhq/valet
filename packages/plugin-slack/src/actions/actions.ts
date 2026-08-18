@@ -197,7 +197,7 @@ function slimChannel(ch: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
+export function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
   const reply_count = typeof msg.reply_count === 'number' ? msg.reply_count : undefined;
 
   // Extract file metadata (skip deleted/tombstone files)

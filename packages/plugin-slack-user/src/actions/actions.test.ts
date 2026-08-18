@@ -1,0 +1,370 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  Credential,
+  CredentialProvider,
+  DecisionGateRequest,
+  DecisionResolution,
+  MessageQuery,
+  PluginActionContext,
+  Sandbox,
+  SessionEntry,
+} from "@valet/engine";
+
+const mocks = vi.hoisted(() => ({
+  slackGet: vi.fn(),
+  slackFetch: vi.fn(),
+}));
+
+vi.mock("./api.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api.js")>();
+  return {
+    ...actual,
+    slackGet: mocks.slackGet,
+    slackFetch: mocks.slackFetch,
+  };
+});
+
+import { slackUserActionPlugin } from "./actions.js";
+
+function slackOk(data: Record<string, unknown>): Response {
+  return new Response(JSON.stringify({ ok: true, ...data }), { status: 200 });
+}
+
+function slackErr(error: string): Response {
+  return new Response(JSON.stringify({ ok: false, error }), { status: 200 });
+}
+
+/** A PluginActionContext whose credential resolves to a user xoxp token. */
+function ctxWithToken(): PluginActionContext {
+  return makeCtx({ accessToken: "xoxp-fake" });
+}
+
+/** A PluginActionContext whose credential is absent (not connected). */
+function ctxWithoutToken(): PluginActionContext {
+  return makeCtx(null);
+}
+
+type FakeSandbox = Partial<Sandbox> & { id: string };
+
+function makeCredentials(cred: Credential | null): CredentialProvider {
+  return {
+    get: async (): Promise<Credential | null> => cred,
+    request: async (): Promise<Credential> => {
+      throw new Error("not implemented in test stub");
+    },
+  };
+}
+
+function makeCtx(cred: Credential | null): PluginActionContext {
+  const sandbox: FakeSandbox = { id: "sb-1" };
+  return {
+    actionId: "",
+    service: "slack-user",
+    userId: "user-1",
+    orgId: "o1",
+    sessionId: "s1",
+    threadId: "t1",
+    credentials: makeCredentials(cred),
+    // Test stub: the action code never touches the sandbox, so a partial
+    // object narrowed to Sandbox keeps the ctx shape without a full fake.
+    sandbox: sandbox as Sandbox,
+    requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
+      throw new Error("not implemented in test stub");
+    },
+    signal: new AbortController().signal,
+    threadRead: async (_key: string, _opts?: MessageQuery): Promise<SessionEntry[]> => [],
+    listThreads: async () => [],
+    setModel: async ({ model }: { model: string }) => ({ fromModel: model, toModel: model }),
+  };
+}
+
+/** Execute a slack-user action by id against the plugin's action list. */
+async function run(id: string, args: unknown, ctx: PluginActionContext) {
+  const def = slackUserActionPlugin.actions.find((a) => a.id === id);
+  if (!def) throw new Error(`missing action def: ${id}`);
+  return def.execute(args, { ...ctx, actionId: id });
+}
+
+beforeEach(() => {
+  mocks.slackGet.mockReset();
+  mocks.slackFetch.mockReset();
+});
+
+// ─── Connection guard ──────────────────────────────────────────────────────
+
+describe("connection guard", () => {
+  it('returns a "Connect Slack (personal)" error when no token is present', async () => {
+    const result = await run("slack_user.search_messages", { query: "hello" }, ctxWithoutToken());
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/connect slack \(personal\)/i);
+    expect(mocks.slackGet).not.toHaveBeenCalled();
+    expect(mocks.slackFetch).not.toHaveBeenCalled();
+  });
+});
+
+// ─── search_messages ───────────────────────────────────────────────────────
+
+describe("slack_user.search_messages", () => {
+  it("calls search.messages with the user xoxp token and slims results", async () => {
+    mocks.slackGet.mockResolvedValueOnce(
+      slackOk({
+        messages: {
+          total: 2,
+          matches: [
+            {
+              channel: { id: "C1", name: "general" },
+              user: "U1",
+              ts: "1.1",
+              text: "hello world",
+              permalink: "https://slack/p1",
+              score: 0.5,
+            },
+            {
+              channel: { id: "D1" },
+              user: "U2",
+              ts: "2.2",
+              text: "dm match",
+              permalink: "https://slack/p2",
+            },
+          ],
+          pagination: { next_cursor: "cur-1" },
+        },
+      }),
+    );
+
+    const result = await run(
+      "slack_user.search_messages",
+      { query: "hello", count: 50, sort: "timestamp", sort_dir: "desc" },
+      ctxWithToken(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(mocks.slackGet).toHaveBeenCalledTimes(1);
+    const [method, token, params] = mocks.slackGet.mock.calls[0];
+    expect(method).toBe("search.messages");
+    expect(token).toBe("xoxp-fake");
+    expect(params).toMatchObject({ query: "hello", count: 50, sort: "timestamp", sort_dir: "desc" });
+
+    const data = result.data as {
+      total: number;
+      next_cursor: string;
+      matches: Array<Record<string, unknown>>;
+    };
+    expect(data.total).toBe(2);
+    expect(data.next_cursor).toBe("cur-1");
+    expect(data.matches).toHaveLength(2);
+    expect(data.matches[0]).toMatchObject({
+      channel: "C1",
+      channel_name: "general",
+      user: "U1",
+      ts: "1.1",
+      text: "hello world",
+      permalink: "https://slack/p1",
+      score: 0.5,
+    });
+    expect(data.matches[1].channel).toBe("D1");
+  });
+
+  it("surfaces a reconnect error and skips the result on token_revoked", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackErr("token_revoked"));
+    const result = await run("slack_user.search_messages", { query: "q" }, ctxWithToken());
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/reconnect/i);
+  });
+
+  it("surfaces a reconnect error on invalid_auth", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackErr("invalid_auth"));
+    const result = await run("slack_user.search_messages", { query: "q" }, ctxWithToken());
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/reconnect/i);
+  });
+});
+
+// ─── read_history (operates on user's full visible surface) ──────────────
+
+describe("slack_user.read_history", () => {
+  it("uses the xoxp token against conversations.history and returns slim messages", async () => {
+    mocks.slackGet.mockResolvedValueOnce(
+      slackOk({
+        messages: [
+          { user: "U1", ts: "1", text: "a", reply_count: 0 },
+          { user: "U2", ts: "2", text: "b" },
+        ],
+        has_more: false,
+        response_metadata: {},
+      }),
+    );
+
+    // A private channel ID — verifies we don't gate on private-channel
+    // membership here (the xoxp token is the access gate, not Valet code).
+    const result = await run("slack_user.read_history", { channel: "G_PRIVATE", limit: 50 }, ctxWithToken());
+
+    expect(result.success).toBe(true);
+    expect(mocks.slackGet).toHaveBeenCalledWith(
+      "conversations.history",
+      "xoxp-fake",
+      expect.objectContaining({ channel: "G_PRIVATE", limit: 50 }),
+    );
+    const data = result.data as { messages: unknown[]; total: number };
+    expect(data.total).toBe(2);
+    expect(data.messages).toHaveLength(2);
+  });
+});
+
+// ─── set_status ───────────────────────────────────────────────────────────
+
+describe("slack_user.set_status", () => {
+  it("POSTs users.profile.set with status_text/emoji as the user", async () => {
+    mocks.slackFetch.mockResolvedValueOnce(slackOk({}));
+    const result = await run(
+      "slack_user.set_status",
+      { status_text: "In a meeting", status_emoji: ":spiral_calendar_pad:" },
+      ctxWithToken(),
+    );
+    expect(result.success).toBe(true);
+    expect(mocks.slackFetch).toHaveBeenCalledWith("users.profile.set", "xoxp-fake", {
+      profile: {
+        status_text: "In a meeting",
+        status_emoji: ":spiral_calendar_pad:",
+      },
+    });
+  });
+
+  it("passes through to users.profile.set even when emoji is omitted", async () => {
+    mocks.slackFetch.mockResolvedValueOnce(slackOk({}));
+    await run("slack_user.set_status", { status_text: "BRB" }, ctxWithToken());
+    const profile = (mocks.slackFetch.mock.calls[0][2] as { profile: Record<string, unknown> }).profile;
+    expect(profile.status_text).toBe("BRB");
+    expect(profile.status_emoji).toBe("");
+  });
+});
+
+// ─── send_dm ──────────────────────────────────────────────────────────────
+
+describe("slack_user.send_dm", () => {
+  it("opens a DM channel and posts using the user xoxp token", async () => {
+    mocks.slackFetch
+      .mockResolvedValueOnce(slackOk({ channel: { id: "D9" } }))
+      .mockResolvedValueOnce(slackOk({ ts: "1.0", channel: "D9" }));
+
+    const result = await run("slack_user.send_dm", { user: "U2", text: "hello (as me)" }, ctxWithToken());
+
+    expect(result.success).toBe(true);
+    expect(mocks.slackFetch).toHaveBeenNthCalledWith(1, "conversations.open", "xoxp-fake", { users: "U2" });
+    expect(mocks.slackFetch).toHaveBeenNthCalledWith(2, "chat.postMessage", "xoxp-fake", {
+      channel: "D9",
+      text: "hello (as me)",
+    });
+    expect(result.data).toMatchObject({ ok: true, ts: "1.0", channel: "D9" });
+  });
+
+  it("surfaces a reconnect error if the user token has been revoked", async () => {
+    mocks.slackFetch.mockResolvedValueOnce(slackErr("token_revoked"));
+    const result = await run("slack_user.send_dm", { user: "U2", text: "hi" }, ctxWithToken());
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/reconnect/i);
+  });
+});
+
+// ─── upload_file ────────────────────────────────────────────────────────────
+
+describe("slack_user.upload_file", () => {
+  it("runs the external upload flow: getUploadURLExternal → PUT bytes → completeUploadExternal", async () => {
+    mocks.slackGet.mockResolvedValueOnce(
+      slackOk({ upload_url: "https://files.slack.com/upload/abc", file_id: "F123" }),
+    );
+    mocks.slackFetch.mockResolvedValueOnce(slackOk({ files: [{ id: "F123", permalink: "https://x/F123" }] }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("OK", { status: 200 }));
+
+    try {
+      const result = await run(
+        "slack_user.upload_file",
+        { channels: "C1", filename: "note.txt", title: "Note", content: "hello world", initial_comment: "fyi" },
+        ctxWithToken(),
+      );
+
+      expect(result.success).toBe(true);
+      // Step 1: reserve URL with the exact UTF-8 byte length.
+      expect(mocks.slackGet).toHaveBeenCalledWith("files.getUploadURLExternal", "xoxp-fake", {
+        filename: "note.txt",
+        length: 11,
+      });
+      // Step 2: raw bytes POSTed to the reserved URL.
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "https://files.slack.com/upload/abc",
+        expect.objectContaining({ method: "POST" }),
+      );
+      // Step 3: finalize, sharing to the channel with the title + comment.
+      expect(mocks.slackFetch).toHaveBeenCalledWith("files.completeUploadExternal", "xoxp-fake", {
+        files: [{ id: "F123", title: "Note" }],
+        channel_id: "C1",
+        initial_comment: "fyi",
+      });
+      expect(result.data).toMatchObject({ ok: true, file_id: "F123" });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("surfaces the deprecated-method style error from step 1", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackErr("method_deprecated"));
+    const result = await run(
+      "slack_user.upload_file",
+      { channels: "C1", filename: "note.txt", content: "hi" },
+      ctxWithToken(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/method_deprecated/);
+  });
+});
+
+// ─── Action surface metadata — riskLevel is what drives the policy gate ──────
+
+describe("action surface metadata", () => {
+  it("exposes slack_user.* actions only (no slack.* leakage)", () => {
+    const actions = slackUserActionPlugin.actions;
+    expect(actions.length).toBeGreaterThan(0);
+    for (const a of actions) expect(a.id.startsWith("slack_user.")).toBe(true);
+  });
+
+  it("marks every write/act-as action high-risk so policy can gate it", () => {
+    const writeIds = [
+      "slack_user.set_status",
+      "slack_user.set_dnd",
+      "slack_user.end_dnd",
+      "slack_user.send_dm",
+      "slack_user.post_message",
+      "slack_user.add_reaction",
+      "slack_user.upload_file",
+      "slack_user.add_pin",
+      "slack_user.add_bookmark",
+      "slack_user.add_reminder",
+    ];
+    const actions = slackUserActionPlugin.actions;
+    for (const id of writeIds) {
+      const a = actions.find((x) => x.id === id);
+      expect(a, `missing action def: ${id}`).toBeDefined();
+      expect(a!.riskLevel).toBe("high");
+    }
+  });
+
+  // Message-reading actions default to `medium` (require_approval) — a
+  // shared/agent-driven session with the owner's xoxp token shouldn't be
+  // able to exfiltrate DMs without a human tap. Only list_channels (which
+  // just enumerates channel membership metadata) stays `low`.
+  it("marks message-reading actions medium-risk and channel listing low-risk", () => {
+    const mediumIds = ["slack_user.search_messages", "slack_user.read_history", "slack_user.read_thread"];
+    const lowIds = ["slack_user.list_channels"];
+    const actions = slackUserActionPlugin.actions;
+    for (const id of mediumIds) {
+      const a = actions.find((x) => x.id === id);
+      expect(a, `missing action def: ${id}`).toBeDefined();
+      expect(a!.riskLevel).toBe("medium");
+    }
+    for (const id of lowIds) {
+      const a = actions.find((x) => x.id === id);
+      expect(a, `missing action def: ${id}`).toBeDefined();
+      expect(a!.riskLevel).toBe("low");
+    }
+  });
+});
