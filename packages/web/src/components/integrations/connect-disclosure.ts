@@ -20,8 +20,11 @@
  *                 (linear, notion).
  *   `unknown`   — the plugin declares actions, but none read the key this
  *                 credential writes, so connecting unlocks nothing the
- *                 client can name (google-calendar writes "google-calendar"
- *                 and its actions read "google_calendar").
+ *                 client can name. This is always a plugin bug: a credential
+ *                 decl missing `service`, so the store key falls back to the
+ *                 plugin name while actions read their own service id. The
+ *                 api's credential-service-alignment suite fails on it; this
+ *                 arm is the honest client-side rendering if one ships anyway.
  */
 import type { PluginActionSummary, PluginServiceSummary } from "@valet/api/wire";
 
