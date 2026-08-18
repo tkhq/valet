@@ -10,6 +10,7 @@ import {
 import {
   connectModeFor,
   gateUnavailableActions,
+  missingClientEnv,
   unavailableServiceSet,
 } from "./integration-availability.js";
 
@@ -142,6 +143,105 @@ describe("connectModeFor", () => {
     const plugins = [makePlugin("linear", { credentials: [decl] })];
 
     await expect(resolve({ plugins, decl, service: "linear" })).resolves.toBe("manual");
+  });
+});
+
+describe("missingClientEnv", () => {
+  function authCodePlugin(name: string, clientIdEnv: string, clientSecretEnv: string): ValetPlugin {
+    return makePlugin(name, {
+      credentials: [
+        {
+          type: "oauth2",
+          configKeys: ["accessToken"],
+          oauth: {
+            mode: "authorization_code",
+            authorizationUrl: "https://accounts.example.com/auth",
+            tokenUrl: "https://accounts.example.com/token",
+            clientIdEnv,
+            clientSecretEnv,
+          },
+        },
+      ],
+    });
+  }
+
+  it("names both client variables when neither is set", () => {
+    const plugins = [authCodePlugin("gmail", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")];
+
+    expect(missingClientEnv(plugins, "gmail", {})).toEqual([
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+    ]);
+  });
+
+  it("names only the unset half of a half-set pair", () => {
+    const plugins = [authCodePlugin("gmail", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")];
+
+    expect(missingClientEnv(plugins, "gmail", { GOOGLE_CLIENT_ID: "id" })).toEqual([
+      "GOOGLE_CLIENT_SECRET",
+    ]);
+  });
+
+  it("is empty once both are set", () => {
+    const plugins = [authCodePlugin("gmail", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")];
+
+    expect(
+      missingClientEnv(plugins, "gmail", { GOOGLE_CLIENT_ID: "id", GOOGLE_CLIENT_SECRET: "secret" }),
+    ).toEqual([]);
+  });
+
+  it("reads each plugin's OWN variable names, so a second plugin needs no code change", () => {
+    const plugins = [
+      authCodePlugin("gmail", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
+      authCodePlugin("dropbox", "DROPBOX_CLIENT_ID", "DROPBOX_CLIENT_SECRET"),
+    ];
+
+    expect(missingClientEnv(plugins, "dropbox", {})).toEqual([
+      "DROPBOX_CLIENT_ID",
+      "DROPBOX_CLIENT_SECRET",
+    ]);
+  });
+
+  it("carries names, never the values behind them", () => {
+    const plugins = [authCodePlugin("gmail", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")];
+    // One half set to a secret-shaped value: the other half's NAME comes
+    // back, and the set value appears nowhere in the result.
+    const result = missingClientEnv(plugins, "gmail", { GOOGLE_CLIENT_ID: "super-secret-value" });
+
+    expect(result).toEqual(["GOOGLE_CLIENT_SECRET"]);
+    expect(JSON.stringify(result)).not.toContain("super-secret-value");
+  });
+
+  it("is empty for an mcp-mode declaration, which needs no local client", () => {
+    const plugins = [
+      makePlugin("figma", {
+        credentials: [
+          {
+            type: "oauth2",
+            configKeys: ["accessToken"],
+            oauth: { mode: "mcp", serverUrl: "https://mcp.example.com" },
+          },
+        ],
+      }),
+    ];
+
+    expect(missingClientEnv(plugins, "figma", {})).toEqual([]);
+  });
+
+  it("is empty for an org-credential prerequisite, whose fix is not a variable", () => {
+    const plugins = [
+      makePlugin("slack", {
+        credentials: [
+          { type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } },
+        ],
+      }),
+    ];
+
+    expect(missingClientEnv(plugins, "slack", {})).toEqual([]);
+  });
+
+  it("is empty for a service no plugin declares", () => {
+    expect(missingClientEnv([], "nobody", {})).toEqual([]);
   });
 });
 

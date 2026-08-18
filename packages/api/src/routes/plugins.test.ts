@@ -293,6 +293,171 @@ describe("GET /api/plugins connect mode", () => {
     expect(afterBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("manual");
   });
 
+  /**
+   * The reason behind an unconfigured OAuth service, for the one person who
+   * can act on it. `local-user` holds `org_members.role = "admin"` in the
+   * harness; `test-member` holds `"member"` and selects itself through the
+   * `x-valet-test-user-id` impersonation header.
+   */
+  describe("missingEnv", () => {
+    const googlePlugin: ValetPlugin = {
+      name: "gmail",
+      version: "0.1.0",
+      credentials: [{
+        type: "oauth2", configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          tokenUrl: "https://oauth2.googleapis.com/token",
+          clientIdEnv: "UNSET_TEST_ID", clientSecretEnv: "UNSET_TEST_SECRET",
+        },
+      }],
+    };
+
+    async function gmailService(headers?: Record<string, string>) {
+      if (!api) throw new Error("api not booted");
+      const res = await fetch(`${api.baseUrl}/api/plugins`, { headers });
+      const { plugins } = (await res.json()) as ListPluginsResponse;
+      return plugins.find((p) => p.name === "gmail")?.services[0];
+    }
+
+    it("names the unset client variables to an org admin", async () => {
+      api = await bootTestApi({ plugins: [googlePlugin] });
+
+      const service = await gmailService();
+      expect(service?.connect).toBe("unconfigured");
+      expect(service?.missingEnv).toEqual(["UNSET_TEST_ID", "UNSET_TEST_SECRET"]);
+    });
+
+    it("omits the key entirely for a plain member", async () => {
+      api = await bootTestApi({ plugins: [googlePlugin] });
+
+      const service = await gmailService({ "x-valet-test-user-id": "test-member" });
+      // Same availability answer, no reason attached: the member's response
+      // carries no variable names at all, so the tile stays hidden.
+      expect(service?.connect).toBe("unconfigured");
+      expect(service?.missingEnv).toBeUndefined();
+    });
+
+    it("names only the unset half of a half-set pair", async () => {
+      process.env.UNSET_TEST_ID = "an-id";
+      try {
+        api = await bootTestApi({ plugins: [googlePlugin] });
+
+        const service = await gmailService();
+        expect(service?.connect).toBe("unconfigured");
+        expect(service?.missingEnv).toEqual(["UNSET_TEST_SECRET"]);
+      } finally {
+        delete process.env.UNSET_TEST_ID;
+      }
+    });
+
+    it("never carries the value behind a set variable", async () => {
+      process.env.UNSET_TEST_ID = "google-client-id-value";
+      try {
+        api = await bootTestApi({ plugins: [googlePlugin] });
+
+        const res = await fetch(`${api.baseUrl}/api/plugins`);
+        const body = await res.text();
+        expect(body).toContain("UNSET_TEST_SECRET");
+        expect(body).not.toContain("google-client-id-value");
+      } finally {
+        delete process.env.UNSET_TEST_ID;
+      }
+    });
+
+    it("is absent for a configured service, for an admin too", async () => {
+      process.env.UNSET_TEST_ID = "an-id";
+      process.env.UNSET_TEST_SECRET = "a-secret";
+      try {
+        api = await bootTestApi({ plugins: [googlePlugin] });
+
+        const service = await gmailService();
+        expect(service?.connect).toBe("oauth");
+        expect(service?.missingEnv).toBeUndefined();
+      } finally {
+        delete process.env.UNSET_TEST_ID;
+        delete process.env.UNSET_TEST_SECRET;
+      }
+    });
+
+    it("is absent for an org-credential prerequisite, whose fix is not a variable", async () => {
+      api = await bootTestApi({ plugins: [{
+        name: "slack", version: "0.1.0",
+        credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+      }] });
+
+      const res = await fetch(`${api.baseUrl}/api/plugins`);
+      const { plugins } = (await res.json()) as ListPluginsResponse;
+      const slack = plugins.find((p) => p.name === "slack")?.services[0];
+      expect(slack?.connect).toBe("unconfigured");
+      expect(slack?.missingEnv).toBeUndefined();
+    });
+  });
+
+  /**
+   * The CAUSE, unlike the variable names, goes to every caller: each cause
+   * has a different corrective action, and a member who still sees the tile
+   * must not read the one that names a page which cannot perform the fix.
+   */
+  describe("connectBlockedBy", () => {
+    const googlePlugin: ValetPlugin = {
+      name: "gmail",
+      version: "0.1.0",
+      credentials: [{
+        type: "oauth2", configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          tokenUrl: "https://oauth2.googleapis.com/token",
+          clientIdEnv: "UNSET_TEST_ID", clientSecretEnv: "UNSET_TEST_SECRET",
+        },
+      }],
+    };
+
+    async function firstService(name: string, headers?: Record<string, string>) {
+      if (!api) throw new Error("api not booted");
+      const res = await fetch(`${api.baseUrl}/api/plugins`, { headers });
+      const { plugins } = (await res.json()) as ListPluginsResponse;
+      return plugins.find((p) => p.name === name)?.services[0];
+    }
+
+    it("reports the deployment cause to a member, who gets no variable names", async () => {
+      api = await bootTestApi({ plugins: [googlePlugin] });
+
+      const service = await firstService("gmail", { "x-valet-test-user-id": "test-member" });
+      expect(service?.connect).toBe("unconfigured");
+      expect(service?.connectBlockedBy).toBe("deployment");
+      expect(service?.missingEnv).toBeUndefined();
+    });
+
+    it("reports the org cause, whose fix is Settings → Organization", async () => {
+      api = await bootTestApi({ plugins: [{
+        name: "slack", version: "0.1.0",
+        credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+      }] });
+
+      const service = await firstService("slack", { "x-valet-test-user-id": "test-member" });
+      expect(service?.connect).toBe("unconfigured");
+      expect(service?.connectBlockedBy).toBe("org");
+    });
+
+    it("is absent for a service anybody can connect", async () => {
+      process.env.UNSET_TEST_ID = "an-id";
+      process.env.UNSET_TEST_SECRET = "a-secret";
+      try {
+        api = await bootTestApi({ plugins: [googlePlugin] });
+
+        const service = await firstService("gmail");
+        expect(service?.connect).toBe("oauth");
+        expect(service?.connectBlockedBy).toBeUndefined();
+      } finally {
+        delete process.env.UNSET_TEST_ID;
+        delete process.env.UNSET_TEST_SECRET;
+      }
+    });
+  });
+
   it("keeps connected:true on an unconfigured service so a leftover credential stays visible", async () => {
     const plugins: ValetPlugin[] = [{
       name: "slack", version: "0.1.0",

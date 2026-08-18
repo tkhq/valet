@@ -17,6 +17,13 @@
  * GitHub App, which the personal credential depends on to sign in and which
  * reaches repositories on its own. See `github-org-app.ts`.
  *
+ * A service the deployment cannot connect carries no control at all. An org
+ * admin still gets the tile, as an informational row naming the environment
+ * variables to set; an unconnected member gets no tile. A Connect button
+ * that cannot work is worse than no tile, so the row stays a statement, not
+ * an offer. A member whose leftover credential keeps the tile on screen
+ * reads the same cause without the variable names.
+ *
  * Connect opens the pre-connect screen (`connect-dialog.tsx`) — for OAuth
  * services and manual-token services alike. The tile no longer runs any
  * connect path itself; it names the service and hands off. The submit action
@@ -41,13 +48,21 @@ export function isService(plugin: PluginSummary): boolean {
 
 /**
  * An unconfigured service (org/deployment prerequisite missing —
- * integration-availability design) renders only while a leftover credential
- * still needs disconnecting. Unconnected + unconfigured = no tile: there is
- * nothing a non-admin could do with it, and the admin's setup surface is
- * Settings → Organization, not this grid.
+ * integration-availability design) renders in two cases: a leftover
+ * credential still needs disconnecting, or the caller can fix the
+ * configuration.
+ *
+ * Unconnected + unconfigured = no tile, for everybody else. A tile a person
+ * cannot act on is noise, which is why the grid hides one.
+ *
+ * "Can fix it" is not decided here. The API sets `missingEnv` only for an
+ * org admin (`org_members.role`), so the field's presence IS the permission
+ * and a member's response never carries it. Visibility keys on `missingEnv`
+ * for that reason, and never on `connectBlockedBy`, which every caller gets.
  */
 export function isVisibleService(service: PluginServiceSummary): boolean {
-  return service.connect !== "unconfigured" || service.connected;
+  if (service.connect !== "unconfigured") return true;
+  return service.connected || (service.missingEnv?.length ?? 0) > 0;
 }
 
 /** True when the plugin has anything left to show in the Services grid. */
@@ -77,6 +92,26 @@ function reachMeta(plugin: PluginSummary): string | null {
  * id — which is the slug for most of the fleet. */
 function iconSlug(plugin: PluginSummary): string {
   return plugin.services[0]?.iconSlug ?? plugin.name;
+}
+
+/** The unset variable names, in prose: one name alone, two joined by "and",
+ * more separated by commas. Each name is its own element so it reads as a
+ * literal string and not as part of the sentence around it.
+ *
+ * The names arrive on the wire, from the plugin's own manifest. Nothing in
+ * this file knows what a Google variable is called, so a second plugin with
+ * different variables prints its own names and needs no change here. */
+function EnvNames({ names }: { names: string[] }) {
+  return (
+    <>
+      {names.map((name, index) => (
+        <span key={name}>
+          {index > 0 && (index === names.length - 1 ? " and " : ", ")}
+          <code className="font-mono text-ink">{name}</code>
+        </span>
+      ))}
+    </>
+  );
 }
 
 /** GitHub is the only service whose organisation owns a second, separate
@@ -216,9 +251,13 @@ function ServiceBlock({
   const repair = needsReauth(health);
   const connectLabel = repair ? "Reconnect" : "Connect";
   // No connect affordance for an unconfigured service — its tile exists only
-  // so a leftover credential can be disconnected (integration-availability
-  // design). The note below names where the setup actually happens.
+  // so a leftover credential can be disconnected, or so an org admin can read
+  // what to set (integration-availability design). The note below names where
+  // the setup actually happens.
   const unconfigured = service.connect === "unconfigured";
+  // Present only for an org admin, and only for the missing-OAuth-client
+  // arm. See `isVisibleService`.
+  const missingEnv = service.missingEnv ?? [];
 
   // Every connect path — the org's GitHub App OAuth, the generic per-service
   // OAuth redirect, and manual token entry — now opens the same pre-connect
@@ -261,11 +300,28 @@ function ServiceBlock({
     disconnectControl
   );
 
-  const unconfiguredNote = unconfigured ? (
+  // Two reasons a service is unconfigured, and two different fixes. The
+  // cause arrives for every reader (`connectBlockedBy`); the variable names
+  // arrive for an org admin alone. So there are three notes:
+  //
+  //   deployment + names  → set these variables, then restart the server
+  //   deployment, no names → ask an org admin (no page in the product sets
+  //                          a server variable, so this must not name one)
+  //   org                  → Settings → Organization, which does set it
+  const unconfiguredNote = !unconfigured ? undefined : missingEnv.length > 0 ? (
+    <p className="text-xs leading-relaxed text-muted">
+      This deployment has no OAuth client for this service. Set{" "}
+      <EnvNames names={missingEnv} /> in the server environment. Then restart the server.
+    </p>
+  ) : service.connectBlockedBy === "deployment" ? (
+    <p className="text-xs leading-relaxed text-muted">
+      This deployment has no OAuth client for this service. Ask an org admin to set it up.
+    </p>
+  ) : (
     <p className="text-xs leading-relaxed text-muted">
       Not configured for this organization. An admin can set this up in Settings → Organization.
     </p>
-  ) : undefined;
+  );
 
   return (
     <>

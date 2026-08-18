@@ -78,8 +78,32 @@ describe("GET /api/credentials/:service/connect", () => {
     api = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
     const res = await fetch(`${api.baseUrl}/api/credentials/gmail/connect`, { redirect: "manual" });
     expect(res.status).toBe(503);
-    const body = (await res.json()) as { missing?: string[] };
+    const body = (await res.json()) as { missing?: string[]; fix?: string };
     expect(body.missing).toEqual(["TEST_GOOGLE_ID", "TEST_GOOGLE_SECRET"]);
+    expect(body.fix).toMatch(/restart the server/);
+  });
+
+  /**
+   * The variable names go to a caller who can set them, the audience rule
+   * `/api/plugins` applies to `missingEnv`. `local-user` holds
+   * `org_members.role = "admin"` in the harness (the test above);
+   * `test-member` holds `"member"` and selects itself through the
+   * `x-valet-test-user-id` impersonation header.
+   */
+  it("authorization_code mode: names no variable to a plain member, and still names the fix", async () => {
+    api = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
+    const res = await fetch(`${api.baseUrl}/api/credentials/gmail/connect`, {
+      redirect: "manual",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(503);
+    const raw = await res.text();
+    expect(raw).not.toContain("TEST_GOOGLE_ID");
+    expect(raw).not.toContain("TEST_GOOGLE_SECRET");
+    const body = JSON.parse(raw) as { error?: string; missing?: string[]; fix?: string };
+    expect(body.error).toBe("oauth not configured");
+    expect(body.missing).toBeUndefined();
+    expect(body.fix).toMatch(/Ask an org admin/);
   });
 
   it("authorization_code mode: 302s with client_id, scopes, and extraAuthParams", async () => {

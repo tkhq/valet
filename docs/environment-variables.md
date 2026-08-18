@@ -37,7 +37,7 @@ stub applies. Provider variable pairs are all-or-none.
 | `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below. Prefer `auth.sso.teams.claim` in `valet.yaml` |
 | `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`). Prefer `auth.sso.teams.assertedClaim` |
 | `AUTH_OIDC_TEAM_ADMIN_GROUP` | Sub-group that grants admin on its parent team (default `admins`). Prefer `auth.sso.teams.adminSubGroup` |
-| `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login |
+| `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login. NOT the Google integrations pair — see [Integrations](#integrations) |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | GitHub social login |
 | `VALET_LOCAL_AUTH` | `1` → stub identity for local dev. Mutually exclusive with `BETTER_AUTH_SECRET` — the server refuses to boot when both are set |
 | `VALET_SANDBOX_JWT_MASTER` | Master key for per-session sandbox gateway JWT secrets (falls back to `BETTER_AUTH_SECRET`) |
@@ -237,6 +237,37 @@ by hand as each user signs in. No wipe and no re-import is needed.
 Inside each sandbox, the provider injects: `VALET_SANDBOX_TOKEN`,
 `VALET_API_URL`, `VALET_SANDBOX_JWT_SECRET`, `VALET_SESSION_ID`,
 `VALET_SANDBOX_PROFILE`.
+
+## Integrations
+
+Optional. These variables hold the OAuth client the server uses to connect
+integrations on a user's behalf, in Settings → Integrations.
+
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client for the Gmail, Google Calendar, and Google Workspace integrations |
+
+### The two Google pairs
+
+Valet reads two Google credential pairs, and they do different jobs:
+
+| Pair | What it turns on |
+|------|------------------|
+| `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Sign in to Valet with a Google account |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Connect the Gmail, Google Calendar, and Google Workspace integrations |
+
+The two pairs may hold the same Google OAuth client's id and secret, but the
+server reads them separately and never falls back from one to the other. Set
+only the `AUTH_` pair and sign-in works while nobody can connect the three
+Google integrations. Add this redirect URI to the OAuth client behind the
+second pair: `{public URL}/api/credentials/oauth/callback`.
+
+Each pair is all-or-none. A Google integration whose pair is half-set stays
+unconnectable, the same as an unset pair
+(`services/integration-availability.ts`). Settings → Integrations names the
+unset variables to an org admin. A member sees no tile for the integration,
+and a member who connected it before the pair went missing is told to ask an
+org admin.
 
 ## GitHub App fallback
 
