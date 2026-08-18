@@ -797,6 +797,41 @@ const getReactions = action(Type.Object({
   },
 });
 
+const postMessage = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...) or group (G...) that the bot has joined' }),
+    text: Type.String({ description: 'Message text' }),
+    thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply to this timestamp' })),
+    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string for rich formatting' })),
+  }))({
+  id: 'slack.post_message',
+  name: 'Post Message',
+  description: 'Post a message to a Slack channel or group as the bot. The bot must be a member of the channel. Use this instead of escalating to the xoxp surface for basic bot-channel communication.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+
+    const body: Record<string, unknown> = { channel: p.channel, text: p.text };
+    if (p.thread_ts) body.thread_ts = p.thread_ts;
+    if (p.blocks) {
+      try {
+        body.blocks = JSON.parse(p.blocks);
+      } catch {
+        return { success: false, error: 'blocks must be valid JSON' };
+      }
+    }
+
+    const res = await slackFetch('chat.postMessage', token, body);
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
+    if (!data.ok) return slackError(res, data);
+
+    return { success: true, data: { ts: data.ts, channel: data.channel } };
+  },
+});
+
 // ─── Export ──────────────────────────────────────────────────────────────────
 
 export const slackPlugin: ActionPlugin = {
@@ -814,5 +849,6 @@ export const slackPlugin: ActionPlugin = {
     getPins,
     getChannelInfo,
     getReactions,
+    postMessage,
   ],
 };
