@@ -147,6 +147,28 @@ slackUserRouter.post('/link', async (c) => {
 });
 
 /**
+ * POST /api/me/slack/link/quick — One-click initiate.
+ *
+ * Look up the caller in the workspace by their Valet email and DM them the
+ * verification code. Takes no body. Returns `202 { reason: "email_not_in_workspace" }`
+ * when the email does not resolve to a member so the client can fall back to
+ * the manual typeahead — that path is not an error, just "we could not
+ * guess who you are; pick yourself from a list".
+ */
+slackUserRouter.post('/link/quick', async (c) => {
+  const user = c.get('user');
+  try {
+    const result = await slackService.initiateSlackLinkByEmail(c.env, user.id, user.email);
+    if (!result) {
+      return c.json({ reason: 'email_not_in_workspace' }, 202);
+    }
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Failed to initiate link' }, 400);
+  }
+});
+
+/**
  * POST /api/me/slack/verify — Complete identity link
  * Body: { code: "AX7K2M" }
  */
