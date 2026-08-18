@@ -1,6 +1,15 @@
 /**
- * Skill sync — mirrors a public GitHub repository's skills into the `skills`
- * table, and keeps mirroring as the repository moves.
+ * Skill sync — mirrors a GitHub repository's skills into the `skills` table,
+ * and keeps mirroring as the repository moves.
+ *
+ * ## Which credential a sync uses
+ *
+ * The sweep runs unattended, so the only identity available is what the
+ * source row carries. `deps.readerFor` turns that row into a reader, and
+ * `services/skill-source-credential.ts` holds the rule about which owner may
+ * use which credential. Read that file before you change anything about the
+ * reader here. A source with no resolvable credential reads anonymously,
+ * which is what every public repository needs.
  *
  * ## The model
  *
@@ -14,8 +23,8 @@
  *
  * 1. Read the head commit of the tracked ref. If it equals `last_sha`, stop.
  *    That is the whole cost of a poll on a repository nobody touched: ONE
- *    API call. Unauthenticated GitHub allows 60 calls per hour per IP, so
- *    this is not a micro-optimisation, it is what makes polling affordable.
+ *    API call. An anonymous read gets 60 calls per hour per IP, so this is
+ *    not a micro-optimisation, it is what makes polling affordable.
  * 2. Only when the commit moved: list the skill directories, read each
  *    `SKILL.md`, and hash a canonical manifest of what came back. If the hash
  *    equals `last_manifest_hash`, record the new commit and stop without
@@ -77,9 +86,11 @@ import {
   type SkillRepoReader,
 } from "./skill-repo-reader.js";
 
-/** How long a healthy source waits before its next poll. Unauthenticated
- * GitHub allows 60 requests per hour per IP, and an unchanged source costs
- * one, so this budgets four calls per hour per source. */
+/** How long a healthy source waits before its next poll. An anonymous read
+ * gets 60 requests per hour per IP, and an unchanged source costs one, so
+ * this budgets four calls per hour per source. An authenticated read has a
+ * far larger budget, and keeps this interval anyway: the interval is also
+ * how fresh a mirror is, and one number is easier to reason about than two. */
 export const SYNC_INTERVAL_MS = 15 * 60_000;
 /** Retry backoff per consecutive failure. A failure past the last entry
  * repeats the last entry: a source is a standing subscription, not a
@@ -119,7 +130,15 @@ export interface SkillSyncOutcome {
 
 export interface SkillSyncDeps {
   db: AppDb;
+  /** The reader used when `readerFor` is not supplied. Anonymous in every
+   * caller that ships, which is what a public repository needs. */
   reader: SkillRepoReader;
+  /** Builds the reader for ONE source, so a private repository is read with
+   * the credential its owner holds. `services/skill-source-credential.ts`
+   * supplies the only implementation, and it is where the rule about which
+   * credential belongs to which owner lives. Without it every sync uses
+   * `reader`. */
+  readerFor?: (source: SkillSourceRow) => Promise<SkillRepoReader>;
   /** Injected clock, for tests that need a deterministic schedule. */
   now?: () => number;
 }
@@ -265,7 +284,11 @@ export class SkillSyncService {
   }
 
   private async run(source: SkillSourceRow): Promise<SkillSyncOutcome> {
-    const { reader } = this.deps;
+    // The credential is resolved ONCE per sync, not once per request, so
+    // every read of one commit goes out under the same identity.
+    const reader = this.deps.readerFor
+      ? await this.deps.readerFor(source)
+      : this.deps.reader;
 
     // Compare 1 — the head commit.
     const headSha = await reader.headSha(source.repoFullName, source.ref);
@@ -274,7 +297,7 @@ export class SkillSyncService {
     }
 
     // Everything below reads at `headSha`, never at the moving ref.
-    const manifest = await this.readManifest(source, headSha);
+    const manifest = await this.readManifest(source, headSha, reader);
 
     // Compare 2 — the skills that commit holds.
     const manifestHash = skillManifestHash({
@@ -295,10 +318,13 @@ export class SkillSyncService {
     });
   }
 
-  /** Lists skill directories and the `prompts/` directory at `headSha`. */
+  /** Lists skill directories and the `prompts/` directory at `headSha`. The
+   * reader is passed in rather than read from `deps`, so every read in one
+   * sync carries the credential `run` resolved for that source. */
   private async readManifest(
     source: SkillSourceRow,
     headSha: string,
+    reader: SkillRepoReader,
   ): Promise<{
     skillEntries: SkillManifestEntry[];
     promptEntries: SkillManifestEntry[];
@@ -308,7 +334,7 @@ export class SkillSyncService {
      * skill directory and a same-named `prompts/<name>.md` file. */
     text: Map<string, string>;
   }> {
-    const listing = await this.deps.reader.listDirectory(
+    const listing = await reader.listDirectory(
       source.repoFullName,
       source.subpath,
       headSha,
@@ -329,7 +355,7 @@ export class SkillSyncService {
       // A read fault here propagates and fails the whole sync. Only "the
       // file is not there" (null) is a normal answer, and it means the
       // directory is not a skill.
-      const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
+      const content = await reader.readFile(source.repoFullName, path, headSha);
       if (content === null) continue;
       skillEntries.push({ name: dir.name, path, contentSha: fileSha(content) });
       text.set(path, content);
@@ -343,7 +369,7 @@ export class SkillSyncService {
     const promptsDir = joinPath(source.subpath, "prompts");
     let promptListing;
     try {
-      promptListing = await this.deps.reader.listDirectory(
+      promptListing = await reader.listDirectory(
         source.repoFullName,
         promptsDir,
         headSha,
@@ -364,7 +390,7 @@ export class SkillSyncService {
         if (file.type !== "file" || !file.name.endsWith(".md")) continue;
         const name = file.name.slice(0, -3); // strip .md
         const path = joinPath(promptsDir, file.name);
-        const content = await this.deps.reader.readFile(source.repoFullName, path, headSha);
+        const content = await reader.readFile(source.repoFullName, path, headSha);
         if (content === null) continue;
         promptEntries.push({ name, path, contentSha: fileSha(content) });
         promptNames.add(name);

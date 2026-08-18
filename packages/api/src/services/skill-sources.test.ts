@@ -123,6 +123,33 @@ describe("skill sources service", () => {
     await createSkillSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "agent" });
   });
 
+  it("records who added the source, whatever the source belongs to", async () => {
+    // The sweep has no request context, so `created_by` is the only user
+    // identity a team source carries. Without it the sync cannot pick a
+    // credential, and the whole source falls back to an anonymous read —
+    // see `services/skill-source-credential.ts`.
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+
+    const personal = await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });
+    const teamSource = await createSkillSource(db, owner("u1"), {
+      repo: "tkhq/ours",
+      teamId: team.id,
+    });
+    const orgSource = await createSkillSource(db, owner("u1"), {
+      repo: "tkhq/theirs",
+      ownerType: "org",
+      isOrgAdmin: true,
+    });
+
+    expect(personal.createdBy).toBe("u1");
+    expect(teamSource.createdBy).toBe("u1");
+    expect(orgSource.createdBy).toBe("u1");
+    // Persisted, not only present on the returned object: the sweep re-reads
+    // the row and never sees what `createSkillSource` returned.
+    const stored = await ownedSkillSourceRow(db, owner("u1"), teamSource.id);
+    expect(stored?.createdBy).toBe("u1");
+  });
+
   it("lists the caller's own sources and every team source they can reach", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
     await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });

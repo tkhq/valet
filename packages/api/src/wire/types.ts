@@ -1825,7 +1825,12 @@ export interface DeleteSkillResponse {
  * skill catalog as `repo`-origin skills, and keeps mirroring as the
  * repository moves.
  *
- * Public repositories only. Nothing here carries a GitHub credential.
+ * A sync reads a public repository with no credential, and a private
+ * repository with the credential the source's owner holds — a person's own
+ * GitHub account for a personal or team source, and the org's GitHub App for
+ * an org source (`packages/api/src/services/skill-source-credential.ts`).
+ * Nothing on this wire type carries a credential, and `lastMessage` never
+ * carries token material.
  */
 export interface SkillSourceSummary {
   id: string;

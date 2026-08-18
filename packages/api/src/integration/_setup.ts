@@ -32,7 +32,8 @@ import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { SkillSyncService } from "../services/skill-sync.js";
-import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
+import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
+import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -316,16 +317,20 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // must treat this as "unavailable", same as a `local` sandbox-backend
   // boot. Constructed before the child spawner, whose zero-config repo
   // binding needs it.
+  // One set of GitHub credential deps for every consumer in the harness, so
+  // a test that points the fixture at one of them points it at all of them.
+  const githubTokenDeps = {
+    db,
+    credentials: engineCredentials,
+    key: deriveSecretKey("test-key"),
+    apiUrl: opts.githubApiUrl,
+    githubUrl: opts.githubApiUrl,
+  };
+
   const prebuildService = new SourceService({
     db,
     builder: opts.imageBuilder ?? null,
-    githubTokenDeps: {
-      db,
-      credentials: engineCredentials,
-      key: deriveSecretKey("test-key"),
-      apiUrl: opts.githubApiUrl,
-      githubUrl: opts.githubApiUrl,
-    },
+    githubTokenDeps,
   });
 
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
@@ -429,7 +434,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
   const skillSync = new SkillSyncService({
     db,
-    reader: new PublicSkillRepoReader({ apiUrl: opts.githubApiUrl }),
+    reader: new GitHubSkillRepoReader({ apiUrl: opts.githubApiUrl }),
+    readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
   });
 
   const providers: Providers = {

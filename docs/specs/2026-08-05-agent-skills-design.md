@@ -1,7 +1,7 @@
 # Agent Skills Design — the skill format V2 targets
 
 **Date:** 2026-08-05
-**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync from public repositories.
+**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, authoring from both the Skills tab and the agent actions, and repository sync from public and private repositories.
 **Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, how a repository's skills are mirrored and kept in step, and which parts of the format are not implemented yet.
 
 ## Context
@@ -128,6 +128,36 @@ A `repo` skill is read-only on that page: no Edit, no Delete. The next sync woul
 - **HTTP.** `POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name, for the shadowing reason above. `POST`, `GET`, and `DELETE /api/skills/sources` add, list, and remove a tracked repository, and `POST /api/skills/sources/:id/sync` re-reads one now.
 - **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions.
 
+### Which credential a sync uses
+
+The sweep runs unattended, on a timer, across every org. It has no request context, so the only identity a sync can use is what the source row carries. `packages/api/src/services/skill-source-credential.ts` turns that row into one credential, and it is the only place that choice is made.
+
+| Owner of the source | Credential | Why that one |
+| --- | --- | --- |
+| A person | that person's own GitHub credential | The mirror can hold only what its owner can already read, and only its owner reads the mirror. |
+| A team | the credential of the user who added the row (`created_by`) | Sharing a repository you can read with your team is a deliberate act. Any other choice would let one member reach repositories through another member's access. |
+| The org | the org's GitHub App installation token | Only an org admin can create an org source, and installing the App is itself an org-admin decision. |
+| None of the above resolves | no credential — the read is anonymous | A public repository stays readable, and nobody has to connect GitHub to track one. |
+
+None of these calls uses `auth: "auto"`. That ladder falls from a user credential through the org's App installation to the org's PAT, which would let a source whose owner has no GitHub connection read through the App's reach. Both calls name an explicit `auth`, which `resolveGitHubToken` honors strictly.
+
+`created_by` is nullable and is NULL for every source added before this column existed. A NULL row reads anonymously; it never falls back to the App.
+
+The binding between a source and the credential funding it is checked on EVERY sync, not once when the row is written. `createSkillSource` does check team membership before it inserts, but the row then reads GitHub every sync interval for as long as it exists, and any remaining team member can force a read with "Sync now". So `resolveSkillSourceCredential` asks two questions again on each sync, before it resolves a token:
+
+1. For a team source, is `created_by` still a member of that team?
+2. For a user or a team source, is that person still a member of the org?
+
+`removeMember`, removal from the org, and the Keycloak de-provision sweep each delete only a membership row, and leave the `users` row, the source row and the stored GitHub credential in place. Without these two questions the sweep would keep pulling a private repository with a departed person's token, into skill rows the remaining team reads. The questions run before the token is resolved, so a departed person's secret is never decrypted for the read. This matches `isTeamMember`'s contract everywhere else in the codebase: a member removed from a team loses access on their very next request.
+
+A person who disconnects GitHub, leaves the team, or leaves the org therefore drops the source to anonymous. It never climbs to the App to keep working, and a public repository keeps syncing throughout.
+
+GitHub answers 404 both for a repository that is not there and for one the credential cannot see, so the failure message is built from what Valet knows locally — which credential the read used. Four cases each name a different corrective action: no credential; a credential that exists but cannot be read; a user account that cannot see the repository; an App installation that does not cover it.
+
+A credential that cannot be read is its own case because it is reachable in normal operations — an `ENCRYPTION_KEY` rotation, a database restored from another environment, or one corrupt `credentials` row all make `decryptSecret` throw. Resolution never propagates such a fault: it returns the `unavailable` credential and logs the cause server-side, so a PUBLIC repository that never needed a credential keeps syncing, and the message on the row names reconnecting GitHub instead of showing a raw crypto error that names no action.
+
+The user-credential message is worded by owner, because the person who READS the error is often not the person whose credential the sync uses. On a personal source they are the same person, so the message names the account and tells them to get access. On a team source the message names no GitHub login — that would identify one person on a row that otherwise names nobody — and it gives the reader the two actions that actually work: ask the person who added the source, or add the source again themselves. Getting access personally would change nothing, because the sync keeps using `created_by`'s credential. `skill_sources.last_error` carries that message to the wire and the UI, so no token material may ever reach an error string: the reader keeps the token in its `Authorization` header and keeps only the credential's KIND for the message.
+
 ### Paging both listings
 
 `GET /api/skills` and `GET /api/skills/sources` are keyset-paginated, in the shape the action log set (`packages/api/src/policies/admin.ts`): `?limit=` with a default and a cap, an opaque `?cursor=` a client only ever passes back, and `nextCursor: null` on the last page. Keyset, not `OFFSET`, so a skill written while somebody reads page two never shifts a row onto a page already read or off one not yet read. The catalog sorts on `(owner rank, name, id)`, where the rank is the delivery precedence — plugin, then personal, then team, then org — so a page boundary cannot break the order the session build uses. Plugin skills live in memory and rank first, and `routes/skills.ts` merges them into the same cursor walk.
@@ -165,7 +195,7 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 - **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
 - **Directories of 500 entries or more.** Sync reads one level of the tracked directory through GitHub's contents endpoint and keeps 500 entries. A listing that reaches that cut fails the sync and reconciles nothing, because the entries past it cannot be told apart from skills the repository no longer holds. Track a subdirectory that fits under the cut.
-- **Private and authenticated repositories.** See the scope line in Repository sync above. The missing piece is a repo-authority check, not the transport.
+- **Workflow import from a private repository.** `GET /api/workflows/import/repo-file` still reads with no credential, so it reaches public repositories only. The reader takes a credential now, and that route has the caller in hand, so the fix is to resolve the caller's own token (`resolveUserApiToken`) and pass it. It must not use the App installation token: that reaches every repository the App covers, and the caller may not.
 - **Write-back.** Sync reads. Nothing pushes a locally written skill into a repository.
 - **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.
 - **`argsSchema` on a stored skill.** Only a plugin can supply one, because it is code, not frontmatter. A stored skill takes no arguments.

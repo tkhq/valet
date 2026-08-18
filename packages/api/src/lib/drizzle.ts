@@ -122,4 +122,30 @@ export async function applyAppMigrations(db: PgDb): Promise<void> {
       ]);
     });
   }
+
+  await addColumnsMissingFromAppliedMigrations(db);
+}
+
+/**
+ * Add columns that a pre-1.0 edit put into an ALREADY-APPLIED migration.
+ *
+ * Before 1.0 this repo edits `0000_app.sql` in place instead of adding a
+ * numbered migration. A fresh database therefore gets the edit, but an
+ * existing one never does: the tracker sees `0000_app.sql` recorded and
+ * skips the file. The documented remedy is to delete the data directory,
+ * which is acceptable for a scratch database and not acceptable for one
+ * holding work somebody wants to keep.
+ *
+ * Each statement here is idempotent, so it costs one catalog lookup per
+ * boot after the first. Add a line when an in-place edit adds a NULLABLE
+ * column; a column that needs a value cannot be repaired this way and does
+ * need a real migration.
+ *
+ * Delete this function at 1.0, when numbered migrations take over.
+ */
+async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
+  // Records which person's GitHub credential a team skill source may use.
+  // Null on every row written before the column existed, which the sync
+  // reads as "no credential" rather than climbing to the org's App.
+  await db.query('ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
 }

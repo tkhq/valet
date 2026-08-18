@@ -8,9 +8,11 @@
  * the repository on a schedule. This panel is where a repository is added,
  * re-read on demand, and removed.
  *
- * PUBLIC repositories only, and the panel says so where the box is: nothing
- * here sends a GitHub credential, so a private repository fails with the same
- * 404 a typo gives.
+ * A public repository needs no GitHub connection. A private one is read with
+ * the credential the source's OWNER holds: the adding person's own GitHub
+ * account for a personal or team source, and the org's GitHub App for an org
+ * source. The hint under the box says which of the two this panel files, so
+ * an org admin is not told to connect a personal account.
  *
  * A mirrored skill is not editable, so the rows carry no edit action. Removing
  * a source removes the skills it brought in, which is why the button is
@@ -126,7 +128,16 @@ export function SkillSourcesPanel({
               {add.isPending ? <Spinner size={14} /> : "Import"}
             </Button>
           </div>
-          <p className="mt-2 text-xs text-muted">Public repositories only.</p>
+          {/* Names what actually governs access, and names the credential
+              THIS panel would use. An org panel files an org source, which
+              reads through the GitHub App, so telling its admin to connect a
+              personal account would send them to the wrong screen. */}
+          <p className="mt-2 text-xs text-muted">
+            A public repository needs no GitHub connection.{" "}
+            {owner?.type === "org"
+              ? "A private one is read with the GitHub App installed for this organization."
+              : "A private one is read with your connected GitHub account."}
+          </p>
           {add.error && <p className="mt-1 text-xs text-danger-500">{errorText(add.error)}</p>}
         </form>
       )}

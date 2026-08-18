@@ -1,6 +1,6 @@
 /**
- * Reads a public GitHub repository for skill sync. Three operations, all
- * over endpoints the GitHub plugin's own actions already use:
+ * Reads a GitHub repository for skill sync. Three operations, all over
+ * endpoints the GitHub plugin's own actions already use:
  *
  *   1. `headSha`      — `GET /repos/{owner}/{repo}/commits/{ref}`
  *   2. `listDirectory` — `GET /repos/{owner}/{repo}/contents/{path}`
@@ -10,20 +10,36 @@
  * `@valet/plugin-github/repo-contents`, the module behind
  * `github.list_repo_directory`. Only the transport differs: the plugin action
  * builds an Octokit from the caller's stored credential, and this reader
- * sends no credential at all.
+ * sends one bearer token, or none.
  *
- * PUBLIC REPOSITORIES ONLY. Nothing here resolves a GitHub token, and that is
- * deliberate rather than unfinished. Reading a private repository would go
- * through the org's GitHub App installation, which can reach every repository
- * the org installed it on — so an authenticated importer needs a check that
- * the person adding the source may read that repository, and no such check
- * exists anywhere in this codebase yet. Until it does, the App's reach must
- * not sit behind an "add a repository" box. See
- * docs/specs/2026-08-05-agent-skills-design.md.
+ * ## The reader does not choose the credential
  *
- * Unauthenticated GitHub allows 60 requests per hour per IP. That budget is
- * why `services/skill-sync.ts` polls on a long interval and stops after one
- * call when the head commit has not moved.
+ * `services/skill-source-credential.ts` makes that choice from the source
+ * row's owner, and this class carries only what it is given. The two stay
+ * apart on purpose: reading a private repository through the wrong
+ * credential is a privilege escalation, so the rule that picks one must live
+ * in a single function a reviewer can check on its own.
+ *
+ * ## No credential is a supported state
+ *
+ * With no credential the reader sends no `Authorization` header, and every
+ * public repository stays readable exactly as before. Nobody has to connect
+ * GitHub to track a public repository.
+ *
+ * ## A token goes in the header and nowhere else
+ *
+ * `skill_sources.last_error` holds this module's error text, and the product
+ * shows that column to every reader of the source. So a token must never
+ * reach an error message, a log line, a query string, or the database. The
+ * reader keeps the token inside its own header map and keeps only the KIND
+ * of the credential for the messages below.
+ *
+ * ## Rate limits
+ *
+ * Anonymous GitHub allows 60 requests per hour per IP; an authenticated
+ * request gets 5000. `services/skill-sync.ts` polls on a long interval and
+ * stops after one call when the head commit has not moved, which is what
+ * keeps the anonymous budget workable.
  */
 import {
   collectDirectoryEntries,
@@ -33,15 +49,119 @@ import {
 } from "@valet/plugin-github/repo-contents";
 import { resolveGithubApiUrl } from "./github-env.js";
 
-/** Thrown when GitHub reports the repository or ref as missing. Unauthenticated,
- * a private repository and a misspelled name are the same 404. */
+/** Who reads the source row, relative to the person whose credential the
+ * sync uses. On a personal source they are the same person. On a team source
+ * they are usually not, and the 404 message must name an action the READER
+ * can do. */
+export type SkillRepoOwnerScope = "user" | "team";
+
+/**
+ * What the reader knows about the credential for one read. All four states
+ * are here, because each names a different corrective action in a 404 and
+ * the reader must not merge them:
+ *
+ *   - `none`        — the source has no credential to use. Read anonymously.
+ *   - `unavailable` — a credential exists but the server cannot read it.
+ *                     Also read anonymously, but say something different.
+ *   - `user`        — one person's own GitHub credential.
+ *   - `installation`— the org's GitHub App installation token.
+ *
+ * `token` is used in the `Authorization` header and is read nowhere else.
+ */
+export type SkillRepoCredential =
+  | { kind: "none" }
+  | { kind: "unavailable" }
+  | {
+      kind: "user";
+      token: string;
+      /** Which owner the source has, which decides who reads its errors. */
+      ownerScope: SkillRepoOwnerScope;
+      /** GitHub login behind the credential, when it is known. Printed only
+       * for a personal source — see `correctiveAction`. */
+      login?: string;
+    }
+  | { kind: "installation"; token: string };
+
+/** What a read can say about the credential it used: `SkillRepoCredential`
+ * without its token. Its own type because this shape reaches error messages,
+ * and those are published on the source row for everyone who can see it. */
+export type SkillRepoCredentialDescriptor =
+  | { kind: "none" }
+  | { kind: "unavailable" }
+  | { kind: "user"; ownerScope: SkillRepoOwnerScope; login?: string }
+  | { kind: "installation" };
+
+/** Drops the token. Written as a switch rather than a rest-spread so that a
+ * new credential field cannot reach an error message by default: adding one
+ * to `SkillRepoCredential` breaks this function until somebody decides
+ * whether it is safe to publish. */
+export function describeCredential(
+  credential: SkillRepoCredential,
+): SkillRepoCredentialDescriptor {
+  switch (credential.kind) {
+    case "user":
+      return credential.login === undefined
+        ? { kind: "user", ownerScope: credential.ownerScope }
+        : { kind: "user", ownerScope: credential.ownerScope, login: credential.login };
+    case "installation":
+      return { kind: "installation" };
+    default:
+      return { kind: credential.kind };
+  }
+}
+
+/**
+ * GitHub answers 404 both for a repository that is not there and for one the
+ * credential cannot see, so it cannot tell the two apart for us. Valet knows
+ * locally which credential the read used, and that is what decides which
+ * real case the reader reports.
+ *
+ * ## The message must fit the person who READS it
+ *
+ * This text goes to `skill_sources.last_error`, and the product shows that
+ * column to everyone who can see the source. On a personal source the reader
+ * and the credential holder are the same person, so "get access to the
+ * repository" is an action they can do. On a TEAM source they are usually
+ * different people: the sync keeps using the credential of the person who
+ * added the row, so a teammate who gets access to the repository changes
+ * nothing. The team message therefore names the two actions that do work —
+ * ask the person who added the source, or add the source again yourself.
+ *
+ * The team message also names no GitHub login. A login identifies one person
+ * on a row that otherwise names nobody, and the team reader does not need it
+ * to do either action.
+ */
+function correctiveAction(credential: SkillRepoCredentialDescriptor): string {
+  if (credential.kind === "user" && credential.ownerScope === "team") {
+    return "Valet read it with the GitHub account that added this source. That account cannot see the repository, or the name has a spelling mistake. Ask the person who added the source to get access on GitHub, or add the source again yourself.";
+  }
+  if (credential.kind === "user") {
+    const account =
+      credential.login === undefined
+        ? "the connected GitHub account"
+        : `the GitHub account ${credential.login}`;
+    return `Valet read it with ${account}. That account cannot see the repository, or the name has a spelling mistake. Get access to the repository on GitHub, then sync again.`;
+  }
+  if (credential.kind === "installation") {
+    return "Valet read it with the GitHub App installed for this organization. Add the repository to the App installation on GitHub, then sync again.";
+  }
+  if (credential.kind === "unavailable") {
+    return "Valet has a GitHub credential for this source but cannot read it. This occurs after a change to the server encryption key. Connect GitHub again in Settings → Connected accounts, then sync again.";
+  }
+  return "Valet read it with no GitHub credential. To read a private repository, connect GitHub in Settings → Connected accounts, then sync again. If the repository is public, check the name for a spelling mistake.";
+}
+
+/** Thrown when GitHub reports the repository or ref as missing. The message
+ * names which credential the read used, because that is what decides what
+ * the reader must do next — see `correctiveAction`. */
 export class SkillRepoNotFoundError extends Error {
   readonly code = "skill_repo_not_found";
   readonly statusCode = 404;
-  constructor(repoFullName: string) {
-    super(
-      `${repoFullName} was not found on GitHub. Valet reads public repositories only, so a private repository and a misspelled name look the same here. Check the name for a spelling mistake. If the repository is private, make it public.`,
-    );
+  constructor(
+    repoFullName: string,
+    credential: SkillRepoCredentialDescriptor = { kind: "none" },
+  ) {
+    super(`${repoFullName} was not found on GitHub. ${correctiveAction(credential)}`);
     this.name = "SkillRepoNotFoundError";
   }
 }
@@ -93,7 +213,7 @@ export interface SkillDirectoryListing {
 }
 
 /** What skill sync needs from a repository host. One implementation ships
- * (`PublicSkillRepoReader`); tests point it at a fixture server. */
+ * (`GitHubSkillRepoReader`); tests point it at a fixture server. */
 export interface SkillRepoReader {
   /** Commit the ref points at. An empty ref means the default branch. */
   headSha(repoFullName: string, ref: string): Promise<string>;
@@ -103,7 +223,7 @@ export interface SkillRepoReader {
   readFile(repoFullName: string, path: string, ref: string): Promise<string | null>;
 }
 
-export interface PublicSkillRepoReaderOptions {
+export interface GitHubSkillRepoReaderOptions {
   /** GitHub API base URL. Defaults to `resolveGithubApiUrl(process.env)`,
    * read at construction time. Tests pass a fixture's URL. */
   apiUrl?: string;
@@ -111,6 +231,11 @@ export interface PublicSkillRepoReaderOptions {
   fetchImpl?: typeof fetch;
   /** Deadline for one request. Defaults to `REQUEST_TIMEOUT_MS`. */
   timeoutMs?: number;
+  /** The credential for every request this reader makes. A `user` or
+   * `installation` credential becomes the `Authorization` header. `none` and
+   * `unavailable` send no header and read anonymously, which is what a public
+   * repository needs. Omitting it means `none`. */
+  credential?: SkillRepoCredential;
 }
 
 /**
@@ -128,15 +253,27 @@ const DEFAULT_REF = "HEAD";
  */
 const REQUEST_TIMEOUT_MS = 15_000;
 
-export class PublicSkillRepoReader implements SkillRepoReader {
+export class GitHubSkillRepoReader implements SkillRepoReader {
   private readonly apiUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  /** Built per instance, not shared, because the `Authorization` header
+   * belongs to this reader's credential alone. Nothing outside `get` reads
+   * this map, which is what keeps the token off every other surface. */
+  private readonly headers: Record<string, string>;
+  /** The credential WITHOUT its token, for `SkillRepoNotFoundError`. */
+  private readonly credential: SkillRepoCredentialDescriptor;
 
-  constructor(opts: PublicSkillRepoReaderOptions = {}) {
+  constructor(opts: GitHubSkillRepoReaderOptions = {}) {
     this.apiUrl = (opts.apiUrl ?? resolveGithubApiUrl(process.env)).replace(/\/+$/, "");
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    const credential: SkillRepoCredential = opts.credential ?? { kind: "none" };
+    this.headers = { ...BASE_HEADERS };
+    if (credential.kind === "user" || credential.kind === "installation") {
+      this.headers.authorization = `Bearer ${credential.token}`;
+    }
+    this.credential = describeCredential(credential);
   }
 
   async headSha(repoFullName: string, ref: string): Promise<string> {
@@ -228,7 +365,7 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   private async get(url: string, what: string): Promise<Response> {
     try {
       return await this.fetchImpl(url, {
-        headers: HEADERS,
+        headers: this.headers,
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
@@ -240,7 +377,7 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   }
 
   private async readBody(res: Response, repoFullName: string, what: string): Promise<unknown> {
-    if (res.status === 404) throw new SkillRepoNotFoundError(repoFullName);
+    if (res.status === 404) throw new SkillRepoNotFoundError(repoFullName, this.credential);
     if (!res.ok) {
       throw new SkillRepoReadError(what, res.status, await githubMessage(res));
     }
@@ -248,7 +385,9 @@ export class PublicSkillRepoReader implements SkillRepoReader {
   }
 }
 
-const HEADERS: Record<string, string> = {
+/** Copied into each reader's own header map, which then adds the
+ * `Authorization` header when the reader carries a credential. */
+const BASE_HEADERS: Record<string, string> = {
   accept: "application/vnd.github+json",
   "user-agent": "Valet",
   "x-github-api-version": "2022-11-28",
