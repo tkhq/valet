@@ -214,6 +214,39 @@ describe("WorkflowsIndexPage", () => {
     );
   });
 
+  it("runs immediately, with no dialog, when the trigger's only field is hidden", async () => {
+    // github.pull-request-review and github.assign-reviewers, once
+    // installed, declare exactly one trigger field: a hidden webhook
+    // payload nobody types. Run must not open a dialog asking for it.
+    workflowsData.workflows = [
+      {
+        id: "wf_event_only",
+        name: "Review a pull request when it opens or updates",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            {
+              id: "start",
+              type: "trigger",
+              dataSchema: { payload: { type: "object", hidden: true } },
+            },
+          ],
+          edges: [],
+        },
+        createdAt: 1,
+        updatedAt: 1,
+        ownerType: "user",
+        ownerId: "u1",
+      },
+    ];
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+
+    await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
+    expect(screen.queryByText("payload")).toBeNull();
+    expect(screen.queryByText(/This workflow's trigger declares inputs/)).toBeNull();
+  });
+
   it("opens the New workflow dialog, defaults the name field, and posts the entered name on Create", async () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));

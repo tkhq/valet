@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Clock, Trash2, Zap } from "lucide-react";
 import type { WorkflowDefinitionSummary, WorkflowTriggerItem } from "@valet/api/wire";
-import { triggerDataSchema } from "@valet/workflow";
+import { triggerDataSchema, visibleTriggerFields } from "@valet/workflow";
 import {
   useAllWorkflowRuns,
   useDeleteWorkflow,
@@ -216,10 +216,12 @@ function DefinitionRow({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
 
-  // A trigger with declared inputs routes through the run dialog; without
-  // one, Run starts immediately as before (no empty-dialog flash).
-  const schema = triggerDataSchema(workflow.definition);
-  const hasSchema = schema !== undefined && Object.keys(schema).length > 0;
+  // A trigger with declared, visible inputs routes through the run dialog;
+  // without one — including a trigger whose only field is `hidden`, an
+  // event maps that in, not a person — Run starts immediately as before
+  // (no empty-dialog flash).
+  const schema = visibleTriggerFields(triggerDataSchema(workflow.definition));
+  const hasSchema = Object.keys(schema).length > 0;
 
   function goToRun(runId: string) {
     void navigate({ to: "/workflows/runs/$runId", params: { runId } });
@@ -287,7 +289,7 @@ function DefinitionRow({
           </span>
         )}
       </div>
-      {hasSchema && schema && (
+      {hasSchema && (
         <RunWorkflowDialog
           workflowId={workflow.id}
           workflowName={workflow.name}

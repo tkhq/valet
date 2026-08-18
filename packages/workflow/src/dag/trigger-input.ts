@@ -46,6 +46,32 @@ function matchesType(value: unknown, type: WorkflowInputDefinition['type']): boo
   return true;
 }
 
+/**
+ * `schema` with every `hidden` field dropped — the fields a webhook maps in
+ * rather than a person types, e.g. the review and assign-reviewers
+ * templates' `payload`. `triggerDataSchema` itself keeps hidden fields,
+ * because `resolveTriggerInput` still needs to merge their defaults; this
+ * is for the two surfaces that decide whether to ask a PERSON for input at
+ * all — the install dialog (`templateInputs`, `packages/api/src/workflows
+ * /templates.ts`) and the run dialog (`workflows.$workflowId.tsx`,
+ * `workflows.index.tsx`) both need the same answer, so it lives once here
+ * rather than once per surface.
+ *
+ * A trigger whose schema is ALL hidden fields — every event-only template
+ * — reduces to `{}`, which is what tells a caller to skip the dialog and
+ * start the run directly instead of opening one with nothing to fill in.
+ */
+export function visibleTriggerFields(
+  schema: Record<string, WorkflowInputDefinition> | undefined,
+): Record<string, WorkflowInputDefinition> {
+  if (!schema) return {};
+  const visible: Record<string, WorkflowInputDefinition> = {};
+  for (const [field, def] of Object.entries(schema)) {
+    if (def.hidden !== true) visible[field] = def;
+  }
+  return visible;
+}
+
 /** Extract the trigger node's declared input schema from a stored (unknown)
  * definition. Returns undefined when there is no trigger node or it declares
  * no schema — callers then skip input validation entirely. The cast at the
