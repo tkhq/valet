@@ -884,16 +884,68 @@ const ASSIGN_ID = "github.assign-reviewers";
  * executor evaluates them. `isIfOperationSupported` is asserted beside each
  * use, so a dataType/operation pair the executor would reject fails here as
  * well. */
+/** `asNumber`/`asString`, copied from `packages/workflow/src/nodes/if.ts`
+ * rather than imported — that file exports no per-type comparator, only the
+ * whole node executor. Keeping the coercion identical to the source is the
+ * point: a fixture typed differently from what these coerce must fail the
+ * same way the real gate would fail on a live pull request. */
+function asNumber(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (!Number.isNaN(n)) return n;
+  }
+  return NaN;
+}
+
+function asString(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  return String(v);
+}
+
+/** Mirrors `evaluateCondition` in `packages/workflow/src/nodes/if.ts`,
+ * scoped to the (dataType, operation) pairs `assignReviewers` actually
+ * uses. `exists` is NOT dataType-agnostic in the real executor — it
+ * type-checks (`evalNumber` requires `typeof left === 'number'`,
+ * `evalObject` requires a plain object, `evalBoolean` requires an actual
+ * boolean) — so this dispatches on dataType first, the same way the real
+ * `switch (cond.dataType)` does, rather than checking `operation` alone.
+ * An unhandled pair throws, so a gate that gains an operation this helper
+ * has not been taught fails the test that exercises it instead of
+ * evaluating silently wrong. */
 function evaluateAssignCondition(condition: IfCondition, ctx: TemplateContext): boolean {
   const left = evaluateExpression(parseExpression(condition.left), ctx);
-  if (condition.operation === "exists") return left !== undefined && left !== null;
-  if (condition.dataType === "boolean" && condition.operation === "isTrue") return left === true;
-  if (condition.dataType === "string" && condition.operation === "doesNotContain") {
-    return typeof left === "string" && typeof condition.right === "string" && !left.includes(condition.right);
-  }
-  if (condition.dataType === "array" && condition.operation === "lengthGreaterThan") {
-    const floor = typeof condition.right === "number" ? condition.right : 0;
-    return Array.isArray(left) && left.length > floor;
+  const right = condition.right;
+  switch (condition.dataType) {
+    case "string":
+      switch (condition.operation) {
+        case "exists":
+          return left !== undefined && left !== null;
+        case "isNotEmpty":
+          return typeof left === "string" && left.length > 0;
+        case "equals":
+          return left === right;
+        case "doesNotContain":
+          return !asString(left).includes(asString(right));
+      }
+      break;
+    case "number":
+      if (condition.operation === "exists") return typeof left === "number" && !Number.isNaN(left);
+      break;
+    case "boolean":
+      if (condition.operation === "isTrue") return left === true;
+      if (condition.operation === "isFalse") return left === false;
+      break;
+    case "array":
+      if (condition.operation === "isEmpty") return !Array.isArray(left) || left.length === 0;
+      if (condition.operation === "lengthGreaterThan") return Array.isArray(left) && left.length > asNumber(right);
+      break;
+    case "object":
+      if (condition.operation === "exists") {
+        return left !== null && typeof left === "object" && !Array.isArray(left);
+      }
+      break;
   }
   throw new Error(`this test evaluates no ${condition.dataType}/${condition.operation} condition`);
 }
@@ -1445,6 +1497,21 @@ describe(`${ASSIGN_ID} — decline swap (branch B)`, () => {
     // bot-login check — the model.
     const classify = definition.nodes.find((n): n is LlmNode => n.type === "llm" && n.id === "classify_decline");
     expect(classify?.prompt).toContain("reassignment this workflow itself just posted");
+  });
+
+  it("cannot rely on the bot-login check for that guard — the reply posts as a real account", () => {
+    // `reply_on_pr` runs under `credential: "user"`, the run owner's own
+    // GitHub account, so its comment's `user.login` is a real handle that
+    // never contains "[bot]". `comment_not_bot` therefore lets the reply
+    // straight through, same as `commenter_is_assignee` would if the run
+    // owner happens to also be a current assignee. The classifier reading
+    // its own text and answering false is genuinely the only thing that
+    // stops the loop — this pins the fact the comment above only asserts.
+    const reply = toolNode(definition, "reply_on_pr");
+    expect(reply.credential).toBe("user");
+    const gate = assignIfNode("comment_not_bot");
+    expect(gate.conditions[0]?.operation).toBe("doesNotContain");
+    expect(gate.conditions[0]?.right).toBe("[bot]");
   });
 
   it("names nobody real in the swap branch either", () => {
