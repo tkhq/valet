@@ -1,0 +1,31 @@
+{
+  "name": "@valet/plugin-openai",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "valet": {
+    "plugin": "./dist/plugin.js"
+  },
+  "exports": {
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@valet/engine": "workspace:*",
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
+  }
+}
