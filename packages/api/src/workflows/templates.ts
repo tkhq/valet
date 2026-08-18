@@ -43,12 +43,16 @@ import {
   type WorkflowInputDefinition,
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { eventSubscriptions, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
+// Same validator the Triggers UI posts through (`routes/events.ts`), so a
+// template-declared subscription and a hand-made one are held to one rule.
+// `trigger-service.ts` set the precedent for importing it from a service.
+import { validateSubscription } from "../routes/events.js";
 import { newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
 import type {
   WorkflowTemplateInput,
@@ -63,6 +67,14 @@ const FOREACH_DEFAULT_MAX_ITEMS = 100;
 /** `WorkflowTemplateSchedule.timezone` is optional; the schedules table
  * defaults the same way (`schema/index.ts`). */
 const DEFAULT_TIMEZONE = "UTC";
+
+/** One filter as the `event_subscriptions.filters` column holds it — the
+ * template's `fromInput` indirection is already resolved to a value here. */
+interface SubscriptionFilterRow {
+  field: string;
+  op: "eq" | "in" | "prefix" | "contains";
+  value: string | string[];
+}
 
 export interface TemplateServiceDeps {
   db: AppDb;
@@ -545,7 +557,7 @@ export type InstallTemplateFailure =
   | { code: "unsupported_owner"; error: string };
 
 export type InstallTemplateResult =
-  | { ok: true; workflowId: string; workflowName: string; scheduleId?: string }
+  | { ok: true; workflowId: string; workflowName: string; scheduleId?: string; subscriptionIds?: string[] }
   | ({ ok: false } & InstallTemplateFailure);
 
 /**
@@ -660,16 +672,25 @@ function referencedTriggerFields(definition: WorkflowDefinition): Set<string> {
 function resolveInstallValues(
   schema: Record<string, WorkflowInputDefinition> | undefined,
   supplied: Record<string, unknown>,
-  scheduled: boolean,
+  /**
+   * True when nothing will be there to answer a run form — a cron schedule
+   * OR an event subscription. Both build `trigger.data` themselves and merge
+   * no `dataSchema` defaults (`scheduler.ts#fire`, `events/dispatcher.ts`
+   * #startWorkflow), so every value an unattended run needs has to be
+   * resolved here, at install, or it is never resolved at all.
+   */
+  unattended: boolean,
 ): { ok: true; values: Record<string, string | number | boolean> } | { ok: false; errors: string[] } {
   const values: Record<string, string | number | boolean> = {};
   const missing: string[] = [];
   if (!schema) return { ok: true, values };
 
   for (const [field, def] of Object.entries(schema)) {
-    const candidate = supplied[field] !== undefined ? supplied[field] : scheduled ? def.default : undefined;
+    const candidate = supplied[field] !== undefined ? supplied[field] : unattended ? def.default : undefined;
     if (candidate === undefined) {
-      if (scheduled && def.required === true) missing.push(field);
+      // A hidden field is one a trigger maps in at fire time (a webhook
+      // payload), never one a person types, so it is never "missing".
+      if (unattended && def.required === true && def.hidden !== true) missing.push(field);
       continue;
     }
     const primitive = primitiveDefault(candidate);
@@ -686,7 +707,7 @@ function resolveInstallValues(
       ok: false,
       errors: missing.map(
         (field) =>
-          `Missing value for "${field}". This template runs on a schedule, and a scheduled run applies no input defaults. Supply "${field}" when you install it.`,
+          `Missing value for "${field}". This template runs on its own, and an unattended run applies no input defaults. Supply "${field}" when you install it.`,
       ),
     };
   }
@@ -829,7 +850,12 @@ export async function installWorkflowTemplate(
     };
   }
 
-  const resolved = resolveInstallValues(schema, supplied, schedule !== undefined);
+  // An event subscription is as unattended as a cron schedule: the
+  // dispatcher builds `trigger.data` from the webhook body and merges no
+  // `dataSchema` defaults, so an event template's inputs must resolve here
+  // or never.
+  const events = owned.template.events ?? [];
+  const resolved = resolveInstallValues(schema, supplied, schedule !== undefined || events.length > 0);
   if (!resolved.ok) {
     return {
       ok: false,
@@ -867,9 +893,73 @@ export async function installWorkflowTemplate(
     fireAt = next.at;
   }
 
+  // Subscriptions are resolved and validated BEFORE the transaction, for
+  // the reason the cron is: a subscription that cannot be armed must not
+  // leave an installed workflow behind that nothing will ever call.
   const workflowId = newWorkflowId("wf");
+  const subscriptions: { name: string; eventKeys: string[]; filters: SubscriptionFilterRow[] }[] = [];
+  for (const event of events) {
+    const filters: SubscriptionFilterRow[] = [];
+    for (const filter of event.filters ?? []) {
+      if (filter.fromInput !== undefined) {
+        const supplied = resolved.values[filter.fromInput];
+        if (typeof supplied !== "string" || supplied.length === 0) {
+          // The template names an input its filter needs, and no usable
+          // value arrived. Two different faults reach here, so the message
+          // names the field rather than guessing which one it was: a
+          // person left it empty, or the template names a field its own
+          // `dataSchema` does not declare.
+          return {
+            ok: false,
+            code: "invalid_input",
+            error:
+              `This template watches for events filtered by "${filter.fromInput}", and no value for it arrived. ` +
+              `Supply "${filter.fromInput}" when you install it.`,
+            errors: [`Event trigger "${event.name}" needs input "${filter.fromInput}" for its ${filter.field} filter.`],
+          };
+        }
+        filters.push({ field: filter.field, op: filter.op, value: supplied });
+        continue;
+      }
+      if (filter.value === undefined) {
+        return {
+          ok: false,
+          code: "broken_template",
+          error: `Template "${templateId}" from "${owned.pluginName}" declares an event filter with no value, so it cannot be installed. Report the template id.`,
+          errors: [`Event trigger "${event.name}" has a ${filter.field} filter with neither "value" nor "fromInput".`],
+        };
+      }
+      filters.push({ field: filter.field, op: filter.op, value: filter.value });
+    }
+
+    // The workflow id is minted above and unique by construction, so its
+    // tail keeps two installs of one template apart in the Triggers list —
+    // the same suffix rule the schedule name uses.
+    const name = `${event.name} (${workflowId.slice(-6)})`;
+    const invalid = validateSubscription(deps.plugins, {
+      name,
+      eventKeys: event.eventKeys,
+      filters,
+      target: { kind: "workflow", workflowId },
+    });
+    if (invalid !== null) {
+      // A filter field the selected keys do not declare lands here. That
+      // is worth refusing loudly: the ingest matcher only reads the
+      // arriving event's own catalog entry, so an undeclared field arms a
+      // subscription that matches nothing and reports nothing, forever.
+      return {
+        ok: false,
+        code: "broken_template",
+        error: `Template "${templateId}" from "${owned.pluginName}" declares an event trigger that cannot be armed, so it cannot be installed. Report the template id.`,
+        errors: [invalid],
+      };
+    }
+    subscriptions.push({ name, eventKeys: event.eventKeys, filters });
+  }
+
   let workflowName = owned.template.name;
   let scheduleId: string | undefined;
+  const subscriptionIds: string[] = [];
   let teamMissing = false;
 
   await deps.db.transaction(async (tx) => {
@@ -952,10 +1042,40 @@ export async function installWorkflowTemplate(
         updatedAt: now,
       });
     }
+
+    // In the SAME transaction as the definition, for the reason the
+    // schedule is: a subscription row naming a workflow that does not
+    // exist would dispatch forever and fail forever.
+    for (const subscription of subscriptions) {
+      const id = randomUUID();
+      subscriptionIds.push(id);
+      await tx.insert(eventSubscriptions).values({
+        id,
+        orgId: owner.orgId,
+        // The dispatcher starts the run as the DEFINITION's owner, so this
+        // records who armed it, the same way the schedule row does.
+        ownerType: "user",
+        ownerId: owner.userId,
+        name: subscription.name,
+        eventKeys: subscription.eventKeys,
+        filters: subscription.filters,
+        target: { kind: "workflow", workflowId },
+        enabled: true,
+        createdBy: owner.userId,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
   });
 
   if (teamMissing) {
     return { ok: false, code: "team_not_found", error: `Team not found: ${teamId}. Choose a team you belong to.` };
   }
-  return { ok: true, workflowId, workflowName, ...(scheduleId !== undefined ? { scheduleId } : {}) };
+  return {
+    ok: true,
+    workflowId,
+    workflowName,
+    ...(scheduleId !== undefined ? { scheduleId } : {}),
+    ...(subscriptionIds.length > 0 ? { subscriptionIds } : {}),
+  };
 }

@@ -371,20 +371,23 @@ describe(REVIEW_ID, () => {
     expect(caveatList.length).toBeLessThanOrEqual(3);
     for (const entry of caveatList) expect(entry.length).toBeLessThan(400);
     const caveats = caveatList.join("\n");
-    expect(caveats).toContain("Installing it does not start it");
-    expect(caveats).toContain("github.pull_request.opened");
+    expect(caveats).toContain("Installing it arms its own trigger");
     expect(caveats).toContain("never approves");
+    // The event keys used to live in this prose because a person had to
+    // type them into the Triggers form. Install arms them now, so the
+    // manifest is where they belong — and where a test can check them.
+    expect(template.events?.flatMap((e) => e.eventKeys)).toContain("github.pull_request.opened");
   });
 
-  it("collects nothing at install, so no unbaked reference can survive it", () => {
+  it("collects only the repository its trigger filter needs, plus the hidden payload", () => {
     const trigger = definition.nodes.find((node) => node.type === "trigger");
     expect(trigger?.type).toBe("trigger");
     const schema = trigger?.type === "trigger" ? trigger.dataSchema : undefined;
-    // One field, and it is hidden: `templateInputs` drops hidden and
-    // non-primitive fields, so the install dialog shows no form at all.
-    // Anything visible here would be a value install bakes only when the
-    // caller supplies it, and a direct API install supplies nothing.
-    expect(Object.keys(schema ?? {})).toEqual(["payload"]);
+    // `repository` is read by no node — it exists so install can arm the
+    // event trigger with a repo filter. `payload` is hidden, so the run
+    // dialog still asks for nothing (`visibleTriggerFields`).
+    expect(Object.keys(schema ?? {})).toEqual(["repository", "payload"]);
+    expect(schema?.repository?.required).toBe(true);
     expect(schema?.payload?.hidden).toBe(true);
     expect(schema?.payload?.type).toBe("object");
     // Not required: the field is never typed by a person, so a required
@@ -1054,6 +1057,7 @@ describe(ASSIGN_ID, () => {
     const trigger = definition.nodes.find((node) => node.type === "trigger");
     const schema = trigger?.type === "trigger" ? trigger.dataSchema : undefined;
     expect(Object.keys(schema ?? {})).toEqual([
+      "repository",
       "codeownersPath",
       "rosterOwner",
       "rosterRepository",
@@ -1115,23 +1119,37 @@ describe(`${ASSIGN_ID} — branch selection`, () => {
   });
 
   it("routes an issue_comment on a pull request into branch B", () => {
-    const gate = assignIfNode("is_review_comment");
     const ctx: TemplateContext = { trigger: commentEventTrigger(commentBody("an-engineer", "sorry, can't do this one")) };
-    expect(evaluateAssignCondition(gate.conditions[0]!, ctx)).toBe(true);
-    expect(evaluateAssignCondition(gate.conditions[1]!, ctx)).toBe(true);
+    expect(evaluateAssignCondition(assignIfNode("is_comment_event").conditions[0]!, ctx)).toBe(true);
+    expect(evaluateAssignCondition(assignIfNode("is_review_comment").conditions[0]!, ctx)).toBe(true);
   });
 
-  it("does not route a comment on a plain issue — no pull_request key on the issue", () => {
-    const gate = assignIfNode("is_review_comment");
+  it("ends a comment on a plain issue as a quiet success, not a failed run", () => {
+    // The comment subscription cannot be narrowed to pull requests, so
+    // every issue comment in the repository starts a run. A failure per
+    // issue comment would fill the run list with red naming no fixable
+    // problem.
     const body = commentBody("an-engineer", "not a pull request comment");
     delete (body.issue as Record<string, unknown>).pull_request;
     const ctx: TemplateContext = { trigger: commentEventTrigger(body) };
-    expect(evaluateAssignCondition(gate.conditions[1]!, ctx)).toBe(false);
+    // It IS a comment event...
+    expect(evaluateAssignCondition(assignIfNode("is_comment_event").conditions[0]!, ctx)).toBe(true);
+    // ...but not on a pull request.
+    expect(evaluateAssignCondition(assignIfNode("is_review_comment").conditions[0]!, ctx)).toBe(false);
+
+    const miss = definition.edges.filter((e) => e.from === "is_review_comment" && e.fromOutput === "false");
+    expect(miss.map((e) => e.to)).toEqual(["not_a_pull_request_comment"]);
+    const stop = nodeOf(definition, "not_a_pull_request_comment");
+    expect(isRecord(stop) && stop.outcome).toBe("success");
   });
 
-  it("stops with the corrective message when neither branch's gate passes", () => {
-    expect(definition.edges.filter((e) => e.from === "is_new_pull_request" && e.fromOutput === "false").map((e) => e.to)).toEqual(["is_review_comment"]);
-    expect(definition.edges.filter((e) => e.from === "is_review_comment" && e.fromOutput === "false").map((e) => e.to)).toEqual(["unrecognized_trigger"]);
+  it("stops with the corrective message only when no event arrived at all", () => {
+    // A hand-started run reaches this. A comment on an issue does NOT —
+    // that is ordinary traffic for the comment subscription, and it ends
+    // in a success stop instead.
+    expect(definition.edges.filter((e) => e.from === "is_new_pull_request" && e.fromOutput === "false").map((e) => e.to)).toEqual(["is_comment_event"]);
+    expect(definition.edges.filter((e) => e.from === "is_comment_event" && e.fromOutput === "false").map((e) => e.to)).toEqual(["unrecognized_trigger"]);
+    expect(definition.edges.filter((e) => e.from === "is_comment_event" && e.fromOutput === "true").map((e) => e.to)).toEqual(["is_review_comment"]);
   });
 
   it("reads owner, repo and pull number from the event, not from a typed field", () => {
@@ -1506,9 +1524,11 @@ describe(`${ASSIGN_ID} — card copy`, () => {
     expect(template.apps).toContain("github");
   });
 
-  it("leads the caveats with how to arm it, since install alone does not start it", () => {
-    expect(caveatList[0]).toContain("It arms no schedule");
-    expect(caveatList[0]).toContain("github.issue_comment.created");
+  it("leads the caveats with what install arms, and the filter that scopes it", () => {
+    expect(caveatList[0]).toContain("arms two triggers");
+    expect(caveatList[0]).toContain("owner/name");
+    // The manual arming instructions are gone, because install does it now.
+    expect(caveatList[0]).not.toContain("New trigger");
   });
 
   it("keeps the caveats to a couple of paragraphs — a reader has to actually read this", () => {

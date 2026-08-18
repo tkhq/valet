@@ -329,6 +329,20 @@ const pullRequestReview: WorkflowDefinition = {
       id: "start",
       type: "trigger",
       dataSchema: {
+        // Read by NO node — the definition takes every repository value from
+        // the webhook body. It exists so install can arm the event trigger
+        // with a repo filter (`events[].filters[].fromInput`). Without a
+        // filter the subscription matches every repository the webhook
+        // reaches, which is the accident the caveats used to warn about and
+        // a person had to avoid by hand.
+        repository: {
+          type: "string",
+          required: true,
+          label: "Repository to watch",
+          placeholder: "your-org/platform",
+          description:
+            "The repository whose pull requests this reviews, as owner/name. Only this repository's events start a run.",
+        },
         payload: {
           type: "object",
           hidden: true,
@@ -826,6 +840,18 @@ const assignReviewers: WorkflowDefinition = {
       id: "start",
       type: "trigger",
       dataSchema: {
+        // Read by NO node — every repository value comes from the webhook
+        // body. It exists so install can arm both event triggers with a
+        // repo filter, which is what keeps this workflow off every other
+        // repository the webhook reaches.
+        repository: {
+          type: "string",
+          required: true,
+          label: "Repository to watch",
+          placeholder: "your-org/platform",
+          description:
+            "The repository whose pull requests this assigns, as owner/name. Only this repository's events start a run.",
+        },
         codeownersPath: {
           type: "string",
           required: true,
@@ -881,12 +907,32 @@ const assignReviewers: WorkflowDefinition = {
       ],
     },
     {
+      // Split from `is_review_comment` on purpose. The comment subscription
+      // cannot be narrowed to pull requests: GitHub fires issue_comment for
+      // issues too, and the catalog declares no filter that tells them
+      // apart (`plugin-github/src/triggers.ts` COMMON_FILTERS is repo and
+      // sender). So EVERY comment in the repository starts a run, and the
+      // run itself has to decide. This gate asks only "was this a comment
+      // at all", which separates a comment on an issue — ordinary, and a
+      // quiet success below — from a run that carried no event at all,
+      // which is a real misconfiguration.
+      id: "is_comment_event",
+      type: "if",
+      conditions: [{ left: "trigger.data.payload.comment.body", dataType: "string", operation: "exists" }],
+    },
+    {
       id: "is_review_comment",
       type: "if",
-      conditions: [
-        { left: "trigger.data.payload.comment.body", dataType: "string", operation: "exists" },
-        { left: "trigger.data.payload.issue.pull_request", dataType: "object", operation: "exists" },
-      ],
+      conditions: [{ left: "trigger.data.payload.issue.pull_request", dataType: "object", operation: "exists" }],
+    },
+    {
+      // Success, not failure. A comment on an issue is the common case for
+      // this subscription, and a failed run per issue comment would fill
+      // the run list with red that names no problem anybody can fix.
+      id: "not_a_pull_request_comment",
+      type: "stop",
+      outcome: "success",
+      message: "The comment was on an issue rather than a pull request, so this run had nothing to do.",
     },
     {
       id: "unrecognized_trigger",
@@ -2122,8 +2168,12 @@ const assignReviewers: WorkflowDefinition = {
   ],
   edges: [
     { from: "start", to: "is_new_pull_request" },
-    { from: "is_new_pull_request", to: "is_review_comment", fromOutput: "false" },
-    { from: "is_review_comment", to: "unrecognized_trigger", fromOutput: "false" },
+    { from: "is_new_pull_request", to: "is_comment_event", fromOutput: "false" },
+    // Not a comment either, so nothing recognizable arrived — a hand-started
+    // run, or a subscription to a key this workflow does not read.
+    { from: "is_comment_event", to: "unrecognized_trigger", fromOutput: "false" },
+    { from: "is_comment_event", to: "is_review_comment", fromOutput: "true" },
+    { from: "is_review_comment", to: "not_a_pull_request_comment", fromOutput: "false" },
 
     // Branch A
     { from: "is_new_pull_request", to: "codeowners", fromOutput: "true" },
@@ -2269,11 +2319,24 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Move the findings into the review body when the inline comments cannot be posted.",
     ],
     caveats: [
-      "Installing it does not start it. Open the workflow, then Triggers, then New trigger, and subscribe it to github.pull_request.opened, github.pull_request.synchronize, github.pull_request.reopened and github.pull_request.ready_for_review, with a repo filter set — without one it reviews every pull request in every repository the webhook reaches.",
+      "Installing it arms its own trigger, scoped to the repository you name, matched as owner/name exactly — a typo arms a trigger that never fires and reports nothing. Your organization also needs a GitHub App installed on that repository, or no webhook arrives at all.",
       "It posts as the installed GitHub App, never approves (COMMENT or REQUEST_CHANGES only), and skips anything past 60 changed files or 120,000 diff bytes with a one-line note instead. Findings are capped at 20 per review and anchored to changed lines; when GitHub rejects an inline anchor, the same findings post in the review body instead.",
       "The review reads only the diff and the pull request's own text, which its author controls — so treat REQUEST_CHANGES as one reviewer's opinion, not a merge gate, especially on a public repo taking pull requests from forks.",
     ],
     definition: pullRequestReview,
+    events: [
+      {
+        name: "Pull request opened or updated",
+        eventKeys: [
+          "github.pull_request.opened",
+          "github.pull_request.synchronize",
+          "github.pull_request.reopened",
+          "github.pull_request.ready_for_review",
+        ],
+        filters: [{ field: "repo", op: "eq", fromInput: "repository" }],
+        description: "When a pull request opens, updates, reopens, or leaves draft",
+      },
+    ],
   },
   {
     id: "github.assign-reviewers",
@@ -2302,10 +2365,28 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Write the updated list, reply on the pull request naming the replacement, and DM the new assignee and the author.",
     ],
     caveats: [
-      "It arms no schedule. Open the workflow, then Triggers, then New trigger, and subscribe it to github.pull_request.opened, github.pull_request.ready_for_review, and github.issue_comment.created — until you do, it never runs.",
+      "Installing it arms two triggers scoped to the repository you name, matched as owner/name exactly — a typo arms triggers that never fire and report nothing. The comment trigger fires on every comment in that repository, issues included, because GitHub offers no filter to separate them; a comment on an issue ends the run as a success that did nothing.",
       "The roster is the only source of group membership, working hours, calendars and Slack ids — nothing here can read a GitHub team or a timezone on its own. A decline is a model's judgment on one comment, not a keyword match; read the reply it posts on the pull request to confirm what it did.",
       `It reads and writes GitHub as you, not as an installed application, and assigning replaces the whole assignees field — a pull request that already has one is left alone. It assigns at most ${MAX_ASSIGNEES} people and checks at most ${MAX_CANDIDATES} calendars per run; anything past those caps is reported, never guessed at.`,
     ],
     definition: assignReviewers,
+    // Two subscriptions rather than one with every key, so the comment
+    // watcher can be turned off on its own. It is the noisier of the two:
+    // GitHub fires issue_comment for issues as well as pull requests, and
+    // no catalog filter can tell them apart, so the run itself has to.
+    events: [
+      {
+        name: "Pull request opened or ready",
+        eventKeys: ["github.pull_request.opened", "github.pull_request.ready_for_review"],
+        filters: [{ field: "repo", op: "eq", fromInput: "repository" }],
+        description: "When a pull request opens or is marked ready for review",
+      },
+      {
+        name: "Comment on a pull request",
+        eventKeys: ["github.issue_comment.created"],
+        filters: [{ field: "repo", op: "eq", fromInput: "repository" }],
+        description: "When somebody comments, to catch a reviewer declining",
+      },
+    ],
   },
 ];

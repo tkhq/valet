@@ -391,6 +391,7 @@ describe("install keeps the hidden event payload, and bakes everything else", ()
     for (const input of templateInputs(triggerSchema(definition))) {
       if (input.default !== undefined) values[input.name] = input.default;
     }
+    values.repository = "example-org/platform";
     values.rosterOwner = "example-org";
     values.rosterRepository = "handbook";
     return values;

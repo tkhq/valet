@@ -33,14 +33,33 @@ CODEOWNERS and roster *location* (path, owning repository) stay as ordinary
 per-event data, the same split `unclaimed-pull-request-routing` already
 makes for its routing file.
 
-Installing the template arms no schedule and no subscription. The person who
-installs it opens Triggers and subscribes it to
-`github.pull_request.opened`, `github.pull_request.ready_for_review`, and
-`github.issue_comment.created` — the same manual-arm step
-`pull-request-review` already asks for, extended by one event key for the
-decline-swap branch below. A run started by hand, or by an event the
-definition does not recognize, stops with a message naming the three keys to
-subscribe to.
+Installing the template arms its own subscriptions. `WorkflowTemplate.events`
+declares them and `installWorkflowTemplate` writes them in the same
+transaction as the definition, the way `schedule` has always armed a cron —
+before this, an event template installed inert, which reads as a broken
+workflow rather than an unfinished setup.
+
+Two subscriptions, not one: `github.pull_request.opened` plus
+`.ready_for_review` for the assignment, and `github.issue_comment.created`
+for the decline swap. Separate, so the comment watcher can be disabled on its
+own. Both filter on `repo`, whose value comes from a `repository` field the
+installer fills in (`filters[].fromInput`) — the template knows it needs the
+filter, and only the installer knows the repository. Without that filter the
+subscription matches every repository the webhook reaches.
+
+The comment subscription cannot be narrowed further. GitHub fires
+`issue_comment` for issues as well as pull requests, and the catalog declares
+no filter that separates them, so every comment in the repository starts a
+run. The run decides: a comment on an issue reaches a `stop` with outcome
+`success` and does nothing. Deliberately not a failure — a failed run per
+issue comment fills the run list with red that names no fixable problem. A
+run that carried no recognizable event at all is still a failure, and still
+names the keys to subscribe to.
+
+An event template's inputs are resolved at install for the reason a
+scheduled template's are: the dispatcher builds `trigger.data` from the
+webhook body and merges no `dataSchema` defaults, so a required value
+missing at install is missing forever.
 
 ### Two branches, one definition
 
