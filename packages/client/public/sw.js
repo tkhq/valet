@@ -4,7 +4,7 @@
 
 // Minimal service worker for PWA installability.
 // This does NOT provide offline support or caching — it simply satisfies
-// Chrome's PWA install criteria (a registered service worker with a fetch handler).
+// Chrome's PWA install criteria (a registered fetch listener).
 
 self.addEventListener('install', (event) => {
   // Activate immediately — no waiting for existing clients to close
@@ -16,9 +16,11 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
-self.addEventListener('fetch', (event) => {
-  // Only intercept same-origin requests; let cross-origin fall through to browser default
-  if (event.request.url.startsWith(self.location.origin)) {
-    event.respondWith(fetch(event.request));
-  }
+// Register a fetch listener but do NOT call event.respondWith — the browser
+// handles the request natively, including its own offline error UI. Calling
+// respondWith(fetch(...)) here would surface a generic unhandled rejection
+// when the network fails instead of the browser's native offline error.
+// Chrome's PWA install criteria are satisfied by the presence of this listener.
+self.addEventListener('fetch', () => {
+  // Intentionally empty — see comment above.
 });
