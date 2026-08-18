@@ -55,6 +55,7 @@ import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -1004,6 +1005,12 @@ export class EngineHost {
           binding?.repo.owner,
         );
         return token === null ? null : { type: "app_install", accessToken: token };
+      }
+      if (service === "openai") {
+        // plugin-openai's key probe: org OpenAI LLM-provider key → stored
+        // "openai" credential → OPENAI_API_KEY env. `null` keeps the openai
+        // tools hidden in list_tools (requiresCredential gating).
+        return resolveOpenAiCredential(db, credentials, owner, orgId);
       }
       if (service !== "github") {
         // Byte-identical to the engine's default store-backed read.
