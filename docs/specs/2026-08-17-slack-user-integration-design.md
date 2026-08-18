@@ -126,8 +126,10 @@ Three additions, all generic:
      credential write and redirect to
      `/integrations?error=identity_conflict`.
    - Link succeeds but the credential save throws → best-effort
-     compensating `unlinkIdentity` (only when the link was newly created,
-     never on a same-user re-link), then `error=oauth_failed`.
+     compensation restores the pre-flow link state: a link the flow newly
+     created is removed (`unlinkIdentity`); a pre-existing link is restored
+     (`linkIdentity` with the prior externalId). Result in either case:
+     `error=oauth_failed`.
 
 The failure residue is therefore at worst a missing link with no
 credential — a state the code flow (section 4) can repair — never a stored

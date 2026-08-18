@@ -511,6 +511,83 @@ describe("identity auto-link (slackish plugin)", () => {
     const link = await identityForExternal(api.providers.db, "slack", "U9");
     expect(link).toBeNull();
   });
+
+  it("compensation (same-user reconnect): save throws → error=oauth_failed and pre-existing link is preserved", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    // Seed the same user + same externalId as the flow will produce.
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U9", userId: "local-user" });
+
+    // Intercept save to throw once.
+    const origSave = api.providers.engineCredentials.save.bind(api.providers.engineCredentials);
+    let threw = false;
+    api.providers.engineCredentials.save = async (...args) => {
+      if (!threw) {
+        threw = true;
+        throw new Error("simulated credential save failure");
+      }
+      return origSave(...args);
+    };
+
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-reconnect-fail", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
+
+    // Link must still be present — it was pre-existing and compensation restores it.
+    const link = await identityForExternal(api.providers.db, "slack", "U9");
+    expect(link).not.toBeNull();
+    expect(link?.userId).toBe("local-user");
+  });
+
+  it("compensation (prior different externalId): save throws → pre-existing link restored, new one removed", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    // Seed the user with a different externalId ("U-OLD") linked before the flow.
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U-OLD", userId: "local-user" });
+
+    // Intercept save to throw once.
+    const origSave = api.providers.engineCredentials.save.bind(api.providers.engineCredentials);
+    let threw = false;
+    api.providers.engineCredentials.save = async (...args) => {
+      if (!threw) {
+        threw = true;
+        throw new Error("simulated credential save failure");
+      }
+      return origSave(...args);
+    };
+
+    // Callback returns externalId "U9" — different from the seeded "U-OLD".
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-restore", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
+
+    // "U-OLD" must be restored — compensation ran linkIdentity with the prior externalId.
+    const oldLink = await identityForExternal(api.providers.db, "slack", "U-OLD");
+    expect(oldLink).not.toBeNull();
+    expect(oldLink?.userId).toBe("local-user");
+
+    // "U9" must NOT be linked — it was the new link that compensation undid.
+    const newLink = await identityForExternal(api.providers.db, "slack", "U9");
+    expect(newLink).toBeNull();
+  });
 });
 
 describe("verifyOAuthConnectState", () => {
