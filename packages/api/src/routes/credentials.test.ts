@@ -5,6 +5,7 @@
  * `plugins.test.ts` — flip `VALET_LOCAL_AUTH` off for one request).
  */
 import { describe, it, expect, afterEach } from "vitest";
+import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 
@@ -267,5 +268,87 @@ describe("GET /api/credentials", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+/**
+ * Availability gate (integration-availability design): a user-scope save
+ * for a service whose deployment/org prerequisite is missing is rejected,
+ * because the credential could never power a working integration. The
+ * org-scope save stays open — it IS the configuration step.
+ */
+describe("PUT /api/credentials/:service — unconfigured services", () => {
+  const GATED_PLUGIN: ValetPlugin = {
+    name: "gated",
+    version: "0.1.0",
+    credentials: [
+      { type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } },
+    ],
+  };
+
+  it("403s a user-scope save while the org credential is missing", async () => {
+    api = await bootTestApi({ plugins: [GATED_PLUGIN] });
+
+    const res = await fetch(`${api.baseUrl}/api/credentials/gated`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "tok-1" }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Settings → Organization");
+  });
+
+  it("accepts the org-scope save (that is the configuration step), then user-scope saves", async () => {
+    api = await bootTestApi({ plugins: [GATED_PLUGIN] });
+
+    const orgPut = await fetch(`${api.baseUrl}/api/credentials/gated`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "org-tok", scope: "org" }),
+    });
+    expect(orgPut.status).toBe(200);
+
+    const userPut = await fetch(`${api.baseUrl}/api/credentials/gated`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "user-tok" }),
+    });
+    expect(userPut.status).toBe(200);
+  });
+
+  it("403s a user-scope save for an oauth service whose client env vars are unset", async () => {
+    const oauthPlugin: ValetPlugin = {
+      name: "gmail",
+      version: "0.1.0",
+      credentials: [{
+        type: "oauth2", configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          tokenUrl: "https://oauth2.googleapis.com/token",
+          clientIdEnv: "UNSET_TEST_ID", clientSecretEnv: "UNSET_TEST_SECRET",
+        },
+      }],
+    };
+    api = await bootTestApi({ plugins: [oauthPlugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/credentials/gmail`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "oauth2", accessToken: "ya29-token" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("still accepts a service with no credential declaration at all", async () => {
+    api = await bootTestApi({ plugins: [GATED_PLUGIN] });
+
+    const res = await fetch(`${api.baseUrl}/api/credentials/some-mcp-server`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+    expect(res.status).toBe(200);
   });
 });

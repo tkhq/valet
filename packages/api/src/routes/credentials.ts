@@ -46,6 +46,7 @@ import { Hono } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
+import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import type {
   CredentialSummary,
   DeleteCredentialResponse,
@@ -122,6 +123,31 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
   const owner = ownerFor(user, scope);
+
+  // Availability gate (integration-availability design): a user-scope save
+  // for a declared service whose deployment/org prerequisite is missing is
+  // rejected — the token could never power a working integration. Org-scope
+  // saves stay open (an admin's org save IS the configuration step), and
+  // services with no declaration stay accepted per the note above.
+  if (scope === "user") {
+    const declared = findCredentialDeclaration(c.var.providers.plugins, service);
+    if (declared) {
+      const mode = await connectModeFor({
+        plugins: c.var.providers.plugins,
+        decl: declared,
+        service,
+        orgId: user.orgId,
+        credentials: engineCredentials,
+        env: process.env,
+      });
+      if (mode === "unconfigured") {
+        return c.json(
+          { error: `${service} is not configured for this organization. An admin can set it up in Settings → Organization.` },
+          403,
+        );
+      }
+    }
+  }
 
   if (!CREDENTIAL_TYPES.includes(body.type)) {
     return c.json({ error: `type must be one of ${CREDENTIAL_TYPES.join("|")}` }, 400);

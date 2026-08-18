@@ -34,6 +34,20 @@ import { authCodeEnvReady, findOAuthDeclaration } from "./integration-oauth.js";
 
 export type ConnectMode = "oauth" | "manual" | "unconfigured";
 
+/** The first declaration for `service` across the plugin set, keyed the way
+ * every consumer keys declarations: `decl.service ?? plugin.name`. */
+export function findCredentialDeclaration(
+  plugins: ValetPlugin[],
+  service: string,
+): CredentialDeclaration | null {
+  for (const plugin of plugins) {
+    for (const decl of plugin.credentials ?? []) {
+      if ((decl.service ?? plugin.name) === service) return decl;
+    }
+  }
+  return null;
+}
+
 export interface AvailabilityContext {
   plugins: ValetPlugin[];
   orgId: string;
