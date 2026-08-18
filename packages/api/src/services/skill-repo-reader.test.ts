@@ -6,7 +6,12 @@
  * private one.
  */
 import { describe, expect, it, afterEach } from "vitest";
-import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import {
+  commitBody,
+  startGithubFixture,
+  treeEntry,
+  type GithubFixture,
+} from "../test-helpers/github-fixture.js";
 import {
   GitHubSkillRepoReader,
   SkillRepoNotFoundError,
@@ -31,10 +36,10 @@ function dirEntry(name: string, type: "file" | "dir") {
 
 describe("GitHubSkillRepoReader", () => {
   it("resolves the default branch head in one unauthenticated call", async () => {
-    fixture = startGithubFixture({ getCommit: () => ({ body: { sha: "commit-1" } }) });
+    fixture = startGithubFixture({ getCommit: () => ({ body: commitBody("commit-1") }) });
     const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
 
-    expect(await reader.headSha("tkhq/skills", "")).toBe("commit-1");
+    expect((await reader.head("tkhq/skills", "")).sha).toBe("commit-1");
 
     expect(fixture.calls).toHaveLength(1);
     expect(fixture.calls[0]?.path).toBe("/repos/tkhq/skills/commits/HEAD");
@@ -42,10 +47,10 @@ describe("GitHubSkillRepoReader", () => {
   });
 
   it("resolves the head of a named ref", async () => {
-    fixture = startGithubFixture({ getCommit: () => ({ body: { sha: "commit-2" } }) });
+    fixture = startGithubFixture({ getCommit: () => ({ body: commitBody("commit-2") }) });
     const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
 
-    expect(await reader.headSha("tkhq/skills", "release")).toBe("commit-2");
+    expect((await reader.head("tkhq/skills", "release")).sha).toBe("commit-2");
     expect(fixture.calls[0]?.path).toBe("/repos/tkhq/skills/commits/release");
   });
 
@@ -53,7 +58,7 @@ describe("GitHubSkillRepoReader", () => {
     fixture = startGithubFixture({ getCommit: () => ({ status: 500, body: { message: "boom" } }) });
     const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
 
-    const err = await reader.headSha("tkhq/skills", "").catch((e: unknown) => e);
+    const err = await reader.head("tkhq/skills", "").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SkillRepoReadError);
     expect(err).not.toBeInstanceOf(SkillRepoNotFoundError);
   });
@@ -72,10 +77,68 @@ describe("GitHubSkillRepoReader", () => {
       timeoutMs: 10,
     });
 
-    const err = await reader.headSha("tkhq/skills", "").catch((e: unknown) => e);
+    const err = await reader.head("tkhq/skills", "").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SkillRepoTimeoutError);
     expect((err as Error).message).toContain("tkhq/skills@HEAD");
     expect((err as Error).message).toContain("status page");
+  });
+
+  it("carries the commit's tree sha, so discovery costs no extra call", async () => {
+    fixture = startGithubFixture({ getCommit: () => ({ body: commitBody("commit-1", "tree-9") }) });
+    const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
+
+    expect(await reader.head("tkhq/skills", "")).toEqual({ sha: "commit-1", treeSha: "tree-9" });
+    expect(fixture.calls).toHaveLength(1);
+  });
+
+  it("refuses a commit response with no tree sha", async () => {
+    fixture = startGithubFixture({ getCommit: () => ({ body: { sha: "commit-1" } }) });
+    const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
+
+    const err = await reader.head("tkhq/skills", "").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SkillRepoReadError);
+    expect((err as Error).message).toContain("no tree sha");
+  });
+
+  it("reads the whole tree in one recursive call", async () => {
+    fixture = startGithubFixture({
+      getTree: () => ({
+        body: {
+          sha: "tree-9",
+          truncated: false,
+          tree: [
+            treeEntry("04-skills", { type: "tree" }),
+            treeEntry("04-skills/deploy/SKILL.md", { sha: "blob-deploy" }),
+          ],
+        },
+      }),
+    });
+    const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
+
+    const tree = await reader.listTree("tkhq/skills", "tree-9");
+
+    expect(tree.truncated).toBe(false);
+    expect(tree.entries.map((e) => e.path)).toEqual(["04-skills", "04-skills/deploy/SKILL.md"]);
+    expect(tree.entries[1]).toEqual({
+      path: "04-skills/deploy/SKILL.md",
+      type: "blob",
+      mode: "100644",
+      sha: "blob-deploy",
+    });
+    expect(fixture.calls).toHaveLength(1);
+    expect(fixture.calls[0]?.path).toBe("/repos/tkhq/skills/git/trees/tree-9");
+    // Without this the response holds one level, which is the walk the tree
+    // read exists to replace.
+    expect(fixture.calls[0]?.query.recursive).toBe("1");
+  });
+
+  it("reports a cut tree rather than hiding the entries it did get", async () => {
+    fixture = startGithubFixture({
+      getTree: () => ({ body: { sha: "tree-9", truncated: true, tree: [treeEntry("a/SKILL.md")] } }),
+    });
+    const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
+
+    expect(await reader.listTree("tkhq/skills", "tree-9")).toMatchObject({ truncated: true });
   });
 
   it("lists one level of the root at a pinned commit", async () => {
@@ -101,7 +164,7 @@ describe("GitHubSkillRepoReader", () => {
     expect(fixture.calls[0]?.path).toBe("/repos/tkhq/skills/contents/agent/skills");
   });
 
-  it("reads a file and decodes its base64 body", async () => {
+  it("reads a file, decodes its base64 body, and carries its blob sha", async () => {
     fixture = startGithubFixture({
       getContents: () => ({
         body: { type: "file", encoding: "base64", content: base64("# Deploy\n"), sha: "blob-1" },
@@ -109,7 +172,27 @@ describe("GitHubSkillRepoReader", () => {
     });
     const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
 
-    expect(await reader.readFile("tkhq/skills", "deploy/SKILL.md", "commit-1")).toBe("# Deploy\n");
+    // The blob sha is what makes the two discovery paths agree: a file read
+    // here and the same file's tree entry produce one manifest key.
+    expect(await reader.readFile("tkhq/skills", "deploy/SKILL.md", "commit-1")).toEqual({
+      text: "# Deploy\n",
+      blobSha: "blob-1",
+    });
+  });
+
+  it("refuses a file response with no blob sha", async () => {
+    // Without a sha the manifest key would be the same for every version of
+    // the file, and a changed skill would report as unchanged for ever.
+    fixture = startGithubFixture({
+      getContents: () => ({ body: { type: "file", encoding: "base64", content: base64("x") } }),
+    });
+    const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url });
+
+    const err = await reader
+      .readFile("tkhq/skills", "deploy/SKILL.md", "commit-1")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SkillRepoReadError);
+    expect((err as Error).message).toContain("Retry the sync");
   });
 
   it("returns null for a file that is not there", async () => {
@@ -143,13 +226,13 @@ describe("GitHubSkillRepoReader", () => {
       const f: GithubFixture = startGithubFixture({
         getCommit: () =>
           authorized(f.calls)
-            ? { body: { sha: "private-commit" } }
+            ? { body: commitBody("private-commit") }
             : { status: 404, body: { message: "Not Found" } },
       });
       fixture = f;
 
       const anonymous = new GitHubSkillRepoReader({ apiUrl: f.url });
-      await expect(anonymous.headSha("tkhq/tk-brain", "")).rejects.toBeInstanceOf(
+      await expect(anonymous.head("tkhq/tk-brain", "")).rejects.toBeInstanceOf(
         SkillRepoNotFoundError,
       );
 
@@ -157,7 +240,7 @@ describe("GitHubSkillRepoReader", () => {
         apiUrl: f.url,
         credential: { kind: "user", token: "ghu_secret", ownerScope: "user", login: "octocat" },
       });
-      expect(await withToken.headSha("tkhq/tk-brain", "")).toBe("private-commit");
+      expect((await withToken.head("tkhq/tk-brain", "")).sha).toBe("private-commit");
       expect(f.calls[1]?.authHeader).toBe("Bearer ghu_secret");
     });
 
@@ -165,7 +248,14 @@ describe("GitHubSkillRepoReader", () => {
       fixture = startGithubFixture({
         getContents: (_owner, _repo, path) =>
           path.endsWith("SKILL.md")
-            ? { body: { type: "file", encoding: "base64", content: base64("# One\n") } }
+            ? {
+                body: {
+                  type: "file",
+                  encoding: "base64",
+                  content: base64("# One\n"),
+                  sha: "blob-one",
+                },
+              }
             : { body: [dirEntry("one", "dir")] },
       });
       const reader = new GitHubSkillRepoReader({
@@ -189,7 +279,7 @@ describe("GitHubSkillRepoReader", () => {
         credential: { kind: "user", token: "ghu_never_print_me", ownerScope: "user", login: "octocat" },
       });
 
-      const err = await reader.headSha("tkhq/tk-brain", "").catch((e: unknown) => e);
+      const err = await reader.head("tkhq/tk-brain", "").catch((e: unknown) => e);
       expect((err as Error).message).not.toContain("ghu_never_print_me");
     });
 
@@ -197,15 +287,15 @@ describe("GitHubSkillRepoReader", () => {
       // The headers used to be one module-level const. If a reader mutated
       // it, every later reader — including an anonymous one — would carry
       // somebody else's token.
-      fixture = startGithubFixture({ getCommit: () => ({ body: { sha: "commit-1" } }) });
+      fixture = startGithubFixture({ getCommit: () => ({ body: commitBody("commit-1") }) });
       const withToken = new GitHubSkillRepoReader({
         apiUrl: fixture.url,
         credential: { kind: "user", token: "ghu_secret", ownerScope: "user" },
       });
       const anonymous = new GitHubSkillRepoReader({ apiUrl: fixture.url });
 
-      await withToken.headSha("tkhq/tk-brain", "");
-      await anonymous.headSha("tkhq/skills", "");
+      await withToken.head("tkhq/tk-brain", "");
+      await anonymous.head("tkhq/skills", "");
 
       expect(fixture.calls[0]?.authHeader).toBe("Bearer ghu_secret");
       expect(fixture.calls[1]?.authHeader).toBeUndefined();
@@ -214,11 +304,11 @@ describe("GitHubSkillRepoReader", () => {
     it("sends no header for a tokenless credential, so a public repo still reads", async () => {
       // `none` and `unavailable` both carry no token. They change only the
       // 404 text, never whether the request goes out.
-      fixture = startGithubFixture({ getCommit: () => ({ body: { sha: "commit-1" } }) });
+      fixture = startGithubFixture({ getCommit: () => ({ body: commitBody("commit-1") }) });
 
       for (const credential of [{ kind: "none" }, { kind: "unavailable" }] as const) {
         const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url, credential });
-        expect(await reader.headSha("tkhq/skills", "")).toBe("commit-1");
+        expect((await reader.head("tkhq/skills", "")).sha).toBe("commit-1");
       }
 
       expect(fixture.calls.map((call) => call.authHeader)).toEqual([undefined, undefined]);
@@ -227,7 +317,7 @@ describe("GitHubSkillRepoReader", () => {
 
   describe("the 404 message names which credential was used", () => {
     async function messageFor(reader: GitHubSkillRepoReader): Promise<string> {
-      const err = await reader.headSha("tkhq/tk-brain", "").catch((e: unknown) => e);
+      const err = await reader.head("tkhq/tk-brain", "").catch((e: unknown) => e);
       expect(err).toBeInstanceOf(SkillRepoNotFoundError);
       return (err as Error).message;
     }

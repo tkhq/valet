@@ -8,7 +8,12 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import {
+  commitBody,
+  startGithubFixture,
+  treeEntry,
+  type GithubFixture,
+} from "../test-helpers/github-fixture.js";
 import { createTeam } from "../services/teams.js";
 import type {
   CreateSkillSourceRequest,
@@ -31,10 +36,6 @@ function skillMd(name: string, description: string): string {
   return `---\nname: ${name}\ndescription: ${description}\n---\n\nDo the thing.\n`;
 }
 
-function entry(name: string) {
-  return { name, path: name, type: "dir", size: 0, sha: `sha-${name}` };
-}
-
 /** A repository the test can move forward between calls. */
 interface RepoState {
   sha: string;
@@ -44,9 +45,17 @@ interface RepoState {
 /** Serves `state`, each named directory holding a well-formed skill. */
 function serve(state: RepoState): GithubFixture {
   fixture = startGithubFixture({
-    getCommit: () => ({ body: { sha: state.sha } }),
+    getCommit: () => ({ body: commitBody(state.sha) }),
+    getTree: () => ({
+      body: {
+        sha: `tree-${state.sha}`,
+        truncated: false,
+        tree: state.names.map((name) =>
+          treeEntry(`${name}/SKILL.md`, { sha: `blob-${state.sha}-${name}` }),
+        ),
+      },
+    }),
     getContents: (_owner, _repo, path) => {
-      if (path === "") return { body: state.names.map(entry) };
       const dir = /^(.*)\/SKILL\.md$/.exec(path)?.[1];
       if (dir === undefined || !state.names.includes(dir)) {
         return { status: 404, body: { message: "Not Found" } };

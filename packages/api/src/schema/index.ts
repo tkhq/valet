@@ -853,7 +853,8 @@ export const skillSources = pgTable(
     repoFullName: text("repo_full_name").notNull(),
     /** Branch, tag, or commit. Empty means the default branch. */
     ref: text("ref").notNull().default(""),
-    /** Directory that holds the skill directories. Empty means the root. */
+    /** Narrows the skill scan to one directory. Empty scans the whole
+     * repository, which is the normal case. */
     subpath: text("subpath").notNull().default(""),
     enabled: boolean("enabled").notNull().default(true),
     status: text("status", { enum: ["pending", "ok", "warning", "error"] })

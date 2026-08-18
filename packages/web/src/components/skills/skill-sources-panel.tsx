@@ -208,15 +208,37 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
           {source.skillCount} skill{source.skillCount === 1 ? "" : "s"} ·{" "}
           {source.lastSyncedAt === null ? "never synced" : `synced ${relativeTime(source.lastSyncedAt)}`}
         </p>
+        {/* A sync that imported nothing writes its reason here, so "0 skills"
+            and "Valet could not read it" and "it holds no SKILL.md" stop
+            looking the same. A warning takes the warning colour rather than
+            the muted one: muted text beside "0 skills" reads as a footnote,
+            and this line is the answer. */}
         {source.lastMessage && (
           <p
             className={
               source.status === "error"
                 ? "mt-1 text-xs leading-relaxed text-danger-500"
-                : "mt-1 text-xs leading-relaxed text-muted"
+                : source.status === "warning"
+                  ? "mt-1 text-xs leading-relaxed text-warning-fg"
+                  : "mt-1 text-xs leading-relaxed text-muted"
             }
           >
             {source.lastMessage}
+          </p>
+        )}
+        {/* What the scan skipped, after a sync this person asked for. The
+            exclusion rule can be wrong — a real skill can sit under a name
+            the scan skips — so the count has to be visible somewhere. It is
+            NOT on the source row: a repository can hold hundreds of these
+            legitimately (a dependency tree, a downloaded agent plugin), and a
+            standing warning about them teaches people to ignore the row. The
+            one case that does reach the row is an excluded path holding a
+            skill this source already mirrors, which warns by path. */}
+        {sync.data !== undefined && sync.data.excluded > 0 && (
+          <p className="mt-1 text-xs leading-relaxed text-muted">
+            Scanned {sync.data.discovered} SKILL.md {sync.data.discovered === 1 ? "file" : "files"}.
+            Skipped {sync.data.excluded} in directories Valet does not scan: dependencies, build
+            output, tests, and downloaded agent plugins.
           </p>
         )}
       </div>

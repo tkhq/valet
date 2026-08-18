@@ -370,7 +370,7 @@ describe("resolveSkillSourceCredential", () => {
       );
       const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url, credential });
 
-      const err = await reader.headSha("tkhq/tk-brain", "").catch((e: unknown) => e);
+      const err = await reader.head("tkhq/tk-brain", "").catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(SkillRepoNotFoundError);
       expect((err as Error).message).not.toContain("authenticate data");

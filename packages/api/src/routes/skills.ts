@@ -736,6 +736,8 @@ async function syncResponse(
     updated: outcome?.updated ?? 0,
     deleted: outcome?.deleted ?? 0,
     warnings: outcome?.warnings ?? [],
+    discovered: outcome?.discovered ?? 0,
+    excluded: outcome?.excluded ?? 0,
   };
 }
 

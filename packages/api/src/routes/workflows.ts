@@ -57,6 +57,7 @@ import {
   GitHubSkillRepoReader,
   SkillRepoReadError,
   SkillRepoTimeoutError,
+  type SkillRepoFile,
 } from "../services/skill-repo-reader.js";
 import type {
   AllowWorkflowPermissionsRequest,
@@ -325,11 +326,11 @@ workflowsRouter.get("/import/repo-file", async (c) => {
   }
 
   const at = parsed.ref === "" ? "" : ` at ${parsed.ref}`;
-  let content: string | null;
+  let file: SkillRepoFile | null;
   try {
     // Constructed per request so the GitHub base URL is read now, not at
     // module load — the same rule `repos/github-host.ts` follows.
-    content = await new GitHubSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
+    file = await new GitHubSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
   } catch (err) {
     // The reader words its own messages for the skill sync sweep, which
     // tells the reader to wait for the next poll. An import has a person in
@@ -353,7 +354,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
 
   // One message covers every miss: unauthenticated, a private repository, a
   // wrong branch, a misspelled path and a directory all answer the same way.
-  if (content === null) {
+  if (file === null) {
     return c.json(
       {
         error: `Valet found no file at ${parsed.subpath} in ${parsed.repoFullName}${at}. Valet reads public repositories only, so a private repository, a wrong branch and a misspelled path look the same here. Check the repository, the path and the branch, and make the repository public.`,
@@ -361,6 +362,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
       404,
     );
   }
+  const content = file.text;
   if (content.trim() === "") {
     return c.json(
       {
