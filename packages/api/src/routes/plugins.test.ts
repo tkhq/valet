@@ -272,7 +272,7 @@ describe("GET /api/plugins connect mode", () => {
     expect(summaries.find((p) => p.name === "gmail")?.services[0]?.connect).toBe("unconfigured");
   });
 
-  it("reports unconfigured for a requires.orgCredential service until the org credential exists", async () => {
+  it("reports unconfigured for a requires.orgCredential service until the org credential exists, then org", async () => {
     const plugins: ValetPlugin[] = [{
       name: "slack", version: "0.1.0",
       credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
@@ -290,7 +290,7 @@ describe("GET /api/plugins connect mode", () => {
 
     const after = await fetch(`${api.baseUrl}/api/plugins`);
     const afterBody = (await after.json()) as ListPluginsResponse;
-    expect(afterBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("manual");
+    expect(afterBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("org");
   });
 
   /**

@@ -78,10 +78,12 @@ export interface CredentialDeclaration {
   oauth?: OAuthDeclaration;
   /** Deployment/org prerequisite for offering this credential. Absent = the
    * credential is self-sufficient (a personal token works with no org setup)
-   * and the service is always offered. `orgCredential: true` = an org-scoped
-   * credential for this service must exist before users can connect; an
-   * admin creates it in Settings → Organization. Evaluated by the API host,
-   * never by the engine. */
+   * and the service is always offered. `orgCredential: true` = the org-scoped
+   * credential an admin creates in Settings → Organization IS the
+   * integration; users never connect this credential themselves. Until the
+   * admin connects, the service is unavailable; after, sessions resolve the
+   * org credential by owner escalation. Evaluated by the API host, never by
+   * the engine. */
   requires?: { orgCredential: true };
 }
 

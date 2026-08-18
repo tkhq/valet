@@ -76,7 +76,7 @@ Slack declares `requires: { orgCredential: true }`.
 definition:
 
 ```ts
-type ConnectMode = "oauth" | "manual" | "unconfigured";
+type ConnectMode = "oauth" | "manual" | "org" | "unconfigured";
 
 connectModeFor({ plugins, decl, service, orgId, credentials, env }): Promise<ConnectMode>
 ```
@@ -91,7 +91,13 @@ Rules, in order:
    2026-07-20 integration-OAuth design specified — see Deviations.)
 4. `requires.orgCredential` with no org-scoped credential stored for the
    service → `"unconfigured"`.
-5. Otherwise → `"manual"`.
+5. `requires.orgCredential` with the org credential stored → `"org"`. The
+   org credential provides the service (sessions resolve it by owner
+   escalation — slack-user-integration design, section 5), so there is
+   nothing for a user to connect and no token entry is offered. The
+   personal path, when a service has one, is its own declaration (e.g.
+   `slack-user` OAuth).
+6. Otherwise → `"manual"`.
 
 `unavailableServiceSet(plugins, orgId, credentials, env)` returns the
 services that resolve to `"unconfigured"`, for the two enforcement points
@@ -100,15 +106,15 @@ that gate by set membership (session builds, workflow invocations).
 ## Enforcement points
 
 **1. `/api/plugins` (presentation).** `PluginServiceSummary.connect` becomes
-`"oauth" | "manual" | "unconfigured"`. Everything else on the summary stays:
-an unconfigured-but-connected service still reports `connected`, health, and
-disconnect works.
+`"oauth" | "manual" | "org" | "unconfigured"`. Everything else on the
+summary stays: an unconfigured-but-connected service still reports
+`connected`, health, and disconnect works.
 
 **2. `PUT /api/credentials/:service` (manual save).** A user-scope save for
-a service that resolves `"unconfigured"` is rejected with an error that
-names the corrective action. Org-scope saves are exempt — an admin's
-org-scope Slack save is exactly how the service becomes configured. Unknown
-services (no declaration) stay accepted, as before.
+a service that resolves `"unconfigured"` or `"org"` is rejected with an
+error that names the corrective action. Org-scope saves are exempt — an
+admin's org-scope Slack save is exactly how the service becomes configured.
+Unknown services (no declaration) stay accepted, as before.
 
 **3. Session builds (agent tools).** `EngineHost.sessionExtras` — the one
 funnel for all four session builders — filters the plugin set through
@@ -140,6 +146,9 @@ disconnect), but sessions stop receiving the tools.
 - Unconfigured and **connected** → the tile renders with Disconnect and a
   note naming the fix for the cause that blocks it (generalizing the GitHub
   org-note slot). See "Two causes, three notes" below.
+- `"org"` → the tile renders with no connect control and the note
+  "Provided by your organization. An admin manages it in Settings →
+  Organization." A leftover user credential keeps its Disconnect.
 
 ## Telling the org admin which setting is missing
 

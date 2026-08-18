@@ -255,6 +255,10 @@ function ServiceBlock({
   // what to set (integration-availability design). The note below names where
   // the setup actually happens.
   const unconfigured = service.connect === "unconfigured";
+  // "org": the org credential provides the service and there is nothing for
+  // the user to connect. The tile states that instead of offering token
+  // entry — the Slack bot token, for one, belongs to Settings → Organization.
+  const orgProvided = service.connect === "org";
   // Present only for an org admin, and only for the missing-OAuth-client
   // arm. See `isVisibleService`.
   const missingEnv = service.missingEnv ?? [];
@@ -290,8 +294,8 @@ function ServiceBlock({
   );
 
   const controls = !service.connected ? (
-    unconfigured ? null : connectControl
-  ) : repair && !unconfigured ? (
+    unconfigured || orgProvided ? null : connectControl
+  ) : repair && !unconfigured && !orgProvided ? (
     <span className="flex items-center gap-3">
       {disconnectControl}
       {connectControl}
@@ -323,6 +327,15 @@ function ServiceBlock({
     </p>
   );
 
+  // The org-provided note replaces the connect control, not the tile: the
+  // service works in sessions through the org credential, so the tile stays
+  // to say who provides it.
+  const orgProvidedNote = orgProvided ? (
+    <p className="text-xs leading-relaxed text-muted">
+      Provided by your organization. An admin manages it in Settings → Organization.
+    </p>
+  ) : undefined;
+
   return (
     <>
       <CardHeading
@@ -334,9 +347,10 @@ function ServiceBlock({
       {/* The org note reads on a disconnected card too — "your organisation
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
-      {(orgNote || unconfiguredNote || (service.connected && (service.health?.login || note))) && (
+      {(orgNote || unconfiguredNote || orgProvidedNote || (service.connected && (service.health?.login || note))) && (
         <div className="mt-1.5 space-y-1 pl-12">
           {unconfiguredNote}
+          {orgProvidedNote}
           {service.connected && service.health?.login && (
             <p className="truncate text-xs text-muted">Account: {service.health.login}</p>
           )}
