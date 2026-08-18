@@ -812,18 +812,18 @@ const sendMessage = action(Type.Object({
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
-    const token = cred?.accessToken ?? "";
+    const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
     // Resolve #name to channel ID via users.conversations
     let channelId = p.channel;
     if (p.channel.startsWith('#')) {
       const name = p.channel.slice(1).toLowerCase();
-      let cursor: string | undefined;
+      let nextCursor: string | undefined;
       let found = false;
       outer: do {
         const q: Record<string, unknown> = { types: 'public_channel,private_channel', limit: 200, exclude_archived: true };
-        if (cursor) q.cursor = cursor;
+        if (nextCursor) q.cursor = nextCursor;
         const res = await slackGet('users.conversations', token, q);
         if (!res.ok) return slackError(res);
         const data = (await res.json()) as { ok: boolean; error?: string; channels?: Record<string, unknown>[]; response_metadata?: { next_cursor?: string } };
@@ -835,8 +835,8 @@ const sendMessage = action(Type.Object({
             break outer;
           }
         }
-        cursor = data.response_metadata?.next_cursor || undefined;
-      } while (cursor);
+        nextCursor = data.response_metadata?.next_cursor || undefined;
+      } while (nextCursor);
       if (!found) return { success: false, error: `Channel "${p.channel}" not found or bot is not a member. Use list_channels to find available channels.` };
     }
 
@@ -853,7 +853,7 @@ const sendMessage = action(Type.Object({
         if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
         userBlocks = parsed as Record<string, unknown>[];
       } catch {
-        return { success: false, error: 'blocks must be valid JSON' };
+        return { success: false, error: 'blocks must be valid JSON array, e.g. [{"type":"section","text":{"type":"mrkdwn","text":"*bold*"}}]' };
       }
     }
 
@@ -885,11 +885,12 @@ const sendMessage = action(Type.Object({
     }
 
     const res = await slackFetch('chat.postMessage', token, body);
-    if (!res.ok) return slackError(res);
     const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
-    if (!data.ok) return slackError(res, data);
+    if (!res.ok || !data.ok) {
+      return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
+    }
 
-    return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
+    return { success: true, data: { ts: data.ts, channel: data.channel } };
   },
 });
 
