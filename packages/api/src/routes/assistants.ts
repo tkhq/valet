@@ -33,6 +33,7 @@ import {
   toAssistantSummary,
 } from "../assistants/service.js";
 import { validateAssistantBehavior } from "../assistants/behavior.js";
+import { PERSONALITY_INJECT_CAP } from "../assistants/persona.js";
 import { assistantOwner, canAdministerAssistantOwner, canViewAssistantOwner } from "../assistants/access.js";
 import { listTeamsForUser } from "../services/teams.js";
 import type {
@@ -129,6 +130,12 @@ assistantsRouter.post("/", async (c) => {
   if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
     return c.json({ error: "personality must be a string." }, 400);
   }
+  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
+    return c.json(
+      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
+      400,
+    );
+  }
   if (body.behavior !== undefined && body.behavior !== null) {
     const err = validateAssistantBehavior(body.behavior);
     if (err) return c.json({ error: err }, 400);
@@ -169,6 +176,12 @@ assistantsRouter.patch("/:id", async (c) => {
   }
   if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
     return c.json({ error: "personality must be a string, or null to clear it." }, 400);
+  }
+  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
+    return c.json(
+      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
+      400,
+    );
   }
   if (body.behavior !== undefined && body.behavior !== null) {
     const err = validateAssistantBehavior(body.behavior);

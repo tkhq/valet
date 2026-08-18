@@ -586,4 +586,51 @@ describe("personality and behavior config", () => {
     expect(created.behavior).toBeUndefined();
     expect(created.personality).toBeUndefined();
   });
+
+  it("POST normalizes a whitespace-only personality to absent", async () => {
+    api = await bootTestApi();
+    // POST stored the raw value before, so `""` disabled the memory-file
+    // fallback at wake. It must trim to null the same way PATCH does.
+    const created = await create(api, { name: "Blank", personality: "   " });
+    expect(created.personality).toBeUndefined();
+  });
+
+  it("PATCH clears a personality set to whitespace only", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage", personality: "Blunt." });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: "   " }),
+    });
+    expect(res.status).toBe(200);
+    const patched = (await res.json()) as PatchAssistantResponse;
+    expect(patched.personality).toBeUndefined();
+  });
+
+  it("POST rejects a personality over the injection cap and names the limit", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/assistants`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: "Wordy", personality: "x".repeat(501) }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("limited to 500 characters");
+  });
+
+  it("PATCH rejects a personality over the injection cap and names the limit", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage" });
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: "x".repeat(501) }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("limited to 500 characters");
+  });
 });

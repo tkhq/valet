@@ -272,9 +272,12 @@ export async function listAssistantsForOwners(
  * check and the insert; the partial unique index catches that, and the
  * retry re-inserts the SAME id as an ordinary assistant.
  *
- * `config.personality` is the raw persona text. `config.behavior` is the
- * parsed `AssistantBehavior`; this function serializes it to JSON before
- * writing so callers never touch the wire format directly.
+ * `config.personality` is the raw persona text. It is trimmed and an empty
+ * result stored as null — the same normalization `patchAssistant` applies, so
+ * `POST { personality: "" }` and a later clear both leave the memory-file
+ * fallback in play at wake. `config.behavior` is the parsed
+ * `AssistantBehavior`; this function serializes it to JSON before writing so
+ * callers never touch the wire format directly.
  */
 export async function createAssistant(
   db: AppDb,
@@ -284,12 +287,14 @@ export async function createAssistant(
   config?: { personality?: string | null; behavior?: AssistantBehavior | null },
 ): Promise<AssistantRow> {
   const hasDefault = (await findDefaultAssistant(db, orgId, principal)) !== undefined;
+  const trimmedPersonality =
+    config?.personality == null ? null : config.personality.trim() || null;
   const row = newAssistantRow({
     orgId,
     principal,
     name,
     isDefault: !hasDefault,
-    personality: config?.personality ?? null,
+    personality: trimmedPersonality,
     behavior: serializeAssistantBehavior(config?.behavior),
   });
 
