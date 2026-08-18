@@ -1007,3 +1007,69 @@ describe("installWorkflowTemplate ownership", () => {
     expect(teamRows).toHaveLength(1);
   });
 });
+
+// ─── The shipped assign-reviewers install, end to end ────────────────────
+
+/**
+ * A real run failed with `unresolved template path "trigger.data.rosterOwner"`,
+ * because an event run's `trigger.data` is the dispatcher's envelope
+ * (`{ key, refs, payload, summary }`) and carries no install fields. Those
+ * fields are supposed to be BAKED into the definition at install. These pin
+ * both halves of that: a blank required field is refused, and a supplied one
+ * is written in as a literal.
+ */
+describe("github.assign-reviewers — install bakes its roster location", () => {
+  const ID = "github.assign-reviewers";
+
+  function inputs(over: Record<string, string> = {}): Record<string, string> {
+    return {
+      repository: "tkhq/valet",
+      codeownersPath: ".github/CODEOWNERS",
+      rosterOwner: "tkhq",
+      rosterRepository: "valet",
+      rosterPath: ".github/reviewer-roster.csv",
+      ...over,
+    };
+  }
+
+  /** The credential gate runs BEFORE input resolution, so every service the
+   * template needs must be connected or the refusal under test never
+   * happens. `slack` is org-provided, so it is saved at org scope. */
+  async function connectAll(): Promise<void> {
+    await connect("github");
+    await connect("google_calendar");
+    await credentials.save({ type: "org", id: OWNER.orgId }, "slack", {
+      type: "bot_token",
+      accessToken: "xoxb-test",
+    });
+  }
+
+  it("refuses the install when a required roster field is blank", async () => {
+    await connectAll();
+    const partial = inputs();
+    delete partial.rosterOwner;
+    const result = await installWorkflowTemplate(deps(bundledPlugins), OWNER, ID, { inputs: partial });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    if (result.code !== "invalid_input") throw new Error(`expected invalid_input, got ${result.code}`);
+    expect(result.errors.join("\n")).toContain("rosterOwner");
+  });
+
+  it("bakes the supplied roster location into the node that reads it", async () => {
+    await connectAll();
+    const result = await installWorkflowTemplate(deps(bundledPlugins), OWNER, ID, { inputs: inputs() });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    const rows = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, result.workflowId));
+    const definition = rows[0]!.definition as WorkflowDefinition;
+    const roster = definition.nodes.find((n) => n.id === "roster");
+    const params = roster && "params" in roster ? (roster.params as Record<string, unknown>) : {};
+    // Literals, not template reads — an event run has nothing to resolve
+    // `{{ trigger.data.rosterOwner }}` against.
+    expect(params.owner).toBe("tkhq");
+    expect(params.repo).toBe("valet");
+    expect(JSON.stringify(definition)).not.toContain("trigger.data.rosterOwner");
+    expect(JSON.stringify(definition)).not.toContain("trigger.data.rosterRepository");
+  });
+});

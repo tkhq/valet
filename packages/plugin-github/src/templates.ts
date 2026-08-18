@@ -830,11 +830,26 @@ const CHANGED_PATHS_LIMIT = 100;
 
 const assignReviewers: WorkflowDefinition = {
   version: "dag/v1",
-  // A hand-started run has no webhook body. Without this, every
-  // `trigger.data.payload.…` path renders empty and the run either assigns
-  // nobody from nothing or writes a comment built from empty strings. With
-  // it, the node that would do that fails before it calls GitHub.
-  policy: { onUnresolvedPath: "fail" },
+  // No `policy.onUnresolvedPath: "fail"` here, unlike the review template.
+  //
+  // That policy existed to stop a hand-started run building a message out
+  // of empty strings, and the branch gates below now do that job: a run
+  // carrying no recognizable event reaches `unrecognized_trigger` before
+  // any node reads the payload. Nothing downstream of a gate runs without
+  // an event.
+  //
+  // What the policy also did, and the reason it is gone, is make the ROSTER
+  // mandatory. `read_repo_file` answers 404 with `success: false`, so a
+  // repository with no roster fails that node, and an `llm` prompt is an
+  // enforceable surface — `shortlist` would fail before running rather than
+  // read an empty roster. Making the roster optional under the policy meant
+  // duplicating every node downstream of `shortlist`, because a second
+  // shortlist node has a second id and nothing downstream could read both.
+  //
+  // Unresolved paths are still REPORTED either way (`interpreter.ts` runs
+  // its template audit regardless; the policy only decides whether a
+  // finding also fails the node), so a typo is still visible in the run's
+  // diagnostics. It is no longer fatal.
   nodes: [
     {
       id: "start",
@@ -989,11 +1004,19 @@ const assignReviewers: WorkflowDefinition = {
       },
     },
     {
+      // CODEOWNERS only. Without it nothing says who owns the changed paths,
+      // and every later step would assign nobody — so the failure is made
+      // here, where the message can name the file to correct.
+      //
+      // The ROSTER is deliberately absent from this gate. A repository with
+      // no roster still gets reviewers: `shortlist` falls back to the
+      // CODEOWNERS tokens themselves. An `if` condition is exempt from the
+      // template audit, so a roster that failed to read is a question here
+      // rather than a fault.
       id: "inputs_readable",
       type: "if",
       conditions: [
         { left: "nodes.codeowners.result.content", dataType: "string", operation: "isNotEmpty" },
-        { left: "nodes.roster.result.content", dataType: "string", operation: "isNotEmpty" },
       ],
     },
     {
@@ -1001,10 +1024,10 @@ const assignReviewers: WorkflowDefinition = {
       type: "stop",
       outcome: "failure",
       message:
-        "One of the two files this run reads is empty. Put an owner rule in {{ trigger.data.codeownersPath }} in " +
-        "{{ trigger.data.payload.repository.full_name }}. Put one row per reviewer in {{ trigger.data.rosterPath }} " +
-        "in {{ trigger.data.rosterOwner }}/{{ trigger.data.rosterRepository }}, with the columns github_handle, " +
-        "groups, slack_user_id, calendar_id, timezone, work_hours, areas.",
+        "{{ trigger.data.codeownersPath }} in {{ trigger.data.payload.repository.full_name }} is empty, or could " +
+        "not be read at all. Put an owner rule in it. Check that the file is at that path and that your GitHub " +
+        "account can read that repository. The reviewer roster is optional — without one, reviewers are taken " +
+        "from CODEOWNERS directly.",
     },
     {
       id: "pull_request_read",
@@ -1068,13 +1091,14 @@ const assignReviewers: WorkflowDefinition = {
         "The roster is CSV with a header row and the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, areas.",
         "groups holds the owner tokens that person answers for, separated by | characters. Any column can be empty.",
         "",
-        "Roster file:",
+        "Roster file. It can be EMPTY — the roster is optional, and a repository that has none still gets reviewers:",
         "{{ nodes.roster.result.content }}",
         "",
         "Do this in order.",
         "1. Take each changed path. Find the last CODEOWNERS rule that matches it. Collect that rule's owner tokens. A path that matches no rule goes in unmatchedPaths.",
         "2. requiredOwners is every owner token you collected, with duplicates removed, sorted. requiredOwnerCount is how many entries it holds. Count them; do not estimate.",
         "3. Read the roster. A row covers an owner token when the token is the row's github_handle written with a leading @, or when the token is one of the row's groups entries.",
+        "3a. WHEN THE ROSTER IS EMPTY, build candidates from the required owner tokens themselves. A token written @handle with NO slash is one person: make a candidate whose handle is that token without the leading @, whose coversOwners is that one token, and whose calendarId, slackUserId, timezone, workHours and areas are all empty strings. A token that contains a slash names a GitHub TEAM and a token that looks like an email address names nobody assignable: put each of those in rosterProblems, saying it needs a roster row, and make no candidate for it. Then apply step 4 to these candidates as well, and skip to step 6.",
         "4. Drop a row when its github_handle is the pull request author.",
         "5. Build candidates from the rows that are left, each with the owner tokens it covers. Keep the rows that cover an owner token no other row covers. Then keep the rest.",
         `6. Return at most ${MAX_CANDIDATES} candidates. Put every candidate you cut in rosterProblems with the text "cut by the candidate cap".`,
@@ -1651,11 +1675,11 @@ const assignReviewers: WorkflowDefinition = {
       },
     },
     {
+      // CODEOWNERS only, for the reason `inputs_readable` gives.
       id: "swap_inputs_readable",
       type: "if",
       conditions: [
         { left: "nodes.codeowners_swap.result.content", dataType: "string", operation: "isNotEmpty" },
-        { left: "nodes.roster_swap.result.content", dataType: "string", operation: "isNotEmpty" },
       ],
     },
     {
@@ -1664,10 +1688,9 @@ const assignReviewers: WorkflowDefinition = {
       outcome: "failure",
       message:
         "{{ trigger.data.payload.comment.user.login }} declined on pull request " +
-        "{{ trigger.data.payload.issue.number }}, and one of the two files a reselection reads is empty. Put an " +
-        "owner rule in {{ trigger.data.codeownersPath }} in {{ trigger.data.payload.repository.full_name }}. Put " +
-        "one row per reviewer in {{ trigger.data.rosterPath }} in " +
-        "{{ trigger.data.rosterOwner }}/{{ trigger.data.rosterRepository }}.",
+        "{{ trigger.data.payload.issue.number }}, and {{ trigger.data.codeownersPath }} in " +
+        "{{ trigger.data.payload.repository.full_name }} is empty, or could not be read at all. Put an owner rule " +
+        "in it, and check that your GitHub account can read that repository.",
     },
     {
       // Same shape as `shortlist`, except the decliner is excluded by name
@@ -1696,7 +1719,7 @@ const assignReviewers: WorkflowDefinition = {
         "The roster is CSV with a header row and the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, areas.",
         "groups holds the owner tokens that person answers for, separated by | characters. Any column can be empty.",
         "",
-        "Roster file:",
+        "Roster file. It can be EMPTY — the roster is optional, and a repository that has none still gets reviewers:",
         "{{ nodes.roster_swap.result.content }}",
         "",
         "The person who just declined, and must not be a candidate: {{ trigger.data.payload.comment.user.login }}",
@@ -1705,6 +1728,7 @@ const assignReviewers: WorkflowDefinition = {
         "1. Take each changed path. Find the last CODEOWNERS rule that matches it. Collect that rule's owner tokens. A path that matches no rule goes in unmatchedPaths.",
         "2. requiredOwners is every owner token you collected, with duplicates removed, sorted. requiredOwnerCount is how many entries it holds. Count them; do not estimate.",
         "3. Read the roster. A row covers an owner token when the token is the row's github_handle written with a leading @, or when the token is one of the row's groups entries.",
+        "3a. WHEN THE ROSTER IS EMPTY, build candidates from the required owner tokens themselves. A token written @handle with NO slash is one person: make a candidate whose handle is that token without the leading @, whose coversOwners is that one token, and whose calendarId, slackUserId, timezone, workHours and areas are all empty strings. A token that contains a slash names a GitHub TEAM and a token that looks like an email address names nobody assignable: put each of those in rosterProblems, saying it needs a roster row, and make no candidate for it. Then apply step 4 to these candidates as well, and skip to step 6.",
         "4. Drop a row when its github_handle is the pull request author, or is the person who just declined.",
         "5. Build candidates from the rows that are left, each with the owner tokens it covers. Keep the rows that cover an owner token no other row covers. Then keep the rest.",
         `6. Return at most ${MAX_CANDIDATES} candidates. Put every candidate you cut in rosterProblems with the text "cut by the candidate cap".`,
@@ -2348,8 +2372,8 @@ export const githubTemplates: WorkflowTemplate[] = [
     rank: 1,
     name: "Assign reviewers to a pull request",
     description:
-      "Picks reviewers for a pull request from CODEOWNERS and a roster CSV you maintain — skipping anyone on " +
-      "PTO or outside their working hours — writes them into the assignees field, and pings each one on Slack. " +
+      "Picks reviewers for a pull request from CODEOWNERS, writes them into the assignees field, and pings each " +
+      "one on Slack. Add a roster CSV to get more: team membership, PTO and working-hours checks, and Slack ids. " +
       "When an assignee declines in a comment, it swaps in the next best candidate on its own.\n\n" +
       "It needs GitHub, Google Calendar, and Slack connected on your own account. Install it, then add its " +
       "GitHub triggers yourself — it runs on pull request and comment events, not on a schedule or by hand.",
@@ -2368,6 +2392,7 @@ export const githubTemplates: WorkflowTemplate[] = [
     ],
     caveats: [
       "Installing it arms two triggers scoped to the repository you name, matched as owner/name exactly — a typo arms triggers that never fire and report nothing. The comment trigger fires on every comment in that repository, issues included, because GitHub offers no filter to separate them; a comment on an issue ends the run as a success that did nothing.",
+      "The roster is optional. Without one, reviewers come from CODEOWNERS directly — which only works for a plain @handle: a @org/team token names a group nothing here can resolve into people, and it is reported rather than assigned. A roster is what buys you team membership, PTO checking, working hours and Slack DMs.",
       "The roster is the only source of group membership, working hours, calendars and Slack ids — nothing here can read a GitHub team or a timezone on its own. A decline is a model's judgment on one comment, not a keyword match; read the reply it posts on the pull request to confirm what it did.",
       `It reads and writes GitHub as you, not as an installed application, and assigning replaces the whole assignees field — a pull request that already has one is left alone. It assigns at most ${MAX_ASSIGNEES} people and checks at most ${MAX_CANDIDATES} calendars per run; anything past those caps is reported, never guessed at.`,
     ],
