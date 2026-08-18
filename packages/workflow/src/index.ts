@@ -45,7 +45,12 @@ export type { IfDataType } from './dag/if-operations.js';
 
 export { parseDurationMs } from './dag/duration.js';
 
-export { normalizeInputType, resolveTriggerInput, triggerDataSchema } from './dag/trigger-input.js';
+export {
+  normalizeInputType,
+  resolveTriggerInput,
+  triggerDataSchema,
+  visibleTriggerFields,
+} from './dag/trigger-input.js';
 export type { TriggerInputError, ResolvedTriggerInput } from './dag/trigger-input.js';
 
 export { validateWorkflowDefinition } from './dag/validate.js';

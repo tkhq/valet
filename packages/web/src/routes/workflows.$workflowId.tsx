@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal, ShieldAlert } from "lucide-react";
-import { triggerDataSchema, type WorkflowDefinition } from "@valet/workflow";
+import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
 import type {
   GetWorkflowPermissionsResponse,
   ListWorkflowRunsResponse,
@@ -204,9 +204,11 @@ function WorkflowEditorPane({
 
   // Run executes the SAVED definition (the api snapshots the stored row),
   // so the run dialog's schema comes from `initialDefinition`, not the
-  // editor's in-progress draft.
-  const schema = triggerDataSchema(initialDefinition);
-  const hasSchema = schema !== undefined && Object.keys(schema).length > 0;
+  // editor's in-progress draft. Filtered to the fields a person actually
+  // answers — a `hidden` field is one an event trigger maps in, and asking
+  // for it here is the same mistake the install dialog already avoids.
+  const schema = visibleTriggerFields(triggerDataSchema(initialDefinition));
+  const hasSchema = Object.keys(schema).length > 0;
 
   async function handleSave(next: WorkflowDefinition) {
     await update.mutateAsync({ name, definition: next });
@@ -329,7 +331,7 @@ function WorkflowEditorPane({
         </div>
       )}
 
-      {hasSchema && schema && (
+      {hasSchema && (
         <RunWorkflowDialog
           workflowId={workflowId}
           workflowName={committedName}

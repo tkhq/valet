@@ -261,6 +261,38 @@ describe("WorkflowEditorPage", () => {
     );
   });
 
+  it("runs immediately, with no dialog, when the trigger's only field is hidden", async () => {
+    // github.pull-request-review and github.assign-reviewers, once
+    // installed, declare exactly one trigger field: a hidden webhook
+    // payload nobody types. Run must not open a dialog asking for it.
+    const original = workflowData.definition;
+    // `workflowData.definition`'s inferred type is the trigger→stop fixture
+    // above; a real definition's `dataSchema` is unchecked stored JSON that
+    // shape does not carry, so this is the same unknown-then-single-cast
+    // seam `trigger-input.test.ts`'s `rawDef` uses.
+    workflowData.definition = {
+      version: "dag/v1",
+      nodes: [
+        {
+          id: "start",
+          type: "trigger",
+          dataSchema: { payload: { type: "object", hidden: true } },
+        },
+      ],
+      edges: [],
+    } as unknown as typeof workflowData.definition;
+    try {
+      render(<WorkflowEditorPage workflowId="wf_1" />);
+      fireEvent.click(screen.getByRole("button", { name: "Run" }));
+
+      await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
+      expect(screen.queryByText("payload")).toBeNull();
+      expect(screen.queryByText(/This workflow's trigger declares inputs/)).toBeNull();
+    } finally {
+      workflowData.definition = original;
+    }
+  });
+
   it("lists runs in the runs drawer, and says when the list is one page of more", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     // `1+`, not `1`: the count is the page's length, not the run total.

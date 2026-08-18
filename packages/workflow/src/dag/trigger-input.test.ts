@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { normalizeInputType, resolveTriggerInput } from './trigger-input.js';
+import { normalizeInputType, resolveTriggerInput, visibleTriggerFields } from './trigger-input.js';
 import type { WorkflowInputDefinition } from './shape.js';
 
 /** Deliberately-malformed input definition. `dataSchema` is unchecked stored
@@ -117,5 +117,40 @@ describe('resolveTriggerInput', () => {
     const result = resolveTriggerInput(schema, { name: null });
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].field).toBe('name');
+  });
+});
+
+describe('visibleTriggerFields', () => {
+  it('drops fields marked hidden, and keeps everything else', () => {
+    const mixed: Record<string, WorkflowInputDefinition> = {
+      repositoryOwner: { type: 'string', required: true },
+      payload: { type: 'object', hidden: true },
+    };
+    expect(visibleTriggerFields(mixed)).toEqual({
+      repositoryOwner: { type: 'string', required: true },
+    });
+  });
+
+  it('reduces an all-hidden schema to empty — the run dialog reads this as "nothing to ask"', () => {
+    // github.pull-request-review and github.assign-reviewers, once
+    // installed: the only field left on the trigger is the hidden webhook
+    // payload. A caller that opens a run dialog on this schema shows one
+    // field nobody should ever type into.
+    const eventOnly: Record<string, WorkflowInputDefinition> = {
+      payload: { type: 'object', hidden: true },
+    };
+    expect(visibleTriggerFields(eventOnly)).toEqual({});
+  });
+
+  it('returns empty for an undefined schema, same as a trigger with no dataSchema at all', () => {
+    expect(visibleTriggerFields(undefined)).toEqual({});
+  });
+
+  it('keeps a field whose hidden flag is explicitly false, or simply absent', () => {
+    const schema: Record<string, WorkflowInputDefinition> = {
+      a: { type: 'string', hidden: false },
+      b: { type: 'string' },
+    };
+    expect(visibleTriggerFields(schema)).toEqual(schema);
   });
 });
