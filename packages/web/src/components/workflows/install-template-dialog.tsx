@@ -12,6 +12,14 @@
  * defaults, so these values are written into the definition at install
  * rather than read from the trigger at run time.
  *
+ * `required` here means "required TO INSTALL", which only a scheduled
+ * template has. Its runs arrive on a timer with no form to answer, so a
+ * missing value has nowhere to come from and the server refuses the install
+ * (`resolveInstallValues`). A template that runs when a person starts it
+ * collects the same fields on the run form instead, so demanding them now
+ * would only stop somebody installing a template to look at it and edit it.
+ * That is the normal way to meet a template, so nothing is demanded here.
+ *
  * A failed install keeps the dialog open with the server's message. The
  * install is one transaction server-side, so a failure leaves nothing
  * behind, and retrying after a correction is safe.
@@ -35,12 +43,22 @@ function initialValues(inputs: WorkflowTemplateInput[]): Record<string, unknown>
   return values;
 }
 
-/** True while a required field is still empty. A boolean is never empty —
- * `false` is an answer. */
+/**
+ * True while a field the INSTALL cannot proceed without is still empty.
+ *
+ * Only a scheduled template has such a field. See the file header: an
+ * unscheduled template asks for the same values on the run form, so holding
+ * the install button hostage to them blocks the ordinary case of installing
+ * a template in order to read it and change it.
+ *
+ * A boolean is never empty — `false` is an answer.
+ */
 function hasEmptyRequired(
   inputs: WorkflowTemplateInput[],
   values: Record<string, unknown>,
+  scheduled: boolean,
 ): boolean {
+  if (!scheduled) return false;
   return inputs.some((input) => {
     if (!input.required || input.type === "boolean") return false;
     const value = values[input.name];
@@ -135,6 +153,7 @@ export function InstallTemplateDialog({
                 key={input.name}
                 id={`${fieldId}-${input.name}`}
                 input={input}
+                scheduled={template.schedule !== null}
                 value={values[input.name]}
                 onChange={(next) =>
                   setValues((prev) => {
@@ -164,7 +183,7 @@ export function InstallTemplateDialog({
           </Button>
           <Button
             onClick={() => void submit()}
-            disabled={install.isPending || hasEmptyRequired(template.inputs, values)}
+            disabled={install.isPending || hasEmptyRequired(template.inputs, values, template.schedule !== null)}
           >
             {install.isPending ? "Installing…" : "Install"}
           </Button>
@@ -179,13 +198,18 @@ function TemplateField({
   input,
   value,
   onChange,
+  scheduled,
 }: {
   id: string;
   input: WorkflowTemplateInput;
   value: unknown;
   onChange: (next: unknown) => void;
+  scheduled: boolean;
 }) {
-  const label = input.required ? `${input.label} *` : input.label;
+  // The asterisk marks a field the install itself cannot proceed without,
+  // so it follows the same rule as the button. On an unscheduled template
+  // every field is answered later, on the run form.
+  const label = input.required && scheduled ? `${input.label} *` : input.label;
 
   if (input.type === "boolean") {
     return (
