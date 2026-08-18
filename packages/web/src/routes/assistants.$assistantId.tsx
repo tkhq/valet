@@ -44,15 +44,15 @@ export function integrationOptions(
   );
 }
 
-/** The rail's administer rule, restated for one assistant: yours always;
- * a team's needs team admin or org admin. The API still 404s a non-admin
+/** The rail's administer rule, restated for one assistant: your own; a
+ * team's needs team admin or org admin. The API still 404s a non-admin
  * write — this only decides read-only rendering. */
 export function canEditAssistant(
   assistant: AssistantSummary,
   teams: TeamSummary[] | undefined,
   me: { id: string; orgRole: "admin" | "member" } | undefined,
 ): boolean {
-  if (assistant.owner.type === "user") return true;
+  if (assistant.owner.type === "user") return me?.id === assistant.owner.id;
   if (me?.orgRole === "admin") return true;
   const team = teams?.find((t) => t.id === assistant.owner.id);
   return team?.callerRole === "admin";
@@ -209,13 +209,14 @@ function AssistantEditorForm({
     });
   }
 
-  // Each section's Save builds its PATCH body from the LATEST SERVER value
-  // (`assistant.behavior`) plus only its OWN half from local state. Spreading
-  // the shared local `behavior` would have persisted the other section's
-  // unsaved edits and clobbered a concurrent edit the server already holds.
+  // Each section's Save builds its PATCH body from the last-fetched server
+  // value (`assistant.behavior`) plus only its OWN half from local state.
+  // Spreading the shared local `behavior` would have persisted the other
+  // section's unsaved edits. This is not a fresh server read: a concurrent
+  // PATCH from another client between fetch and save is still overwritten.
   function saveSkills() {
     const newBehavior: AssistantBehavior = {
-      ...(assistant.behavior ?? null),
+      ...assistant.behavior,
       skills:
         skillsMode === "all"
           ? { mode: "all" }
@@ -226,7 +227,7 @@ function AssistantEditorForm({
 
   function saveIntegrations() {
     const newBehavior: AssistantBehavior = {
-      ...(assistant.behavior ?? null),
+      ...assistant.behavior,
       integrations:
         integrationsMode === "all"
           ? { mode: "all" }

@@ -209,7 +209,7 @@ assistantsRouter.patch("/:id", async (c) => {
       // Cache-only eviction (never destroy(): that would kill a running
       // turn). The next wake rebuilds with the new persona and filters —
       // the same seam PATCH /api/orchestrator/info uses.
-      engineHost.evictCache(row.sessionId);
+      engineHost.evictCache(updated.sessionId);
     }
     return c.json(response);
   } catch (err) {

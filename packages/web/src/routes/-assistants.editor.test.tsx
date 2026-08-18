@@ -215,9 +215,15 @@ describe("integrationOptions()", () => {
 });
 
 describe("canEditAssistant()", () => {
-  it("user-owned assistant → always true", () => {
+  it("your own user-owned assistant → true", () => {
     const assistant = makeAssistant({ owner: { type: "user", id: "u1" } });
     expect(canEditAssistant(assistant, [], { id: "u1", orgRole: "member" })).toBe(true);
+  });
+
+  it("another user's assistant → false, even for an org admin", () => {
+    const assistant = makeAssistant({ owner: { type: "user", id: "u2" } });
+    expect(canEditAssistant(assistant, [], { id: "u1", orgRole: "member" })).toBe(false);
+    expect(canEditAssistant(assistant, [], { id: "u1", orgRole: "admin" })).toBe(false);
   });
 
   it("team assistant + callerRole member + orgRole member → false", () => {
