@@ -332,6 +332,15 @@ export interface PatchSessionRequest {
   /** New session name. Trimmed server-side. Must not be empty. */
   title?: string;
   /**
+   * Move the session to a team (a team id) or to your own workspace
+   * (`null`). Omitted means no change. The caller must administer the
+   * session; a team move also requires current membership of the target
+   * team — a non-member or unknown id 404s, the same existence-hiding
+   * `CreateSessionRequest.teamId` applies. Refused while a turn is running:
+   * the engine binds skills and credential context to the owner at build.
+   */
+  teamId?: string | null;
+  /**
    * Raise the session to `"full"` to run the terminal and the VS Code
    * server in its sandbox, or drop it back to `"headless"`.
    *

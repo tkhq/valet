@@ -464,10 +464,11 @@ sessionsRouter.patch("/:id", async (c) => {
   const wantsModel = body.model !== undefined;
   const wantsTitle = body.title !== undefined;
   const wantsProfile = body.profile !== undefined;
+  const wantsOwner = body.teamId !== undefined;
   // A body with no field at all keeps the message this guard has always
   // sent. The model picker is still the only caller that can omit a field
   // by accident, and a contract test pins this exact response.
-  if (!wantsModel && !wantsTitle && !wantsProfile) {
+  if (!wantsModel && !wantsTitle && !wantsProfile && !wantsOwner) {
     return c.json({ error: "model is required" }, 400);
   }
   if (wantsModel && (typeof body.model !== "string" || body.model.length === 0)) {
@@ -512,6 +513,46 @@ sessionsRouter.patch("/:id", async (c) => {
     }
   }
 
+  // Owner move (team-workspace-ui design, decision 5): a team id moves the
+  // session to that team, `null` to the CALLER's own workspace — on a
+  // team-owned session the mover is a team or org admin, and taking a
+  // session personal makes it theirs. Validated like the create route:
+  // membership of the target team, 404 for a non-member or unknown id.
+  let nextOwner: Principal | undefined;
+  if (wantsOwner) {
+    if (body.teamId !== null && (typeof body.teamId !== "string" || body.teamId.length === 0)) {
+      return c.json(
+        { error: "teamId must be a team id, or null to move the session to your own workspace." },
+        400,
+      );
+    }
+    if (typeof body.teamId === "string") {
+      if (!(await isTeamMember(db, body.teamId, userId))) {
+        return c.json({ error: "team not found" }, 404);
+      }
+      nextOwner = { type: "team", id: body.teamId };
+    } else {
+      nextOwner = { type: "user", id: userId };
+    }
+    // An unchanged owner is not a change — no eviction, no mid-turn refusal.
+    if (nextOwner.type === row.ownerType && nextOwner.id === row.ownerId) {
+      nextOwner = undefined;
+    }
+  }
+  if (nextOwner !== undefined) {
+    // Refused mid-turn for the same reason a profile change is: the engine
+    // session binds skills and credential context to its owner at build, so
+    // the move evicts the cached session, and a running turn must not lose
+    // it under itself.
+    const busy = await engineStore.listUnsettledSubmissions(id);
+    if (busy.length > 0) {
+      return c.json(
+        { error: "a turn is running. Wait for it to finish, then move the session." },
+        409,
+      );
+    }
+  }
+
   // Materialize the engine session only when the model changes. A rename
   // must not start a sandbox — the header renames hibernated sessions too.
   let model: string | undefined;
@@ -544,13 +585,27 @@ sessionsRouter.patch("/:id", async (c) => {
   // The writes land after every validation, so a rejected model never
   // leaves a half-applied patch behind.
   let effectiveRow = row;
-  if (nextTitle !== undefined || nextProfile !== undefined) {
+  if (nextTitle !== undefined || nextProfile !== undefined || nextOwner !== undefined) {
     const now = Date.now();
+    // A personal move also re-stamps `userId`: `canViewSession` and
+    // `canAdministerSession` key user-owned rows off that column, so leaving
+    // the original creator there would hand the session to somebody who no
+    // longer owns it and lock out the mover. A team move leaves it alone —
+    // on team rows the column only records the first actor.
+    const ownerCols =
+      nextOwner !== undefined
+        ? {
+            ownerType: nextOwner.type,
+            ownerId: nextOwner.id,
+            ...(nextOwner.type === "user" ? { userId: nextOwner.id } : {}),
+          }
+        : {};
     await db
       .update(agentSessions)
       .set({
         ...(nextTitle !== undefined ? { title: nextTitle } : {}),
         ...(nextProfile !== undefined ? { profile: nextProfile } : {}),
+        ...ownerCols,
         updatedAt: now,
       })
       .where(eq(agentSessions.id, id));
@@ -558,8 +613,15 @@ sessionsRouter.patch("/:id", async (c) => {
       ...row,
       ...(nextTitle !== undefined ? { title: nextTitle } : {}),
       ...(nextProfile !== undefined ? { profile: nextProfile } : {}),
+      ...ownerCols,
       updatedAt: now,
     };
+  }
+
+  if (nextOwner !== undefined) {
+    // The cached engine session still holds the old owner's skills provider
+    // and credential context; the next touch rebuilds from the updated row.
+    engineHost.evictCache(id);
   }
 
   if (nextProfile !== undefined) {
