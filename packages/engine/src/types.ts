@@ -363,6 +363,11 @@ export interface MessageEntry extends BaseEntry {
   /** Present only when the model is in pi-ai's pricing registry; unpriced turns omit. */
   cost?: MessageCost;
   /**
+   * Image attachments on a user message. Only present on user entries with
+   * attached images; never on assistant, tool, or system entries.
+   */
+  attachments?: Array<{ type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }>;
+  /**
    * Present when this user entry originated from a `SignalContent` prompt.
    * `content` holds the raw (unescaped) body; rendering into LLM context
    * wraps it in the XML envelope described here (see `renderSignalEnvelope`

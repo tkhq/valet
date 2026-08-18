@@ -2094,6 +2094,33 @@ export class Thread {
     // QueueItem.metadata flows through onto the entry so synthetic flags like
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
+    
+    // Extract attachments if the prompt content has them.
+    let attachments: MessageEntry["attachments"];
+    if (
+      !isSignalContent(item.content) &&
+      typeof item.content === "object" &&
+      item.content !== null &&
+      "attachments" in item.content &&
+      Array.isArray(item.content.attachments)
+    ) {
+      // Runtime validation of each attachment element to guard against malformed wire data
+      const validated: MessageEntry["attachments"] = [];
+      for (const att of item.content.attachments) {
+        if (typeof att === "object" && att !== null && typeof att.mimeType === "string") {
+          validated.push({
+            type: "image" as const,
+            url: att.url,
+            data: att.data,
+            mimeType: att.mimeType,
+            name: att.name,
+          });
+        }
+        // Skip malformed elements silently; real issues will surface in model calls
+      }
+      attachments = validated.length > 0 ? validated : undefined;
+    }
+    
     const userEntry: MessageEntry = {
       id: uid("e"),
       sessionId: this.session.id,
@@ -2105,6 +2132,7 @@ export class Thread {
       signal: signalMeta,
       author: item.author,
       channel: item.channel,
+      attachments,
       // signalStamp (when present) has already been lifted into `signal`
       // above; stripping it here avoids duplicating the sender stamp into
       // the persisted entry's metadata (and onto the wire) a second time.
@@ -3702,9 +3730,44 @@ export function entriesToAgentMessages(
 
     if (e.role === "user") {
       const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
+      const contentBlocks: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+        { type: "text", text },
+      ];
+      
+      // Add image attachments if present
+      if (e.attachments) {
+        for (const att of e.attachments) {
+          if (att.type === "image") {
+            // If we have binary data, convert to base64; otherwise use the URL directly
+            let imageData: string;
+            // att.data is set when a tool returns binary attachment data (e.g. screenshot utilities)
+            if (att.data instanceof Uint8Array) {
+              imageData = Buffer.from(att.data).toString("base64");
+            } else if (att.url) {
+              // Extract base64 payload from data: URL
+              const match = att.url.match(/^data:([^;]+);base64,([A-Za-z0-9+/]+=*)$/);
+              if (!match) {
+                // Invalid data: URL format — skip this attachment and log a warning
+                console.warn(`[engine] skipping attachment with invalid data: URL format: ${att.url}`);
+                continue;
+              }
+              imageData = match[2];
+            } else {
+              // Skip attachments without data
+              continue;
+            }
+            contentBlocks.push({
+              type: "image",
+              data: imageData,
+              mimeType: att.mimeType,
+            });
+          }
+        }
+      }
+      
       out.push({
         role: "user",
-        content: [{ type: "text", text }],
+        content: contentBlocks,
         timestamp: e.createdAt,
       });
       continue;
