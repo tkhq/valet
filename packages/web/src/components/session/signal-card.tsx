@@ -102,7 +102,42 @@ function ChildSettledCard({
   );
 }
 
+/**
+ * A workflow run's report, with a link back to the run.
+ *
+ * The generic envelope labelled this "workflow.request" and stopped there,
+ * so a person reading their assistant could see that a workflow had said
+ * something but not which one, nor open it. `promptOrchestrator` now sets
+ * `attributes.runId` (`api/src/workflows/engine-deps.ts`); a signal that
+ * predates that still renders through the envelope below.
+ */
+function WorkflowRequestCard({ message, runId }: { message: Message; runId: string }) {
+  return (
+    <CardShell>
+      <div className="flex items-center gap-2">
+        <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
+          workflow
+        </span>
+        <Link
+          to="/workflows/runs/$runId"
+          params={{ runId }}
+          className="text-[11px] text-muted hover:underline"
+        >
+          Open run
+        </Link>
+      </div>
+      {message.content && (
+        <div className="mt-1.5 text-sm text-ink">
+          <Markdown>{message.content}</Markdown>
+        </div>
+      )}
+    </CardShell>
+  );
+}
+
 function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSignal }) {
+  const runId = signal.signalType === "workflow.request" ? signal.attributes?.runId : undefined;
+  if (runId) return <WorkflowRequestCard message={message} runId={runId} />;
   return (
     <CardShell>
       <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">

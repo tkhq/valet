@@ -46,7 +46,11 @@ function SessionPage() {
   // at this route, so redirect here rather than changing the API — this
   // future-proofs any such link regardless of where it originates.
   if (info.data?.sessionId && info.data.sessionId === sessionId) {
-    return <Navigate to="/chat" replace />;
+    // Forward the thread. This route already validates a `thread` param and
+    // /chat already reads one, but the redirect used to drop it — so a link
+    // naming a specific thread (a workflow run's, say) landed on whichever
+    // thread happened to be newest.
+    return <Navigate to="/chat" replace search={thread ? { thread } : {}} />;
   }
 
   const child = findChild(childrenQ.data?.children ?? [], sessionId);

@@ -12,6 +12,8 @@ export interface CheckpointLike {
   sessionId?: string;
   /** The run a `workflow` node started, when it started one. */
   childRunId?: string;
+  /** The thread a `session`/`orchestrator` node submitted to, when it had one. */
+  threadId?: string;
 }
 
 /** Raw checkpoint status strings → the same `NodeRunStatus` vocabulary the
@@ -123,6 +125,10 @@ function CheckpointRow({
             <Link
               to="/sessions/$sessionId"
               params={{ sessionId: checkpoint.sessionId }}
+              // The thread, when the node recorded one. That route forwards
+              // it to /chat for the caller's own assistant, which is the
+              // only way to land on THIS run's thread instead of the newest.
+              search={checkpoint.threadId ? { thread: checkpoint.threadId } : undefined}
               className="text-muted hover:underline"
             >
               Open session
