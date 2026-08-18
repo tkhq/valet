@@ -35,6 +35,57 @@ export interface WorkflowTemplateSchedule {
   description: string;
 }
 
+/**
+ * One filter on a template's event trigger.
+ *
+ * The value is either a literal, or `fromInput` — the name of a trigger
+ * `dataSchema` field the person fills in at install. A repository is the
+ * motivating case: the template knows it needs a repo filter, and only the
+ * installer knows which repo.
+ *
+ * A filter with neither, or with both, is refused before anything is
+ * written. So is a `field` the selected event keys do not declare: the
+ * ingest matcher only consults the arriving event's own catalog entry, so
+ * an undeclared field produces a subscription that matches nothing, forever,
+ * with no error to read.
+ */
+export interface WorkflowTemplateEventFilter {
+  /** A field the event catalog declares for these keys, e.g. "repo". */
+  field: string;
+  op: "eq" | "in" | "prefix" | "contains";
+  /** Literal value. Mutually exclusive with `fromInput`. */
+  value?: string | string[];
+  /**
+   * Trigger `dataSchema` field whose install-time value becomes this
+   * filter's value. Declare that field `required: true` — an event
+   * template's inputs are resolved at install, because an event run merges
+   * no `dataSchema` defaults.
+   */
+  fromInput?: string;
+}
+
+/**
+ * An event subscription the host arms with the workflow, in the same
+ * transaction that writes the definition.
+ *
+ * Without this a template that runs on events installs INERT: the
+ * definition is correct and nothing ever calls it, which reads as a broken
+ * workflow rather than an unfinished setup. A cron template has had
+ * `schedule` for exactly this reason since the gallery shipped.
+ */
+export interface WorkflowTemplateEventTrigger {
+  /**
+   * Base name. The host appends a per-install suffix, the same way it does
+   * for a schedule, so two installs stay apart in the Triggers list.
+   */
+  name: string;
+  /** Catalog event keys. A trailing ".*" wildcard is allowed. */
+  eventKeys: string[];
+  filters?: WorkflowTemplateEventFilter[];
+  /** One line of card copy, e.g. "When a pull request opens or is marked ready". */
+  description: string;
+}
+
 export interface WorkflowTemplate {
   /**
    * Stable, globally unique id — the install route's path parameter. Two
@@ -84,4 +135,13 @@ export interface WorkflowTemplate {
   definition: unknown;
   /** Cron schedule to arm with the workflow, in the same transaction. */
   schedule?: WorkflowTemplateSchedule;
+  /**
+   * Event subscriptions to arm with the workflow, in the same transaction.
+   *
+   * A template that declares neither `schedule` nor `events` installs as a
+   * workflow somebody starts by hand. A template that declares `events` and
+   * has them armed is the difference between an installed workflow and an
+   * installed workflow that actually runs.
+   */
+  events?: WorkflowTemplateEventTrigger[];
 }

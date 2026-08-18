@@ -657,6 +657,46 @@ export function validateValetPlugin(
     if (typeof t.definition !== "object" || t.definition === null) {
       issues.push({ path: `${path}.definition`, message: "required dag/v1 workflow definition object" });
     }
+    // BEFORE the schedule branch on purpose. That branch ends its guard
+    // with a bare `return`, which leaves this whole per-template callback —
+    // so a check placed after it is silently skipped for every template
+    // whose schedule is malformed.
+    checkArray(t.events, `${path}.events`, issues, (raw, evPath) => {
+      const ev = asRecord(raw, evPath, issues);
+      if (!ev) return;
+      for (const key of ["name", "description"] as const) {
+        if (typeof ev[key] !== "string" || ev[key].length === 0) {
+          issues.push({ path: `${evPath}.${key}`, message: "required non-empty string" });
+        }
+      }
+      if (
+        !Array.isArray(ev.eventKeys) ||
+        ev.eventKeys.length === 0 ||
+        ev.eventKeys.some((key) => typeof key !== "string" || key.length === 0)
+      ) {
+        issues.push({ path: `${evPath}.eventKeys`, message: "required non-empty string array" });
+      }
+      checkArray(ev.filters, `${evPath}.filters`, issues, (rawFilter, filterPath) => {
+        const f = asRecord(rawFilter, filterPath, issues);
+        if (!f) return;
+        if (typeof f.field !== "string" || f.field.length === 0) {
+          issues.push({ path: `${filterPath}.field`, message: "required non-empty string" });
+        }
+        if (typeof f.op !== "string" || !FILTER_OPS.includes(f.op)) {
+          issues.push({ path: `${filterPath}.op`, message: `must be one of ${FILTER_OPS.join(", ")}` });
+        }
+        // Exactly one source. Both is ambiguous; neither arms a
+        // subscription whose filter can never match, which is invisible
+        // at run time because a filter that matches nothing simply never
+        // fires.
+        if ((f.value !== undefined) === (f.fromInput !== undefined)) {
+          issues.push({ path: filterPath, message: 'requires exactly one of "value" or "fromInput"' });
+        }
+        if (f.fromInput !== undefined && (typeof f.fromInput !== "string" || f.fromInput.length === 0)) {
+          issues.push({ path: `${filterPath}.fromInput`, message: "must be a non-empty string" });
+        }
+      });
+    });
     if (t.schedule !== undefined) {
       const schedule = asRecord(t.schedule, `${path}.schedule`, issues);
       if (!schedule) return;
@@ -689,6 +729,11 @@ export function validateValetPlugin(
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, plugin: value as ValetPlugin };
 }
+
+/** Filter operators a template event trigger may use. Mirrors the host's
+ * own `FILTER_OPS` (`api/src/routes/events.ts`), which is the list the
+ * ingest matcher actually implements. */
+const FILTER_OPS: readonly string[] = ["eq", "in", "prefix", "contains"];
 
 function checkArray(
   value: unknown,

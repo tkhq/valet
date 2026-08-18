@@ -26,7 +26,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { PgDb } from "@valet/store-postgres";
-import { teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { eventSubscriptions, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import {
   bakeInputs,
@@ -212,6 +212,98 @@ const notesNightly: WorkflowTemplate = {
     [{ from: "start", to: "read" }],
   ),
   schedule: { name: "Notes nightly", cron: "0 3 * * *", timezone: "UTC", description: "Every day at 03:00" },
+};
+
+/**
+ * An EVENT-driven template: no schedule, one subscription install arms, and
+ * a filter whose value comes from an install-time input. The trigger def
+ * supplies the catalog entry `validateSubscription` checks the filter field
+ * against — an undeclared field is the failure mode worth a test, because
+ * it arms a subscription that silently matches nothing.
+ */
+const notesOnEvent: WorkflowTemplate = {
+  id: "notes-on-event",
+  name: "Notes on event",
+  description: "Reads a note when one is written.",
+  category: "Batch work",
+  apps: ["notes"],
+  steps: ["Read"],
+  definition: definition(
+    [
+      {
+        id: "start",
+        type: "trigger",
+        dataSchema: {
+          watched: { type: "string", required: true, label: "Folder" },
+          payload: { type: "object", hidden: true },
+        },
+      },
+      { id: "read", type: "tool", service: "notes", action: "read", params: { id: "n_1" } },
+    ],
+    [{ from: "start", to: "read" }],
+  ),
+  events: [
+    {
+      name: "On a note",
+      eventKeys: ["notes.written"],
+      filters: [{ field: "folder", op: "eq", fromInput: "watched" }],
+      description: "When a note is written",
+    },
+  ],
+};
+
+/** Same, with a filter field the catalog does not declare. */
+const notesBadFilter: WorkflowTemplate = {
+  ...notesOnEvent,
+  id: "notes-bad-filter",
+  name: "Notes bad filter",
+  events: [
+    {
+      name: "On a note",
+      eventKeys: ["notes.written"],
+      filters: [{ field: "not_a_declared_field", op: "eq", fromInput: "watched" }],
+      description: "When a note is written",
+    },
+  ],
+};
+
+/** The catalog entry both fixtures above are validated against. */
+const notesTriggerDef = {
+  id: "notes.written",
+  service: "notes",
+  description: "A note was written",
+  verify: () => Promise.resolve(null),
+  toEvent: () => ({
+    key: "notes.written",
+    dedupeKey: "d",
+    occurredAt: new Date(0).toISOString(),
+    refs: {},
+    summary: "note written",
+    payload: {},
+  }),
+  catalog: [
+    {
+      key: "notes.written",
+      description: "A note was written",
+      filters: [{ field: "folder", path: "folder", description: "Folder" }],
+    },
+  ],
+};
+
+const eventPlugin: ValetPlugin = {
+  name: "notes-events",
+  version: "0.0.1",
+  actions: [localActions],
+  triggers: [notesTriggerDef],
+  templates: [notesOnEvent],
+};
+
+const badFilterPlugin: ValetPlugin = {
+  name: "notes-bad-filter",
+  version: "0.0.1",
+  actions: [localActions],
+  triggers: [notesTriggerDef],
+  templates: [notesBadFilter],
 };
 
 const brokenTemplate: WorkflowTemplate = {
@@ -667,6 +759,60 @@ describe("installWorkflowTemplate", () => {
     expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
   });
 
+  it("arms a template's event triggers in the same transaction as the workflow", async () => {
+    // The gap this closes: an event template used to install INERT. The
+    // definition was correct and nothing ever called it, which reads as a
+    // broken workflow rather than an unfinished setup.
+    const result = await installWorkflowTemplate(deps([eventPlugin]), OWNER, "notes-on-event", {
+      inputs: { watched: "acme/platform" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    const subs = await db.select().from(eventSubscriptions);
+    expect(subs).toHaveLength(1);
+    expect(subs[0]!.eventKeys).toEqual(["notes.written"]);
+    expect(subs[0]!.target).toEqual({ kind: "workflow", workflowId: result.workflowId });
+    expect(subs[0]!.enabled).toBe(true);
+    // The install-time input became the filter value, which is the whole
+    // point of `fromInput`: the template knows it needs a filter, and only
+    // the installer knows what to filter on.
+    expect(subs[0]!.filters).toEqual([{ field: "folder", op: "eq", value: "acme/platform" }]);
+    // Suffixed like a schedule name, so two installs stay apart.
+    expect(subs[0]!.name).toContain("On a note");
+    expect(result.subscriptionIds).toHaveLength(1);
+  });
+
+  it("refuses the install when a filter's input has no value, naming the field", async () => {
+    // Caught by the required-input gate, which now treats an event
+    // template as unattended for the same reason a scheduled one is: the
+    // dispatcher merges no `dataSchema` defaults, so a value missing at
+    // install is missing forever. The filter-level check downstream is a
+    // backstop for a template that names an input its schema never declared.
+    const result = await installWorkflowTemplate(deps([eventPlugin]), OWNER, "notes-on-event");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    if (result.code !== "invalid_input") throw new Error(`expected invalid_input, got ${result.code}`);
+    expect(result.errors.join("\n")).toContain("watched");
+    // Nothing armed, and nothing written.
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
+  it("refuses a template whose filter field the event keys do not declare", async () => {
+    // A filter field the catalog does not declare arms a subscription that
+    // matches nothing, forever, with nothing to read. Refusing loudly at
+    // install is the only moment anybody finds out.
+    const result = await installWorkflowTemplate(deps([badFilterPlugin]), OWNER, "notes-bad-filter", {
+      inputs: { watched: "acme/platform" },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("broken_template");
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
   it("reports an unknown template id", async () => {
     const result = await installWorkflowTemplate(deps(), OWNER, "no-such-template");
     expect(result.ok).toBe(false);
@@ -779,7 +925,9 @@ describe("installWorkflowTemplate", () => {
     if (result.code !== "invalid_input") throw new Error(`expected invalid_input, got ${result.code}`);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain('Missing value for "noteId"');
-    expect(result.errors[0]).toContain("a scheduled run applies no input defaults");
+    // Worded for both unattended kinds now — a cron schedule and an event
+    // subscription have the same problem and the same fix.
+    expect(result.errors[0]).toContain("an unattended run applies no input defaults");
     expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
