@@ -5,6 +5,7 @@ import type {
   DecisionResolution as EngineDecisionResolution,
   MessageEntry as EngineMessageEntry,
   MessagePart as EngineMessagePart,
+  QueueState as EngineQueueState,
 } from "@valet/engine";
 import type {
   DecisionGate as WireDecisionGate,
@@ -181,6 +182,33 @@ export type WireEventDraft = WireEvent extends infer T
     : never
   : never;
 
+/**
+ * Project the engine's full QueueState to a `queue.state` frame with id
+ * lists — the live socket stays thin; the admin surface returns full items.
+ * Shared by the bus-event path below and the WS handshake, which seeds one
+ * frame per thread so a client connecting mid-turn sees the queue without
+ * waiting for the next transition.
+ */
+export function queueStateToWire(
+  sessionId: string,
+  threadId: string,
+  state: EngineQueueState,
+): WireEventDraft {
+  return {
+    type: "queue.state",
+    sessionId,
+    threadId,
+    state: {
+      mode: state.mode,
+      status: state.status,
+      activeItemId: state.activeItemId,
+      pendingIds: state.pending.map((i) => i.id),
+      collectingIds: (state.collectBuffer ?? []).map((i) => i.id),
+      blockedGateId: state.blockedGateId,
+    },
+  };
+}
+
 export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
   const e = ev.event;
   switch (e.type) {
@@ -345,24 +373,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
       ];
 
     case "queue_state":
-      // Project the engine's full QueueState to id lists — the live socket
-      // stays thin; the admin surface returns full items. sessionId comes
-      // from the envelope (the engine event only carries threadId + state).
-      return [
-        {
-          type: "queue.state",
-          sessionId: ev.sessionId,
-          threadId: e.threadId,
-          state: {
-            mode: e.state.mode,
-            status: e.state.status,
-            activeItemId: e.state.activeItemId,
-            pendingIds: e.state.pending.map((i) => i.id),
-            collectingIds: (e.state.collectBuffer ?? []).map((i) => i.id),
-            blockedGateId: e.state.blockedGateId,
-          },
-        },
-      ];
+      // sessionId comes from the envelope (the engine event only carries
+      // threadId + state).
+      return [queueStateToWire(ev.sessionId, e.threadId, e.state)];
 
     case "submission_settled":
       return [

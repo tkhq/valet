@@ -761,3 +761,35 @@ export function useQueueStateForThread(
     return s.bySession[sessionId]?.queueByThread[threadId];
   });
 }
+
+/**
+ * True while the thread's submission queue says the agent holds — or is
+ * about to take — the execution context: a running or gate-blocked turn, or
+ * submissions waiting to run. Backs the Stop button and the Escape
+ * interrupt alongside `agentStatus`: the queue state comes from durable
+ * rows (seeded by the WS handshake), so it stays correct across reconnects
+ * and page loads that would miss the live `status` transition events.
+ * Everything it reports true for is abortable — `Thread.abort` interrupts a
+ * running turn, withdraws pending gates, and settles queued items.
+ */
+export function queueBusy(state: WireQueueState | undefined): boolean {
+  if (!state) return false;
+  if (
+    state.status === "running" ||
+    state.status === "blocked_on_decision_gate" ||
+    state.status === "queued"
+  ) {
+    return true;
+  }
+  // Pause wins the status precedence in the engine's `deriveQueueState`, so
+  // a thread paused mid-turn reports `paused` WITH an `activeItemId` — the
+  // claimed turn keeps running and stays abortable. On any other status a
+  // lingering `activeItemId` is drift (a stale frame from a turn that
+  // already settled), not work — treating it as busy would pin a phantom
+  // Stop button on an idle thread.
+  if (state.status === "paused" && state.activeItemId !== undefined) return true;
+  // Waiting submissions are busy whatever the status says: collect-buffer
+  // items ride an `idle` status until their window flushes, and a paused
+  // queue holds its pending items. Both are abortable.
+  return state.pendingIds.length > 0 || state.collectingIds.length > 0;
+}

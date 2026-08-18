@@ -39,12 +39,17 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
-vi.mock("~/stores/stream", () => ({
-  useSessionStream: () => ({ messages: [], agentStatus: "idle", conn: "open" }),
-  useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
-    selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
-  usePendingGateForThread: () => undefined,
-}));
+vi.mock("~/stores/stream", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/stores/stream")>();
+  return {
+    ...actual,
+    useSessionStream: () => ({ messages: [], agentStatus: "idle", conn: "open" }),
+    useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
+      selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
+    usePendingGateForThread: () => undefined,
+    useQueueStateForThread: () => undefined,
+  };
+});
 
 vi.mock("./session-header", () => ({
   SessionHeader: ({ session }: { session: { title?: string } }) => (

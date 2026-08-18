@@ -33,7 +33,7 @@ import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useAssistants } from "~/api/assistants";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
-import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
+import { queueBusy, useQueueStateForThread, type AgentStatus, type ConnectionStatus } from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
 import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
@@ -101,6 +101,10 @@ export function SessionHeader({
   // One error slot for every header action: pause, replace, rename, and the
   // Terminal/VS Code switch.
   const [actionError, setActionError] = useState<string | null>(null);
+  // Durable busy fallback for the status badge — same signal the composer's
+  // Stop/Escape affordance uses. Without it, a page that connects mid-turn
+  // shows "idle" next to a visible Stop button until the next status event.
+  const threadBusy = queueBusy(useQueueStateForThread(session.id, threadId));
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -301,7 +305,7 @@ export function SessionHeader({
           {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
           <SandboxChip sandbox={sandbox} />
           <ConnectionBadge conn={conn} />
-          <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} />
+          <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
         </div>
       </header>
     );
@@ -378,7 +382,7 @@ export function SessionHeader({
         )}
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
-        <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} />
+        <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
         <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
           <Button
             variant="ghost"
@@ -490,17 +494,42 @@ export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: num
   );
 }
 
-function AgentStatusBadge({ status, turnStartedAt }: { status: AgentStatus; turnStartedAt?: number }) {
-  const elapsed = useElapsedSeconds(status === "idle" ? undefined : turnStartedAt);
-  if (status === "idle") return <Badge variant="neutral">idle</Badge>;
+function AgentStatusBadge({
+  status,
+  turnStartedAt,
+  queueBusy = false,
+}: {
+  status: AgentStatus;
+  turnStartedAt?: number;
+  /**
+   * Durable fallback: the thread's queue holds an abortable submission. When
+   * the live `status` still reads idle (mid-turn connect before the seed
+   * frame, or a dropped event), the badge shows a generic "working" instead
+   * of a false "idle".
+   */
+  queueBusy?: boolean;
+}) {
+  const busy = status !== "idle" || queueBusy;
+  const elapsed = useElapsedSeconds(busy ? turnStartedAt : undefined);
+  if (!busy) return <Badge variant="neutral">idle</Badge>;
+  const label = status === "idle" ? "working" : status.replace("_", " ");
+  // "queued" and "blocked_on_decision_gate" stay neutral on purpose (the
+  // pre-fallback behavior): nothing is executing while queued, and a
+  // gate-blocked turn already renders the prominent DecisionGateCard — an
+  // accent badge would signal the same thing twice. "idle" here is the
+  // queue-busy fallback (`busy` gate above), so it reads as active work.
   const variant =
-    status === "error" ? "danger" : status === "thinking" || status === "tool_calling" ? "accent" : "neutral";
+    status === "error"
+      ? "danger"
+      : status === "thinking" || status === "tool_calling" || status === "idle"
+        ? "accent"
+        : "neutral";
   return (
     <Badge variant={variant} className={cn("inline-flex items-center gap-1.5 tabular-nums")}>
       {status !== "queued" && (
         <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
       )}
-      {status.replace("_", " ")}
+      {label}
       {elapsed !== undefined && <span className="text-current/70">{formatElapsed(elapsed)}</span>}
     </Badge>
   );

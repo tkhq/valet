@@ -53,6 +53,8 @@ The existing session view re-mounted for the assistant session id (threads, gate
 
    Added 2026-08-15: **Escape interrupts the running turn.** While the agent is busy, Escape triggers the same thread abort as the Stop button (window-level listener in the `Composer`, so it works anywhere on the chat tab). Layered dismissals keep priority through `preventDefault`: an open command popup consumes Escape to close itself; an open child panel consumes Escape (capture phase) to close; only an unclaimed Escape interrupts.
 
+   Amended 2026-08-17: **"busy" covers the whole turn, not just live transitions.** The Stop button, the Escape interrupt, the header status badge, and the transcript busy indicator all derive from two signals: the live `status` events AND the thread's durable `queue.state` (`queueBusy` in `~/stores/stream` — running, gate-blocked, or waiting submissions; everything it reports is abortable via `Thread.abort`). Server-side, the WS handshake seeds one `queue.state` frame per thread plus a `status` frame for a mid-turn thread (`Thread.currentAgentStatus`) right after `init`. Before this, a client that connected mid-turn (page load or reconnect during a long tool call) read the thread as idle — no Stop, Escape inert — until the next transition event.
+
 ### `/memory` and `/memory/$` — memory explorer
 
 Two panes:

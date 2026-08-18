@@ -10,7 +10,7 @@ import {
 import { ImagePlus, Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
-import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
+import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
@@ -204,7 +204,16 @@ export function Composer({
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
   // id is mandatory because the optimistic message carries it.
-  const working = agentStatus !== "idle" && agentStatus !== "error";
+  //
+  // `working` gates the Stop button and the Escape interrupt, so it must be
+  // true for the WHOLE time the agent holds the execution context — not just
+  // while status transition events happen to be flowing. `agentStatus` alone
+  // misses two windows: a client that connected mid-turn before the WS
+  // handshake seeded it, and any state the live events dropped. The queue
+  // state is the durable fallback: a running/blocked/queued submission means
+  // there is something to abort.
+  const working =
+    (agentStatus !== "idle" && agentStatus !== "error") || queueBusy(queueState);
   // `collect` also lands on `queue`: a collect-mode message waits for its
   // window to close, so "after the current turn" stays true for it.
   const action: SubmitAction = !working

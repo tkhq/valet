@@ -8,6 +8,10 @@
  * Semantics:
  *   - One subscriber = one socket = one session.
  *   - `init` is sent first, metadata-only. Thread history loads via REST.
+ *   - After `init`, the handshake seeds one `queue.state` frame per thread
+ *     (durable queue rows) plus a `status` frame for each thread that is
+ *     mid-turn, so a client connecting during a long tool call sees the
+ *     agent as busy immediately.
  *   - Resume: `?fromOffset=<offset>` replays durable events after that offset
  *     before live delivery resumes. Durable frames carry a persistent
  *     `offset`; ephemeral frames (text_delta) never do. Without the query
@@ -20,7 +24,7 @@ import type { UpgradeWebSocket } from "hono/ws";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
-import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
+import { busEventToWire, queueStateToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
@@ -131,6 +135,22 @@ export function registerWsRoutes(
                 docker: row.docker,
               },
             });
+
+            // Seed per-thread live state right after init. A client that
+            // connects mid-turn (page load, reconnect) would otherwise show
+            // the thread as idle — no Stop button, Escape inert — until the
+            // NEXT transition event, which a long tool call can hold off for
+            // minutes. `queue.state` comes from durable rows; the `status`
+            // frame reads the in-memory turn phase. Both are chunk-style
+            // (no offset), so the client applies them unconditionally and a
+            // later durable replay still converges to the same state.
+            for (const thread of engineSession.listThreads()) {
+              send(ws, queueStateToWire(sessionId, thread.id, await thread.currentQueueState()));
+              const agentStatus = thread.currentAgentStatus;
+              if (agentStatus !== "idle") {
+                send(ws, { type: "status", threadId: thread.id, status: agentStatus });
+              }
+            }
 
             // Map one bus event → wire frames and push them. Durable events
             // carry `offset`; we stamp it onto each frame so clients can
