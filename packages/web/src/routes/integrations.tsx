@@ -23,6 +23,15 @@ export const Route = createFileRoute("/integrations")({
 type ConnectResult = { kind: "connected" | "error"; value: string } | null;
 
 /**
+ * Maps OAuth callback error codes to human-readable messages. Each message
+ * names the corrective action when one exists.
+ */
+const ERROR_MESSAGES: Record<string, string> = {
+  identity_conflict:
+    "This Slack account is already linked to another Valet user. Unlink it there first, or sign in as that user.",
+};
+
+/**
  * Reads the OAuth round trip's result, then clears it from the URL so a
  * reload does not repeat the notice. The read is an effect, not a `useState`
  * initializer: `replaceState` is a side effect, and React runs an
@@ -80,8 +89,12 @@ export function IntegrationsPage() {
           )}
           {connectResult?.kind === "error" && (
             <div className="mt-4 rounded border border-line bg-danger-wash px-3 py-2 text-sm text-danger-600">
-              Connection failed: {connectResult.value}. Select Connect on the service below to
-              try again.
+              {ERROR_MESSAGES[connectResult.value] ?? (
+                <>
+                  Connection failed: {connectResult.value}. Select Connect on the service below to
+                  try again.
+                </>
+              )}
             </div>
           )}
         </div>

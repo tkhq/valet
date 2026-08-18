@@ -378,6 +378,16 @@ describe("IntegrationsPage", () => {
     render(<IntegrationsPage />);
     expect(screen.getByText(/access_denied/)).toBeTruthy();
   });
+
+  it("maps identity_conflict to a human-readable message naming the corrective action", () => {
+    window.history.replaceState(null, "", "/integrations?error=identity_conflict");
+    render(<IntegrationsPage />);
+    expect(
+      screen.getByText(
+        "This Slack account is already linked to another Valet user. Unlink it there first, or sign in as that user.",
+      ),
+    ).toBeTruthy();
+  });
 });
 
 describe("brand marks", () => {

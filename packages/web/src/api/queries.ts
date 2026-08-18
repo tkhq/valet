@@ -424,20 +424,20 @@ export function useStartIdentityLink() {
   });
 }
 
-export function useSetLinkNotify() {
+export function useSetLinkNotify(provider: string) {
   const qc = useQueryClient();
   return useMutation<{ ok: true }, Error, PatchIdentityLinkRequest>({
-    mutationFn: (body) => api.patchIdentityLink("telegram", body),
+    mutationFn: (body) => api.patchIdentityLink(provider, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
   });
 }
 
-export function useUnlinkIdentity() {
+export function useUnlinkIdentity(provider: string) {
   const qc = useQueryClient();
   return useMutation<{ ok: true }, Error, void>({
-    mutationFn: () => api.deleteIdentityLink("telegram"),
+    mutationFn: () => api.deleteIdentityLink(provider),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
