@@ -344,4 +344,251 @@ describe('google-calendar actions', () => {
       error: 'Calendar could not parse "gibberish" as an event. Try a clearer time format.',
     });
   });
+
+  it('query_free_busy posts the window and maps busy intervals per calendar', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        calendars: {
+          'alice@example.com': {
+            busy: [
+              { start: '2026-04-20T09:00:00-07:00', end: '2026-04-20T09:30:00-07:00' },
+              { start: '2026-04-20T13:00:00-07:00', end: '2026-04-20T14:00:00-07:00' },
+            ],
+          },
+          'bob@example.com': { busy: [] },
+        },
+      }),
+    );
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com', 'bob@example.com'],
+        timeMin: '2026-04-20T08:00:00-07:00',
+        timeMax: '2026-04-20T18:00:00-07:00',
+      },
+      pluginCtx(),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://www.googleapis.com/calendar/v3/freeBusy');
+    expect(init.method).toBe('POST');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
+    expect(JSON.parse(init.body as string)).toEqual({
+      timeMin: '2026-04-20T08:00:00-07:00',
+      timeMax: '2026-04-20T18:00:00-07:00',
+      items: [{ id: 'alice@example.com' }, { id: 'bob@example.com' }],
+    });
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        timeMin: '2026-04-20T08:00:00-07:00',
+        timeMax: '2026-04-20T18:00:00-07:00',
+        calendars: {
+          'alice@example.com': {
+            busy: [
+              { start: '2026-04-20T09:00:00-07:00', end: '2026-04-20T09:30:00-07:00' },
+              { start: '2026-04-20T13:00:00-07:00', end: '2026-04-20T14:00:00-07:00' },
+            ],
+            error: null,
+          },
+          'bob@example.com': { busy: [], error: null },
+        },
+      },
+    });
+  });
+
+  it('query_free_busy forwards timeZone when provided', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { calendars: { 'alice@example.com': { busy: [] } } }),
+    );
+
+    await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com'],
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+        timeZone: 'America/Los_Angeles',
+      },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      timeMin: '2026-04-20T08:00:00Z',
+      timeMax: '2026-04-20T18:00:00Z',
+      timeZone: 'America/Los_Angeles',
+      items: [{ id: 'alice@example.com' }],
+    });
+  });
+
+  it('query_free_busy maps a per-calendar notFound error to a readable message', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        calendars: {
+          'alice@example.com': { busy: [{ start: '2026-04-20T09:00:00Z', end: '2026-04-20T10:00:00Z' }] },
+          'locked@example.com': {
+            busy: [],
+            errors: [{ domain: 'global', reason: 'notFound' }],
+          },
+        },
+      }),
+    );
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com', 'locked@example.com'],
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+        calendars: {
+          'alice@example.com': {
+            busy: [{ start: '2026-04-20T09:00:00Z', end: '2026-04-20T10:00:00Z' }],
+            error: null,
+          },
+          'locked@example.com': {
+            busy: [],
+            error:
+              'No free/busy visibility into this calendar. Check the email address, or ask the owner to share their calendar.',
+          },
+        },
+      },
+    });
+  });
+
+  it('query_free_busy backfills a queried calendar the API response omits', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        calendars: {
+          'alice@example.com': { busy: [] },
+        },
+      }),
+    );
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com', 'missing@example.com'],
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+        calendars: {
+          'alice@example.com': { busy: [], error: null },
+          'missing@example.com': {
+            busy: [],
+            error: 'The API returned no result for this calendar. Check the calendar ID.',
+          },
+        },
+      },
+    });
+  });
+
+  it('query_free_busy extracts the message from a structured 400 error body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(400, {
+        error: {
+          code: 400,
+          message: 'Invalid value for: Invalid format: "not-a-timestamp"',
+          errors: [{ domain: 'global', reason: 'badRequest' }],
+        },
+      }),
+    );
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com'],
+        timeMin: 'not-a-timestamp',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        'Calendar rejected the free/busy query: Invalid value for: Invalid format: "not-a-timestamp". Check that timeMin/timeMax are valid RFC3339 timestamps.',
+    });
+  });
+
+  it('query_free_busy rejects more than 50 calendars without calling fetch', async () => {
+    const items = Array.from({ length: 51 }, (_, i) => `user${i}@example.com`);
+
+    const result = await action('calendar.query_free_busy').execute(
+      { items, timeMin: '2026-04-20T08:00:00Z', timeMax: '2026-04-20T18:00:00Z' },
+      pluginCtx(),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: false,
+      error: 'Too many calendars: 51. Query at most 50 calendars per request.',
+    });
+  });
+
+  it('query_free_busy returns "Missing access token" without calling fetch when no credential is stored', async () => {
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com'],
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx({ credentials: makeCredentials(null) }),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ success: false, error: 'Missing access token' });
+  });
+
+  it('query_free_busy maps a 403 response to a permission error', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com'],
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Permission denied. Confirm the calendar scope was granted.',
+    });
+  });
+
+  it('query_free_busy maps a 400 response to a window error', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('bad request', { status: 400 }));
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com'],
+        timeMin: 'not-a-timestamp',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        'Calendar rejected the free/busy query: bad request. Check that timeMin/timeMax are valid RFC3339 timestamps.',
+    });
+  });
 });

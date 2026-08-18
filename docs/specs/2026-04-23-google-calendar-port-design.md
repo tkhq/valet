@@ -84,3 +84,17 @@ Removed IDs:
 No labels guard changes needed -- Calendar is a separate plugin outside google-workspace.
 
 No D1 migration needed. Action IDs are synced at worker startup via content registry.
+
+## Amendment (2026-08-17): free/busy re-added
+
+The "fast-follow" note above triggered: agents could not check co-workers' availability (for example, to schedule a PR review). One action is re-added, under a new ID:
+
+| Action ID | Params (summary) | Description | Risk |
+|-----------|------------------|-------------|------|
+| `calendar.query_free_busy` | `items` (calendar IDs / emails, max 50), `timeMin`, `timeMax`, `timeZone?` | POST `/freeBusy`. Returns busy intervals per calendar. Works for unsubscribed co-worker calendars — a person's calendar ID is their email address. Per-calendar `notFound` errors map to a readable message; the query still succeeds for visible calendars. | low |
+
+Notes:
+
+- The old `calendar.query_freebusy` ID is not reused. The new ID follows the snake_case word split of the other actions.
+- No scope change: `freebusy.query` is covered by the already-requested `https://www.googleapis.com/auth/calendar` scope. Existing connections need no re-consent.
+- `find_available_slots` stays dropped. The agent computes free slots from the busy intervals.

@@ -62,6 +62,27 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+/**
+ * Google API error bodies are structured JSON like
+ * {"error":{"code":400,"message":"...","errors":[...]}}. Pull out the
+ * human-readable message; fall back to the raw body when it isn't JSON.
+ */
+function extractApiErrorMessage(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+      const err = (parsed as { error: unknown }).error;
+      if (typeof err === "object" && err !== null && "message" in err) {
+        const message = (err as { message: unknown }).message;
+        if (typeof message === "string" && message.length > 0) return message;
+      }
+    }
+  } catch {
+    // Not JSON — fall through to the raw body.
+  }
+  return body;
+}
+
 // ─── Credential Helper ─────────────────────────────────────────────────────────
 
 async function getAccessToken(ctx: PluginActionContext): Promise<string> {
@@ -575,10 +596,120 @@ const quickAdd = action(
   },
 });
 
+const queryFreeBusy = action(
+  Type.Object({
+    items: Type.Array(
+      Type.String({
+        description: "Calendar ID to query. For a co-worker, this is their email address.",
+      }),
+      {
+        minItems: 1,
+        description:
+          "Calendars to query, by ID. A person's primary calendar ID is their email address. No subscription to their calendar is needed — only free/busy visibility.",
+      },
+    ),
+    timeMin: Type.String({
+      description: 'Window start (inclusive) as RFC3339 timestamp, e.g. "2026-04-20T08:00:00-07:00".',
+    }),
+    timeMax: Type.String({
+      description: "Window end (exclusive) as RFC3339 timestamp.",
+    }),
+    timeZone: Type.Optional(
+      Type.String({
+        description: 'IANA timezone like "America/Los_Angeles" for the returned intervals. Defaults to UTC.',
+      }),
+    ),
+  }),
+)({
+  id: "calendar.query_free_busy",
+  name: "Query Free/Busy",
+  description:
+    "Returns busy intervals for one or more calendars in a time window — including co-workers' calendars you are not subscribed to (query by their email address). Use this to find a common free slot before create_event. Returns busy blocks only, never event details. A calendar the user cannot see reports a per-calendar error instead of failing the query.",
+  riskLevel: "low",
+  execute: async (args, ctx) => {
+    const p = args;
+    const token = await getAccessToken(ctx);
+    if (!token) return { success: false, error: "Missing access token" };
+    if (p.items.length > 50) {
+      return {
+        success: false,
+        error: `Too many calendars: ${p.items.length}. Query at most 50 calendars per request.`,
+      };
+    }
+    try {
+      const requestBody: Record<string, unknown> = {
+        timeMin: p.timeMin,
+        timeMax: p.timeMax,
+        items: p.items.map((id) => ({ id })),
+      };
+      if (p.timeZone !== undefined) requestBody.timeZone = p.timeZone;
+
+      const res = await calendarFetch("/freeBusy", token, {
+        method: "POST",
+        body: JSON.stringify(requestBody),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        if (res.status === 403)
+          return {
+            success: false,
+            error: "Permission denied. Confirm the calendar scope was granted.",
+          };
+        if (res.status === 400)
+          return {
+            success: false,
+            error: `Calendar rejected the free/busy query: ${extractApiErrorMessage(body)}. Check that timeMin/timeMax are valid RFC3339 timestamps.`,
+          };
+        return { success: false, error: `Failed to query free/busy: ${res.status} ${body}` };
+      }
+      const data = (await res.json()) as {
+        calendars?: Record<
+          string,
+          {
+            busy?: Array<{ start?: string; end?: string }>;
+            errors?: Array<{ domain?: string; reason?: string }>;
+          }
+        >;
+      };
+      const calendars: Record<
+        string,
+        { busy: Array<{ start?: string; end?: string }>; error: string | null }
+      > = {};
+      for (const [id, cal] of Object.entries(data.calendars ?? {})) {
+        const reasons = (cal.errors ?? []).map((e) => e.reason).filter(Boolean);
+        let error: string | null = null;
+        if (reasons.includes("notFound")) {
+          error =
+            "No free/busy visibility into this calendar. Check the email address, or ask the owner to share their calendar.";
+        } else if (reasons.length > 0) {
+          error = `Free/busy lookup failed for this calendar: ${reasons.join(", ")}.`;
+        }
+        calendars[id] = { busy: cal.busy ?? [], error };
+      }
+      // The API can omit a queried ID from the response body entirely;
+      // backfill so every queried calendar has an entry.
+      for (const id of p.items) {
+        if (!(id in calendars)) {
+          calendars[id] = {
+            busy: [],
+            error: "The API returned no result for this calendar. Check the calendar ID.",
+          };
+        }
+      }
+      return {
+        success: true,
+        data: { timeMin: p.timeMin, timeMax: p.timeMax, calendars },
+      };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  },
+});
+
 // ─── Plugin export ───────────────────────────────────────────────────────────
 
 export const googleCalendarPlugin: ActionPlugin = {
   service: "google_calendar",
   description: "Google Calendar integration for events and scheduling.",
-  actions: [listEvents, createEvent, updateEvent, deleteEvent, quickAdd],
+  actions: [listEvents, createEvent, updateEvent, deleteEvent, quickAdd, queryFreeBusy],
 };
