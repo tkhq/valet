@@ -184,6 +184,16 @@ Contents:
   Slack user tokens do not expire unless token rotation is enabled, so
   `expiresInSec` stays unset and the refresh decorator never fires.
 - **Skill**: port `skills/slack-user.md`.
+- **App manifest**: the user flow runs against the same Slack app as the
+  org bot (`SLACK_CLIENT_ID` names one app). `buildSlackAppManifest`
+  therefore declares the user scope bundle under
+  `oauth_config.scopes.user` and registers the OAuth callback
+  (`<publicUrl>/api/credentials/oauth/callback`) as a redirect URL. Slack
+  grants a user token only the scopes the manifest declares, so a
+  deployment that connected Slack before this change must refresh the app
+  from the new manifest, or every personal connect fails with the
+  interpreter's scope-shortfall error. Without a public URL the redirect
+  URL is omitted and the operator adds their reachable callback by hand.
 - **Deleted, deliberately**: V1's claim-blob route
   (`packages/worker/src/routes/slack-user.ts`). It existed because V1's
   callback ran unauthenticated at the app root. The v2 callback runs

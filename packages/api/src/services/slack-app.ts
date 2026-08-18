@@ -25,6 +25,7 @@
  * https://docs.slack.dev/reference/app-manifest/
  */
 import type { SlackAppManifestWire } from "../wire/types.js";
+import { SLACK_USER_SCOPES } from "@valet/plugin-slack-user/oauth";
 
 /**
  * Mount prefix for the dedicated Slack ingress, and the router path below
@@ -150,6 +151,12 @@ export function buildSlackAppManifest(opts: SlackManifestOptions): SlackAppManif
   const requestUrl = slackRequestUrl(opts.publicUrl);
   const botEvents = unique(SLACK_BOT_EVENTS);
   const botScopes = unique([...SLACK_REQUIRED_BOT_SCOPES, ...SLACK_OPTIONAL_BOT_SCOPES]);
+  // The Slack (personal) user-OAuth flow (`/api/credentials/slack-user/connect`)
+  // runs against this same Slack app: `SLACK_CLIENT_ID` is one app. Slack
+  // grants a user token only the scopes this manifest declares, so the user
+  // bundle must ride along or every personal connect fails with a
+  // scope-shortfall error telling the user to reinstall.
+  const userScopes = unique([...SLACK_USER_SCOPES]);
 
   return {
     display_information: {
@@ -179,7 +186,14 @@ export function buildSlackAppManifest(opts: SlackManifestOptions): SlackAppManif
       },
     },
     oauth_config: {
-      scopes: { bot: botScopes },
+      // The user-OAuth callback must be a registered redirect URL or Slack
+      // rejects the authorize request. No public URL → nothing to register;
+      // the operator adds their reachable callback by hand (e.g.
+      // http://localhost:8788/api/credentials/oauth/callback in dev).
+      ...(opts.publicUrl
+        ? { redirect_urls: [`${opts.publicUrl.replace(/\/+$/, "")}/api/credentials/oauth/callback`] }
+        : {}),
+      scopes: { bot: botScopes, user: userScopes },
     },
     settings: {
       event_subscriptions: {

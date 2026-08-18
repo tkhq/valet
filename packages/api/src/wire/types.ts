@@ -3058,7 +3058,16 @@ export interface SlackAppManifestWire {
     };
     bot_user: { display_name: string; always_online: boolean };
   };
-  oauth_config: { scopes: { bot: string[] } };
+  oauth_config: {
+    /** Callback for the Slack (personal) user-OAuth flow. Omitted when the
+     * deployment has no public URL; the operator adds one by hand before
+     * the user flow can run. */
+    redirect_urls?: string[];
+    /** `user` is the Slack (personal) scope bundle. Slack grants a user
+     * token only the scopes declared here, so a stale manifest fails every
+     * connect with a scope-shortfall error. */
+    scopes: { bot: string[]; user: string[] };
+  };
   settings: {
     /** `request_url` is omitted in Socket Mode. */
     event_subscriptions: { request_url?: string; bot_events: string[] };
