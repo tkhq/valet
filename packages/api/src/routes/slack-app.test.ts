@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { GetSlackAppResponse } from "../wire/types.js";
+import { SLACK_OPTIONAL_BOT_SCOPES } from "../services/slack-app.js";
 
 let api: TestApi | undefined;
 const savedPublicUrl = process.env.VALET_PUBLIC_URL;
@@ -70,8 +71,10 @@ describe("GET /api/org/slack", () => {
     expect(body.connected).toBe(true);
     expect(body.teamName).toBe("Acme");
     expect(body.teamId).toBe("T0001");
-    // The optional scopes are absent from the stored list.
-    expect(body.missingScopes).toEqual(["users:read", "im:write", "files:read", "files:write"]);
+    // Every optional scope is absent from the stored list. Asserted
+    // against the exported constant so the manifest can grow scopes
+    // without this test pinning a stale copy.
+    expect(body.missingScopes).toEqual([...SLACK_OPTIONAL_BOT_SCOPES]);
   });
 
   it("reports nothing missing for a credential saved before scopes were recorded", async () => {
