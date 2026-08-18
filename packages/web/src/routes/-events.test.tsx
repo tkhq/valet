@@ -309,9 +309,17 @@ describe("EventsPage — Subscriptions", () => {
       expect(screen.queryByRole("button", { name: "PR alerts actions" })).toBeNull();
       const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
       expect(toggle.disabled).toBe(true);
+      // The list carries every subscription in the org, so a colleague's
+      // personal row is badged — an unbadged row must mean the viewer's own.
+      expect(screen.getByText("Personal")).toBeTruthy();
     } finally {
       subscriptionsData.subscriptions[0].ownerId = "u1";
     }
+  });
+
+  it("the viewer's own personal subscription carries no badge", () => {
+    openSubscriptionsTab();
+    expect(screen.queryByText("Personal")).toBeNull();
   });
 
   it("creates a subscription from a name, catalog-picked keys, and the default target", async () => {

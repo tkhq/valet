@@ -13,16 +13,18 @@ import {
   ErrorRow,
   LoadingRow,
   Switch,
+  Tooltip,
 } from "~/components/primitives";
 import {
   useDeleteEventSubscription,
   useEventSubscriptions,
   usePatchEventSubscription,
 } from "~/api/events";
-import { useMe, useTeams } from "~/api/settings";
+import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
 import { OwnerBadge } from "~/components/owner-badge";
+import { eligibleTeams } from "~/components/session/assistant-rail";
 import { SubscriptionCreateDialog } from "./subscription-create-dialog";
 
 /** Mirrors the server's `canMutateSubscription`: an org-owned subscription
@@ -71,18 +73,20 @@ export function SubscriptionsPanel() {
     () => new Map((workflowsQ.data?.workflows ?? []).map((w) => [w.id, w.name])),
     [workflowsQ.data],
   );
+  const orgQ = useOrg();
   const teamNames = useMemo(
     () => new Map((teamsQ.data?.teams ?? []).map((t) => [t.id, t.name])),
     [teamsQ.data],
   );
   // Membership, not visibility: an org admin sees every team in the org,
-  // but only a member may manage a team's subscriptions (`callerRole`).
+  // but only a member may manage a team's subscriptions. `eligibleTeams` is
+  // the one encoding of that rule (callerRole plus the org feature gate).
   const memberTeamIds = useMemo(
     () =>
       new Set(
-        (teamsQ.data?.teams ?? []).filter((t) => t.callerRole !== null).map((t) => t.id),
+        eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations).map((t) => t.id),
       ),
-    [teamsQ.data],
+    [teamsQ.data, orgQ.data],
   );
 
   return (
@@ -112,13 +116,18 @@ export function SubscriptionsPanel() {
               sub={sub}
               workflowNames={workflowNames}
               teamNames={teamNames}
+              viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
             />
           ))}
         </div>
       )}
 
-      <SubscriptionCreateDialog open={creating} onOpenChange={setCreating} />
+      {/* Mounted only while open: the dialog computes its default target at
+          mount, so mount time must be open time (see its header comment).
+          Also keeps its catalog/workflow queries off the tab's initial
+          load. */}
+      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} />}
     </div>
   );
 }
@@ -127,11 +136,14 @@ function SubscriptionRow({
   sub,
   workflowNames,
   teamNames,
+  viewerId,
   mutable,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
   teamNames: Map<string, string>;
+  /** The caller's user id; undefined while `useMe` loads. */
+  viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
 }) {
@@ -146,15 +158,26 @@ function SubscriptionRow({
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
           {/* Ownership varies row to row here, so it is badged: "Org" for
-              org-owned, the team's name for a team's (`OwnerBadge`), and no
-              badge for your own — an unbadged row is yours, the same rule
-              the skills catalog uses. */}
+              org-owned, the team's name for a team's (`OwnerBadge`), and
+              "Personal" for a COLLEAGUE's — the list carries every
+              subscription in the org, so an unbadged row means yours only
+              because everyone else's personal rows say whose kind they
+              are. */}
           {sub.ownerType === "org" && (
             <Badge variant="accent" className="shrink-0">
               Org
             </Badge>
           )}
-          <OwnerBadge ownerType={sub.ownerType} ownerId={sub.ownerId} />
+          {sub.ownerType === "team" && (
+            <OwnerBadge ownerType={sub.ownerType} ownerId={sub.ownerId} />
+          )}
+          {sub.ownerType === "user" && viewerId !== undefined && sub.ownerId !== viewerId && (
+            <Tooltip content="A colleague's personal subscription. Only they can change it.">
+              <Badge variant="neutral" className="shrink-0">
+                Personal
+              </Badge>
+            </Tooltip>
+          )}
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           {sub.eventKeys.map((k) => (

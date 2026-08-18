@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRow, SelectMenu } from "~/components/primitives";
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
@@ -38,29 +38,23 @@ export function SubscriptionCreateDialog({
   const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
   const scopedTeamId = scopedTeam?.id;
 
+  // The default is computed ONCE, at mount. The panel mounts this dialog
+  // only while it is open, so mount time IS open time — and nothing may
+  // rewrite the target afterwards. An effect used to re-derive it whenever
+  // the workspace resolved, which silently replaced a target the user had
+  // already picked when the teams query landed late. If the workspace is
+  // still unknown at open, the default is your own assistant and the team
+  // option appears (unselected) when the query lands.
   const [name, setName] = useState("");
   const [keys, setKeys] = useState<Set<string>>(new Set());
   const [target, setTarget] = useState<TargetChoice>(() => targetFor(scopedTeamId));
   const [error, setError] = useState<string | null>(null);
-
-  // The dialog mounts closed, long before the workspace is known, so the
-  // default target is re-derived each time it opens. The dialog is modal —
-  // the scope cannot change under an open one.
-  useEffect(() => {
-    if (open) setTarget(targetFor(scopedTeamId));
-  }, [open, scopedTeamId]);
 
   const workflows = workflowsQ.data?.workflows ?? [];
   const services = catalogQ.data?.services ?? [];
   const targetReady = target.kind === "orchestrator" || target.workflowId.length > 0;
   const canSubmit = name.trim().length > 0 && keys.size > 0 && targetReady && !create.isPending;
 
-  function reset() {
-    setName("");
-    setKeys(new Set());
-    setTarget(targetFor(scopedTeamId));
-    setError(null);
-  }
 
   function toggleKey(key: string) {
     setKeys((cur) => {
@@ -77,25 +71,16 @@ export function SubscriptionCreateDialog({
     create.mutate(
       { name: name.trim(), eventKeys: [...keys], target },
       {
-        onSuccess: () => {
-          reset();
-          onOpenChange(false);
-        },
+        onSuccess: () => onOpenChange(false),
         onError: (err) => setError(errorText(err)),
       },
     );
   }
 
-  function handleOpenChange(next: boolean) {
-    // Closing via Cancel, the overlay, or Escape must not leave a stale
-    // error or stale field values for the next "New subscription" open —
-    // the dialog stays mounted between opens.
-    if (!next) reset();
-    onOpenChange(next);
-  }
-
+  // No reset machinery: closing unmounts the dialog (the panel mounts it
+  // only while open), so the next open starts from a fresh mount.
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="New subscription"
         description="Pick the events to match and what a match runs."
@@ -216,7 +201,7 @@ export function SubscriptionCreateDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="secondary" onClick={() => handleOpenChange(false)}>
+          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button type="button" disabled={!canSubmit} onClick={submit}>
