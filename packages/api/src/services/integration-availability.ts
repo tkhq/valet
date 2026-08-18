@@ -15,7 +15,12 @@
  *   4. `requires.orgCredential` unmet     → "unconfigured". The org-scoped
  *      credential (an admin connects it in Settings → Organization) is the
  *      integration's foundation — e.g. the Slack app.
- *   5. otherwise                          → "manual". A self-sufficient
+ *   5. `requires.orgCredential` met       → "org". The org credential IS the
+ *      integration; sessions resolve it by owner escalation. There is
+ *      nothing for a user to connect, so the UI offers no token entry —
+ *      the Slack bot token belongs to Settings → Organization, never to a
+ *      member's integrations page.
+ *   6. otherwise                          → "manual". A self-sufficient
  *      personal token (API key), always offered.
  *
  * Four consumers share this definition: `/api/plugins` (presentation),
@@ -35,7 +40,7 @@ import type {
 } from "@valet/engine";
 import { authCodeEnvReady, findOAuthDeclaration } from "./integration-oauth.js";
 
-export type ConnectMode = "oauth" | "manual" | "unconfigured";
+export type ConnectMode = "oauth" | "manual" | "org" | "unconfigured";
 
 /** The first declaration for `service` across the plugin set, keyed the way
  * every consumer keys declarations: `decl.service ?? plugin.name`. */
@@ -72,7 +77,7 @@ export async function connectModeFor(
       { type: "org", id: params.orgId },
       params.service,
     );
-    if (orgCredential === null) return "unconfigured";
+    return orgCredential === null ? "unconfigured" : "org";
   }
   return "manual";
 }

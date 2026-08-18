@@ -275,7 +275,9 @@ describe("GET /api/credentials", () => {
  * Availability gate (integration-availability design): a user-scope save
  * for a service whose deployment/org prerequisite is missing is rejected,
  * because the credential could never power a working integration. The
- * org-scope save stays open — it IS the configuration step.
+ * org-scope save stays open — it IS the configuration step. Once it exists,
+ * the org credential provides the service ("org" mode) and user-scope
+ * saves stay rejected: there is nothing a personal token adds.
  */
 describe("PUT /api/credentials/:service — unconfigured services", () => {
   const GATED_PLUGIN: ValetPlugin = {
@@ -299,7 +301,7 @@ describe("PUT /api/credentials/:service — unconfigured services", () => {
     expect(body.error).toContain("Settings → Organization");
   });
 
-  it("accepts the org-scope save (that is the configuration step), then user-scope saves", async () => {
+  it("accepts the org-scope save (that is the configuration step), then still 403s user-scope saves", async () => {
     api = await bootTestApi({ plugins: [GATED_PLUGIN] });
 
     const orgPut = await fetch(`${api.baseUrl}/api/credentials/gated`, {
@@ -314,7 +316,9 @@ describe("PUT /api/credentials/:service — unconfigured services", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "bot_token", accessToken: "user-tok" }),
     });
-    expect(userPut.status).toBe(200);
+    expect(userPut.status).toBe(403);
+    const body = (await userPut.json()) as { error: string };
+    expect(body.error).toContain("provided by your organization");
   });
 
   it("403s a user-scope save for an oauth service whose client env vars are unset", async () => {

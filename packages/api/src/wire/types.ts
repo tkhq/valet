@@ -1618,13 +1618,16 @@ export interface PluginServiceSummary {
    * resolution timeout/failure — the UI falls back to its static copy. */
   toolCount?: number;
   /** How the connect UI obtains this credential: "oauth" renders a Connect
-   * redirect button; "manual" renders token entry; "unconfigured" means the
-   * deployment/org prerequisite is missing (OAuth client env vars, or the
-   * org-scoped credential an admin connects in Settings → Organization) —
-   * the UI offers no connect path, and hides the tile unless a leftover
-   * credential still needs disconnecting. See
+   * redirect button; "manual" renders token entry; "org" means the org
+   * credential (Settings → Organization) provides the service and there is
+   * nothing for the user to connect — the tile states that and offers no
+   * token entry; "unconfigured" means the deployment/org prerequisite is
+   * missing (OAuth client env vars, or the org-scoped credential an admin
+   * connects in Settings → Organization) — the UI offers no connect path,
+   * and hides the tile unless a leftover credential still needs
+   * disconnecting. See
    * docs/specs/2026-08-17-integration-availability-design.md. */
-  connect: "oauth" | "manual" | "unconfigured";
+  connect: "oauth" | "manual" | "org" | "unconfigured";
   /**
    * Which prerequisite blocks the connection, for the note the tile shows.
    * Present only when `connect === "unconfigured"`.

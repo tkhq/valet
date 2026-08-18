@@ -130,9 +130,11 @@ pluginsRouter.get("/", async (c) => {
 
     const services: PluginServiceSummary[] = await Promise.all((plugin.credentials ?? []).map(async (decl) => {
       const service = decl.service ?? plugin.name;
-      // Tri-state availability (integration-availability design): "oauth",
-      // "manual", or "unconfigured" when the deployment/org prerequisite is
-      // missing. Same resolver the save/session/workflow gates use.
+      // Availability (integration-availability design): "oauth", "manual",
+      // "org" when the org credential provides the service with nothing for
+      // the user to connect, or "unconfigured" when the deployment/org
+      // prerequisite is missing. Same resolver the save/session/workflow
+      // gates use.
       const connect = await connectModeFor({
         plugins,
         decl,

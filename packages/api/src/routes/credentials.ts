@@ -146,6 +146,16 @@ credentialsRouter.put("/:service", async (c) => {
           403,
         );
       }
+      // "org": the org credential IS the integration and sessions resolve
+      // it by owner escalation, so a personal token adds nothing a member
+      // should paste. The personal path, when one exists, is its own
+      // declaration (e.g. slack-user OAuth).
+      if (mode === "org") {
+        return c.json(
+          { error: `${service} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
+          403,
+        );
+      }
     }
   }
 

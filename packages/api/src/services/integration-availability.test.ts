@@ -114,7 +114,7 @@ describe("connectModeFor", () => {
     ).resolves.toBe("unconfigured");
   });
 
-  it("requires.orgCredential with the org credential stored is \"manual\"", async () => {
+  it("requires.orgCredential with the org credential stored is \"org\" — no personal token entry", async () => {
     const decl: CredentialDeclaration = {
       type: "bot_token",
       configKeys: ["accessToken"],
@@ -124,7 +124,7 @@ describe("connectModeFor", () => {
 
     await expect(
       resolve({ plugins, decl, service: "slack", credentials: await storeWithOrgCredential("slack") }),
-    ).resolves.toBe("manual");
+    ).resolves.toBe("org");
   });
 
   it("requires.orgCredential with no org credential is \"unconfigured\"", async () => {

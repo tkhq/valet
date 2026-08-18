@@ -24,11 +24,12 @@ const plugin: ValetPlugin = {
       type: "bot_token",
       configKeys: ["accessToken"],
       connectLabel: "Connect Slack (bot token)",
-      // The org Slack app (Settings → Organization → Slack) is the
-      // integration's foundation: webhook ingress and the channel transport
-      // need it. Without it a personal bot token gives a half-dead
-      // integration, so the service is not offered until an admin connects
-      // the org credential.
+      // The org Slack app (Settings → Organization → Slack) IS the
+      // integration: webhook ingress, the channel transport, and session
+      // tools all resolve the org credential by owner escalation. Members
+      // never paste a bot token — before an admin connects, the service is
+      // "unconfigured"; after, it is "org" (provided by the organization).
+      // The personal path is the separate slack-user OAuth declaration.
       requires: { orgCredential: true },
     },
   ],
