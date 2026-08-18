@@ -203,6 +203,7 @@ vi.mock("~/api/integrations", () => ({
 // these three hooks. importOriginal: see -new-session-dialog.test.tsx for
 // why a bare replacement is unsafe under vitest.config.ts's isolate:false.
 let identityLinksData: { links: IdentityLinkStatus[] } | undefined;
+let identityLinksLoading = false;
 const startLinkMutateAsync = vi.fn();
 const unlinkIdentityMutate = vi.fn();
 
@@ -210,7 +211,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
-    useIdentityLinks: () => ({ data: identityLinksData, isLoading: false, error: null }),
+    useIdentityLinks: () => ({ data: identityLinksData, isLoading: identityLinksLoading, error: null }),
     useStartIdentityLink: () => ({ mutateAsync: startLinkMutateAsync, isPending: false }),
     useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false }),
   };
@@ -958,6 +959,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     currentPluginsData = slackOrgPlugins();
     currentOrg = org("member");
     identityLinksData = undefined;
+    identityLinksLoading = false;
     startLinkMutateAsync.mockReset();
     unlinkIdentityMutate.mockClear();
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -1005,6 +1007,14 @@ describe("IntegrationsPage — org-provided pairing", () => {
     render(<IntegrationsPage />);
 
     expect(screen.getByText(/Provided by your organization/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
+  });
+
+  it("holds both the note and the pairing block while the link list loads — no flash", () => {
+    identityLinksLoading = true;
+    render(<IntegrationsPage />);
+
+    expect(screen.queryByText(/Provided by your organization/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
   });
 });

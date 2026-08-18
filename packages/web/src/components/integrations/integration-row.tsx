@@ -332,14 +332,16 @@ function ServiceBlock({
   // entry: pairing their account through the identity-link code flow, for
   // providers that declare one (the hook returns null otherwise, and for a
   // provider whose transport is not ready). The generic note stands in when
-  // there is no pairing to offer.
-  const orgProvidedNote = orgProvided ? (
-    <p className="text-xs leading-relaxed text-muted">
-      Provided by your organization. An admin manages it in Settings → Organization.
-    </p>
-  ) : undefined;
+  // there is no pairing to offer — and is HELD while the link list loads,
+  // so the tile does not flash the note before the pairing block swaps in.
   const identityLink = useServiceIdentityLink(service.service);
-  const pairing = orgProvided && identityLink?.channelReady ? identityLink : null;
+  const pairing = orgProvided && identityLink.link?.channelReady ? identityLink.link : null;
+  const orgProvidedNote =
+    orgProvided && !pairing && !identityLink.isLoading ? (
+      <p className="text-xs leading-relaxed text-muted">
+        Provided by your organization. An admin manages it in Settings → Organization.
+      </p>
+    ) : undefined;
 
   return (
     <>
@@ -352,7 +354,7 @@ function ServiceBlock({
       {/* The org note reads on a disconnected card too — "your organisation
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
-      {(orgNote || unconfiguredNote || orgProvidedNote || (service.connected && (service.health?.login || note))) && (
+      {(orgNote || unconfiguredNote || pairing || orgProvidedNote || (service.connected && (service.health?.login || note))) && (
         <div className="mt-1.5 space-y-1 pl-12">
           {unconfiguredNote}
           {pairing ? <IdentityLinkBlock link={pairing} title={title} /> : orgProvidedNote}

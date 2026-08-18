@@ -25,11 +25,19 @@ import { Button } from "~/components/primitives";
 import { useIdentityLinks, useStartIdentityLink, useUnlinkIdentity } from "~/api/queries";
 import { ApiError } from "~/api/client";
 
-/** The identity-link entry for `provider`, or null while loading, on error,
- * and for providers that declare no `identityLink`. */
-export function useServiceIdentityLink(provider: string): IdentityLinkStatus | null {
+/** The identity-link entry for `provider` — null on error and for providers
+ * that declare no `identityLink`. `isLoading` is surfaced so the tile can
+ * hold BOTH the pairing block and its fallback note until the list settles,
+ * instead of flashing the fallback on every page load. */
+export function useServiceIdentityLink(provider: string): {
+  link: IdentityLinkStatus | null;
+  isLoading: boolean;
+} {
   const linksQ = useIdentityLinks();
-  return linksQ.data?.links.find((link) => link.provider === provider) ?? null;
+  return {
+    link: linksQ.data?.links.find((link) => link.provider === provider) ?? null,
+    isLoading: linksQ.isLoading,
+  };
 }
 
 function startErrorMessage(err: unknown, title: string): string {
@@ -95,7 +103,9 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
           <p className="break-all font-mono text-xs text-ink">{pendingLink.code}</p>
           <p className="text-xs leading-relaxed text-muted">{pendingLink.instructions}</p>
           <p className="text-xs text-muted">
-            The code expires in {Math.round(pendingLink.expiresInSeconds / 60)} minutes.
+            {/* ceil, not round: a code with seconds left must never read "0 minutes". */}
+            The code expires in {Math.ceil(pendingLink.expiresInSeconds / 60)}{" "}
+            {Math.ceil(pendingLink.expiresInSeconds / 60) === 1 ? "minute" : "minutes"}.
           </p>
         </div>
       )}
