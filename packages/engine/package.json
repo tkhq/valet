@@ -22,8 +22,8 @@
     "repl": "tsx bin/repl.ts"
   },
   "dependencies": {
-    "@mariozechner/pi-agent-core": "0.73.0",
-    "@mariozechner/pi-ai": "0.73.0",
+    "@mariozechner/pi-agent-core": "0.73.1",
+    "@mariozechner/pi-ai": "0.73.1",
     "@opentelemetry/api": "^1.9.1",
     "typebox": "^1.1.24",
     "yaml": "^2.9.0"
