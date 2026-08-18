@@ -393,13 +393,19 @@ describe("listWorkflowTemplateSummaries", () => {
     ]);
   });
 
-  it("stops calling a service unconfigured once the organization connects it", async () => {
+  it("reports a service the organization connected as connected — nobody's own credential list ever carries it", async () => {
+    // The org credential IS the integration (Settings → Organization →
+    // Chat): every member reads it by owner escalation, and no member ever
+    // gets a personal row for "chat" in their own credential list. Reading
+    // only that list — the bug this pins — would report this template as
+    // needing a personal connection forever, to a service the caller can
+    // never personally connect.
     await credentials.save({ type: "org", id: OWNER.orgId }, "chat", {
       type: "bot_token",
       accessToken: "chat-org-token",
     });
     const list = await listWorkflowTemplateSummaries(deps([chatPlugin]), OWNER);
-    expect(list.find((t) => t.id === "chat-note")?.requires).toEqual([{ service: "chat", connected: false }]);
+    expect(list.find((t) => t.id === "chat-note")?.requires).toEqual([{ service: "chat", connected: true }]);
   });
 
   it("hides a template whose definition does not validate", async () => {

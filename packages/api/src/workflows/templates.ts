@@ -46,7 +46,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, lockTeamForOwnership } from "../services/teams.js";
-import { unavailableServiceSet } from "../services/integration-availability.js";
+import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
 import { newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
@@ -475,16 +475,27 @@ export async function listWorkflowTemplateSummaries(
   caller: { userId: string; orgId: string },
 ): Promise<WorkflowTemplateSummary[]> {
   const owner: CredentialOwner = { type: "user", id: caller.userId };
-  const connected = new Set((await deps.credentials.list(owner)).map((cred) => cred.service));
-  // The same resolver the integrations page, the manual-save gate, the
-  // session tool gate and the workflow invoker use, so all five agree on
-  // what this deployment can offer.
-  const unavailable = await unavailableServiceSet({
+  const availability = {
     plugins: deps.plugins,
     orgId: caller.orgId,
     credentials: deps.credentials,
     env: process.env,
-  });
+  };
+  // The same resolver the integrations page, the manual-save gate, the
+  // session tool gate and the workflow invoker use, so all five agree on
+  // what this deployment can offer.
+  const [personal, orgProvided, unavailable] = await Promise.all([
+    deps.credentials.list(owner),
+    orgProvidedServiceSet(availability),
+    unavailableServiceSet(availability),
+  ]);
+  // A service in "org" mode (e.g. Slack's bot token, connected once in
+  // Settings → Organization) is never on any member's OWN credential list —
+  // that is the whole point of an org credential. Union it in here, or
+  // every card for an org-provided-but-not-personally-connectable service
+  // reads "Connect Slack" forever, for every member, including the one who
+  // set it up.
+  const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
 
   const summaries: WorkflowTemplateSummary[] = [];
   for (const owned of listCatalogTemplates(deps.plugins)) {

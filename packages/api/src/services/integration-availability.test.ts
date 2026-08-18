@@ -11,6 +11,7 @@ import {
   connectModeFor,
   gateUnavailableActions,
   missingClientEnv,
+  orgProvidedServiceSet,
   unavailableServiceSet,
 } from "./integration-availability.js";
 
@@ -292,6 +293,73 @@ describe("unavailableServiceSet", () => {
     });
 
     expect(unavailable).toEqual(new Set());
+  });
+});
+
+describe("orgProvidedServiceSet", () => {
+  it("is empty before an admin connects the org credential", async () => {
+    const slack = makePlugin("slack", {
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    });
+
+    const provided = await orgProvidedServiceSet({
+      plugins: [slack],
+      orgId: ORG,
+      credentials: new InMemoryCredentialStore(),
+      env: {},
+    });
+
+    expect(provided).toEqual(new Set());
+  });
+
+  it("names the service once its org credential exists — the fact no member's own credential list carries", async () => {
+    // This is the set `listWorkflowTemplateSummaries` unions into
+    // `connected`: an org-scoped credential is never on any ONE member's own
+    // list, and reading only that list is the bug this closes — a card
+    // offering "Connect Slack" to a member for a service their organization
+    // already connected, which member never can do themselves.
+    const slack = makePlugin("slack", {
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    });
+
+    const provided = await orgProvidedServiceSet({
+      plugins: [slack],
+      orgId: ORG,
+      credentials: await storeWithOrgCredential("slack"),
+      env: {},
+    });
+
+    expect(provided).toEqual(new Set(["slack"]));
+  });
+
+  it("never names a personal-oauth or manual-token service, whatever is connected", async () => {
+    const linear = makePlugin("linear", {
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    });
+    const google = makePlugin("google-workspace", {
+      credentials: [
+        {
+          type: "oauth2",
+          configKeys: ["accessToken"],
+          oauth: {
+            mode: "authorization_code",
+            authorizationUrl: "https://accounts.example.com/auth",
+            tokenUrl: "https://accounts.example.com/token",
+            clientIdEnv: "GOOGLE_CLIENT_ID",
+            clientSecretEnv: "GOOGLE_CLIENT_SECRET",
+          },
+        },
+      ],
+    });
+
+    const provided = await orgProvidedServiceSet({
+      plugins: [linear, google],
+      orgId: ORG,
+      credentials: new InMemoryCredentialStore(),
+      env: { GOOGLE_CLIENT_ID: "id", GOOGLE_CLIENT_SECRET: "secret" },
+    });
+
+    expect(provided).toEqual(new Set());
   });
 });
 
