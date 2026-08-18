@@ -62,15 +62,12 @@ export function MoveSessionDialog({
     });
   }
 
-  function handleOpenChange(next: boolean) {
-    // Reopening starts from the row's real owner, not a stale draft.
-    if (next) setSelected(currentKey);
-    move.reset();
-    onOpenChange(next);
-  }
-
+  // No reset machinery: the header mounts this dialog only while it is
+  // open (`{moving && …}`), so every open is a fresh mount and `selected`
+  // initializes from the row's real owner above. A close-time or open-time
+  // reset would be dead code — and dead resets read as load-bearing.
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="Move to workspace"
         description="The session keeps its threads, history, and sandbox. Who can open it changes."
@@ -91,7 +88,7 @@ export function MoveSessionDialog({
           <Button
             type="button"
             variant="secondary"
-            onClick={() => handleOpenChange(false)}
+            onClick={() => onOpenChange(false)}
             disabled={move.isPending}
           >
             Cancel
