@@ -483,6 +483,13 @@ export const assistants = pgTable(
     ownerId: text("owner_id").notNull(),
     /** What the reader calls it. Was `orchestrator_identities.handle`. */
     name: text("name"),
+    /** Per-assistant persona text. Null falls back to the owner's
+     * assistant/personality.md memory file (the pre-config behavior). */
+    personality: text("personality"),
+    /** JSON `AssistantBehavior` (wire/types.ts). Null means every skill and
+     * integration. Validated on write (`validateAssistantBehavior`); parsed
+     * fail-open on read (`parseAssistantBehavior`). */
+    behavior: text("behavior"),
     sessionId: text("session_id").notNull(),
     /**
      * The one a machine picks when nobody chose. Workflow orchestrator

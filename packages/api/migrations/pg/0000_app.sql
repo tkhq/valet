@@ -285,6 +285,8 @@ CREATE TABLE "assistants" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
 	"name" text,
+	"personality" text,
+	"behavior" text,
 	"session_id" text NOT NULL,
 	"is_default" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
