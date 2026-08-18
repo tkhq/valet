@@ -6,7 +6,12 @@ import { useSessions } from "~/api/queries";
 import { useListOwner } from "~/lib/use-list-owner";
 import { Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { NewSessionDialog } from "~/components/new-session-dialog";
-import { WorkspaceClause, useActiveWorkspace, workspaceName } from "~/components/workspace-clause";
+import {
+  WorkspaceClause,
+  useActiveWorkspace,
+  workspaceName,
+  type ActiveWorkspace,
+} from "~/components/workspace-clause";
 import { RunStateBadge } from "~/components/run-state-badge";
 import { relativeTime } from "~/lib/relative-time";
 
@@ -58,7 +63,7 @@ export function sortByAttention(sessions: readonly SessionSummary[]): SessionSum
 /** The empty state names the workspace it is empty IN — an empty team list
  * otherwise reads as the switcher not working, which is exactly the report
  * that motivated the workspace clause. */
-function emptyLabel(ws: ReturnType<typeof useActiveWorkspace>): string {
+function emptyLabel(ws: ActiveWorkspace | undefined): string {
   if (ws !== undefined && (ws.kind === "team" || ws.hasTeams)) {
     return `No sessions in ${workspaceName(ws)} yet.`;
   }

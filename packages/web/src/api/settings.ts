@@ -86,6 +86,11 @@ export function useOrg(opts?: UseQueryOptions<OrgResponse>) {
   return useQuery<OrgResponse>({
     queryKey: qkSettings.org(),
     queryFn: () => api.getOrg(),
+    // The workspace clause mounts this on every list page, so each route
+    // change would otherwise refetch it (app default staleTime is 5s). Org
+    // facts change rarely and their mutations invalidate the key — same
+    // reasoning as `useModels` below.
+    staleTime: 60_000,
     ...opts,
   });
 }
@@ -142,6 +147,9 @@ export function useTeams(opts?: UseQueryOptions<ListTeamsResponse>) {
   return useQuery<ListTeamsResponse>({
     queryKey: qkSettings.teams(),
     queryFn: () => api.listTeams(),
+    // Same rule as `useOrg`: read by the workspace clause on every list
+    // page; team mutations already invalidate this key.
+    staleTime: 60_000,
     ...opts,
   });
 }

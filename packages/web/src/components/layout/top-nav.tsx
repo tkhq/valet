@@ -178,7 +178,14 @@ export function TopNav() {
       <WorkspaceSwitcher
         options={options}
         activeKey={scope.key}
-        onSelect={scope.setKey}
+        onSelect={(key) => {
+          // Any new selection retires the previous failure. Without this a
+          // single failed create pinned "Cannot open that workspace" beside
+          // the switcher for the rest of the visit — no later selection
+          // mutates (and so clears) the error unless it also needs a create.
+          createAssistant.reset();
+          scope.setKey(key);
+        }}
         navigateOnSelect={onChat}
         onCreateAssistant={createWorkspaceAssistant}
       />
