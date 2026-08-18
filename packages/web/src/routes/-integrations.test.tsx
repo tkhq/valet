@@ -279,11 +279,21 @@ describe("IntegrationsPage", () => {
           dynamic: true as const,
           services: [],
         },
+        {
+          // Multi-word slug, no wire displayName: every word capitalizes,
+          // matching the server's titleCaseSlug fallback.
+          name: "mcp-config:pager-duty",
+          version: "0.0.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [],
+        },
       ],
     };
     render(<IntegrationsPage />);
     expect(screen.getByText("Grafana Cloud")).toBeTruthy();
     expect(screen.getByText("Pylon")).toBeTruthy();
+    expect(screen.getByText("Pager Duty")).toBeTruthy();
     expect(screen.queryByText(/Mcp config/)).toBeNull();
   });
 
