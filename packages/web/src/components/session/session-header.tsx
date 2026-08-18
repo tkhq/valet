@@ -513,6 +513,11 @@ function AgentStatusBadge({
   const elapsed = useElapsedSeconds(busy ? turnStartedAt : undefined);
   if (!busy) return <Badge variant="neutral">idle</Badge>;
   const label = status === "idle" ? "working" : status.replace("_", " ");
+  // "queued" and "blocked_on_decision_gate" stay neutral on purpose (the
+  // pre-fallback behavior): nothing is executing while queued, and a
+  // gate-blocked turn already renders the prominent DecisionGateCard — an
+  // accent badge would signal the same thing twice. "idle" here is the
+  // queue-busy fallback (`busy` gate above), so it reads as active work.
   const variant =
     status === "error"
       ? "danger"

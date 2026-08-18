@@ -774,12 +774,22 @@ export function useQueueStateForThread(
  */
 export function queueBusy(state: WireQueueState | undefined): boolean {
   if (!state) return false;
-  return (
+  if (
     state.status === "running" ||
     state.status === "blocked_on_decision_gate" ||
-    state.status === "queued" ||
-    state.activeItemId !== undefined ||
-    state.pendingIds.length > 0 ||
-    state.collectingIds.length > 0
-  );
+    state.status === "queued"
+  ) {
+    return true;
+  }
+  // Pause wins the status precedence in the engine's `deriveQueueState`, so
+  // a thread paused mid-turn reports `paused` WITH an `activeItemId` — the
+  // claimed turn keeps running and stays abortable. On any other status a
+  // lingering `activeItemId` is drift (a stale frame from a turn that
+  // already settled), not work — treating it as busy would pin a phantom
+  // Stop button on an idle thread.
+  if (state.status === "paused" && state.activeItemId !== undefined) return true;
+  // Waiting submissions are busy whatever the status says: collect-buffer
+  // items ride an `idle` status until their window flushes, and a paused
+  // queue holds its pending items. Both are abortable.
+  return state.pendingIds.length > 0 || state.collectingIds.length > 0;
 }

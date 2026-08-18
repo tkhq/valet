@@ -854,6 +854,14 @@ describe("queueBusy", () => {
     expect(queueBusy(base)).toBe(false);
   });
 
+  it("is false for an idle queue carrying a stale activeItemId (frame drift)", () => {
+    expect(queueBusy({ ...base, activeItemId: "q-stale" })).toBe(false);
+  });
+
+  it("is true for a thread paused mid-turn (paused status, claimed item)", () => {
+    expect(queueBusy({ ...base, status: "paused", activeItemId: "q-1" })).toBe(true);
+  });
+
   it("is true for a running or gate-blocked turn", () => {
     expect(queueBusy({ ...base, status: "running", activeItemId: "q-1" })).toBe(true);
     expect(
