@@ -130,6 +130,32 @@ export async function unavailableServiceSet(params: AvailabilityContext): Promis
 }
 
 /**
+ * The declared services that resolve "org" for this org — an org credential
+ * (e.g. the Slack bot token, Settings → Organization → Slack) that provides
+ * the service for every member, with nothing for an individual to connect.
+ * `integration-row.tsx` already reads `connect === "org"` to show that; this
+ * is the same classification for a surface — the workflow template gallery
+ * — that only ever asked "is this caller's OWN credential list missing the
+ * service", which an org-provided service always answers "yes" to, because
+ * an org credential is never on a member's own list. Left unhandled, that
+ * surface tells a member to "Connect Slack" for a service an org admin
+ * already connected, and personally never can.
+ */
+export async function orgProvidedServiceSet(params: AvailabilityContext): Promise<Set<string>> {
+  const provided = new Set<string>();
+  await Promise.all(
+    params.plugins.flatMap((plugin) =>
+      (plugin.credentials ?? []).map(async (decl) => {
+        const service = decl.service ?? plugin.name;
+        const mode = await connectModeFor({ ...params, decl, service });
+        if (mode === "org") provided.add(service);
+      }),
+    ),
+  );
+  return provided;
+}
+
+/**
  * Strips the `ActionPlugin`s whose credential key (`credentialService ??
  * service` — the same join `invokeAction` and the `/api/plugins` actions
  * column use) belongs to an unavailable service. Everything else on the
