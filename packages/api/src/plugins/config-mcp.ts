@@ -54,6 +54,10 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     staticToken = token;
   }
 
+  // The connect UI shows this as the card title, so a missing displayName
+  // must still read like a product name, not a slug.
+  const displayName = entry.displayName ?? titleCaseSlug(entry.name);
+
   const credentials: CredentialDeclaration[] = [];
   if (entry.auth === "oauth") {
     credentials.push({
@@ -67,13 +71,14 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
       service: entry.name,
       type: "api_key",
       configKeys: ["accessToken"],
-      connectLabel: entry.connectLabel ?? `${entry.name} API key`,
+      connectLabel: entry.connectLabel ?? `${displayName} API key`,
     });
   }
 
   const plugin: ValetPlugin = {
     name: `${CONFIG_MCP_PLUGIN_PREFIX}${entry.name}`,
     version: "0.0.0",
+    displayName,
     description: entry.description ?? `Config-declared MCP server (${entry.url})`,
     actions: [
       mcpActionPlugin({
@@ -89,4 +94,15 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
   };
   if (credentials.length > 0) plugin.credentials = credentials;
   return plugin;
+}
+
+/** "grafana-cloud" → "Grafana Cloud" — the fallback when the entry names no
+ * displayName. Slugs are validated lowercase, so each word just uppercases
+ * its first letter. */
+function titleCaseSlug(slug: string): string {
+  return slug
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }

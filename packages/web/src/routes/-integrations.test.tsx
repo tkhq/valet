@@ -248,6 +248,55 @@ describe("IntegrationsPage", () => {
     expect(screen.getByText("Connected")).toBeTruthy();
   });
 
+  it("shows a config-declared MCP server by its displayName, never the mcp-config: id", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "mcp-config:grafana",
+          version: "0.0.0",
+          displayName: "Grafana Cloud",
+          description: "Grafana Cloud integration for dashboards and alerts",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [
+            {
+              service: "grafana",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: false,
+              connect: "oauth" as const,
+              dynamic: true as const,
+              actions: [],
+            },
+          ],
+        },
+        {
+          // An api that predates `displayName` on the wire: the client
+          // still strips the mcp-config: prefix before title-casing.
+          name: "mcp-config:pylon",
+          version: "0.0.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [],
+        },
+        {
+          // Multi-word slug, no wire displayName: every word capitalizes,
+          // matching the server's titleCaseSlug fallback.
+          name: "mcp-config:pager-duty",
+          version: "0.0.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [],
+        },
+      ],
+    };
+    render(<IntegrationsPage />);
+    expect(screen.getByText("Grafana Cloud")).toBeTruthy();
+    expect(screen.getByText("Pylon")).toBeTruthy();
+    expect(screen.getByText("Pager Duty")).toBeTruthy();
+    expect(screen.queryByText(/Mcp config/)).toBeNull();
+  });
+
   it("built-in plugins get no connect affordance; deepwiki (keyless) gets none either", () => {
     render(<IntegrationsPage />);
     // Only github + typefully are connectable → exactly two Connect buttons.

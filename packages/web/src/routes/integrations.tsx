@@ -4,7 +4,7 @@ import { usePlugins } from "~/api/integrations";
 import { Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
-import { displayName } from "~/components/integrations/display-name";
+import { pluginDisplayName } from "~/components/integrations/display-name";
 
 /**
  * `/integrations` — the services a person can connect, in the settings
@@ -61,7 +61,7 @@ export function IntegrationsPage() {
   const services = plugins
     .filter(isService)
     .filter(hasVisibleSurface)
-    .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
+    .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
 
   return (
     <div className="flex-1 overflow-y-auto">

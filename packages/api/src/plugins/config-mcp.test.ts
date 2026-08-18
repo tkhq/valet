@@ -55,9 +55,23 @@ describe("configMcpPlugins", () => {
       service: "example",
       type: "api_key",
       configKeys: ["accessToken"],
-      connectLabel: "example API key",
+      connectLabel: "Example API key",
     });
     expect(defaulted.actions?.[0]?.requiresCredential).toBe(true);
+  });
+
+  it("carries the entry's displayName onto the plugin and the default connect label", () => {
+    const [plugin] = configMcpPlugins(
+      [decl({ auth: "api_key", displayName: "Example Cloud" })],
+      {},
+    );
+    expect(plugin.displayName).toBe("Example Cloud");
+    expect(plugin.credentials?.[0]?.connectLabel).toBe("Example Cloud API key");
+  });
+
+  it("defaults displayName to the title-cased entry name", () => {
+    const [plugin] = configMcpPlugins([decl({ name: "grafana-cloud" })], {});
+    expect(plugin.displayName).toBe("Grafana Cloud");
   });
 
   it("bearer entries read the token from env and need no per-user credential", () => {
