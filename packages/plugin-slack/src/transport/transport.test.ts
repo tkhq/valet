@@ -208,6 +208,40 @@ describe("parseUpdate — the agent surface events", () => {
     expect(transport.parseUpdate(envelope(imMessage({ channel_type: "channel", channel: "C1" })))).toBeNull();
     expect(transport.parseUpdate(envelope({ type: "app_mention", channel: "C1", user: "U1", text: "hi" }))).toBeNull();
   });
+
+  it("parses a link command DM into a command event", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(envelope(imMessage({ text: "link AbC123xyz" })));
+    expect(event).toMatchObject({
+      kind: "command",
+      conversationKey: KEY,
+      sender: { externalId: "U1" },
+      dispatchId: "slack:Ev1",
+      text: "link AbC123xyz",
+      command: { name: "start", args: "AbC123xyz" },
+    });
+    expect(event).not.toHaveProperty("threadTs");
+    expect(event).not.toHaveProperty("context");
+  });
+
+  it("parses link command regardless of case and surrounding whitespace", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(envelope(imMessage({ text: "  LINK   AbC123xyz  " })));
+    expect(event).toMatchObject({
+      kind: "command",
+      command: { name: "start", args: "AbC123xyz" },
+    });
+  });
+
+  it("treats link with no code as a plain message, not a command", () => {
+    const transport = makeTransport();
+    expect(transport.parseUpdate(envelope(imMessage({ text: "link" })))).toMatchObject({ kind: "message" });
+  });
+
+  it("treats messages that contain link but don't match the command pattern as plain messages", () => {
+    const transport = makeTransport();
+    expect(transport.parseUpdate(envelope(imMessage({ text: "linked you a doc" })))).toMatchObject({ kind: "message" });
+  });
 });
 
 describe("parseUpdate — gate callbacks", () => {
