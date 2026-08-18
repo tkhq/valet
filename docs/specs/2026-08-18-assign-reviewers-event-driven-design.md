@@ -61,6 +61,32 @@ scheduled template's are: the dispatcher builds `trigger.data` from the
 webhook body and merges no `dataSchema` defaults, so a required value
 missing at install is missing forever.
 
+### The roster is optional
+
+CODEOWNERS is required; the roster is not. A repository with no roster
+still gets reviewers — `shortlist` falls back to the CODEOWNERS tokens
+themselves. Only a plain `@handle` survives that fallback: a `@org/team`
+token names a group nothing here can resolve into people, and the
+assignees field takes users only, so a team token is reported in
+`rosterProblems` rather than written into an assignment GitHub would
+silently drop. A roster is what buys team membership, PTO checking,
+working hours and Slack ids.
+
+This is why `assignReviewers` carries no `policy.onUnresolvedPath: "fail"`
+while `pullRequestReview` does. `read_repo_file` answers a 404 with
+`success: false`, so a missing roster FAILS its node, and an `llm` prompt
+is an enforceable surface — under the policy, `shortlist` would fail
+before running rather than read an empty roster. Making the roster
+optional under the policy meant a second shortlist node behind a gate,
+and therefore duplicating every node downstream of it, because a second
+shortlist has a second id and nothing downstream could read both.
+
+What the policy protected against is now covered by the branch gates: a
+run carrying no recognizable event reaches `unrecognized_trigger` before
+any node reads the payload. Unresolved paths are still reported either
+way — the interpreter runs its template audit regardless, and the policy
+only decides whether a finding also fails the node.
+
 ### Two branches, one definition
 
 The engine audits every node's templates against the run's actual trigger

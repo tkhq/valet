@@ -1067,11 +1067,14 @@ describe(ASSIGN_ID, () => {
     expect(schema?.payload?.hidden).toBe(true);
   });
 
-  it("fails a hand-started run before any template renders empty", () => {
-    // No `payload` at all is a manual run. `policy.onUnresolvedPath: "fail"`
-    // is the backstop; `unrecognized_trigger` is what gives it a corrective
-    // message instead of a wall of blank-field errors.
-    expect(definition.policy?.onUnresolvedPath).toBe("fail");
+  it("stops a hand-started run at the branch gates, not on a blank-field error", () => {
+    // This template carries NO `policy.onUnresolvedPath: "fail"`, unlike the
+    // review template. The branch gates make it unnecessary — a run with no
+    // recognizable event reaches `unrecognized_trigger` before any node reads
+    // the payload — and the policy is what forced the roster to be
+    // mandatory, because an `llm` prompt is an enforceable surface and a
+    // missing roster fails its read.
+    expect(definition.policy?.onUnresolvedPath).toBeUndefined();
     const stop = nodeOf(definition, "unrecognized_trigger");
     const message = isRecord(stop) && typeof stop.message === "string" ? stop.message : "";
     expect(isRecord(stop) && stop.outcome).toBe("failure");
@@ -1337,6 +1340,52 @@ describe(`${ASSIGN_ID} — what it writes and who it tells (branch A)`, () => {
   });
 });
 
+describe(`${ASSIGN_ID} — the roster is optional`, () => {
+  const definition = definitionOf(ASSIGN_ID);
+
+  it("gates only on CODEOWNERS, in both branches", () => {
+    // A repository with no roster still gets reviewers. `read_repo_file`
+    // answers 404 with success:false, so a missing roster FAILS its node —
+    // an `if` condition is exempt from the template audit, which is why a
+    // roster read that never resolved is a question here rather than a fault.
+    for (const id of ["inputs_readable", "swap_inputs_readable"]) {
+      const gate = assignIfNode(id);
+      expect(gate.conditions).toHaveLength(1);
+      expect(gate.conditions[0]?.left).toContain("codeowners");
+      expect(gate.conditions[0]?.left).not.toContain("roster");
+    }
+  });
+
+  it("tells both shortlist steps how to build candidates without a roster", () => {
+    for (const id of ["shortlist", "shortlist_swap"]) {
+      const node = definition.nodes.find((n): n is LlmNode => n.type === "llm" && n.id === id);
+      const prompt = node?.prompt ?? "";
+      expect(prompt).toContain("WHEN THE ROSTER IS EMPTY");
+      // A plain @handle is a person and can be assigned.
+      expect(prompt).toContain("A token written @handle with NO slash is one person");
+      // A team token is NOT assignable through the assignees field, so it is
+      // reported rather than silently dropped into a name GitHub discards.
+      expect(prompt).toContain("names a GitHub TEAM");
+      expect(prompt).toContain("rosterProblems");
+      // The fallback must not bypass the exclusion step — branch B drops the
+      // decliner there, and skipping it would re-assign the person who just
+      // said no.
+      expect(prompt).toContain("apply step 4 to these candidates as well");
+    }
+  });
+
+  it("still fails when CODEOWNERS itself is unreadable, naming both causes", () => {
+    const stop = nodeOf(definition, "no_inputs");
+    const message = isRecord(stop) && typeof stop.message === "string" ? stop.message : "";
+    expect(isRecord(stop) && stop.outcome).toBe("failure");
+    // "empty" and "could not be read" are different problems with different
+    // fixes, and the run cannot tell them apart — so it names both.
+    expect(message).toContain("is empty, or could not be read at all");
+    expect(message).toContain("can read that repository");
+    expect(message).toContain("roster is optional");
+  });
+});
+
 describe(`${ASSIGN_ID} — decline swap (branch B)`, () => {
   const definition = definitionOf(ASSIGN_ID);
 
@@ -1532,7 +1581,7 @@ describe(`${ASSIGN_ID} — card copy`, () => {
   });
 
   it("keeps the caveats to a couple of paragraphs — a reader has to actually read this", () => {
-    expect(caveatList.length).toBeLessThanOrEqual(3);
+    expect(caveatList.length).toBeLessThanOrEqual(4);
     for (const entry of caveatList) expect(entry.length).toBeLessThan(400);
   });
 
