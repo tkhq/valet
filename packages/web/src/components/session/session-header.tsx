@@ -117,12 +117,18 @@ export function SessionHeader({
   const editOpen = useRef(false);
 
   async function destroy() {
-    // A team's assistant is shared, so the prompt names what everyone else
-    // loses rather than describing a private session.
+    // Three prompts for three losses. A team ASSISTANT is a shared
+    // conversation, so the prompt names what the team loses. A team-owned
+    // STANDALONE session (reachable since "Move to workspace…") is still a
+    // session — its prompt keeps the sandbox/child-session warning and adds
+    // who else loses it. A personal session keeps the original warning.
+    const teamNote = `Everyone on ${team?.name ?? "the team"} loses`;
     const prompt =
-      teamId !== null
-        ? `Delete ${title}? Everyone on ${team?.name ?? "the team"} loses this conversation and its threads.`
-        : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
+      isAssistantSession && teamId !== null
+        ? `Delete ${title}? ${teamNote} this conversation and its threads.`
+        : teamId !== null
+          ? `Delete this session permanently? ${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
+          : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
     if (!confirm(prompt)) return;
     try {
       await del.mutateAsync(session.id);
@@ -445,8 +451,12 @@ export function SessionHeader({
                   Replace sandbox
                 </DropdownMenuItem>
                 {/* Standalone sessions only: an assistant's session is
-                    addressed by its owner, so its owner is structural. */}
-                {!isAssistantSession && (
+                    addressed by its owner, so its owner is structural (the
+                    API refuses too). Gated on the assistants list having
+                    RESOLVED — while it loads, `isAssistantSession` is false
+                    for every session, and the item would flash on assistant
+                    pages. */}
+                {!isAssistantSession && assistants.data !== undefined && (
                   <DropdownMenuItem onSelect={() => setMoving(true)}>
                     <FolderInput className="h-3.5 w-3.5 mr-2" aria-hidden />
                     Move to workspace…
@@ -458,7 +468,12 @@ export function SessionHeader({
                   onSelect={() => void destroy()}
                 >
                   <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-                  {teamId !== null ? "Delete this team's assistant…" : "Delete session…"}
+                  {/* Only an assistant session IS the team's assistant. A
+                      team-owned standalone session is a session; calling it
+                      the assistant would threaten the wrong thing. */}
+                  {isAssistantSession && teamId !== null
+                    ? "Delete this team's assistant…"
+                    : "Delete session…"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
