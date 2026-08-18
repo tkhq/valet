@@ -1,5 +1,6 @@
 import { Link, Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import { MemoryImportExport } from "~/components/memory/import-export";
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { MemorySearchPane } from "~/components/memory/memory-search";
 import { cn } from "~/lib/cn";
 
@@ -43,6 +44,9 @@ function MemoryLayout() {
         <div className="flex items-center gap-1 px-2 pt-2">
           <ViewTab to="/memory" label="Files" active={!isGraph} />
           <ViewTab to="/memory/graph" label="Graph" active={isGraph} />
+          <span className="ml-auto pr-1">
+            <WorkspaceClause />
+          </span>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto">
           <MemorySearchPane activePath={activePath} onSelect={onSelect} />

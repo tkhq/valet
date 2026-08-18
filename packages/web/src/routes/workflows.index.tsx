@@ -12,6 +12,7 @@ import {
   useWorkflows,
 } from "~/api/workflows";
 import { OwnerBadge } from "~/components/owner-badge";
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { runCountLabel } from "~/lib/run-count";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
@@ -74,7 +75,12 @@ export function WorkflowsIndexPage() {
     <div className="flex-1 flex flex-col min-h-0">
       <div className="border-b border-line px-6 pt-4">
         <div className="flex items-center justify-between">
-          <h1 className="text-lg font-semibold tracking-tight text-ink font-display">Workflows</h1>
+          <div className="flex items-baseline gap-3">
+            <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
+              Workflows
+            </h1>
+            <WorkspaceClause />
+          </div>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={() => setImportOpen(true)}>
               Import
