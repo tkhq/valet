@@ -17,6 +17,12 @@ const plugin: ValetPlugin = {
   credentials: [
     {
       type: "oauth2",
+      // MUST equal the ActionPlugin's `service` in actions.ts: the connect
+      // flow stores the token under this name and the tools read by that
+      // one. Without it the store key defaults to the plugin name
+      // ("google-calendar"), the tools read "google_calendar", and every
+      // connected credential is invisible to every tool.
+      service: "google_calendar",
       // Copied verbatim from the legacy provider's oauthScopes.
       scopes: [
         "https://www.googleapis.com/auth/calendar",
