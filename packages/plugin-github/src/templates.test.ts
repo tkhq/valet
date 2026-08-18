@@ -366,6 +366,16 @@ describe(REVIEW_ID, () => {
     expect(template.schedule).toBeUndefined();
   });
 
+  it("keeps the caveats to a couple of paragraphs — a reader has to actually read this", () => {
+    const caveatList = template.caveats ?? [];
+    expect(caveatList.length).toBeLessThanOrEqual(3);
+    for (const entry of caveatList) expect(entry.length).toBeLessThan(400);
+    const caveats = caveatList.join("\n");
+    expect(caveats).toContain("Installing it does not start it");
+    expect(caveats).toContain("github.pull_request.opened");
+    expect(caveats).toContain("never approves");
+  });
+
   it("collects nothing at install, so no unbaked reference can survive it", () => {
     const trigger = definition.nodes.find((node) => node.type === "trigger");
     expect(trigger?.type).toBe("trigger");
@@ -1497,19 +1507,21 @@ describe(`${ASSIGN_ID} — card copy`, () => {
   });
 
   it("leads the caveats with how to arm it, since install alone does not start it", () => {
-    expect(caveatList[0]).toContain("It arms no schedule and does not run on install");
+    expect(caveatList[0]).toContain("It arms no schedule");
     expect(caveatList[0]).toContain("github.issue_comment.created");
   });
 
-  it("still states the platform gaps the request cannot get around", () => {
-    expect(caveats).toContain("It cannot read a GitHub team.");
-    expect(caveats).toContain("It does not know anybody's working hours.");
-    expect(caveats).toContain("It has no signal for who last worked on the changed code.");
+  it("keeps the caveats to a couple of paragraphs — a reader has to actually read this", () => {
+    expect(caveatList.length).toBeLessThanOrEqual(3);
+    for (const entry of caveatList) expect(entry.length).toBeLessThan(400);
   });
 
-  it("states the decline-classifier's own limit and the cross-round gap", () => {
-    expect(caveats).toContain("A decline is a model's judgment on one PR comment, not a keyword match.");
-    expect(caveats).toContain("Two declines on the same pull request are two independent comment events.");
+  it("still names the roster as the source the platform itself cannot supply", () => {
+    expect(caveats).toContain("The roster is the only source of group membership, working hours, calendars and Slack ids");
+  });
+
+  it("still states the decline-classifier's own limit", () => {
+    expect(caveats).toContain("A decline is a model's judgment on one comment, not a keyword match");
   });
 
   it("no longer claims a swap is unbuilt", () => {
