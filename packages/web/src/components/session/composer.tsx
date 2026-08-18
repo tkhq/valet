@@ -14,6 +14,11 @@ import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stor
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
+import {
+  readCommandRecency,
+  recordCommandUse,
+  type CommandRecency,
+} from "~/lib/command-recency";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
 import {
@@ -112,6 +117,9 @@ export function Composer({
   const argMatch = /^\/(\S+) (\S*)$/.exec(text);
   const { data: commandsData } = useCommands(sessionId);
   const allCommands = commandsData?.commands ?? [];
+  // Per-browser last-used ranking for the command popup. Loaded once per
+  // mount; `submit` records each sent slash command and refreshes it.
+  const [commandRecency, setCommandRecency] = useState<CommandRecency>(() => readCommandRecency());
   const filteredCommands = commandQuery !== null
     ? allCommands.filter((c) => c.name.startsWith(commandQuery))
     : [];
@@ -136,7 +144,7 @@ export function Composer({
     : [];
   const popupItems: PopupItem[] =
     commandQuery !== null
-      ? commandsToItems(filteredCommands)
+      ? commandsToItems(filteredCommands, commandRecency)
       : filteredArgs.map((o) => ({
           id: o.value,
           label: o.value,
@@ -317,6 +325,13 @@ export function Composer({
       // falling back to a recency heuristic. Null for slash commands —
       // they never queue, so there is nothing to link.
       if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
+      // Recency ranking for the command popup. Recorded only for a name the
+      // registry knows, and only after the send succeeded — a typo or a
+      // failed send is not a "use".
+      const commandName = /^\/(\S+)/.exec(t)?.[1];
+      if (commandName && allCommands.some((c) => c.name === commandName)) {
+        setCommandRecency(recordCommandUse(commandName));
+      }
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
       // message stays visible — they can see what they sent + retry; on the

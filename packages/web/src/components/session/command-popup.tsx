@@ -5,6 +5,7 @@
  * sources (slash commands, argument completions) into `PopupItem`s.
  */
 import type { WireCommandInfo } from "@valet/api/wire";
+import type { CommandRecency } from "~/lib/command-recency";
 
 export interface PopupItem {
   /** Stable identity, passed to onSelect (a command name or an argument value). */
@@ -31,11 +32,33 @@ const SOURCE_LABEL: Record<WireCommandInfo["source"], string> = {
   plugin: "Plugin",
 };
 
-/** Adapt registry commands (already prefix-filtered) into popup items. */
-export function commandsToItems(commands: WireCommandInfo[]): PopupItem[] {
-  const ordered = [...commands].sort(
-    (a, b) => SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source),
-  );
+/**
+ * Adapt registry commands (already prefix-filtered) into popup items.
+ *
+ * `recency` (command name → last-used epoch ms, from `~/lib/command-recency`)
+ * floats what the user actually uses to the top. Groups must stay contiguous —
+ * the popup renders group-by-group while ↑/↓ walk the flat item order, so a
+ * command sorted away from its group would break keyboard navigation. Recency
+ * therefore sorts at two levels: groups by their most recently used command,
+ * then commands within a group. Sort is stable, so untouched commands keep
+ * the registry's order (built-in → skill → plugin, registration order within).
+ */
+export function commandsToItems(
+  commands: WireCommandInfo[],
+  recency: CommandRecency = {},
+): PopupItem[] {
+  const groupRecency = new Map<WireCommandInfo["source"], number>();
+  for (const c of commands) {
+    const used = recency[c.name] ?? 0;
+    if (used > (groupRecency.get(c.source) ?? 0)) groupRecency.set(c.source, used);
+  }
+  const ordered = [...commands].sort((a, b) => {
+    const byGroup = (groupRecency.get(b.source) ?? 0) - (groupRecency.get(a.source) ?? 0);
+    if (byGroup !== 0) return byGroup;
+    const bySource = SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source);
+    if (bySource !== 0) return bySource;
+    return (recency[b.name] ?? 0) - (recency[a.name] ?? 0);
+  });
   return ordered.map((c) => ({
     id: c.name,
     label: `/${c.name}`,

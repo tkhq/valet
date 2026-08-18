@@ -112,6 +112,8 @@ Built per session at session build time from four inputs: engine built-ins (stat
 
 Two refresh seams keep a cached session's registry current (`Session.refreshCommandRegistry()`, invoked on every commands read and on each attachment `ready` transition): `workspaceSkillsProvider` re-scans `/workspace/.valet/prompts`, and `skillsProvider` re-reads the stored skills the session's owner can reach. Without the second seam, a long-lived session served the skill set from its first build forever.
 
+The web autocomplete sorts suggestions by recency: the composer records each sent slash command in per-browser `localStorage` (`packages/web/src/lib/command-recency.ts`), and the popup floats the most recently used commands — and their source group — to the top. Never-used commands keep the built-in → skill → plugin order.
+
 ## Command-result entry
 
 New engine entry kind `command_result` with `{ command, source, ok, output }`; `output` is markdown. Results show in history on every surface and survive reload.
