@@ -120,7 +120,11 @@ Three additions, all generic:
    - The callback calls `identityForExternal` first; a hit for a different
      Valet user stops the flow before any write (`linkIdentity` must never
      run on a cross-user hit — it deletes-then-inserts, so it would steal
-     the identity). The unique index remains a backstop against races. Same
+     the identity). The `identityForExternal` gate is the only cross-user
+     check. In the race window between gate and write, two concurrent
+     connects for the same Slack account resolve last-writer-wins; this is
+     benign because both callers proved control of that account via OAuth
+     consent. Same
      user reconnecting → flow continues.
      Identity already linked to a different Valet user → stop before any
      credential write and redirect to

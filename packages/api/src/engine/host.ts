@@ -936,9 +936,11 @@ export class EngineHost {
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
    *    installation). `null` when no installation resolves.
-   *  - `slack` → the raw store read enriched with `metadata.owner_slack_user_id`
-   *    when the session user has a `slack` identity link. Activates plugin-slack's
-   *    dormant private-channel check. No enrichment when no link is found or no
+   *  - `slack` → user credential first (personal `plugin-slack-user` token),
+   *    then org credential (`plugin-slack` bot token) as fallback. When a
+   *    credential is found and the session user has a `slack` identity link,
+   *    `metadata.owner_slack_user_id` is injected, activating plugin-slack's
+   *    private-channel check. No enrichment when no link is found or no
    *    credential is stored (returns `null` or the bare stored credential).
    *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
    *    read, byte-identical to the engine's default (store-backed) path.
@@ -1019,14 +1021,13 @@ export class EngineHost {
       }
       if (service !== "github") {
         if (service === "slack") {
-          // The Slack bot token is org-shared by design: `PUT
+          // The Slack bot token is org-shared: `PUT
           // /api/credentials/slack?scope=org` stores it under
           // `{ type: "org", id: orgId }`. The engine's session always calls
           // the resolver with a user owner, so a plain exact-owner read would
           // return null for every production session. Read the user credential
-          // first (personal overrides are possible in principle); when absent,
-          // escalate to the org owner. Mirror the github branch's style: the
-          // bot token is org-shared by design.
+          // first (a personal `plugin-slack-user` token takes precedence);
+          // when absent, escalate to the org owner.
           const stored =
             (await credentials.get(owner, service)) ??
             (await credentials.get({ type: "org", id: orgId }, service));

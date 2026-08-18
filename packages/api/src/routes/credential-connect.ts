@@ -264,15 +264,34 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   let restoreLink: (() => Promise<void>) | null = null;
   if (saved.identity) {
     const identity = saved.identity;
-    const existing = await identityForExternal(db, identity.provider, identity.externalId);
-    if (existing && existing.userId !== user.id) {
-      return c.redirect(`${returnTo}/integrations?error=identity_conflict`, 302);
+    try {
+      const existing = await identityForExternal(db, identity.provider, identity.externalId);
+      if (existing && existing.userId !== user.id) {
+        return c.redirect(`${returnTo}/integrations?error=identity_conflict`, 302);
+      }
+      const prior = await identityForUser(db, identity.provider, user.id);
+      await linkIdentity(db, {
+        provider: identity.provider,
+        externalId: identity.externalId,
+        userId: user.id,
+        notifyAttention: prior?.notifyAttention ?? true,
+      });
+      if (prior !== null) {
+        const priorSnap = prior;
+        restoreLink = () =>
+          linkIdentity(db, {
+            provider: identity.provider,
+            externalId: priorSnap.externalId,
+            userId: user.id,
+            notifyAttention: priorSnap.notifyAttention,
+          });
+      } else {
+        restoreLink = () => unlinkIdentity(db, identity.provider, user.id);
+      }
+    } catch (err) {
+      console.error(`oauth callback: identity link failed for ${verified.service}:`, err);
+      return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
     }
-    const prior = await identityForUser(db, identity.provider, user.id);
-    await linkIdentity(db, { provider: identity.provider, externalId: identity.externalId, userId: user.id });
-    restoreLink = prior
-      ? () => linkIdentity(db, { provider: identity.provider, externalId: prior.externalId, userId: user.id })
-      : () => unlinkIdentity(db, identity.provider, user.id);
   }
   try {
     await engineCredentials.save({ type: "user", id: user.id }, verified.service, {

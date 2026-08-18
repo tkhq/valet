@@ -12,7 +12,12 @@ import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oaut
 import type { ListCredentialsResponse } from "../wire/types.js";
 import { verifyOAuthConnectState } from "./credential-connect.js";
 import { signState } from "../lib/oauth-state.js";
-import { identityForExternal, linkIdentity } from "../channels/identity-links.js";
+import {
+  identityForExternal,
+  identityForUser,
+  linkIdentity,
+  setNotifyAttention,
+} from "../channels/identity-links.js";
 
 let api: TestApi | undefined;
 let fake: FakeOAuthServer;
@@ -477,6 +482,32 @@ describe("identity auto-link (slackish plugin)", () => {
     // Link is still present.
     const link = await identityForExternal(api.providers.db, "slack", "U9");
     expect(link?.userId).toBe("local-user");
+  });
+
+  it("same-user reconnect: preserves notifyAttention=false from the prior link", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    // Seed a link with notifyAttention=false.
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U9", userId: "local-user" });
+    await setNotifyAttention(api.providers.db, "slack", "local-user", false);
+
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-reconnect2", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?connected=slackish");
+
+    // notifyAttention must still be false after reconnect.
+    const link = await identityForUser(api.providers.db, "slack", "local-user");
+    expect(link).not.toBeNull();
+    expect(link?.notifyAttention).toBe(false);
   });
 
   it("compensation: when credential save throws, the new identity link is removed", async () => {
