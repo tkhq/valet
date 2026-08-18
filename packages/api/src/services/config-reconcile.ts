@@ -31,6 +31,7 @@ import { InstanceConfigError } from "../config/instance-config.js";
 import {
   ensureOrg,
   getSsoTeamGroups,
+  normalizeSsoTeamGroups,
   renameOrg,
   setOrgModelPreferences,
   setOrgMemberRole,
@@ -140,19 +141,34 @@ async function reconcileOrgPass(
   // file wins at every boot, the same rule as org.features below.
   const declaredGroups = cfg.auth?.sso?.teams?.groups;
   if (declaredGroups !== undefined) {
+    // Normalize BEFORE the comparison, because the column always holds the
+    // normalized list. Compared raw, a duplicate in the file makes the
+    // lengths differ at every boot, and the line below prints forever with
+    // nothing actually changing. The file validator already enforces the
+    // same path shape (`config/instance-config.ts`), so a throw here means
+    // the two guards drifted apart — that is a config the api must not
+    // half-apply, and the error must name the file.
+    let declared: string[];
+    try {
+      declared = normalizeSsoTeamGroups(declaredGroups);
+    } catch (e) {
+      throw new InstanceConfigError(
+        `${configFileLabel(configPath)}: auth.sso.teams.groups: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     const stored = await getSsoTeamGroups(db, org.id);
     const changed =
       stored === null ||
-      stored.length !== declaredGroups.length ||
-      stored.some((path, i) => path !== declaredGroups[i]);
+      stored.length !== declared.length ||
+      stored.some((path, i) => path !== declared[i]);
     if (changed) {
       console.warn(
-        `[config-reconcile] auth.sso.teams.groups set to [${declaredGroups.join(", ")}] from ` +
+        `[config-reconcile] auth.sso.teams.groups set to [${declared.join(", ")}] from ` +
           `${configFileLabel(configPath)}. The file wins at every boot, so a group list edited ` +
           `in Settings does not last. To control the list in Settings, remove the key from that file.`,
       );
     }
-    await setSsoTeamGroups(db, org.id, declaredGroups);
+    await setSsoTeamGroups(db, org.id, declared);
   }
 
   const orgCfg = cfg.org;

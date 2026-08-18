@@ -132,6 +132,31 @@ describe("reconcileInstanceConfig — org pass", () => {
     }
   });
 
+  it("a duplicate declared group neither changes the column nor re-prints the boot line", async () => {
+    // The column always holds the NORMALIZED list, so the comparison must
+    // normalize the declared list too. Compared raw, a duplicate in the
+    // file makes the lengths differ forever, and the "file wins" line
+    // prints at every boot with nothing actually changing.
+    const org = await ensureOrg(db);
+    await db.update(orgs).set({ ssoTeamGroups: ["/platform"] }).where(eq(orgs.id, org.id));
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg: InstanceConfig = {
+        version: 1,
+        auth: { sso: { teams: { groups: ["/platform", "/platform"] } } },
+      };
+      await reconcileInstanceConfig(deps(db), cfg);
+
+      const rows = await db.select({ ssoTeamGroups: orgs.ssoTeamGroups }).from(orgs);
+      expect(rows[0]!.ssoTeamGroups).toEqual(["/platform"]);
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes("auth.sso.teams.groups"))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("an undeclared auth.sso.teams.groups leaves the Settings-made allowlist alone", async () => {
     const org = await ensureOrg(db);
     await db.update(orgs).set({ ssoTeamGroups: ["/settings-made"] }).where(eq(orgs.id, org.id));

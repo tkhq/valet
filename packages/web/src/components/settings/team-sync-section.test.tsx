@@ -160,6 +160,18 @@ describe("TeamSyncSection writes", () => {
     );
   });
 
+  it("says so when the added group is already listed, and writes nothing", () => {
+    ssoTeamSync = true;
+    ssoTeamGroups = ["/platform"];
+    render(<TeamSyncSection />);
+
+    fireEvent.change(screen.getByLabelText("Group path"), { target: { value: "/platform" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+
+    expect(mutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByText(/already listed/)).toBeTruthy();
+  });
+
   it("rejects a bad path in place, naming the shape, and writes nothing", () => {
     ssoTeamSync = true;
     render(<TeamSyncSection />);

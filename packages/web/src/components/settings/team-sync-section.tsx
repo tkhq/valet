@@ -83,9 +83,14 @@ export function TeamSyncSection() {
       setPathError('Enter a top-level group path such as "/platform".');
       return;
     }
+    if (groups.includes(trimmed)) {
+      // Not a silent no-op: the reader typed a path and nothing on screen
+      // would explain why nothing happened.
+      setPathError(`${trimmed} is already listed.`);
+      return;
+    }
     setPathError(null);
     setNewPath("");
-    if (groups.includes(trimmed)) return;
     void apply({ ssoTeamGroups: [...groups, trimmed] });
   }
 
