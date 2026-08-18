@@ -514,3 +514,99 @@ describe("validateValetPlugin templates slot", () => {
     if (!res.ok) expect(res.issues.some((i) => i.path === "templates")).toBe(true);
   });
 });
+
+describe("validateValetPlugin oauth authorization_code extensions", () => {
+  function manifestWith(credential: Record<string, unknown>): Record<string, unknown> {
+    return { name: "fixture", version: "0.1.0", credentials: [credential] };
+  }
+
+  it("accepts scopesParam and interpretTokenResponse", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://example.com/authorize",
+          tokenUrl: "https://example.com/token",
+          clientIdEnv: "X_ID",
+          clientSecretEnv: "X_SECRET",
+          scopesParam: "user_scope",
+          interpretTokenResponse: () => ({ accessToken: "tok" }),
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects an empty scopesParam", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://example.com/authorize",
+          tokenUrl: "https://example.com/token",
+          clientIdEnv: "X_ID",
+          clientSecretEnv: "X_SECRET",
+          scopesParam: "",
+        },
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a non-function interpretTokenResponse", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://example.com/authorize",
+          tokenUrl: "https://example.com/token",
+          clientIdEnv: "X_ID",
+          clientSecretEnv: "X_SECRET",
+          interpretTokenResponse: "not a function",
+        },
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects scopesParam on mcp mode", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: { mode: "mcp", serverUrl: "https://mcp.example.com", scopesParam: "user_scope" },
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("validateValetPlugin identityLink", () => {
+  it("accepts provider + instructions, with optional deepLink function", () => {
+    const result = validateValetPlugin({
+      name: "fixture",
+      version: "0.1.0",
+      identityLink: {
+        provider: "slack",
+        instructions: "DM the Valet app: link <code>",
+        deepLink: () => null,
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects missing instructions", () => {
+    const result = validateValetPlugin({
+      name: "fixture",
+      version: "0.1.0",
+      identityLink: { provider: "slack" },
+    });
+    expect(result.ok).toBe(false);
+  });
+});

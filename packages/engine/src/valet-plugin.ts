@@ -17,6 +17,28 @@ import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
 import type { WorkflowTemplate } from "./workflow-template.js";
 
+export interface OAuthIdentity {
+  provider: string;
+  externalId: string;
+  externalName?: string;
+  teamId?: string;
+}
+
+export interface TokenInterpretation {
+  accessToken: string;
+  refreshToken?: string;
+  expiresInSec?: number;
+  /** Scopes the provider actually granted (not requested). */
+  grantedScopes?: string[];
+  /** Provider facts stored on the credential (team_id, slack_user_id, …). */
+  metadata?: Record<string, string>;
+  /** Present → the connect flow also writes a user_identity_links row. */
+  identity?: OAuthIdentity;
+}
+
+/** Thrown by interpretTokenResponse. `message` is user-facing: name the corrective action. */
+export class OAuthInterpretError extends Error {}
+
 /** How the connect UI obtains an oauth2 credential (integration-OAuth design). */
 export type OAuthDeclaration =
   | {
@@ -34,6 +56,12 @@ export type OAuthDeclaration =
       clientSecretEnv: string;
       /** Extra authorize-URL params, e.g. Google's access_type=offline&prompt=consent. */
       extraAuthParams?: Record<string, string>;
+      /** Query param that carries the scope list. Default "scope".
+       *  Slack user tokens use "user_scope". */
+      scopesParam?: string;
+      /** Interpret a non-standard token response. Absent → standard OAuth2
+       *  shape. Throw OAuthInterpretError to fail the flow. */
+      interpretTokenResponse?: (raw: unknown) => TokenInterpretation;
     };
 
 export interface CredentialDeclaration {
@@ -356,6 +384,16 @@ export interface ChannelTransportFactory {
   create(ctx: TransportContext): ChannelTransport;
 }
 
+export interface IdentityLinkDeclaration {
+  /** Identity provider key in user_identity_links (e.g. "slack", "telegram"). */
+  provider: string;
+  /** Shown in the web UI; tells the user how to deliver the code. */
+  instructions: string;
+  /** Optional deep link for one-tap delivery (Telegram's t.me URL). Return
+   *  null when the transport is not ready. */
+  deepLink?: (ctx: { botUsername: string | null; code: string }) => string | null;
+}
+
 export interface ValetPlugin {
   /** Plugin id, e.g. "github". Unique across loaded plugins. */
   name: string;
@@ -374,6 +412,8 @@ export interface ValetPlugin {
   commands?: CommandDef[];
   /** Installable workflow templates this plugin contributes to the gallery. */
   templates?: WorkflowTemplate[];
+  /** Declares this plugin's provider supports code-based identity linking. */
+  identityLink?: IdentityLinkDeclaration;
 }
 
 export interface PluginValidationIssue {
@@ -524,6 +564,11 @@ export function validateValetPlugin(
         if (typeof oauth.serverUrl !== "string" || oauth.serverUrl.length === 0) {
           issues.push({ path: `${path}.oauth.serverUrl`, message: "required non-empty string" });
         }
+        for (const field of ["scopesParam", "interpretTokenResponse"] as const) {
+          if (oauth[field] !== undefined) {
+            issues.push({ path: `${path}.oauth.${field}`, message: "only valid on authorization_code mode" });
+          }
+        }
       } else if (oauth.mode === "authorization_code") {
         for (const key of ["authorizationUrl", "tokenUrl", "clientIdEnv", "clientSecretEnv"] as const) {
           if (typeof oauth[key] !== "string" || oauth[key].length === 0) {
@@ -535,6 +580,12 @@ export function validateValetPlugin(
           if (params && Object.values(params).some((v) => typeof v !== "string")) {
             issues.push({ path: `${path}.oauth.extraAuthParams`, message: "values must be strings" });
           }
+        }
+        if (oauth.scopesParam !== undefined && (typeof oauth.scopesParam !== "string" || oauth.scopesParam === "")) {
+          issues.push({ path: `${path}.oauth.scopesParam`, message: "must be a non-empty string when present" });
+        }
+        if (oauth.interpretTokenResponse !== undefined && typeof oauth.interpretTokenResponse !== "function") {
+          issues.push({ path: `${path}.oauth.interpretTokenResponse`, message: "must be a function when present" });
         }
       } else {
         issues.push({ path: `${path}.oauth.mode`, message: "must be \"mcp\" or \"authorization_code\"" });
@@ -617,6 +668,21 @@ export function validateValetPlugin(
       }
     }
   });
+
+  if (v.identityLink !== undefined) {
+    const link = asRecord(v.identityLink, "identityLink", issues);
+    if (link) {
+      if (typeof link.provider !== "string" || !NAME_RE.test(link.provider)) {
+        issues.push({ path: "identityLink.provider", message: "required string matching /^[a-z][a-z0-9-]*$/" });
+      }
+      if (typeof link.instructions !== "string" || link.instructions === "") {
+        issues.push({ path: "identityLink.instructions", message: "required non-empty string" });
+      }
+      if (link.deepLink !== undefined && typeof link.deepLink !== "function") {
+        issues.push({ path: "identityLink.deepLink", message: "must be a function when present" });
+      }
+    }
+  }
 
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, plugin: value as ValetPlugin };
