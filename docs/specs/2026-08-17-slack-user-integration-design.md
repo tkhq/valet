@@ -232,11 +232,25 @@ that docblock in the same commit.
 
 `buildCredentialResolver` (`packages/api/src/engine/host.ts`) is the
 single decision point for a session's credentials and already branches on
-`service === "github"`. Add a branch: for `service === "slack"`, after the
-raw store read, look up the session user's `user_identity_links` row for
-provider `slack` and merge `owner_slack_user_id: externalId` into the
-credential metadata. Unlinked user → no metadata key, and the plugin's
-existing behavior (deny private-channel reads) holds.
+`service === "github"`. Add a branch for `service === "slack"`:
+
+The Slack bot token is org-shared by design. `PUT
+/api/credentials/slack?scope=org` stores it under `{ type: "org", id:
+orgId }`. The engine's session always calls the resolver with a user owner
+(`{ type: "user", id: userId }`), so a plain exact-owner read returns null
+for every production session.
+
+The resolver reads the user credential first (a personal credential, if
+ever present, takes precedence). When the user-scoped read returns null,
+the resolver escalates to the org owner and reads from there. Whichever
+credential resolves — user or org — is then enriched: the resolver looks up
+the session user's `user_identity_links` row for provider `slack` and
+merges `owner_slack_user_id: externalId` into the credential metadata.
+Unlinked user → no metadata key, and the plugin's existing behavior (deny
+private-channel reads) holds. No credential at either scope → `null`.
+
+This org-owner escalation is specific to `slack`. All other services keep
+the exact-owner read with no fallback.
 
 The identity link is the single source of truth, whether it arrived via
 OAuth auto-link or the code flow. The resolver never reads the

@@ -1,7 +1,14 @@
 /**
- * Verifies that `buildCredentialResolver` enriches the org `slack` credential
- * with the session user's Slack identity link (`owner_slack_user_id`), activating
- * the dormant private-channel check in plugin-slack.
+ * Verifies that `buildCredentialResolver` resolves the org-scoped Slack bot
+ * credential and enriches it with the session user's Slack identity link
+ * (`owner_slack_user_id`), activating the dormant private-channel check in
+ * plugin-slack.
+ *
+ * The bot token is org-shared by design (`PUT /api/credentials/slack?scope=org`
+ * stores it under `{ type: "org", id: orgId }`). The engine's session always
+ * calls the resolver with a user owner, so a plain exact-owner read would
+ * return null in production. These tests prove the org-scoped fallback and the
+ * enrichment path both work correctly.
  *
  * Modelled on host.github-credential.test.ts — same harness, same fixture
  * bootstrapping pattern, exercising the real `Session.credentialProvider()` seam.
@@ -57,9 +64,10 @@ describe("EngineHost session slack credential resolution", () => {
     return h;
   }
 
-  it("linked user + stored org slack credential → resolved credential has owner_slack_user_id and all original fields", async () => {
+  it("org-scoped slack credential + linked user → resolves and carries owner_slack_user_id", async () => {
     const { appDb, credentials } = await harness();
-    await credentials.save({ type: "user", id: userId }, "slack", {
+    // Store credential under org scope — this is the production path.
+    await credentials.save({ type: "org", id: orgId }, "slack", {
       type: "oauth2",
       accessToken: "xoxb-bot-token",
       metadata: { team_id: "T99" },
@@ -78,9 +86,9 @@ describe("EngineHost session slack credential resolution", () => {
     expect(cred?.metadata?.["team_id"]).toBe("T99");
   });
 
-  it("unlinked user → resolved credential identical to the stored one (no owner_slack_user_id)", async () => {
+  it("org-scoped slack credential + unlinked user → resolves without owner_slack_user_id", async () => {
     const { appDb, credentials } = await harness();
-    await credentials.save({ type: "user", id: userId }, "slack", {
+    await credentials.save({ type: "org", id: orgId }, "slack", {
       type: "oauth2",
       accessToken: "xoxb-bot-token",
       metadata: { team_id: "T77" },
@@ -97,37 +105,49 @@ describe("EngineHost session slack credential resolution", () => {
     expect(Object.prototype.hasOwnProperty.call(cred?.metadata ?? {}, "owner_slack_user_id")).toBe(false);
   });
 
-  it("service === slack with no stored credential → null (no throw)", async () => {
+  it("user-scoped slack credential present → wins over an org-scoped one", async () => {
     const { appDb, credentials } = await harness();
-    await linkIdentity(appDb, { provider: "slack", externalId: "U11", userId });
-    // No slack credential stored.
-
-    fixture = startGithubFixture();
-    const h = makeHost(appDb, credentials, fixture.url);
-
-    const session = await h.sessionFor("sess-slack-nocred", { userId, orgId, workspace: "/tmp" });
-    const cred = await session.credentialProvider().get("slack");
-
-    expect(cred).toBeNull();
-  });
-
-  it("another service (linear) with a linked slack user → metadata untouched", async () => {
-    const { appDb, credentials } = await harness();
-    await credentials.save({ type: "user", id: userId }, "linear", {
-      type: "api_key",
-      apiKey: "lin-key",
-      metadata: { workspace_id: "W1" },
+    // Both stored: user-scoped must win.
+    await credentials.save({ type: "org", id: orgId }, "slack", {
+      type: "oauth2",
+      accessToken: "xoxb-org-token",
+      metadata: { team_id: "TORG" },
+    });
+    await credentials.save({ type: "user", id: userId }, "slack", {
+      type: "oauth2",
+      accessToken: "xoxb-user-token",
+      metadata: { team_id: "TUSER" },
     });
     await linkIdentity(appDb, { provider: "slack", externalId: "U42", userId });
 
     fixture = startGithubFixture();
     const h = makeHost(appDb, credentials, fixture.url);
 
-    const session = await h.sessionFor("sess-linear-slack", { userId, orgId, workspace: "/tmp" });
+    const session = await h.sessionFor("sess-slack-user-wins", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("slack");
+
+    expect(cred?.accessToken).toBe("xoxb-user-token");
+    expect(cred?.metadata?.["owner_slack_user_id"]).toBe("U42");
+    expect(cred?.metadata?.["team_id"]).toBe("TUSER");
+  });
+
+  it("non-slack service stored org-scoped only → resolves null (no generic fallback leaked)", async () => {
+    const { appDb, credentials } = await harness();
+    // Store a linear credential under org scope — the resolver must NOT fall
+    // back to org for non-slack services.
+    await credentials.save({ type: "org", id: orgId }, "linear", {
+      type: "api_key",
+      apiKey: "lin-org-key",
+      metadata: { workspace_id: "WORG" },
+    });
+    await linkIdentity(appDb, { provider: "slack", externalId: "U42", userId });
+
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-linear-no-fallback", { userId, orgId, workspace: "/tmp" });
     const cred = await session.credentialProvider().get("linear");
 
-    expect(cred?.accessToken).toBe("lin-key");
-    expect(Object.prototype.hasOwnProperty.call(cred?.metadata ?? {}, "owner_slack_user_id")).toBe(false);
-    expect(cred?.metadata?.["workspace_id"]).toBe("W1");
+    expect(cred).toBeNull();
   });
 });

@@ -1018,17 +1018,31 @@ export class EngineHost {
         return resolveOpenAiCredential(db, credentials, owner, orgId);
       }
       if (service !== "github") {
-        const stored = await credentials.get(owner, service);
-        if (service === "slack" && stored) {
-          // Activates plugin-slack's dormant private-channel check (its V2-GAP
-          // comment): the identity link is the single source of truth for the
-          // owner's Slack user id, regardless of how the link was created.
-          const identity = await identityForUser(db, "slack", userId);
-          if (identity) {
-            return { ...stored, metadata: { ...stored.metadata, owner_slack_user_id: identity.externalId } };
+        if (service === "slack") {
+          // The Slack bot token is org-shared by design: `PUT
+          // /api/credentials/slack?scope=org` stores it under
+          // `{ type: "org", id: orgId }`. The engine's session always calls
+          // the resolver with a user owner, so a plain exact-owner read would
+          // return null for every production session. Read the user credential
+          // first (personal overrides are possible in principle); when absent,
+          // escalate to the org owner. Mirror the github branch's style: the
+          // bot token is org-shared by design.
+          const stored =
+            (await credentials.get(owner, service)) ??
+            (await credentials.get({ type: "org", id: orgId }, service));
+          if (stored) {
+            // Activates plugin-slack's dormant private-channel check (its
+            // V2-GAP comment): the identity link is the single source of
+            // truth for the owner's Slack user id, regardless of how the
+            // link was created.
+            const identity = await identityForUser(db, "slack", userId);
+            if (identity) {
+              return { ...stored, metadata: { ...stored.metadata, owner_slack_user_id: identity.externalId } };
+            }
           }
+          return stored ?? null;
         }
-        return stored;
+        return await credentials.get(owner, service);
       }
       const resolved = await resolveSessionGitHubToken(
         {
