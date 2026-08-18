@@ -36,7 +36,9 @@ to leak between teams.
 
 This document covers the definition and the owning row. Per-assistant
 documents, skill restriction and tool assignment build on it and are not in
-this pass.
+this pass. Skill restriction, tool assignment and per-assistant personality
+are specced in `2026-08-18-assistant-editor-design.md`; per-assistant
+documents stay deferred.
 
 ## One address, not two
 
