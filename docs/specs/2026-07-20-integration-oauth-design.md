@@ -101,6 +101,12 @@ Failure at any step logs the upstream error server-side and redirects to `/integ
 
 Each credential entry in the response gains `connect: "oauth" | "manual"` so the web UI knows which affordance to render. Derived purely from `declaration.oauth` presence (for authorization_code mode, also env-var presence — a Google plugin with unset `GOOGLE_CLIENT_ID` reports `"manual"` so the UI doesn't render a Connect button that 503s).
 
+> **Superseded (2026-08-17):** the manual fallback for authorization_code
+> declarations with unset env vars is replaced by a third state,
+> `"unconfigured"` — a pasted access token cannot refresh without the
+> client secret, so token entry never produced a working credential. See
+> `2026-08-17-integration-availability-design.md`.
+
 ## Registered-client storage: `mcp_oauth_clients`
 
 New app table (pre-1.0: edit `packages/api/migrations/pg/0000_app.sql` in place + add Drizzle schema; local `rm -rf ~/.valet/pg` required after):

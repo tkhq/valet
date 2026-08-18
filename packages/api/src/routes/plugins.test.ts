@@ -251,7 +251,9 @@ describe("GET /api/plugins connect mode", () => {
     expect(slack?.connect).toBe("manual");
   });
 
-  it("reports manual for authorization_code declarations whose env vars are unset", async () => {
+  it("reports unconfigured for authorization_code declarations whose env vars are unset", async () => {
+    // No manual fallback: a pasted access token cannot refresh without the
+    // client secret (integration-availability design).
     const plugins: ValetPlugin[] = [{
       name: "gmail", version: "0.1.0",
       credentials: [{
@@ -267,7 +269,46 @@ describe("GET /api/plugins connect mode", () => {
     api = await bootTestApi({ plugins });
     const res = await fetch(`${api.baseUrl}/api/plugins`);
     const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
-    expect(summaries.find((p) => p.name === "gmail")?.services[0]?.connect).toBe("manual");
+    expect(summaries.find((p) => p.name === "gmail")?.services[0]?.connect).toBe("unconfigured");
+  });
+
+  it("reports unconfigured for a requires.orgCredential service until the org credential exists", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+
+    const before = await fetch(`${api.baseUrl}/api/plugins`);
+    const beforeBody = (await before.json()) as ListPluginsResponse;
+    expect(beforeBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("unconfigured");
+
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token",
+      accessToken: "xoxb-org-token",
+    });
+
+    const after = await fetch(`${api.baseUrl}/api/plugins`);
+    const afterBody = (await after.json()) as ListPluginsResponse;
+    expect(afterBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("manual");
+  });
+
+  it("keeps connected:true on an unconfigured service so a leftover credential stays visible", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "slack", {
+      type: "bot_token",
+      accessToken: "xoxb-personal",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    const slack = summaries.find((p) => p.name === "slack")?.services[0];
+    expect(slack?.connected).toBe(true);
+    expect(slack?.connect).toBe("unconfigured");
   });
 });
 

@@ -1597,10 +1597,13 @@ export interface PluginServiceSummary {
    * resolution timeout/failure — the UI falls back to its static copy. */
   toolCount?: number;
   /** How the connect UI obtains this credential: "oauth" renders a Connect
-   * redirect button; "manual" renders token entry. authorization_code-mode
-   * declarations report "manual" when their client env vars are unset so
-   * the UI never renders a Connect button that would 503. */
-  connect: "oauth" | "manual";
+   * redirect button; "manual" renders token entry; "unconfigured" means the
+   * deployment/org prerequisite is missing (OAuth client env vars, or the
+   * org-scoped credential an admin connects in Settings → Organization) —
+   * the UI offers no connect path, and hides the tile unless a leftover
+   * credential still needs disconnecting. See
+   * docs/specs/2026-08-17-integration-availability-design.md. */
+  connect: "oauth" | "manual" | "unconfigured";
   /** Stable slug the client maps to a brand mark, e.g. "github", "gmail".
    * Absent when the plugin declares none — the UI falls back to initials.
    * A slug, not an image: the mark ships with the client so a service icon

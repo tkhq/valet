@@ -24,7 +24,7 @@ import type {
   PluginServiceSummary,
   PluginSummary,
 } from "../wire/types.js";
-import { findOAuthDeclaration, authCodeEnvReady } from "../services/integration-oauth.js";
+import { connectModeFor } from "../services/integration-availability.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
@@ -77,7 +77,7 @@ pluginsRouter.get("/", async (c) => {
     }),
   );
 
-  const summaries: PluginSummary[] = plugins.map((plugin) => {
+  const summaries: PluginSummary[] = await Promise.all(plugins.map(async (plugin) => {
     const actionPlugins = plugin.actions ?? [];
     const actionCount = actionPlugins.reduce((sum, actionPlugin) => sum + actionPlugin.actions.length, 0);
 
@@ -116,12 +116,19 @@ pluginsRouter.get("/", async (c) => {
         .map((actionPlugin) => actionPlugin.credentialService ?? actionPlugin.service),
     );
 
-    const services: PluginServiceSummary[] = (plugin.credentials ?? []).map((decl) => {
+    const services: PluginServiceSummary[] = await Promise.all((plugin.credentials ?? []).map(async (decl) => {
       const service = decl.service ?? plugin.name;
-      const found = findOAuthDeclaration(plugins, service);
-      const oauthReady =
-        found !== null &&
-        (found.oauth.mode === "mcp" || authCodeEnvReady(found.oauth, process.env));
+      // Tri-state availability (integration-availability design): "oauth",
+      // "manual", or "unconfigured" when the deployment/org prerequisite is
+      // missing. Same resolver the save/session/workflow gates use.
+      const connect = await connectModeFor({
+        plugins,
+        decl,
+        service,
+        orgId: c.var.user.orgId,
+        credentials: engineCredentials,
+        env: process.env,
+      });
       return {
         service,
         type: decl.type,
@@ -130,7 +137,7 @@ pluginsRouter.get("/", async (c) => {
         configKeys: decl.configKeys,
         connected: connectedServices.has(service),
         dynamic: dynamicServices.has(service) ? true : undefined,
-        connect: oauthReady ? "oauth" : "manual",
+        connect,
         toolCount: toolCounts.get(service),
         // The slug is declared per plugin (`plugin.yaml`), so every service a
         // plugin declares shares its plugin's mark. A service that names
@@ -139,7 +146,7 @@ pluginsRouter.get("/", async (c) => {
         health: health.get(service),
         actions: actionsByCredentialKey.get(service) ?? [],
       };
-    });
+    }));
 
     return {
       name: plugin.name,
@@ -149,7 +156,7 @@ pluginsRouter.get("/", async (c) => {
       dynamic: dynamicServices.size > 0 ? true : undefined,
       services,
     };
-  });
+  }));
 
   const resp: ListPluginsResponse = { plugins: summaries };
   return c.json(resp);
