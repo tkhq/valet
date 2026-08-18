@@ -29,7 +29,7 @@ import { Badge, Button } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
-import { displayName } from "./display-name";
+import { displayName, pluginDisplayName } from "./display-name";
 import { GithubOrgAppLine } from "./github-org-app-line";
 import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
 
@@ -97,7 +97,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
       {single ? (
         <ServiceBlock
           service={single}
-          title={displayName(plugin.name)}
+          title={pluginDisplayName(plugin)}
           slug={single.iconSlug ?? plugin.name}
           description={plugin.description}
           meta={meta}
@@ -106,7 +106,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
       ) : (
         <>
           <CardHeading
-            title={displayName(plugin.name)}
+            title={pluginDisplayName(plugin)}
             slug={iconSlug(plugin)}
             description={plugin.description}
           />
@@ -136,9 +136,9 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
 export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
   return (
     <div className="flex items-start gap-3 rounded-lg bg-ink-wash p-4">
-      <ServiceIcon slug={iconSlug(plugin)} label={displayName(plugin.name)} tone="quiet" />
+      <ServiceIcon slug={iconSlug(plugin)} label={pluginDisplayName(plugin)} tone="quiet" />
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-ink">{displayName(plugin.name)}</div>
+        <div className="text-sm font-medium text-ink">{pluginDisplayName(plugin)}</div>
         {plugin.description && (
           <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
             {plugin.description}

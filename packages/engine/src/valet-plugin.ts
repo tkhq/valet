@@ -360,6 +360,9 @@ export interface ValetPlugin {
   /** Plugin id, e.g. "github". Unique across loaded plugins. */
   name: string;
   version: string;
+  /** Human-readable name for UI surfaces, e.g. "Grafana Cloud". Clients
+   * fall back to a title-cased `name` when absent. */
+  displayName?: string;
   description?: string;
   actions?: ActionPlugin[];
   triggers?: TriggerDef[];
@@ -403,6 +406,9 @@ export function validateValetPlugin(
   }
   if (typeof v.version !== "string" || v.version.length === 0) {
     issues.push({ path: "version", message: "required non-empty string" });
+  }
+  if (v.displayName !== undefined && typeof v.displayName !== "string") {
+    issues.push({ path: "displayName", message: "must be a string when present" });
   }
   if (v.description !== undefined && typeof v.description !== "string") {
     issues.push({ path: "description", message: "must be a string when present" });

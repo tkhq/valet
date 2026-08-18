@@ -62,6 +62,9 @@ export interface SsoTeamMapping {
 export interface McpServerDecl {
   /** Service name; actions surface as `<name>.<tool>`. Lowercase slug. */
   name: string;
+  /** Human-readable name for the connect UI, e.g. "Grafana Cloud". Defaults
+   * to a title-cased `name`. */
+  displayName?: string;
   /** The remote MCP server endpoint (http/https). */
   url: string;
   auth: "none" | "oauth" | "api_key" | "bearer";
@@ -617,6 +620,8 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
           );
         }
         entry.name = name;
+      } else if (key === "displayName") {
+        entry.displayName = assertNonEmptyString(v, `mcpServers[${i}].displayName`, path);
       } else if (key === "url") {
         const raw = assertNonEmptyString(v, `mcpServers[${i}].url`, path);
         let parsed: URL;

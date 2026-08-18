@@ -29,12 +29,24 @@ const DISPLAY_NAMES: Record<string, string> = {
   telegram: "Telegram",
 };
 
+/** Config-declared MCP plugins are named `mcp-config:<entry>` (see
+ * packages/api/src/plugins/config-mcp.ts). The prefix is a dedupe guard,
+ * not a name — strip it before deriving a label. */
+const MCP_CONFIG_PREFIX = "mcp-config:";
+
 export function displayName(id: string): string {
   const known = DISPLAY_NAMES[id];
   if (known) return known;
-  return id
+  const bare = id.startsWith(MCP_CONFIG_PREFIX) ? id.slice(MCP_CONFIG_PREFIX.length) : id;
+  return bare
     .split(/[-_]/)
     .filter(Boolean)
     .map((word, i) => (i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word))
     .join(" ");
+}
+
+/** The card title for a plugin: the manifest's own `displayName` when it
+ * declares one (config-declared MCP servers do), else the id-derived label. */
+export function pluginDisplayName(plugin: { name: string; displayName?: string }): string {
+  return plugin.displayName ?? displayName(plugin.name);
 }

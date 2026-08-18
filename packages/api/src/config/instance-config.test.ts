@@ -323,6 +323,7 @@ describe("mcpServers validation", () => {
         "  - name: crm",
         "    url: https://mcp.crm.example/mcp",
         "    auth: oauth",
+        "    displayName: Acme CRM",
         "    description: CRM tools",
         "  - name: typefully",
         "    url: https://mcp.typefully.com/mcp",
@@ -338,8 +339,18 @@ describe("mcpServers validation", () => {
     );
     const cfg = parseInstanceConfig(yaml, path);
     expect(cfg.mcpServers).toHaveLength(4);
+    expect(cfg.mcpServers?.[1]?.displayName).toBe("Acme CRM");
     expect(cfg.mcpServers?.[2]?.authQueryParam).toBe("TYPEFULLY_API_KEY");
     expect(cfg.mcpServers?.[3]?.enabled).toBe(false);
+  });
+
+  it("rejects an empty displayName", () => {
+    const yaml = base(
+      '  - name: x\n    url: https://x.example/mcp\n    auth: none\n    displayName: ""',
+    );
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "mcpServers[0].displayName must not be empty",
+    );
   });
 
   it("rejects a name that is not a lowercase slug", () => {

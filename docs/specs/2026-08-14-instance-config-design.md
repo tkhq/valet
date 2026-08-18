@@ -498,6 +498,7 @@ set is in-memory process state, so there is no row to converge.
 ```yaml
 mcpServers:
   - name: salesforce            # required; lowercase slug; the action service
+    displayName: Salesforce CRM # optional; connect-UI card title
     url: https://mcp.example.com/mcp   # required; http(s) MCP endpoint
     auth: oauth                 # required; none | oauth | api_key | bearer
     tokenEnv: SF_MCP_TOKEN      # bearer only: env var that holds the token
@@ -531,6 +532,12 @@ Rules:
 - Mode-specific keys on the wrong mode fail validation (`tokenEnv` outside
   `bearer`, `connectLabel` outside `api_key`, `authQueryParam` outside
   `api_key`/`bearer`).
+- `displayName` is the human-readable name the connect UI shows as the
+  card title (and in the default `connectLabel` for `api_key` entries).
+  When absent, the synthesized plugin title-cases `name`
+  ("grafana-cloud" → "Grafana Cloud"). The wire carries it as
+  `PluginSummary.displayName`; the web client prefers it over its own
+  id-derived label.
 
 ## Tool policies
 

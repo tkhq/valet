@@ -151,6 +151,7 @@ pluginsRouter.get("/", async (c) => {
     return {
       name: plugin.name,
       version: plugin.version,
+      displayName: plugin.displayName,
       description: plugin.description,
       actionCount,
       dynamic: dynamicServices.size > 0 ? true : undefined,

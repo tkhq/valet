@@ -1651,6 +1651,10 @@ export interface PluginServiceSummary {
 export interface PluginSummary {
   name: string;
   version: string;
+  /** Human-readable name from the plugin manifest, e.g. "Grafana Cloud".
+   * Absent for most bundled plugins — the client falls back to its own
+   * display-name map keyed on `name`. */
+  displayName?: string;
   description?: string;
   /** Count of statically-declared actions only (plugins with `resolveActions`
    * may expose more at runtime — see `PluginServiceSummary.dynamic`). */
