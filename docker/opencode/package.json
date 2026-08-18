@@ -2,7 +2,7 @@
   "name": "opencode-tools",
   "private": true,
   "dependencies": {
-    "@opencode-ai/plugin": "*",
+    "@opencode-ai/plugin": "^1.18.18",
     "@toon-format/toon": "^2.1.0",
     "zod": "^4.0.0"
   }
