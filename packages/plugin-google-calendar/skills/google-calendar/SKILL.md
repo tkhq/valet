@@ -19,6 +19,8 @@ You have access to Google Calendar through the `google-calendar` plugin.
 
 - **`calendar.quick_add`** — Create an event from a natural-language string. Google's parser extracts the title and time automatically.
 
+- **`calendar.query_free_busy`** — Get busy intervals for one or more calendars in a time window. Works for co-workers' calendars by email address — no subscription needed, only free/busy visibility. Returns busy blocks, never event details.
+
 ## Common Patterns
 
 ### Checking Today's Schedule
@@ -91,6 +93,21 @@ calendar.quick_add({ text: "Team standup every weekday at 9:30am" })
 calendar.quick_add({ text: "Lunch with Alice tomorrow at noon" })
 calendar.quick_add({ text: "Dentist appointment next Tuesday 3-4pm" })
 ```
+
+### Checking Co-workers' Availability
+
+To find a slot for a meeting or a PR review, query free/busy for each person's email:
+
+```
+calendar.query_free_busy({
+  items: ["me@example.com", "alice@example.com", "bob@example.com"],
+  timeMin: "2026-04-22T09:00:00-07:00",
+  timeMax: "2026-04-22T17:00:00-07:00",
+  timeZone: "America/Los_Angeles"
+})
+```
+
+The response maps each calendar ID to its busy intervals. Find a gap common to all calendars, then create the event with `create_event`. A calendar entry with a non-null `error` means the user has no free/busy visibility into that calendar — the query still succeeds for the others.
 
 ### Deleting an Event
 
