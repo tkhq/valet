@@ -20,21 +20,35 @@ import { integrationOptions, canEditAssistant } from "./assistants.$assistantId"
 const patchMutate = vi.fn();
 const archiveMutate = vi.fn();
 const navigateMock = vi.fn();
+// Per-section patch errors. The form calls usePatchAssistant four times per
+// render, in a fixed order: identity, skills, integrations, manage. The mock
+// hands each call the matching entry, so a test can place an error under ONE
+// section and assert it renders under that section only.
+const SECTION_ORDER = ["identity", "skills", "integrations", "manage"] as const;
+type Section = (typeof SECTION_ORDER)[number];
+let patchErrors: Partial<Record<Section, Error>> = {};
+let patchCallIndex = 0;
 let assistantsData: AssistantSummary[] = [];
 let pluginsData: PluginSummary[] = [];
-let skillsData: { skills: { name: string; origin: string }[]; nextCursor: null } = {
+// `useAllSkills` returns the paged-to-exhaustion shape: the accumulated
+// skills plus a `complete` flag. `complete: false` means the catalog is still
+// loading and dangling classification must wait.
+let skillsData: { skills: { name: string; origin: string }[]; complete: boolean } = {
   skills: [],
-  nextCursor: null,
+  complete: true,
 };
 let teamsData: TeamSummary[] = [];
 let meData: { id: string; orgRole: "admin" | "member" } = {
   id: "u1",
   orgRole: "member",
 };
+// The routed param. Mutable so a test can navigate between two editor URLs
+// without a remount, exactly as the real router reuses the component.
+let routeParamId = "asst_1";
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  useParams: (_opts?: unknown) => ({ assistantId: "asst_1" }),
+  useParams: (_opts?: unknown) => ({ assistantId: routeParamId }),
   useNavigate: () => navigateMock,
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
     <a href={to}>{children}</a>
@@ -45,8 +59,18 @@ vi.mock("~/api/assistants", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/assistants")>();
   return {
     ...actual,
-    useAssistants: () => ({ data: { assistants: assistantsData }, isLoading: false, error: null }),
-    usePatchAssistant: () => ({ mutate: patchMutate, isPending: false, error: null }),
+    useAssistants: () => {
+      // First hook the page calls each render — reset the per-render patch
+      // call counter here so the four usePatchAssistant calls below index
+      // into SECTION_ORDER deterministically.
+      patchCallIndex = 0;
+      return { data: { assistants: assistantsData }, isLoading: false, error: null };
+    },
+    usePatchAssistant: () => {
+      const section = SECTION_ORDER[patchCallIndex] ?? "identity";
+      patchCallIndex += 1;
+      return { mutate: patchMutate, isPending: false, error: patchErrors[section] ?? null };
+    },
     useArchiveAssistant: () => ({ mutate: archiveMutate, isPending: false, error: null }),
   };
 });
@@ -63,7 +87,7 @@ vi.mock("~/api/skills", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/skills")>();
   return {
     ...actual,
-    useSkills: () => ({ data: skillsData, isLoading: false, error: null }),
+    useAllSkills: () => ({ data: skillsData, isLoading: false, error: null }),
   };
 });
 
@@ -224,9 +248,12 @@ describe("AssistantEditorPage", () => {
     navigateMock.mockClear();
     assistantsData = [];
     pluginsData = [];
-    skillsData = { skills: [], nextCursor: null };
+    skillsData = { skills: [], complete: true };
     teamsData = [];
     meData = { id: "u1", orgRole: "member" };
+    routeParamId = "asst_1";
+    patchErrors = {};
+    patchCallIndex = 0;
   });
 
   it("renders 'assistant does not exist' message when id not found", () => {
@@ -283,7 +310,6 @@ describe("AssistantEditorPage", () => {
           id: "asst_1",
           body: expect.objectContaining({ name: "New Name" }),
         }),
-        expect.anything(),
       ),
     );
   });
@@ -295,7 +321,7 @@ describe("AssistantEditorPage", () => {
         { name: "code-review", origin: "plugin" },
         { name: "ste-writing", origin: "local" },
       ],
-      nextCursor: null,
+      complete: true,
     };
     meData = { id: "u1", orgRole: "member" };
     render(<AssistantEditorPage />);
@@ -322,7 +348,6 @@ describe("AssistantEditorPage", () => {
             }),
           }),
         }),
-        expect.anything(),
       ),
     );
   });
@@ -332,11 +357,101 @@ describe("AssistantEditorPage", () => {
       skills: { mode: "allowlist", names: ["ghost-skill"] },
     };
     assistantsData = [makeAssistant({ id: "asst_1", name: "Bot", behavior })];
-    skillsData = { skills: [], nextCursor: null }; // ghost-skill not in catalog
+    skillsData = { skills: [], complete: true }; // ghost-skill not in catalog
     meData = { id: "u1", orgRole: "member" };
     render(<AssistantEditorPage />);
 
     expect(screen.getByText(/ghost-skill/)).toBeTruthy();
     expect(screen.getByText(/not found/i)).toBeTruthy();
+  });
+
+  // Finding 4: an incomplete catalog must NOT flag a name as not-found. A
+  // name can live on a later page; only a whole catalog can classify it.
+  it("holds the 'not found' chip while the catalog is still paging", () => {
+    const behavior: AssistantBehavior = {
+      skills: { mode: "allowlist", names: ["ghost-skill"] },
+    };
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot", behavior })];
+    // Catalog still loading (more pages to fetch), and ghost-skill not yet
+    // seen on the pages in hand.
+    skillsData = { skills: [], complete: false };
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    expect(screen.queryByText(/not found/i)).toBeNull();
+  });
+
+  // Finding 1: the router reuses this component across a param change. The
+  // key on AssistantEditorForm must remount it so B's config replaces A's.
+  it("re-initializes the form when the routed assistant id changes", () => {
+    assistantsData = [
+      makeAssistant({ id: "asst_1", name: "Alpha", isDefault: true }),
+      makeAssistant({ id: "asst_2", name: "Beta", isDefault: false }),
+    ];
+    meData = { id: "u1", orgRole: "member" };
+    const { rerender } = render(<AssistantEditorPage />);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Alpha");
+
+    // Navigate to the second editor URL — same component, new param.
+    routeParamId = "asst_2";
+    rerender(<AssistantEditorPage />);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Beta");
+  });
+
+  // Finding 3: a non-identity section's mutation error renders under ITS OWN
+  // Save control, not under Identity.
+  it("renders a skills save error under the Skills section only", () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot" })];
+    meData = { id: "u1", orgRole: "member" };
+    patchErrors = { skills: new Error("skills save failed") };
+    render(<AssistantEditorPage />);
+
+    // The error text renders (under the skills Save control).
+    const err = screen.getByText(/skills save failed/i);
+    expect(err).toBeTruthy();
+    // It sits after the Save skills button, not after Save identity.
+    const skillsBtn = screen.getByRole("button", { name: "Save skills" });
+    expect(skillsBtn.parentElement?.contains(err)).toBe(true);
+    const identityBtn = screen.getByRole("button", { name: "Save identity" });
+    expect(identityBtn.parentElement?.contains(err)).toBe(false);
+  });
+
+  // Finding 2: saving one section carries the SERVER value for the other
+  // section's half, never the local unsaved edits or an empty object.
+  it("saving skills preserves the server's integrations half in the PATCH body", async () => {
+    const behavior: AssistantBehavior = {
+      integrations: {
+        mode: "allowlist",
+        entries: [{ service: "github" }],
+      },
+    };
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot", behavior })];
+    skillsData = {
+      skills: [{ name: "code-review", origin: "plugin" }],
+      complete: true,
+    };
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    // Edit the skills section locally, then save it.
+    fireEvent.click(screen.getByRole("radio", { name: "Only these skills" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "code-review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save skills" }));
+
+    await waitFor(() =>
+      expect(patchMutate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "asst_1",
+          body: {
+            behavior: {
+              // The server's integrations half survives untouched.
+              integrations: { mode: "allowlist", entries: [{ service: "github" }] },
+              // Only the skills half reflects the local edit.
+              skills: { mode: "allowlist", names: ["code-review"] },
+            },
+          },
+        }),
+      ),
+    );
   });
 });

@@ -9,7 +9,7 @@ import type {
 } from "@valet/api/wire";
 import { useAssistants, usePatchAssistant, useArchiveAssistant } from "~/api/assistants";
 import { usePlugins } from "~/api/integrations";
-import { useSkills } from "~/api/skills";
+import { useAllSkills } from "~/api/skills";
 import { useMe, useTeams } from "~/api/settings";
 import { assistantLabel } from "~/components/session/assistant-rail";
 import { Section } from "~/components/settings/section";
@@ -103,7 +103,12 @@ export function AssistantEditorPage() {
       : undefined;
 
   return (
+    // key on the assistant id: the router reuses this component across a
+    // param change (one editor URL to another), so without a remount the
+    // form's useState would keep assistant A's edits and Save would write
+    // them onto B. The key forces a fresh form per assistant.
     <AssistantEditorForm
+      key={assistant.id}
       assistant={assistant}
       canEdit={canEdit}
       integrationOpts={integrationOpts}
@@ -128,7 +133,14 @@ function AssistantEditorForm({
   owningTeamName: string | undefined;
   pluginsResolved: boolean;
 }) {
-  const patch = usePatchAssistant();
+  // One mutation instance per section. usePatchAssistant is a thin
+  // useMutation wrapper, so a separate instance per Save control is cheap —
+  // and it keeps each section's pending and error state under its OWN control
+  // instead of surfacing every section's error under Identity.
+  const identityPatch = usePatchAssistant();
+  const skillsPatch = usePatchAssistant();
+  const integrationsPatch = usePatchAssistant();
+  const managePatch = usePatchAssistant();
   const archive = useArchiveAssistant();
   const navigate = useNavigate();
 
@@ -152,17 +164,26 @@ function AssistantEditorForm({
     behavior?.integrations?.mode === "allowlist" ? behavior.integrations.entries : [];
 
   // Skills catalog query — owner-scoped when the assistant has a team owner.
+  // Both queries page to exhaustion (useAllSkills): the server caps one page
+  // at 24, and an allowlisted name that lived on page 2 rendered as a
+  // "(not found)" chip and could be destroyed. Reading the whole catalog is
+  // the only safe basis for calling a name dangling.
   const ownerQuery =
     assistant.owner.type === "team"
       ? { ownerType: "team" as const, ownerId: assistant.owner.id }
       : {};
-  const skillsQ = useSkills(ownerQuery);
-  const pluginSkillsQ = useSkills();
+  const skillsQ = useAllSkills(ownerQuery);
+  const pluginSkillsQ = useAllSkills();
 
   // Section-level gates: skills and integrations wait on their own catalogs.
   // The identity section renders immediately without waiting on slow catalogs.
   const skillsResolved =
     skillsQ.data !== undefined && pluginSkillsQ.data !== undefined;
+
+  // The catalog is whole only when BOTH queries reached their final page. A
+  // name is classified as dangling only against a whole catalog (below).
+  const catalogComplete =
+    skillsQ.data?.complete === true && pluginSkillsQ.data?.complete === true;
 
   const catalogSkillNames = useMemo(() => {
     const all: string[] = [];
@@ -179,46 +200,39 @@ function AssistantEditorForm({
   // ── save handlers ────────────────────────────────────────────────────
 
   function saveIdentity() {
-    patch.mutate(
-      {
-        id: assistant.id,
-        body: {
-          name: name.trim() || undefined,
-          personality: personality.trim() ? personality.trim() : null,
-        },
+    identityPatch.mutate({
+      id: assistant.id,
+      body: {
+        name: name.trim() || undefined,
+        personality: personality.trim() ? personality.trim() : null,
       },
-      { onSuccess: () => {} },
-    );
+    });
   }
 
+  // Each section's Save builds its PATCH body from the LATEST SERVER value
+  // (`assistant.behavior`) plus only its OWN half from local state. Spreading
+  // the shared local `behavior` would have persisted the other section's
+  // unsaved edits and clobbered a concurrent edit the server already holds.
   function saveSkills() {
     const newBehavior: AssistantBehavior = {
-      ...behavior,
+      ...(assistant.behavior ?? null),
       skills:
         skillsMode === "all"
           ? { mode: "all" }
           : { mode: "allowlist", names: allowedSkillNames },
     };
-    setBehavior(newBehavior);
-    patch.mutate(
-      { id: assistant.id, body: { behavior: newBehavior } },
-      { onSuccess: () => {} },
-    );
+    skillsPatch.mutate({ id: assistant.id, body: { behavior: newBehavior } });
   }
 
   function saveIntegrations() {
     const newBehavior: AssistantBehavior = {
-      ...behavior,
+      ...(assistant.behavior ?? null),
       integrations:
         integrationsMode === "all"
           ? { mode: "all" }
           : { mode: "allowlist", entries: allowedEntries },
     };
-    setBehavior(newBehavior);
-    patch.mutate(
-      { id: assistant.id, body: { behavior: newBehavior } },
-      { onSuccess: () => {} },
-    );
+    integrationsPatch.mutate({ id: assistant.id, body: { behavior: newBehavior } });
   }
 
   function setSkillsMode(mode: "all" | "allowlist") {
@@ -292,8 +306,12 @@ function AssistantEditorForm({
     }));
   }
 
-  // Dangling skill names (in allowlist, not in catalog).
-  const danglingNames = allowedSkillNames.filter((n) => !catalogSkillNames.has(n));
+  // Dangling skill names (in allowlist, not in catalog). Only classified
+  // against a WHOLE catalog — a partial catalog would flag a real name that
+  // lives on a later page as "(not found)" and invite its removal.
+  const danglingNames = catalogComplete
+    ? allowedSkillNames.filter((n) => !catalogSkillNames.has(n))
+    : [];
 
   const label = assistantLabel(assistant);
 
@@ -331,6 +349,9 @@ function AssistantEditorForm({
             onChange={(e) => setPersonality(e.target.value)}
             disabled={!canEdit}
             rows={4}
+            // Matches the server cap PERSONALITY_INJECT_CAP (500): the API
+            // 400s a longer value, so the field stops the overflow up front.
+            maxLength={500}
             placeholder="You are warm and direct."
             className="w-full rounded border bg-[--bg] text-[--fg] placeholder:text-muted border-[--border] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 focus-visible:border-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm resize-y leading-relaxed"
           />
@@ -339,13 +360,13 @@ function AssistantEditorForm({
           <Button
             type="button"
             onClick={saveIdentity}
-            disabled={!canEdit || patch.isPending}
+            disabled={!canEdit || identityPatch.isPending}
             aria-label="Save identity"
           >
-            {patch.isPending ? "Saving…" : "Save identity"}
+            {identityPatch.isPending ? "Saving…" : "Save identity"}
           </Button>
-          {patch.error != null && (
-            <p className="text-xs text-danger-500">{errorText(patch.error)}</p>
+          {identityPatch.error != null && (
+            <p className="text-xs text-danger-500">{errorText(identityPatch.error)}</p>
           )}
         </div>
       </Section>
@@ -435,11 +456,14 @@ function AssistantEditorForm({
             <Button
               type="button"
               onClick={saveSkills}
-              disabled={!canEdit || patch.isPending}
+              disabled={!canEdit || skillsPatch.isPending}
               aria-label="Save skills"
             >
-              Save skills
+              {skillsPatch.isPending ? "Saving…" : "Save skills"}
             </Button>
+            {skillsPatch.error != null && (
+              <p className="text-xs text-danger-500">{errorText(skillsPatch.error)}</p>
+            )}
           </div>
         </div>
         )}
@@ -532,11 +556,14 @@ function AssistantEditorForm({
             <Button
               type="button"
               onClick={saveIntegrations}
-              disabled={!canEdit || patch.isPending}
+              disabled={!canEdit || integrationsPatch.isPending}
               aria-label="Save integrations"
             >
-              Save integrations
+              {integrationsPatch.isPending ? "Saving…" : "Save integrations"}
             </Button>
+            {integrationsPatch.error != null && (
+              <p className="text-xs text-danger-500">{errorText(integrationsPatch.error)}</p>
+            )}
           </div>
         </div>
         )}
@@ -549,11 +576,14 @@ function AssistantEditorForm({
             <Button
               type="button"
               variant="secondary"
-              onClick={() => patch.mutate({ id: assistant.id, body: { isDefault: true } })}
-              disabled={!canEdit || patch.isPending}
+              onClick={() => managePatch.mutate({ id: assistant.id, body: { isDefault: true } })}
+              disabled={!canEdit || managePatch.isPending}
             >
               Make default
             </Button>
+          )}
+          {managePatch.error != null && (
+            <p className="text-xs text-danger-500">{errorText(managePatch.error)}</p>
           )}
 
           {assistant.isDefault ? (
