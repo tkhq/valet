@@ -575,4 +575,15 @@ describe("personality and behavior config", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("POST with explicit null behavior and personality treats them as absent", async () => {
+    api = await bootTestApi();
+    // A client that always sends every field explicitly may send null for
+    // optional fields. null must not reach validateAssistantBehavior or the
+    // personality type guard — it should be treated the same as omitting the
+    // field entirely.
+    const created = await create(api, { name: "Null-fields", behavior: null, personality: null });
+    expect(created.behavior).toBeUndefined();
+    expect(created.personality).toBeUndefined();
+  });
 });

@@ -323,9 +323,9 @@ export async function createAssistant(
  *
  * `personality` and `behavior` are optional in the patch object. When
  * present they overwrite the stored value; `null` clears it. Absent means
- * "do not touch". The route serializes `AssistantBehavior` to JSON before
- * calling here; the route then evicts the cached engine session so the next
- * wake picks up the new persona and filters.
+ * "do not touch". This function serializes `AssistantBehavior` to JSON via
+ * `serializeAssistantBehavior`; the route then evicts the cached engine
+ * session so the next wake picks up the new persona and filters.
  */
 export async function patchAssistant(
   db: AppDb,

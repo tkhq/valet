@@ -126,10 +126,10 @@ assistantsRouter.post("/", async (c) => {
   if (body.name !== undefined && typeof body.name !== "string") {
     return c.json({ error: "name must be a string." }, 400);
   }
-  if (body.personality !== undefined && typeof body.personality !== "string") {
+  if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
     return c.json({ error: "personality must be a string." }, 400);
   }
-  if (body.behavior !== undefined) {
+  if (body.behavior !== undefined && body.behavior !== null) {
     const err = validateAssistantBehavior(body.behavior);
     if (err) return c.json({ error: err }, 400);
   }
