@@ -637,6 +637,36 @@ describe("installWorkflowTemplate", () => {
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
 
+  it("installs a template whose service the ORGANIZATION connected, not the caller", async () => {
+    // The gate this pins: an org-mode credential (Settings → Organization)
+    // is never on any one member's own credential list, so a personal-list
+    // check refuses this install forever — while the gallery, which reads
+    // both sources, offers an Install button that then bounces. The two
+    // must agree.
+    await credentials.save({ type: "org", id: OWNER.orgId }, "chat", {
+      type: "bot_token",
+      accessToken: "chat-org-token",
+    });
+    const result = await installWorkflowTemplate(deps([chatPlugin]), OWNER, "chat-note");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(1);
+  });
+
+  it("sends an unconfigured service to an admin, not to the Integrations page", async () => {
+    // The integrations page HIDES a service the org has not set up, so
+    // "Connect chat in Integrations" would send the reader to a screen with
+    // no button on it. Only an admin can act here.
+    const result = await installWorkflowTemplate(deps([chatPlugin]), OWNER, "chat-note");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("not_connected");
+    expect(result.error).toContain("not configured for this organization");
+    expect(result.error).toContain("Settings → Organization");
+    expect(result.error).not.toContain("Connect chat in Integrations");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
   it("reports an unknown template id", async () => {
     const result = await installWorkflowTemplate(deps(), OWNER, "no-such-template");
     expect(result.ok).toBe(false);

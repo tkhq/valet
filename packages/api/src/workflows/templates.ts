@@ -714,8 +714,26 @@ export async function installWorkflowTemplate(
     return { ok: false, code: "not_found", error: `No template with id "${templateId}". Reload the gallery and try again.` };
   }
 
-  const connected = new Set((await deps.credentials.list({ type: "user", id: owner.userId })).map((c) => c.service));
-  const summarized = summarizeTemplate(owned, deps.actionPluginByService, connected);
+  // The same two-source read `listWorkflowTemplateSummaries` makes, and for
+  // the same reason: an org-mode service (a Slack bot token an admin
+  // connected once in Settings → Organization) is never on any one member's
+  // OWN credential list, because sessions resolve it by owner escalation.
+  // Reading only the personal list refuses the install of a template whose
+  // service the organization already provides — and the gallery, which does
+  // union the two, offers an Install button that this gate then rejects.
+  const availability = {
+    plugins: deps.plugins,
+    orgId: owner.orgId,
+    credentials: deps.credentials,
+    env: process.env,
+  };
+  const [personal, orgProvided, unavailable] = await Promise.all([
+    deps.credentials.list({ type: "user", id: owner.userId }),
+    orgProvidedServiceSet(availability),
+    unavailableServiceSet(availability),
+  ]);
+  const connected = new Set([...personal.map((c) => c.service), ...orgProvided]);
+  const summarized = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
   if (!summarized.ok) {
     return {
       ok: false,
@@ -725,7 +743,24 @@ export async function installWorkflowTemplate(
     };
   }
 
-  const unconnected = summarized.value.summary.requires.filter((r) => !r.connected).map((r) => r.service);
+  // Two different reasons a requirement is unmet, and they take different
+  // corrective actions. A service the CALLER has not connected is fixed on
+  // the Integrations page. A service the ORGANIZATION has not configured is
+  // not on that page at all (integration-availability design hides it), so
+  // sending the reader there is sending them to a screen with no button on
+  // it — only an admin can act, in Settings → Organization.
+  const unmet = summarized.value.summary.requires.filter((r) => !r.connected);
+  const unconfigured = unmet.filter((r) => r.unconfigured === true).map((r) => r.service);
+  const unconnected = unmet.filter((r) => r.unconfigured !== true).map((r) => r.service);
+  if (unconfigured.length > 0) {
+    return {
+      ok: false,
+      code: "not_connected",
+      error:
+        `${unconfigured.join(" and ")} is not configured for this organization, so this template cannot run yet. ` +
+        `An admin sets it up in Settings → Organization.`,
+    };
+  }
   if (unconnected.length > 0) {
     return {
       ok: false,
