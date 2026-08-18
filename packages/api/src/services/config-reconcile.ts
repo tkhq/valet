@@ -30,9 +30,11 @@ import type { InstanceConfig, ToolPolicyRule } from "../config/instance-config.j
 import { InstanceConfigError } from "../config/instance-config.js";
 import {
   ensureOrg,
+  getSsoTeamGroups,
   renameOrg,
   setOrgModelPreferences,
   setOrgMemberRole,
+  setSsoTeamGroups,
   LAST_ADMIN_ERROR,
 } from "./org.js";
 import {
@@ -131,6 +133,27 @@ async function reconcileOrgPass(
   sourceService?: SourceService,
 ): Promise<void> {
   const org = await ensureOrg(db, sourceService);
+
+  // Team-sync group allowlist — declared under auth.sso.teams.groups, not
+  // org.*, but it lands on the org row because the login sync reads it per
+  // login (`auth/provisioning.ts`) and Settings edits the same column. The
+  // file wins at every boot, the same rule as org.features below.
+  const declaredGroups = cfg.auth?.sso?.teams?.groups;
+  if (declaredGroups !== undefined) {
+    const stored = await getSsoTeamGroups(db, org.id);
+    const changed =
+      stored === null ||
+      stored.length !== declaredGroups.length ||
+      stored.some((path, i) => path !== declaredGroups[i]);
+    if (changed) {
+      console.warn(
+        `[config-reconcile] auth.sso.teams.groups set to [${declaredGroups.join(", ")}] from ` +
+          `${configFileLabel(configPath)}. The file wins at every boot, so a group list edited ` +
+          `in Settings does not last. To control the list in Settings, remove the key from that file.`,
+      );
+    }
+    await setSsoTeamGroups(db, org.id, declaredGroups);
+  }
 
   const orgCfg = cfg.org;
   if (!orgCfg) return;

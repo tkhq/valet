@@ -46,6 +46,13 @@ export const orgs = pgTable("orgs", {
   // (`services/org.ts`'s `getOrgModelPreferences`/`setOrgModelPreferences`)
   // — jsonb, mirroring the `features` column above.
   modelPreferences: jsonb("model_preferences").notNull().default([]),
+  // Top-level group paths the login team sync mirrors (e.g. `["/platform"]`),
+  // editable from Settings (`services/org.ts`). NULL means "never set",
+  // which mirrors nothing — the same fail-closed answer as an empty list.
+  // When `valet.yaml` declares `auth.sso.teams.groups`, the boot reconciler
+  // writes the file's list over this column, so the file wins at every boot
+  // — the same precedence as `features` (`services/config-reconcile.ts`).
+  ssoTeamGroups: jsonb("sso_team_groups"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   // Org-level toggle: present skill names as bare slash-commands instead of
   // prefixed `/skill <name>`. Replaces the deleted per-user `users.bareSkillCommands`.

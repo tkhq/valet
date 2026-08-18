@@ -163,6 +163,62 @@ export async function setOrgFeatures(db: AppQueryable, orgId: string, features: 
   await db.update(orgs).set({ features: { ...raw, ...features } }).where(eq(orgs.id, orgId));
 }
 
+/**
+ * Exact copy string the group-path guard throws — routes/tests assert on it.
+ * Names the corrective action: the shape a path must have.
+ */
+export const SSO_TEAM_GROUP_SHAPE_ERROR =
+  'ssoTeamGroups entries must be top-level group paths such as "/platform"';
+
+/**
+ * Validates and normalizes a group allowlist from untrusted input: trims
+ * each entry, requires the top-level-path shape (`/name`, exactly one
+ * segment — the same shape `auth.sso.teams.groups` requires in
+ * `config/instance-config.ts`), and drops duplicates keeping first
+ * position. One bad entry rejects the whole list, because a silently
+ * dropped entry would read back as "this group was turned off".
+ */
+export function normalizeSsoTeamGroups(groups: unknown): string[] {
+  if (!Array.isArray(groups)) {
+    throw new ValidationError("ssoTeamGroups must be an array of strings");
+  }
+  const out: string[] = [];
+  for (const raw of groups) {
+    if (typeof raw !== "string") throw new ValidationError(SSO_TEAM_GROUP_SHAPE_ERROR);
+    const trimmed = raw.trim();
+    // Leading `/` plus exactly one non-empty segment. A bare name cannot be
+    // told from a same-named group nested elsewhere, and the sync mirrors a
+    // top-level group and its admin sub-group only (`services/team-sync.ts`).
+    if (!/^\/[^/]+$/.test(trimmed)) throw new ValidationError(SSO_TEAM_GROUP_SHAPE_ERROR);
+    if (!out.includes(trimmed)) out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Reads `orgs.sso_team_groups`. NULL means the list was never set — by the
+ * file or by Settings — and the caller must mirror nothing, the same
+ * fail-closed answer an empty list gives. The two are kept distinct so the
+ * boot reconciler can tell "the operator chose nothing" from "the operator
+ * chose an empty list".
+ */
+export async function getSsoTeamGroups(db: AppQueryable, orgId: string): Promise<string[] | null> {
+  const rows = await db
+    .select({ ssoTeamGroups: orgs.ssoTeamGroups })
+    .from(orgs)
+    .where(eq(orgs.id, orgId))
+    .limit(1);
+  const value = rows[0]?.ssoTeamGroups;
+  if (!Array.isArray(value)) return null;
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/** Overwrites `orgs.sso_team_groups` after `normalizeSsoTeamGroups`. */
+export async function setSsoTeamGroups(db: AppQueryable, orgId: string, groups: string[]): Promise<void> {
+  const normalized = normalizeSsoTeamGroups(groups);
+  await db.update(orgs).set({ ssoTeamGroups: normalized }).where(eq(orgs.id, orgId));
+}
+
 /** Reads `orgs.model_preferences` (jsonb); absent/missing reads as `[]`. */
 export async function getOrgModelPreferences(db: AppQueryable, orgId: string): Promise<string[]> {
   const rows = await db

@@ -2145,6 +2145,15 @@ export interface OrgResponse {
   name: string;
   createdAt: number;
   features: OrgFeaturesWire;
+  /**
+   * Top-level group paths the team sync mirrors, e.g. `["/platform"]` —
+   * the per-group half of `features.ssoTeamSync`. A group outside this
+   * list never becomes a team; an existing mirror of a de-listed group
+   * goes dormant (kept, with its members, updated by nothing). Never-set
+   * reads as `[]`: both mirror nothing. When `valet.yaml` declares
+   * `auth.sso.teams.groups`, the file overwrites this list at every boot.
+   */
+  ssoTeamGroups: string[];
   callerRole: "admin" | "member";
 }
 
@@ -2152,6 +2161,8 @@ export interface OrgResponse {
 export interface PatchOrgRequest {
   name?: string;
   features?: Partial<OrgFeaturesWire>;
+  /** Replaces the whole mirrored-group list; entries are `/name` paths. */
+  ssoTeamGroups?: string[];
 }
 
 export type PatchOrgResponse = OrgResponse;

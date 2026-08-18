@@ -16,13 +16,17 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
+import { ValidationError } from "@valet/shared";
 import {
   getOrgFeatures,
+  getSsoTeamGroups,
   isOrgAdmin,
   listOrgMembers,
+  normalizeSsoTeamGroups,
   renameOrg,
   setOrgFeatures,
   setOrgMemberRole,
+  setSsoTeamGroups,
   type OrgFeatures,
   type OrgRole,
 } from "../services/org.js";
@@ -47,7 +51,10 @@ async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): P
   const row = rows[0];
   if (!row) return undefined;
   const features = await getOrgFeatures(db, orgId);
-  return { id: row.id, name: row.name, createdAt: row.createdAt, features, callerRole };
+  // Never-set (NULL) flattens to `[]` on the wire: both mirror nothing, so
+  // the client needs no null case.
+  const ssoTeamGroups = (await getSsoTeamGroups(db, orgId)) ?? [];
+  return { id: row.id, name: row.name, createdAt: row.createdAt, features, ssoTeamGroups, callerRole };
 }
 
 /** Org-admin gate applied to every route below GET /api/org. */
@@ -87,7 +94,7 @@ orgRouter.patch("/", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const allowed = new Set(["name", "features"]);
+  const allowed = new Set(["name", "features", "ssoTeamGroups"]);
   const unknownFields = Object.keys(raw).filter((k) => !allowed.has(k));
   if (unknownFields.length > 0) {
     return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
@@ -138,6 +145,20 @@ orgRouter.patch("/", async (c) => {
     // not name — one `valet.yaml` declared — survives this write. See
     // services/org.ts.
     await setOrgFeatures(db, user.orgId, update);
+  }
+
+  if ("ssoTeamGroups" in raw) {
+    try {
+      // Replaces the whole list, normalized (`normalizeSsoTeamGroups` is
+      // the shape guard — a bad entry 400s with the corrective message).
+      // Same file-wins caveat as the features above: a `valet.yaml` that
+      // declares auth.sso.teams.groups overwrites this write at the next
+      // restart, and the reconciler prints one line naming the file.
+      await setSsoTeamGroups(db, user.orgId, normalizeSsoTeamGroups(raw.ssoTeamGroups));
+    } catch (err) {
+      if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+      throw err;
+    }
   }
 
   const body = await loadOrgResponse(db, user.orgId, "admin");

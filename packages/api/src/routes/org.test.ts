@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { LAST_ADMIN_ERROR } from "../services/org.js";
+import { LAST_ADMIN_ERROR, SSO_TEAM_GROUP_SHAPE_ERROR } from "../services/org.js";
 import type { OrgMembersResponse, OrgResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -131,6 +131,40 @@ describe("PATCH /api/org", () => {
       body: JSON.stringify({ features: { bogus: true } }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("sets the team-sync group allowlist, normalized, and GET reflects it", async () => {
+    api = await bootTestApi();
+
+    // Never set reads as an empty list on the wire — the client needs no
+    // null case, and both states mirror nothing.
+    const before = await fetch(`${api.baseUrl}/api/org`, { headers: HEADERS });
+    expect(((await before.json()) as OrgResponse).ssoTeamGroups).toEqual([]);
+
+    const res = await fetch(`${api.baseUrl}/api/org`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ ssoTeamGroups: [" /platform ", "/research", "/platform"] }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OrgResponse;
+    expect(body.ssoTeamGroups).toEqual(["/platform", "/research"]);
+
+    const getRes = await fetch(`${api.baseUrl}/api/org`, { headers: HEADERS });
+    expect(((await getRes.json()) as OrgResponse).ssoTeamGroups).toEqual(["/platform", "/research"]);
+  });
+
+  it("rejects a group entry that is not a top-level path, naming the shape", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ ssoTeamGroups: ["platform"] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(SSO_TEAM_GROUP_SHAPE_ERROR);
   });
 
   it("an empty features object is a 200 no-op that leaves the gate unchanged", async () => {

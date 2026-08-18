@@ -31,7 +31,7 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
-import { findOrg, getOrgFeatures } from "./services/org.js";
+import { findOrg, getOrgFeatures, getSsoTeamGroups } from "./services/org.js";
 import { reportTeamSyncState } from "./services/team-sync.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
@@ -204,7 +204,9 @@ if (authConfig) {
       oidc.teamClaim = mapping.claim;
       oidc.teamAssertedClaim = mapping.assertedClaim;
       oidc.teamAdminGroup = mapping.adminSubGroup;
-      oidc.teamGroups = mapping.groups;
+      // `mapping.groups` is not copied anywhere: the boot reconciler writes
+      // `auth.sso.teams.groups` onto the org row, and every reader takes the
+      // column (`services/config-reconcile.ts`).
     }
   } catch (e) {
     if (e instanceof InstanceConfigError) {
@@ -408,7 +410,9 @@ if (instanceConfig) {
       orgId: org.id,
       enabled: features.ssoTeamSync,
       ssoConfigured: authConfig?.oidc !== undefined,
-      mirroredGroups: authConfig?.oidc?.teamGroups ?? [],
+      // The column, not the file: the reconcile above already wrote the
+      // file's list over it, and Settings edits land here too.
+      mirroredGroups: (await getSsoTeamGroups(providers.db, org.id)) ?? [],
       configPath: process.env.VALET_CONFIG,
     });
   }

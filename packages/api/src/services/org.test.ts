@@ -7,13 +7,16 @@ import { orgMembers, orgs, users } from "../schema/index.js";
 import {
   getOrgFeatures,
   getOrgModelPreferences,
+  getSsoTeamGroups,
   isOrgAdmin,
   listOrgMembers,
   MEMBER_NOT_FOUND_ERROR,
+  normalizeSsoTeamGroups,
   renameOrg,
   setOrgFeatures,
   setOrgModelPreferences,
   setOrgMemberRole,
+  setSsoTeamGroups,
 } from "./org.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string, role: "admin" | "member", createdAt: number) {
@@ -130,6 +133,42 @@ describe("org service", () => {
       // returns `any` implicitly, which is how untrusted input arrives).
       const bogus = JSON.parse('"not-an-array"');
       await expect(setOrgModelPreferences(db, orgId, bogus)).rejects.toThrow(ValidationError);
+    });
+  });
+
+  describe("sso team groups", () => {
+    it("reads null when never set — 'no information', distinct from an empty list", async () => {
+      expect(await getSsoTeamGroups(db, orgId)).toBeNull();
+    });
+
+    it("round-trips a set list", async () => {
+      await setSsoTeamGroups(db, orgId, ["/platform", "/research"]);
+      expect(await getSsoTeamGroups(db, orgId)).toEqual(["/platform", "/research"]);
+    });
+
+    it("an explicitly empty list stays empty, not null", async () => {
+      await setSsoTeamGroups(db, orgId, []);
+      expect(await getSsoTeamGroups(db, orgId)).toEqual([]);
+    });
+
+    it("normalize trims entries, drops duplicates, keeps order", () => {
+      expect(normalizeSsoTeamGroups([" /platform ", "/research", "/platform"])).toEqual([
+        "/platform",
+        "/research",
+      ]);
+    });
+
+    it("normalize rejects a non-array", () => {
+      const bogus = JSON.parse('"/platform"');
+      expect(() => normalizeSsoTeamGroups(bogus)).toThrow(ValidationError);
+    });
+
+    it("normalize rejects a bare name and a nested path", () => {
+      // A bare name cannot be told from a same-named group nested elsewhere,
+      // and the sync mirrors top-level groups only (`services/team-sync.ts`).
+      expect(() => normalizeSsoTeamGroups(["platform"])).toThrow(ValidationError);
+      expect(() => normalizeSsoTeamGroups(["/platform/admins"])).toThrow(ValidationError);
+      expect(() => normalizeSsoTeamGroups(["/"])).toThrow(ValidationError);
     });
   });
 
