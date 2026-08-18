@@ -121,7 +121,12 @@ function SchemaField({
   error?: string;
   onChange: (value: unknown) => void;
 }) {
-  const label = def.required ? `${field} *` : field;
+  // `label` first, field name only as a fallback. Every template declares
+  // one, and showing the raw schema key instead ("rosterOwner") asks a
+  // person to read code. `templateInputs` (the install dialog's source)
+  // has always fallen back this way; this dialog did not.
+  const text = def.label ?? field;
+  const label = def.required ? `${text} *` : text;
   return (
     <div className="flex flex-col gap-1">
       <SchemaFieldControl label={label} def={def} value={value} onChange={onChange} />

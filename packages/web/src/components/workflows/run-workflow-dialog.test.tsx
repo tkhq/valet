@@ -23,12 +23,12 @@ const schema: Record<string, WorkflowInputDefinition> = {
   mode: { type: "string", enum: ["fast", "safe"], default: "safe" },
 };
 
-function renderDialog(onStarted = vi.fn()) {
+function renderDialog(onStarted = vi.fn(), fields: Record<string, WorkflowInputDefinition> = schema) {
   render(
     <RunWorkflowDialog
       workflowId="wf_1"
       workflowName="deploy-thing"
-      schema={schema}
+      schema={fields}
       open
       onOpenChange={() => {}}
       onStarted={onStarted}
@@ -43,6 +43,21 @@ beforeEach(() => {
 });
 
 describe("RunWorkflowDialog", () => {
+  it("shows the declared label, not the raw schema key", () => {
+    // "rosterOwner" is a code identifier. Every template declares a `label`
+    // for exactly this reason, and this dialog used to ignore it.
+    renderDialog(vi.fn(), {
+      rosterOwner: { type: "string", required: true, label: "Roster file owner" },
+    });
+    expect(screen.getByText("Roster file owner *")).toBeTruthy();
+    expect(screen.queryByText("rosterOwner *")).toBeNull();
+  });
+
+  it("falls back to the field name when a schema declares no label", () => {
+    renderDialog(vi.fn(), { bare: { type: "string" } });
+    expect(screen.getByText("bare")).toBeTruthy();
+  });
+
   it("renders a field per schema entry with defaults pre-filled", () => {
     renderDialog();
     expect(screen.getByLabelText(/name/i)).toBeTruthy();

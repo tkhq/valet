@@ -341,7 +341,7 @@ const pullRequestReview: WorkflowDefinition = {
           label: "Repository to watch",
           placeholder: "your-org/platform",
           description:
-            "The repository whose pull requests this reviews, as owner/name. Only this repository's events start a run.",
+            "The repository whose pull requests this reviews. Give it as owner/name, exactly as GitHub shows it — only this repository's pull requests start a run.",
         },
         payload: {
           type: "object",
@@ -850,7 +850,7 @@ const assignReviewers: WorkflowDefinition = {
           label: "Repository to watch",
           placeholder: "your-org/platform",
           description:
-            "The repository whose pull requests this assigns, as owner/name. Only this repository's events start a run.",
+            "The repository whose pull requests this assigns reviewers to. Give it as owner/name, exactly as GitHub shows it — only this repository's events start a run.",
         },
         codeownersPath: {
           type: "string",
@@ -859,21 +859,23 @@ const assignReviewers: WorkflowDefinition = {
           label: "CODEOWNERS path",
           placeholder: ".github/CODEOWNERS",
           description:
-            "GitHub reads CODEOWNERS from CODEOWNERS, .github/CODEOWNERS or docs/CODEOWNERS. Name the one your repository uses.",
+            "Path to CODEOWNERS inside the repository above. GitHub allows CODEOWNERS, .github/CODEOWNERS or docs/CODEOWNERS — name the one your repository uses.",
         },
         rosterOwner: {
           type: "string",
           required: true,
           label: "Roster file owner",
           placeholder: "your-org",
-          description: "The account or organization that holds the reviewer roster. It can be the same one.",
+          description:
+            "The GitHub account or organization that holds the roster file. Often the same one that owns the repository above.",
         },
         rosterRepository: {
           type: "string",
           required: true,
           label: "Roster file repository",
           placeholder: "handbook",
-          description: "The repository that holds the roster. Your GitHub account must be able to read it.",
+          description:
+            "The repository that holds the roster file. It can be the repository above, or a separate one — your GitHub account only has to be able to read it.",
         },
         rosterPath: {
           type: "string",
@@ -882,8 +884,8 @@ const assignReviewers: WorkflowDefinition = {
           label: "Roster file path",
           placeholder: ".github/reviewer-roster.csv",
           description:
-            "A CSV file with the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, " +
-            "areas.",
+            "Path to the roster inside that repository. The roster is a CSV listing who can review: one row per person, " +
+            "with the columns github_handle, groups, slack_user_id, calendar_id, timezone, work_hours, areas.",
         },
         payload: {
           type: "object",
