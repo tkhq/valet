@@ -18,3 +18,26 @@ export {
   pullModel,
   type ModelInfo,
 } from "./models.js";
+
+export {
+  getValetDir,
+  getSyncDir,
+  getCacheDir,
+  getAuthPath,
+  isLoggedIn,
+  getAuthToken,
+  saveAuthToken,
+  clearAuth,
+  sync,
+  type SyncOptions,
+  type AuthToken,
+} from "./sync.js";
+
+export {
+  proxyToolCall,
+  requiresCloudProxy,
+  queueToolCall,
+  flushQueue,
+  type ToolCall,
+  type ToolResult,
+} from "./proxy.js";

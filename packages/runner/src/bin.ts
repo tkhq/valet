@@ -25,6 +25,15 @@ import {
   removeModel,
   MODEL_REGISTRY,
   getModelsDir,
+  isLoggedIn,
+  getAuthToken,
+  saveAuthToken,
+  clearAuth,
+  sync,
+  getSyncDir,
+  getCacheDir,
+  getValetDir,
+  flushQueue,
 } from "./local/index.js";
 
 // ─── Local Inference Commands ────────────────────────────────────────────
@@ -220,6 +229,217 @@ Examples:
       console.error("Fatal error:", err);
       process.exit(1);
     }
+  })();
+} else if (args[0] === "login") {
+  // valet login - authenticate with Turnkey
+  (async () => {
+    try {
+      console.log("🔐 Opening browser for Turnkey authentication...\n");
+
+      // Start local callback server
+      const { createServer } = await import("http");
+      const server = createServer();
+
+      const port = await new Promise<number>((resolve) => {
+        server.listen(0, () => {
+          const addr = server.address();
+          resolve(typeof addr === 'object' && addr ? addr.port : 9876);
+        });
+      });
+
+      const callbackUrl = `http://localhost:${port}/callback`;
+      const authUrl = `${process.env.VALET_API_URL || 'https://valet.turnkey.io'}/cli/auth?callback=${encodeURIComponent(callbackUrl)}`;
+
+      console.log(`If browser doesn't open, visit:\n${authUrl}\n`);
+
+      // Try to open browser
+      const { exec } = await import("child_process");
+      const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+      exec(`${openCmd} "${authUrl}"`);
+
+      // Wait for callback
+      const token = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          server.close();
+          reject(new Error("Login timed out"));
+        }, 120000);
+
+        server.on("request", (req, res) => {
+          const url = new URL(req.url || "", `http://localhost:${port}`);
+          if (url.pathname === "/callback") {
+            const token = url.searchParams.get("token");
+            if (token) {
+              res.writeHead(200, { "Content-Type": "text/html" });
+              res.end("<html><body><h1>Login successful!</h1><p>You can close this tab.</p></body></html>");
+              clearTimeout(timeout);
+              server.close();
+              resolve(token);
+            } else {
+              res.writeHead(400);
+              res.end("Missing token");
+            }
+          }
+        });
+      });
+
+      // Save token
+      await saveAuthToken({
+        sessionToken: token,
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+        userId: "pending" // Will be filled by first API call
+      });
+
+      console.log("✓ Logged in successfully!\n");
+      console.log("Run 'valet sync' to sync your data.");
+      process.exit(0);
+    } catch (err) {
+      console.error("Login failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  })();
+
+} else if (args[0] === "logout") {
+  // valet logout
+  (async () => {
+    await clearAuth();
+    console.log("✓ Logged out");
+    console.log("\nNote: Local data remains in ~/.valet/sync/");
+    console.log("Run 'rm -rf ~/.valet' to fully clear local data.");
+    process.exit(0);
+  })();
+
+} else if (args[0] === "sync") {
+  // valet sync [--pull] [--push] [--only memories,skills]
+  const { values: syncValues } = parseArgs({
+    args: args.slice(1),
+    options: {
+      pull: { type: "boolean" },
+      push: { type: "boolean" },
+      only: { type: "string" },
+      watch: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+
+  if (syncValues.help) {
+    console.log(`
+Valet Sync — Sync data between local and cloud
+
+Usage:
+  valet sync [OPTIONS]
+
+Options:
+  --pull         Pull from cloud only (don't push local changes)
+  --push         Push to cloud only (don't pull)
+  --only <list>  Selective sync (comma-separated: memories,skills,workflows,personas,preferences)
+  --watch        Continuous bidirectional sync
+  -h, --help     Show this help
+
+Examples:
+  valet sync                    # Full bidirectional sync
+  valet sync --pull             # Pull only
+  valet sync --only memories    # Sync only memories
+`);
+    process.exit(0);
+  }
+
+  (async () => {
+    try {
+      if (!await isLoggedIn()) {
+        console.error("Not logged in. Run: valet login");
+        process.exit(1);
+      }
+
+      await sync({
+        pull: syncValues.pull as boolean,
+        push: syncValues.push as boolean,
+        only: syncValues.only ? (syncValues.only as string).split(",") : undefined
+      });
+
+      process.exit(0);
+    } catch (err) {
+      console.error("Sync failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  })();
+
+} else if (args[0] === "whoami") {
+  // valet whoami - show current user and sync status
+  (async () => {
+    const auth = await getAuthToken();
+    if (!auth) {
+      console.log("Not logged in. Run: valet login");
+      process.exit(0);
+    }
+
+    console.log(`User: ${auth.userId}`);
+    console.log(`Session expires: ${new Date(auth.expiresAt).toLocaleString()}`);
+
+    // Check sync status
+    const syncDir = getSyncDir();
+    try {
+      const { promises: fs } = await import("fs");
+      const categories = await fs.readdir(syncDir);
+      console.log(`\nSynced: ${categories.join(", ") || "nothing"}`);
+    } catch {
+      console.log("\nNo data synced yet. Run: valet sync");
+    }
+
+    process.exit(0);
+  })();
+
+} else if (args[0] === "queue") {
+  // valet queue <list|flush|clear>
+  const subcommand = args[1];
+
+  (async () => {
+    const { promises: fs } = await import("fs");
+    const path = await import("path");
+
+    const queueFile = path.join(getValetDir(), "queue", "pending.json");
+
+    if (subcommand === "list") {
+      try {
+        const queue = JSON.parse(await fs.readFile(queueFile, "utf-8"));
+        if (queue.length === 0) {
+          console.log("No pending tool calls.");
+        } else {
+          console.log(`${queue.length} pending tool call(s):\n`);
+          for (const call of queue) {
+            console.log(`  - ${call.toolId}`);
+          }
+        }
+      } catch {
+        console.log("No pending tool calls.");
+      }
+    } else if (subcommand === "flush") {
+      console.log("Executing pending tool calls...\n");
+      const results = await flushQueue();
+      console.log(`Executed ${results.length} call(s).`);
+      for (const result of results) {
+        console.log(`  ${result.success ? "✓" : "✗"} ${result.error || "success"}`);
+      }
+    } else if (subcommand === "clear") {
+      try {
+        await fs.unlink(queueFile);
+        console.log("Queue cleared.");
+      } catch {
+        console.log("Queue already empty.");
+      }
+    } else {
+      console.log(`
+Valet Queue — Manage offline tool call queue
+
+Usage:
+  valet queue <command>
+
+Commands:
+  list    Show pending tool calls
+  flush   Execute all pending calls
+  clear   Discard pending calls
+`);
+    }
+    process.exit(0);
   })();
 }
 
