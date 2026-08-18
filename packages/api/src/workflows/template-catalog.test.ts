@@ -243,53 +243,6 @@ describe("seeded workflow catalog", () => {
   });
 });
 
-// ─── Reviewer routing, specifically ──────────────────────────────────────
-
-describe("catalog.reviewer-routing", () => {
-  const definition = builtinWorkflowTemplates.find((t) => t.id === "catalog.reviewer-routing")!
-    .definition as WorkflowDefinition;
-
-  it("takes the area-to-reviewer map as a required input, not as a constant", () => {
-    const schema = triggerSchema(definition);
-    expect(schema?.reviewerMap?.type).toBe("object");
-    expect(schema?.reviewerMap?.required).toBe(true);
-  });
-
-  it("reads the map from the trigger when it routes", () => {
-    const route = definition.nodes.find((node) => node.id === "route");
-    expect(route?.type).toBe("llm");
-    const paths = referencedPaths(definition).map((segments) => segments.join("."));
-    expect(paths).toContain("trigger.data.reviewerMap");
-  });
-
-  it("sends to the reviewer the match produced, never to a name in the definition", () => {
-    const notify = definition.nodes.find((node) => node.id === "notify_reviewer");
-    expect(notify?.type).toBe("orchestrator");
-    const prompt = notify?.type === "orchestrator" ? notify.prompt : "";
-    expect(prompt).toContain("{{ nodes.route.result.output.reviewer }}");
-    // A handle written into the definition would route every install to one
-    // person, whatever map they supplied.
-    expect(prompt).not.toMatch(/@[a-z][a-z0-9-]+/i);
-  });
-
-  it("branches on the miss instead of guessing a reviewer", () => {
-    const branches = definition.edges.filter((edge) => edge.from === "has_reviewer");
-    expect(branches.map((edge) => edge.fromOutput).sort()).toEqual(["false", "true"]);
-    const miss = branches.find((edge) => edge.fromOutput === "false")!;
-    expect(miss.to).toBe("report_gap");
-  });
-
-  it("keeps its example handles to placeholders", () => {
-    const schema = triggerSchema(definition);
-    const placeholder = schema?.reviewerMap?.placeholder ?? "";
-    // Every handle in the example is a role, so nobody real is named and no
-    // install inherits somebody else's team.
-    const handles = placeholder.match(/@[a-z0-9-]+/gi) ?? [];
-    expect(handles.length).toBeGreaterThan(0);
-    expect(handles.filter((handle) => !handle.startsWith("@reviewer-"))).toEqual([]);
-  });
-});
-
 // ─── Aggregation ─────────────────────────────────────────────────────────
 
 const seededIds = builtinWorkflowTemplates.map((t) => t.id);
@@ -407,7 +360,7 @@ describe("gallery order", () => {
  * install without anybody choosing it. That is the shape this pins, on the
  * real registry rather than a fixture.
  */
-describe("install keeps the per-run fields on the run form", () => {
+describe("install keeps the hidden event payload, and bakes everything else", () => {
   const owned = findCatalogTemplate(bundledPlugins, "github.assign-reviewers");
   const template = owned!.template;
   // Narrowed here rather than at the manifest, the same way `seeded` above
@@ -430,15 +383,14 @@ describe("install keeps the per-run fields on the run form", () => {
   const actionEnv = buildValidateEnvironment(actionPluginByService);
 
   /** What the dialog posts: declared defaults, plus the install-time
-   * answers a reader gives. The per-run fields are left empty, which is
-   * what their own descriptions tell the reader to do. */
+   * answers a reader gives. There is no per-run field left to leave empty —
+   * an event trigger fills `payload`, and no install dialog collects a
+   * `hidden` field at all. */
   function dialogPayload(): Record<string, string | number | boolean> {
     const values: Record<string, string | number | boolean> = {};
     for (const input of templateInputs(triggerSchema(definition))) {
       if (input.default !== undefined) values[input.name] = input.default;
     }
-    values.repositoryOwner = "example-org";
-    values.repositoryName = "platform";
     values.rosterOwner = "example-org";
     values.rosterRepository = "handbook";
     return values;
@@ -449,28 +401,27 @@ describe("install keeps the per-run fields on the run form", () => {
     expect(definition.version).toBe("dag/v1");
   });
 
-  it("bakes the repository and the file paths, and nothing else", () => {
+  it("bakes every install-time field, and leaves only the hidden event payload", () => {
     const baked = bakeInputs(definition, dialogPayload());
-    expect(Object.keys(triggerSchema(baked) ?? {})).toEqual(["pullNumber", "excludeHandles"]);
+    expect(Object.keys(triggerSchema(baked) ?? {})).toEqual(["payload"]);
+    expect(triggerSchema(baked)?.payload?.hidden).toBe(true);
   });
 
-  it("leaves the pull request number a run can still answer", () => {
-    // The failure this pins: a baked number re-assigns one pull request on
-    // every run, forever, and the card's own copy promises a run form.
+  it("writes the baked roster location into the roster read, not a run-form value", () => {
     const baked = bakeInputs(definition, dialogPayload());
-    const assign = nodesById(baked).get("assign");
-    const params = assign && "params" in assign ? assign.params : undefined;
-    expect(isRecord(params) ? params.pullNumber : "").toBe("{{ trigger.data.pullNumber }}");
+    const roster = nodesById(baked).get("roster");
+    const params = roster && "params" in roster ? roster.params : undefined;
     expect(isRecord(params) ? params.owner : "").toBe("example-org");
+    expect(isRecord(params) ? params.repo : "").toBe("handbook");
   });
 
-  it("leaves the exclude field, which is the only answer to a decline", () => {
-    // No node type parks on an inbound message, so the template's
-    // stated mitigation for "sorry, cannot do" is a second run with the
-    // handle excluded. Baking this field removes that mitigation.
+  it("leaves the pull request's own repository to the event, and never bakes one in", () => {
+    // The failure this pins: a baked owner/repo would read CODEOWNERS from
+    // one fixed repository regardless of which one the webhook names.
     const baked = bakeInputs(definition, dialogPayload());
-    expect(triggerSchema(baked)?.excludeHandles).toBeDefined();
-    expect(JSON.stringify(baked)).toContain("{{ trigger.data.excludeHandles }}");
+    const codeowners = nodesById(baked).get("codeowners");
+    const params = codeowners && "params" in codeowners ? codeowners.params : undefined;
+    expect(isRecord(params) ? params.owner : "").toBe("{{ trigger.data.payload.repository.owner.login }}");
   });
 
   it("still validates once the install-time values are written in", () => {

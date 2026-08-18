@@ -463,7 +463,7 @@ export function summarizeTemplate(
  * a template whose service is merely NOT CONNECTED belongs in the gallery,
  * because connecting it is exactly what the card asks for.
  */
-const SERVICES_NOT_READY: ReadonlySet<string> = new Set(["slack"]);
+const SERVICES_NOT_READY: ReadonlySet<string> = new Set();
 
 /** The services a template cannot run without. */
 function requiredServices(summary: WorkflowTemplateSummary): string[] {

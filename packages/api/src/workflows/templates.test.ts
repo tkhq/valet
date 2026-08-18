@@ -469,39 +469,40 @@ describe("listWorkflowTemplateSummaries", () => {
   });
 });
 
-// ─── The shipped gallery, with Slack not available ───────────────────────
+// ─── The shipped gallery, now that Slack is available ────────────────────
 
 /**
  * Every other case in this file uses fixtures, so the assertions do not
- * move when a template's copy does. This one runs the REAL plugin set,
- * because what it guards is a shipped card silently leaving the gallery:
- * `SERVICES_NOT_READY` drops any template whose `requires` names Slack, and
- * `requires` is derived from tool nodes rather than declared by an author.
- * A slack tool node added back to either template below is therefore a
- * change nobody sees until the card is gone.
+ * move when a template's copy does. This one runs the REAL plugin set: it
+ * pins that removing "slack" from `SERVICES_NOT_READY` actually changes
+ * what a person sees, not only what the flag says. `requires` is derived
+ * from tool nodes rather than declared by an author, so a slack tool node
+ * added to or removed from either template below moves this test.
  */
-describe("the shipped gallery, with Slack not available", () => {
+describe("the shipped gallery, now that Slack is available", () => {
   async function shippedIds(): Promise<string[]> {
     const list = await listWorkflowTemplateSummaries(deps(bundledPlugins), OWNER);
     return list.map((t) => t.id);
   }
 
-  it("offers the two templates that report through the orchestrator", async () => {
+  it("offers the reviewer-assignment template, and reports that it needs Slack now", async () => {
     const list = await listWorkflowTemplateSummaries(deps(bundledPlugins), OWNER);
-    for (const id of ["github.assign-reviewers", "github.unclaimed-pull-request-routing"]) {
-      const summary = list.find((t) => t.id === id);
-      expect(summary).toBeDefined();
-      expect(summary?.requires.map((r) => r.service)).not.toContain("slack");
-    }
+    const summary = list.find((t) => t.id === "github.assign-reviewers");
+    expect(summary).toBeDefined();
+    expect(summary?.requires.map((r) => r.service)).toContain("slack");
   });
 
-  it("still hides the two that read Slack for their data", async () => {
-    // `list_channels` and `read_history` have no substitute: an orchestrator
-    // cannot supply channel history nothing ever read. These two stay hidden
-    // until Slack works, which is the right outcome rather than a gap.
+  it("still reports no Slack need for the routing template — the comment is its whole delivery", async () => {
+    const list = await listWorkflowTemplateSummaries(deps(bundledPlugins), OWNER);
+    const summary = list.find((t) => t.id === "github.unclaimed-pull-request-routing");
+    expect(summary).toBeDefined();
+    expect(summary?.requires.map((r) => r.service)).not.toContain("slack");
+  });
+
+  it("now offers the two templates that read Slack for their data", async () => {
     const ids = await shippedIds();
-    expect(ids).not.toContain("workflows.daily-triage-digest");
-    expect(ids).not.toContain("workflows.meeting-prep");
+    expect(ids).toContain("workflows.daily-triage-digest");
+    expect(ids).toContain("workflows.meeting-prep");
   });
 });
 
