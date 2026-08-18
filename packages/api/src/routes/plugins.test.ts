@@ -663,3 +663,77 @@ describe("GET /api/plugins — actions a credential unlocks", () => {
     expect(fixture?.actions.map((a) => a.name)).toEqual(["fixture.ping", "fixture.pong"]);
   });
 });
+
+/**
+ * `actionServices` — the routing-service grouping the assistant editor uses.
+ * Unlike `services[].actions` (keyed by credential service), these are keyed
+ * by the ActionPlugin's routing service and include credential-less plugins.
+ */
+describe("GET /api/plugins — actionServices", () => {
+  it("credential-less plugin's actions appear in actionServices", async () => {
+    // NO_DECLARATIONS_PLUGIN has actions but no credentials — its service
+    // ("bare") never appears in `services[]`, but must appear in `actionServices`.
+    api = await bootTestApi({ plugins: [NO_DECLARATIONS_PLUGIN] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    expect(res.status).toBe(200);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const bare = plugins.find((p) => p.name === "bare-plugin");
+
+    // No credential declared → services is empty.
+    expect(bare?.services).toEqual([]);
+    // But actionServices carries the routing service.
+    const actionServices = bare?.actionServices ?? [];
+    expect(actionServices).toHaveLength(1);
+    expect(actionServices[0]?.service).toBe("bare");
+    expect(actionServices[0]?.actions).toHaveLength(1);
+    expect(actionServices[0]?.actions[0]?.id).toBe("bare.ping");
+  });
+
+  it("actionServices groups by routing service, not credential service", async () => {
+    // The skewed plugin: credentialService !== service. services[] carries no
+    // actions for the declared credential key; actionServices carries them
+    // under the routing service ("skewed").
+    const skewedPlugin: ValetPlugin = {
+      name: "skewed",
+      version: "1.0.0",
+      actions: [
+        {
+          service: "skewed",
+          credentialService: "skewed_underscored",
+          actions: [pingAction("skewed.list")],
+        },
+      ],
+      credentials: [{ service: "skewed", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [skewedPlugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const skewed = plugins.find((p) => p.name === "skewed");
+
+    // credential key mismatch → services actions empty.
+    expect(skewed?.services[0]?.actions).toEqual([]);
+    // actionServices uses routing service key.
+    const actionServices = skewed?.actionServices ?? [];
+    expect(actionServices).toHaveLength(1);
+    expect(actionServices[0]?.service).toBe("skewed");
+    expect(actionServices[0]?.actions[0]?.id).toBe("skewed.list");
+  });
+
+  it("dynamic actionService carries dynamic:true and static actions", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const fixture = plugins.find((p) => p.name === "fixture-plugin");
+
+    const actionServices = fixture?.actionServices ?? [];
+    expect(actionServices).toHaveLength(1);
+    const svc = actionServices[0];
+    expect(svc?.service).toBe("fixture");
+    expect(svc?.dynamic).toBe(true);
+    // Static actions only (resolveActions result not included here).
+    expect(svc?.actions.map((a) => a.id)).toEqual(["fixture.ping", "fixture.pong"]);
+  });
+});

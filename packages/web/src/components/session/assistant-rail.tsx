@@ -415,6 +415,11 @@ function AssistantRow({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem asChild>
+              <Link to="/assistants/$assistantId" params={{ assistantId: assistant.id }}>
+                Edit assistant
+              </Link>
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={onRename}>Rename</DropdownMenuItem>
             {!assistant.isDefault && <MakeDefaultItem assistant={assistant} />}
             {assistant.isDefault ? (

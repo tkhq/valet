@@ -15,7 +15,7 @@
  * `test-member` is a plain org member reached with the
  * `x-valet-test-user-id` impersonation header.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { assistants, teamMembers, teams } from "../schema/index.js";
@@ -477,5 +477,160 @@ describe("POST /api/assistants/:id/session", () => {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("personality and behavior config", () => {
+  const BEHAVIOR = {
+    skills: { mode: "allowlist" as const, names: ["gh-triage"] },
+    integrations: {
+      mode: "allowlist" as const,
+      entries: [{ service: "github", excludeActions: ["github.delete_repo"] }],
+    },
+  };
+
+  it("create-with-config round-trips through the summary", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {
+      name: "Triage",
+      personality: "Terse. Cites sources.",
+      behavior: BEHAVIOR,
+    });
+    expect(created.personality).toBe("Terse. Cites sources.");
+    expect(created.behavior).toEqual(BEHAVIOR);
+
+    const listed = await list(api);
+    const row = listed.find((a) => a.id === created.id);
+    expect(row?.behavior).toEqual(BEHAVIOR);
+  });
+
+  it("PATCH writes both fields, and null clears them", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage" });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: "Blunt.", behavior: BEHAVIOR }),
+    });
+    expect(res.status).toBe(200);
+    const patched = (await res.json()) as PatchAssistantResponse;
+    expect(patched.personality).toBe("Blunt.");
+    expect(patched.behavior).toEqual(BEHAVIOR);
+
+    const cleared = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: null, behavior: null }),
+    });
+    expect(cleared.status).toBe(200);
+    const clearedBody = (await cleared.json()) as PatchAssistantResponse;
+    expect(clearedBody.personality).toBeUndefined();
+    expect(clearedBody.behavior).toBeUndefined();
+  });
+
+  it("rejects a malformed behavior with a corrective message", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ behavior: { skills: { mode: "some" } } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/skills\.mode must be 'all' or 'allowlist'/);
+  });
+
+  it("a behavior PATCH evicts the cached engine session", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+    const evict = vi.spyOn(api.providers.engineHost, "evictCache");
+
+    await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: "Blunt." }),
+    });
+    expect(evict).toHaveBeenCalledWith(created.sessionId);
+
+    evict.mockClear();
+    await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: "Renamed only" }),
+    });
+    expect(evict).not.toHaveBeenCalled();
+  });
+
+  it("a plain team member cannot write a team assistant's behavior", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "test-member", "member");
+    const created = await create(api, { owner: { type: "team", id: "team_1" } });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
+      body: JSON.stringify({ personality: "Mine now." }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("POST with explicit null behavior and personality treats them as absent", async () => {
+    api = await bootTestApi();
+    // A client that always sends every field explicitly may send null for
+    // optional fields. null must not reach validateAssistantBehavior or the
+    // personality type guard — it should be treated the same as omitting the
+    // field entirely.
+    const created = await create(api, { name: "Null-fields", behavior: null, personality: null });
+    expect(created.behavior).toBeUndefined();
+    expect(created.personality).toBeUndefined();
+  });
+
+  it("POST normalizes a whitespace-only personality to absent", async () => {
+    api = await bootTestApi();
+    // POST stored the raw value before, so `""` disabled the memory-file
+    // fallback at wake. It must trim to null the same way PATCH does.
+    const created = await create(api, { name: "Blank", personality: "   " });
+    expect(created.personality).toBeUndefined();
+  });
+
+  it("PATCH clears a personality set to whitespace only", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage", personality: "Blunt." });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: "   " }),
+    });
+    expect(res.status).toBe(200);
+    const patched = (await res.json()) as PatchAssistantResponse;
+    expect(patched.personality).toBeUndefined();
+  });
+
+  it("POST rejects a personality over the injection cap and names the limit", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/assistants`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: "Wordy", personality: "x".repeat(501) }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("limited to 500 characters");
+  });
+
+  it("PATCH rejects a personality over the injection cap and names the limit", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage" });
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ personality: "x".repeat(501) }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("limited to 500 characters");
   });
 });
