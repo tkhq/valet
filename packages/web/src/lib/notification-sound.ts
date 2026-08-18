@@ -51,6 +51,15 @@ export function setNaviModeEnabled(enabled: boolean): void {
 
 let naviAudio: HTMLAudioElement | null = null;
 
+/**
+ * Test-only. Both audio handles here are module singletons, so without a
+ * reset one test's element (and its mock call counts) bleeds into the next.
+ */
+export function resetAudioForTests(): void {
+  naviAudio = null;
+  ctx = null;
+}
+
 function naviElement(): HTMLAudioElement | null {
   if (naviAudio) return naviAudio;
   if (typeof Audio === "undefined") return null;
@@ -99,9 +108,16 @@ export function unlock(): void {
 }
 
 /**
- * Play the chime. Never throws and never rejects — this runs inside
- * notification handling, where an audio failure must not take the UI with
- * it. Returns whether a sound was actually started.
+ * Play the attention sound. Never throws and never rejects — this runs
+ * inside notification handling, where an audio failure must not take the UI
+ * with it.
+ *
+ * Returns whether playback was INITIATED, not whether it was heard. The mp3
+ * path can only fail asynchronously (autoplay blocked, file missing), after
+ * this has already returned; that failure retries the synth chime, and if
+ * the chime cannot start either the ping is dropped. Callers must not treat
+ * `true` as proof of sound — the tab-title count in `use-attention-ping.ts`
+ * is the signal that survives every audio failure, by design.
  */
 export function playAttentionChime(): boolean {
   if (isNaviModeEnabled() && playNaviSound()) return true;
@@ -109,9 +125,9 @@ export function playAttentionChime(): boolean {
 }
 
 /**
- * The egg. Returns whether playback was started; an async rejection (file
- * missing, autoplay blocked) falls back to the synth chime so the ping is
- * never silently lost to the joke.
+ * The egg. Returns whether playback was initiated; an async rejection (file
+ * missing, autoplay blocked) falls back to the synth chime — see the
+ * contract on `playAttentionChime` for what that does and does not promise.
  */
 function playNaviSound(): boolean {
   const el = naviElement();
