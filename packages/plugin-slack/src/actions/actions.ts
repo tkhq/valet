@@ -9,7 +9,7 @@ import type {
 } from "@valet/engine";
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
-import { buildContentBlocks, SLACK_TEXT_LIMIT } from "../message-chunking.js";
+import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -797,30 +797,91 @@ const getReactions = action(Type.Object({
   },
 });
 
-const postMessage = action(Type.Object({
-    channel: Type.String({ description: 'Channel ID (C...) or group (G...) that the bot has joined' }),
-    text: Type.String({ description: 'Message text' }),
-    thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply to this timestamp' })),
-    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string for rich formatting' })),
+const sendMessage = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
+    text: Type.String({ description: 'Message body. Supports Slack mrkdwn formatting (bold: *text*, italic: _text_, code: `code`, links: <url|label>).' }),
+    thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply under an existing message. Use the ts value returned by a previous send_message call (e.g. "1780887543.189519").' })),
+    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string for rich formatting. When provided, text is used as the notification fallback only.' })),
+    unfurl_links: Type.Optional(Type.Boolean({ description: 'Whether Slack shows link-preview "unfurls" for URLs in the message. Omit to keep Slack\'s default (previews on). Set false to suppress link previews — e.g. when posting a batch of Linear/GitHub/Jira links you do not want each to expand into a card.' })),
+    unfurl_media: Type.Optional(Type.Boolean({ description: 'Whether Slack unfurls media (images, video, rich media) linked in the message. Omit to keep Slack\'s default (on). Set false alongside unfurl_links to fully suppress embeds.' })),
   }))({
-  id: 'slack.post_message',
-  name: 'Post Message',
-  description: 'Post a message to a Slack channel or group as the bot. The bot must be a member of the channel. Use this instead of escalating to the xoxp surface for basic bot-channel communication.',
-  riskLevel: 'low',
+  id: 'slack.send_message',
+  name: 'Send Message',
+  description: 'Post a message to a Slack channel or thread. Use this to send to any channel the bot has joined — for arbitrary channel posts and threaded replies. Use channel_reply instead only when replying on the specific channel a user wrote from. Returns ts (message timestamp) and channel — save ts to thread follow-up messages under this one via thread_ts.',
+  riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const body: Record<string, unknown> = { channel: p.channel, text: p.text };
+    // Resolve #name to channel ID via users.conversations
+    let channelId = p.channel;
+    if (p.channel.startsWith('#')) {
+      const name = p.channel.slice(1).toLowerCase();
+      let cursor: string | undefined;
+      let found = false;
+      outer: do {
+        const q: Record<string, unknown> = { types: 'public_channel,private_channel', limit: 200, exclude_archived: true };
+        if (cursor) q.cursor = cursor;
+        const res = await slackGet('users.conversations', token, q);
+        if (!res.ok) return slackError(res);
+        const data = (await res.json()) as { ok: boolean; error?: string; channels?: Record<string, unknown>[]; response_metadata?: { next_cursor?: string } };
+        if (!data.ok) return slackError(res, data);
+        for (const ch of (data.channels || [])) {
+          if (typeof ch.name === 'string' && ch.name.toLowerCase() === name) {
+            channelId = ch.id as string;
+            found = true;
+            break outer;
+          }
+        }
+        cursor = data.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+      if (!found) return { success: false, error: `Channel "${p.channel}" not found or bot is not a member. Use list_channels to find available channels.` };
+    }
+
+    const denied = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
+    if (denied) return denied;
+
+    const body: Record<string, unknown> = { channel: channelId, text: p.text };
     if (p.thread_ts) body.thread_ts = p.thread_ts;
+
+    let userBlocks: Record<string, unknown>[] | undefined;
     if (p.blocks) {
       try {
-        body.blocks = JSON.parse(p.blocks);
+        const parsed = JSON.parse(p.blocks);
+        if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
+        userBlocks = parsed as Record<string, unknown>[];
       } catch {
         return { success: false, error: 'blocks must be valid JSON' };
       }
+    }
+
+    if (p.unfurl_links !== undefined) body.unfurl_links = p.unfurl_links;
+    if (p.unfurl_media !== undefined) body.unfurl_media = p.unfurl_media;
+
+    if (ctx.actor?.name) body.username = ctx.actor.name;
+
+    // Attribute non-DM posts to the session owner (mirrors the channel
+    // transport's attribution context block on agent-authored replies).
+    const ownerSlackId = ownerSlackUserId(cred);
+    const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
+    const needsLongBlocks = !userBlocks && p.text.length > SLACK_TEXT_LIMIT;
+
+    if (hasAttribution || needsLongBlocks) {
+      const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
+      const contentBlocks = userBlocks
+        ? userBlocks.slice(0, blockBudget)
+        : buildContentBlocks(p.text, p.text, blockBudget);
+      if (hasAttribution) {
+        contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
+      }
+      body.blocks = contentBlocks;
+      if (needsLongBlocks) {
+        body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+      }
+    } else if (userBlocks) {
+      body.blocks = userBlocks;
     }
 
     const res = await slackFetch('chat.postMessage', token, body);
@@ -828,7 +889,7 @@ const postMessage = action(Type.Object({
     const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
     if (!data.ok) return slackError(res, data);
 
-    return { success: true, data: { ts: data.ts, channel: data.channel } };
+    return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
   },
 });
 
@@ -849,6 +910,6 @@ export const slackPlugin: ActionPlugin = {
     getPins,
     getChannelInfo,
     getReactions,
-    postMessage,
+    sendMessage,
   ],
 };

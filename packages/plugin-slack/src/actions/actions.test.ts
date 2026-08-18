@@ -416,63 +416,229 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: false, error: 'Missing bot_token' });
   });
 
-  it('post_message posts a message to a channel as the bot', async () => {
+  it('send_message posts a message to a channel by ID with guard check', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
 
-    const result = await action('slack.post_message').execute(
+    const result = await action('slack.send_message').execute(
       { channel: 'C1', text: 'hello channel' },
       pluginCtx(),
     );
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url).toBe('https://slack.com/api/chat.postMessage');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
     expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'hello channel' });
-    expect(result).toEqual({ success: true, data: { ts: '123.456', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ok: true, ts: '123.456', channel: 'C1' } });
   });
 
-  it('post_message supports optional thread_ts for threaded replies', async () => {
+  it('send_message resolves channel name (#prefix) to channel ID via users.conversations', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ok: true,
+          channels: [{ id: 'C1', name: 'proj-valet' }],
+          response_metadata: {},
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
+
+    const result = await action('slack.send_message').execute(
+      { channel: '#proj-valet', text: 'hello' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: true, data: { ok: true, ts: '123.456', channel: 'C1' } });
+  });
+
+  it('send_message returns error when channel name not found', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ok: true,
+        channels: [{ id: 'C1', name: 'general' }],
+        response_metadata: {},
+      }),
+    );
+
+    const result = await action('slack.send_message').execute(
+      { channel: '#not-found', text: 'hello' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Channel "#not-found" not found or bot is not a member. Use list_channels to find available channels.',
+    });
+  });
+
+  it('send_message supports optional thread_ts for threaded replies', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '124.567', channel: 'C1' }));
 
-    const result = await action('slack.post_message').execute(
+    const result = await action('slack.send_message').execute(
       { channel: 'C1', text: 'reply in thread', thread_ts: '123.456' },
       pluginCtx(),
     );
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'reply in thread', thread_ts: '123.456' });
-    expect(result).toEqual({ success: true, data: { ts: '124.567', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ok: true, ts: '124.567', channel: 'C1' } });
   });
 
-  it('post_message supports optional blocks for rich formatting', async () => {
+  it('send_message supports optional blocks for rich formatting', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
     const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: '*bold*' } }]);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '125.678', channel: 'C1' }));
 
-    const result = await action('slack.post_message').execute(
+    const result = await action('slack.send_message').execute(
       { channel: 'C1', text: 'with blocks', blocks },
       pluginCtx(),
     );
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
     expect(body.blocks).toEqual(JSON.parse(blocks));
-    expect(result).toEqual({ success: true, data: { ts: '125.678', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ok: true, ts: '125.678', channel: 'C1' } });
   });
 
-  it('post_message rejects invalid blocks JSON', async () => {
-    const result = await action('slack.post_message').execute(
+  it('send_message uses actor name as username when provided', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '126.789', channel: 'C1' }));
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: 'from actor' },
+      pluginCtx({ actor: { id: 'u1', name: 'Alice' } }),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ username: 'Alice' });
+    expect(result).toEqual({ success: true, data: { ok: true, ts: '126.789', channel: 'C1' } });
+  });
+
+  it('send_message adds attribution context block for non-DM channels when owner is linked', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '127.890', channel: 'C1' }));
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: 'with attribution' },
+      pluginCtx({
+        credentials: makeCredentials({
+          accessToken: 'xoxb-test-token',
+          metadata: { owner_slack_user_id: 'U999' },
+        }),
+      }),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.blocks).toBeDefined();
+    expect(body.blocks[body.blocks.length - 1]).toEqual({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: '↳ <@U999>' }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('send_message does not add attribution block for DM channels', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D1', is_private: false, is_im: true, is_mpim: false } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '128.901', channel: 'D1' }));
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'D1', text: 'dm message' },
+      pluginCtx({
+        credentials: makeCredentials({
+          accessToken: 'xoxb-test-token',
+          metadata: { owner_slack_user_id: 'U999' },
+        }),
+      }),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    // For DMs, blocks should NOT include attribution
+    if (body.blocks) {
+      const lastBlock = body.blocks[body.blocks.length - 1];
+      expect(lastBlock.type).not.toBe('context');
+    }
+    expect(result.success).toBe(true);
+  });
+
+  it('send_message supports unfurl_links parameter', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '129.012', channel: 'C1' }));
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: 'no unfurls', unfurl_links: false },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ unfurl_links: false });
+    expect(result.success).toBe(true);
+  });
+
+  it('send_message supports unfurl_media parameter', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '130.123', channel: 'C1' }));
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: 'no media', unfurl_media: false },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ unfurl_media: false });
+    expect(result.success).toBe(true);
+  });
+
+  it('send_message rejects invalid blocks JSON', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+
+    const result = await action('slack.send_message').execute(
       { channel: 'C1', text: 'invalid', blocks: '{invalid json}' },
       pluginCtx(),
     );
 
-    expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({ success: false, error: 'blocks must be valid JSON' });
   });
 
-  it('post_message returns Slack API error passthrough (not_in_channel)', async () => {
+  it('send_message rejects blocks that are not a JSON array', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: 'invalid', blocks: '{"type": "section"}' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: false, error: 'blocks must be a JSON array' });
+  });
+
+  it('send_message uses buildContentBlocks for long text messages', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '131.234', channel: 'C1' }));
+
+    const longText = 'a'.repeat(5000); // Longer than SLACK_TEXT_LIMIT (4000)
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: longText },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.blocks).toBeDefined();
+    expect(Array.isArray(body.blocks)).toBe(true);
+    expect(result.success).toBe(true);
+  });
+
+  it('send_message returns Slack API error passthrough (not_in_channel)', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'not_in_channel' }));
 
-    const result = await action('slack.post_message').execute(
+    const result = await action('slack.send_message').execute(
       { channel: 'C1', text: 'hello' },
       pluginCtx(),
     );
@@ -480,10 +646,11 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: false, error: 'Slack API error: not_in_channel' });
   });
 
-  it('post_message returns Slack API error passthrough (channel_not_found)', async () => {
+  it('send_message returns Slack API error passthrough (channel_not_found)', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
 
-    const result = await action('slack.post_message').execute(
+    const result = await action('slack.send_message').execute(
       { channel: 'C999', text: 'hello' },
       pluginCtx(),
     );
