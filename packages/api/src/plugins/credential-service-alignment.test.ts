@@ -26,9 +26,20 @@ describe("credential/action service alignment", () => {
 
   for (const plugin of withBoth) {
     it(`${plugin.name}: every stored credential service is read by an action plugin`, () => {
-      const readKeys = new Set(
-        (plugin.actions ?? []).map((actionPlugin) => actionPlugin.credentialService ?? actionPlugin.service),
+      // ActionPlugin.service is required by the type, so an undefined key
+      // can only mean a runtime-malformed plugin (bad cast, JS-authored
+      // object). Fail loudly on that instead of quietly comparing against
+      // an undefined entry in the set.
+      const keys = (plugin.actions ?? []).map(
+        (actionPlugin) => actionPlugin.credentialService ?? actionPlugin.service,
       );
+      for (const key of keys) {
+        expect(
+          typeof key === "string" && key.length > 0,
+          `${plugin.name}: an ActionPlugin resolves to credential key ${JSON.stringify(key)} — service is required`,
+        ).toBe(true);
+      }
+      const readKeys = new Set(keys);
       for (const decl of plugin.credentials ?? []) {
         const storedAs = decl.service ?? plugin.name;
         expect(
