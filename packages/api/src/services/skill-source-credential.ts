@@ -127,6 +127,13 @@ export async function resolveSkillSourceCredential(
 
     // user and team both resolve ONE person's own credential. They differ
     // only in which column names that person.
+    //
+    // For a user source the OWNER is the person, so `owner_id` names them
+    // and `created_by` would say the same thing. For a team source the owner
+    // is the team, so `owner_id` names no person at all and only
+    // `created_by` does. Reading `created_by` for both would work today and
+    // break the moment a row predates that column, which is exactly the
+    // case handled below.
     const userId = source.ownerType === "user" ? source.ownerId : source.createdBy;
     // A team source added before `created_by` existed names nobody, and a
     // sync must not guess. It reads anonymously.
