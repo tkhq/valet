@@ -716,3 +716,163 @@ describe("unconfigured services", () => {
     expect(screen.getByText(/Not configured for this organization/)).toBeTruthy();
   });
 });
+
+/**
+ * An unconfigured service whose fix is a deployment setting. `missingEnv`
+ * arrives on the wire ONLY for an org admin — the API omits the key for
+ * everybody else — so the field's presence decides the tile and which note
+ * it carries. `connectBlockedBy` arrives for everybody, and it keeps the
+ * member's note off a page that cannot perform the fix. The row stays
+ * informational: no Connect button can work while the server has no OAuth
+ * client.
+ */
+describe("an unconfigured service an org admin can fix", () => {
+  /** The API sends `connectBlockedBy: "deployment"` to every caller for this
+   * cause, and `missingEnv` to an org admin alone. */
+  function calendarPlugins(
+    opts: { missingEnv?: string[]; connected?: boolean } = {},
+  ): ListPluginsResponse {
+    return {
+      plugins: [
+        {
+          name: "google-calendar",
+          version: "0.1.0",
+          description: "Read and write Google Calendar events",
+          actionCount: 8,
+          services: [
+            {
+              service: "google-calendar",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: opts.connected ?? false,
+              connect: "unconfigured" as const,
+              connectBlockedBy: "deployment" as const,
+              ...(opts.missingEnv ? { missingEnv: opts.missingEnv } : {}),
+              actions: [],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  const bothUnset = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"];
+
+  beforeEach(() => {
+    currentOrgStatus = { configured: true, installationCount: 1, suspendedCount: 0 };
+    currentOrg = org("admin");
+  });
+
+  it("shows the tile and names both variables when the wire carries them", () => {
+    currentPluginsData = calendarPlugins({ missingEnv: bothUnset });
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("Google Calendar")).toBeTruthy();
+    expect(screen.getByText("GOOGLE_CLIENT_ID")).toBeTruthy();
+    expect(screen.getByText("GOOGLE_CLIENT_SECRET")).toBeTruthy();
+    expect(screen.getByText(/Then restart the server/)).toBeTruthy();
+  });
+
+  it("names only the unset half of a half-set pair", () => {
+    currentPluginsData = calendarPlugins({ missingEnv: ["GOOGLE_CLIENT_SECRET"] });
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("GOOGLE_CLIENT_SECRET")).toBeTruthy();
+    expect(screen.queryByText("GOOGLE_CLIENT_ID")).toBeNull();
+  });
+
+  it("prints whatever variables the wire names, with no hardcoded Google knowledge", () => {
+    currentPluginsData = calendarPlugins({ missingEnv: ["DROPBOX_CLIENT_ID", "DROPBOX_CLIENT_SECRET"] });
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("DROPBOX_CLIENT_ID")).toBeTruthy();
+    expect(screen.getByText("DROPBOX_CLIENT_SECRET")).toBeTruthy();
+  });
+
+  it("offers no Connect control — the fix is on the server, not in the browser", () => {
+    currentPluginsData = calendarPlugins({ missingEnv: bothUnset });
+    render(<IntegrationsPage />);
+
+    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Disconnect/ })).toBeNull();
+  });
+
+  it("hides the same service from a member, whose wire carries no missingEnv", () => {
+    // Byte-for-byte the pre-change behaviour: no key, no tile, no names.
+    currentPluginsData = calendarPlugins();
+    currentOrg = org("member");
+    render(<IntegrationsPage />);
+
+    expect(screen.queryByText("Google Calendar")).toBeNull();
+    expect(screen.queryByText("GOOGLE_CLIENT_ID")).toBeNull();
+  });
+
+  it("sends a member with a leftover credential to a person, not to a page that cannot help", () => {
+    // The operator dropped the OAuth client after this member connected. The
+    // credential keeps the tile on screen, so the member reads a note. It
+    // must not send them to Settings → Organization, where nothing sets a
+    // server variable.
+    currentPluginsData = calendarPlugins({ connected: true });
+    currentOrg = org("member");
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText(/Ask an org admin to set it up/)).toBeTruthy();
+    expect(screen.queryByText(/Settings → Organization/)).toBeNull();
+    expect(screen.queryByText("GOOGLE_CLIENT_ID")).toBeNull();
+    expect(screen.getByRole("button", { name: "Disconnect Google Calendar" })).toBeTruthy();
+  });
+
+  it("keeps the org-credential note for the cause that Settings → Organization does fix", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "slack",
+          version: "0.1.0",
+          actionCount: 11,
+          services: [
+            {
+              service: "slack",
+              type: "bot_token" as const,
+              configKeys: ["accessToken"],
+              connected: true,
+              connect: "unconfigured" as const,
+              connectBlockedBy: "org" as const,
+              actions: [],
+            },
+          ],
+        },
+      ],
+    };
+    currentOrg = org("member");
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText(/Not configured for this organization/)).toBeTruthy();
+    expect(screen.queryByText(/Ask an org admin/)).toBeNull();
+  });
+
+  it("leaves a configured service alone", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "google-calendar",
+          version: "0.1.0",
+          actionCount: 8,
+          services: [
+            {
+              service: "google-calendar",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: false,
+              connect: "oauth" as const,
+              actions: [],
+            },
+          ],
+        },
+      ],
+    };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByRole("button", { name: "Connect Google Calendar" })).toBeTruthy();
+    expect(screen.queryByText(/restart the server/)).toBeNull();
+  });
+});

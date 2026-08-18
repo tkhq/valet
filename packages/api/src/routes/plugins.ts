@@ -5,7 +5,11 @@
  * caller's own connected-service set from `providers.engineCredentials`.
  *
  * Never returns secret material — only which services are connected, not
- * their tokens. See `routes/credentials.ts` for the mutation surface.
+ * their tokens. See `routes/credentials.ts` for the mutation surface. The
+ * same rule holds for `missingEnv`, which carries deployment variable
+ * NAMES read off the plugin manifest so an org admin learns what to set;
+ * the values behind those names are read only as a presence test and never
+ * enter the response.
  *
  * A connected service also reports `health`, read from the same four
  * whitelisted credential fields `GET /api/credentials` returns
@@ -24,7 +28,8 @@ import type {
   PluginServiceSummary,
   PluginSummary,
 } from "../wire/types.js";
-import { connectModeFor } from "../services/integration-availability.js";
+import { connectModeFor, missingClientEnv } from "../services/integration-availability.js";
+import { isOrgAdmin } from "../services/org.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
@@ -47,8 +52,14 @@ function credentialHealth(stored: StoredCredential): PluginServiceSummary["healt
 }
 
 pluginsRouter.get("/", async (c) => {
-  const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts } = c.var.providers;
+  const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts, db } = c.var.providers;
   const owner: CredentialOwner = { type: "user", id: c.var.user.id };
+
+  // Who may read WHY a service is unconfigured. `org_members.role` is the
+  // authority (`services/org.ts`), not the global JWT role. Read once per
+  // request, not per service: it is a database row, and every service in
+  // the response asks the same question about the same caller.
+  const callerIsOrgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
 
   const connectedServices = new Set((await engineCredentials.list(owner)).map((cred) => cred.service));
 
@@ -129,6 +140,23 @@ pluginsRouter.get("/", async (c) => {
         credentials: engineCredentials,
         env: process.env,
       });
+      // Two things about an unconfigured service, with two audiences.
+      //
+      // The CAUSE goes to everybody, because the note each reader sees must
+      // send them to the right place. Rule 3 (no OAuth client in this
+      // deployment) is the only unconfigured arm with an environment
+      // variable behind it, so a name in `missing` is what separates it
+      // from rule 4's org credential.
+      //
+      // The variable NAMES go to an org admin only. Everybody else gets no
+      // key at all, and the client hides the tile as before. The gate is
+      // here rather than in the browser so a member cannot read the names
+      // out of the response.
+      const missing =
+        connect === "unconfigured" ? missingClientEnv(plugins, service, process.env) : [];
+      const connectBlockedBy: PluginServiceSummary["connectBlockedBy"] =
+        connect !== "unconfigured" ? undefined : missing.length > 0 ? "deployment" : "org";
+      const missingEnv = callerIsOrgAdmin ? missing : [];
       return {
         service,
         type: decl.type,
@@ -138,6 +166,8 @@ pluginsRouter.get("/", async (c) => {
         connected: connectedServices.has(service),
         dynamic: dynamicServices.has(service) ? true : undefined,
         connect,
+        connectBlockedBy,
+        missingEnv: missingEnv.length > 0 ? missingEnv : undefined,
         toolCount: toolCounts.get(service),
         // The slug is declared per plugin (`plugin.yaml`), so every service a
         // plugin declares shares its plugin's mark. A service that names

@@ -1604,6 +1604,40 @@ export interface PluginServiceSummary {
    * credential still needs disconnecting. See
    * docs/specs/2026-08-17-integration-availability-design.md. */
   connect: "oauth" | "manual" | "unconfigured";
+  /**
+   * Which prerequisite blocks the connection, for the note the tile shows.
+   * Present only when `connect === "unconfigured"`.
+   *
+   * - `"deployment"` — the server has no OAuth client for this service. The
+   *   fix is an environment variable and a server restart, so no page in
+   *   the product can perform it.
+   * - `"org"` — the org-scoped credential is missing. An admin connects it
+   *   in Settings → Organization.
+   *
+   * EVERY caller reads this field. Each cause has a different corrective
+   * action, and a member who sees the tile (a leftover credential keeps it
+   * on screen) needs the note to name the right one. The field carries a
+   * cause and nothing else: no variable name, no identifier, no value.
+   */
+  connectBlockedBy?: "deployment" | "org";
+  /**
+   * The deployment environment variables this service still needs, for a
+   * caller who can set them. Present only when `connectBlockedBy ===
+   * "deployment"` AND the caller is an org admin (`org_members.role`), so
+   * its presence is the permission — a member's JSON simply lacks the key,
+   * and the tile stays hidden for somebody who cannot act.
+   *
+   * `GET /api/credentials/:service/connect` holds the same gate on the
+   * `missing` array in its 503 body, so the two surfaces that can name
+   * these variables agree on who reads them.
+   *
+   * NAMES ONLY. The array is built by filtering the declaration's own
+   * `clientIdEnv`/`clientSecretEnv` name fields, and the values behind those
+   * names are read only as a presence test (`authCodeEnvReady`). A variable
+   * name is not a secret; its value is, and no value can reach this array,
+   * because `string[]` of manifest names is the only thing it can hold.
+   */
+  missingEnv?: string[];
   /** Stable slug the client maps to a brand mark, e.g. "github", "gmail".
    * Absent when the plugin declares none — the UI falls back to initials.
    * A slug, not an image: the mark ships with the client so a service icon

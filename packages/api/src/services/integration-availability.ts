@@ -23,6 +23,9 @@
  * sessionExtras` (agent tool gate), and the workflow `ActionInvoker`.
  * Availability gates NEW connections and tool exposure only — stored
  * credentials stay readable and deletable regardless.
+ *
+ * `missingClientEnv` reads the REASON behind rule 3 for `/api/plugins`,
+ * which shows it to an org admin. It reports variable names, never values.
  */
 import type {
   ActionPlugin,
@@ -72,6 +75,33 @@ export async function connectModeFor(
     if (orgCredential === null) return "unconfigured";
   }
   return "manual";
+}
+
+/**
+ * The OAuth client environment variables `service` still needs — the reason
+ * behind rule 3, for a caller who can act on it.
+ *
+ * This reads the resolution; it does not change it. `connectModeFor` stays
+ * the one definition of "unconfigured", and this answers "which setting?"
+ * for the operator who has to fix it.
+ *
+ * The result carries NAMES, never values. Each name comes from the
+ * declaration's own `clientIdEnv`/`clientSecretEnv` manifest field, so a new
+ * plugin with different variables reports its own names with no change here.
+ * `env` is read only to test presence, the same test `authCodeEnvReady`
+ * makes. Empty for a configured service, for `mode: "mcp"` (the remote
+ * server owns the dance), and for a declaration with no OAuth at all — an
+ * org-credential prerequisite is not an environment variable, and the
+ * corrective action for it is a different one.
+ */
+export function missingClientEnv(
+  plugins: ValetPlugin[],
+  service: string,
+  env: Record<string, string | undefined>,
+): string[] {
+  const found = findOAuthDeclaration(plugins, service);
+  if (found === null || found.oauth.mode === "mcp") return [];
+  return [found.oauth.clientIdEnv, found.oauth.clientSecretEnv].filter((name) => !env[name]);
 }
 
 /**

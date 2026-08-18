@@ -55,9 +55,10 @@ export function IntegrationsPage() {
   const plugins = data?.plugins ?? [];
   const connectResult = useConnectResult();
 
-  // `hasVisibleSurface` drops plugins whose every service is unconfigured
-  // and unconnected — nothing on such a tile could work until an admin sets
-  // the service up in Settings → Organization.
+  // `hasVisibleSurface` drops plugins whose every service is unconfigured,
+  // unconnected, and unfixable by this caller — nothing on such a tile could
+  // work, and nothing on it would tell the reader what to do. An org admin
+  // keeps the tile, because the API tells them which setting is missing.
   const services = plugins
     .filter(isService)
     .filter(hasVisibleSurface)

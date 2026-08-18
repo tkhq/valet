@@ -10,6 +10,11 @@
  * match the session user as defense against replayed state values.
  * Callback failures redirect to /integrations?error=… rather than JSON —
  * the user arrives via a browser navigation, not fetch.
+ *
+ * The 503 for a service this deployment cannot connect names the missing
+ * environment variables to an org admin only. That is the audience rule
+ * `/api/plugins` applies to `missingEnv`, and this route is the other
+ * surface that can name them (integration-availability design).
  */
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
@@ -25,6 +30,8 @@ import {
   exchangeAuthorizationCode,
   findOAuthDeclaration,
 } from "../services/integration-oauth.js";
+import { missingClientEnv } from "../services/integration-availability.js";
+import { isOrgAdmin } from "../services/org.js";
 
 export const credentialConnectRouter = new Hono<AppEnv>();
 
@@ -132,8 +139,22 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
 
   // authorization_code mode
   if (!authCodeEnvReady(found.oauth, process.env)) {
-    const missing = [found.oauth.clientIdEnv, found.oauth.clientSecretEnv].filter((name) => !process.env[name]);
-    return c.json({ error: "oauth not configured", missing }, 503);
+    // The variable names go to a caller who can set them, the same audience
+    // rule `/api/plugins` applies to `missingEnv` (integration-availability
+    // design). `org_members.role` is the authority, not the global role.
+    // Both surfaces read one helper, so they can never name a different set.
+    const callerIsOrgAdmin = await isOrgAdmin(db, user.orgId, user.id);
+    const missing = callerIsOrgAdmin ? missingClientEnv(plugins, service, process.env) : [];
+    return c.json(
+      {
+        error: "oauth not configured",
+        fix: callerIsOrgAdmin
+          ? "Set these variables in the server environment. Then restart the server."
+          : "Ask an org admin to set the OAuth client for this service.",
+        ...(missing.length > 0 ? { missing } : {}),
+      },
+      503,
+    );
   }
   const state = signState<OAuthConnectState>(base, key);
   const query = new URLSearchParams({

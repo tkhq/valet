@@ -136,10 +136,80 @@ disconnect), but sessions stop receiving the tools.
 - `connectPath` and the tile renderer handle `"unconfigured"` (the
   tri-state makes the new case a type error to ignore).
 - Unconfigured and **not connected** → the tile does not render in the
-  grid.
+  grid, unless the caller can fix it (below).
 - Unconfigured and **connected** → the tile renders with Disconnect and a
-  note: "Not configured for this organization. An admin can set this up in
-  Settings → Organization." (generalizing the GitHub org-note slot).
+  note naming the fix for the cause that blocks it (generalizing the GitHub
+  org-note slot). See "Two causes, three notes" below.
+
+## Telling the org admin which setting is missing
+
+Hiding a tile is right for a person who cannot act. It is wrong for the
+operator who can: gmail, google-calendar and google-workspace all declare
+`clientIdEnv: 'GOOGLE_CLIENT_ID'`, so a deployment that never set that pair
+loses three tiles with no trace, and nothing on the page names the two
+variables that stand between the operator and a working integration.
+
+`PluginServiceSummary` gains two optional fields:
+
+```ts
+/** Present whenever `connect === "unconfigured"`, for every caller. Which
+ * prerequisite blocks the connection — rule 3 or rule 4. */
+connectBlockedBy?: "deployment" | "org";
+/** Present only when `connectBlockedBy === "deployment"` AND the caller is
+ * an org admin. Names only, from the declaration's own
+ * clientIdEnv/clientSecretEnv. */
+missingEnv?: string[];
+```
+
+`missingClientEnv(plugins, service, env)` (same module as `connectModeFor`)
+builds `missingEnv` by filtering the declaration's two name fields on
+presence. It reads the resolution and does not change it — rule 3 is
+unchanged. It also decides `connectBlockedBy`: rule 3 is the only
+unconfigured arm with an environment variable behind it, so a non-empty
+result means "deployment" and an empty one means "org".
+
+**Names are not values.** `env` is read only as a presence test, the same
+test `authCodeEnvReady` makes, and the field's type is `string[]` of manifest
+names. `resolveClientEnv` — the one function in this area that returns
+secret material — is not on this path.
+
+**The gate is server-side.** `/api/plugins` resolves `isOrgAdmin` once per
+request against `org_members.role` and omits `missingEnv` for everybody
+else, so the field's presence IS the permission and the client needs no
+second gate. One other route can name these variables:
+`GET /api/credentials/:service/connect` returns them in the `missing` array
+of its 503 body, and it now holds the same `isOrgAdmin` gate on that array
+(`routes/credential-connect.ts`). Both surfaces read `missingClientEnv`, so
+they cannot name a different set, and a member reads the names on neither.
+
+The gate decides who is SHOWN the reason. A variable name is not a secret,
+and the two 503 bodies differ only in whether they name one — every caller
+is told the service is unconfigured, and every caller is told what to do
+next.
+
+**Two causes, three notes.** Rule 3 and rule 4 have different fixes, and
+only one of them is a page in the product. `connectBlockedBy` carries the
+cause to every reader, because a member who still sees the tile (a leftover
+credential keeps it on screen) must not be sent to a page that cannot help:
+
+| Cause | Caller | Note |
+|-------|--------|------|
+| deployment | org admin | "This deployment has no OAuth client for this service. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in the server environment. Then restart the server." |
+| deployment | member | "This deployment has no OAuth client for this service. Ask an org admin to set it up." |
+| org | anybody | "Not configured for this organization. An admin can set this up in Settings → Organization." |
+
+**The tile stays informational.** `isVisibleService` shows an unconnected
+tile only when `missingEnv` is non-empty, so visibility keys on the
+admin-only field and never on `connectBlockedBy`.
+
+No control appears. Setting a server variable and restarting is a deployment
+step the browser cannot take, and `GET /api/credentials/:service/connect`
+still 503s while the env is unset — a Connect button here would fail exactly
+the way the dead button that this design removed did.
+
+Both pairs of Google variables are documented together in `.env.example` and
+`docs/environment-variables.md`: `AUTH_GOOGLE_*` is sign-in, `GOOGLE_*` is
+these three integrations, and the server reads them separately.
 
 ## Adjacent fix: `requiresCredential` inference
 
