@@ -65,7 +65,7 @@ describe("slack bot scopes", () => {
     "reactions.get": "reactions:read",
     "pins.list": "pins:read",
     "users.info": "users:read",
-    "bots.info": "bots:read",
+    "bots.info": "users:read", // no bots:read scope exists; bots.info reads with users:read
   };
 
   it("declares a scope for every Slack method the transport calls", () => {

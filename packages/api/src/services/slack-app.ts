@@ -93,8 +93,9 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   "reactions:read",
   // `slack.get_pins` (`pins.list`).
   "pins:read",
-  // Bot-sender enrichment (`bots.info`, data-enrichment design).
-  "bots:read",
+  // Bot-sender enrichment (`bots.info`) rides `users:read` above. There is
+  // no granular `bots:read` scope — Slack rejects a manifest that asks for
+  // one.
 
   // ── V1 parity, held for surfaces that are ported next ───────────────
   // The scopes below have no v2 consumer yet. They ride along so an
