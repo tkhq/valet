@@ -15,6 +15,7 @@ import {
   parseGrantedScopes,
   slackRequestUrl,
 } from "./slack-app.js";
+import { SLACK_USER_SCOPES } from "@valet/plugin-slack-user/oauth";
 
 describe("slack bot events", () => {
   it("subscribes the agent messaging experience, not the legacy assistant one", () => {
@@ -89,6 +90,25 @@ describe("buildSlackAppManifest", () => {
       expect(manifest.oauth_config.scopes.bot).toContain(scope);
     }
     expect(manifest.settings.event_subscriptions.bot_events).toEqual([...SLACK_BOT_EVENTS]);
+  });
+
+  it("declares the Slack (personal) user scope bundle and the OAuth callback", () => {
+    const manifest = buildSlackAppManifest({ publicUrl: "https://valet.example.com" });
+
+    // Slack grants a user token only the scopes declared in the manifest.
+    // A drift between the plugin's bundle and the manifest fails every
+    // personal connect with a scope-shortfall error.
+    expect([...manifest.oauth_config.scopes.user].sort()).toEqual([...SLACK_USER_SCOPES].sort());
+    expect(manifest.oauth_config.redirect_urls).toEqual([
+      "https://valet.example.com/api/credentials/oauth/callback",
+    ]);
+  });
+
+  it("omits redirect_urls without a public URL but keeps the user scopes", () => {
+    const manifest = buildSlackAppManifest({ publicUrl: null });
+
+    expect(manifest.oauth_config.redirect_urls).toBeUndefined();
+    expect(manifest.oauth_config.scopes.user.length).toBeGreaterThan(0);
   });
 
   it("points events and interactivity at the path app.ts actually mounts", () => {
