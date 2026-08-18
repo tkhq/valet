@@ -59,17 +59,22 @@ const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   error: null,
 }));
 
+// The wire ships `definition: unknown` (stored JSON the shape does not
+// carry), so the fixture holds it as `unknown` too — a test can then swap
+// in any stored shape without a cast.
+const initialDefinition: unknown = {
+  version: "dag/v1",
+  nodes: [
+    { id: "trigger", type: "trigger" },
+    { id: "stop", type: "stop", outcome: "success" },
+  ],
+  edges: [{ from: "trigger", to: "stop" }],
+};
+
 const workflowData = {
   id: "wf_1",
   name: "Deploy pipeline",
-  definition: {
-    version: "dag/v1",
-    nodes: [
-      { id: "trigger", type: "trigger" },
-      { id: "stop", type: "stop", outcome: "success" },
-    ],
-    edges: [{ from: "trigger", to: "stop" }],
-  },
+  definition: initialDefinition,
   createdAt: 1,
   updatedAt: 1,
 };
@@ -266,10 +271,6 @@ describe("WorkflowEditorPage", () => {
     // installed, declare exactly one trigger field: a hidden webhook
     // payload nobody types. Run must not open a dialog asking for it.
     const original = workflowData.definition;
-    // `workflowData.definition`'s inferred type is the trigger→stop fixture
-    // above; a real definition's `dataSchema` is unchecked stored JSON that
-    // shape does not carry, so this is the same unknown-then-single-cast
-    // seam `trigger-input.test.ts`'s `rawDef` uses.
     workflowData.definition = {
       version: "dag/v1",
       nodes: [
@@ -280,7 +281,7 @@ describe("WorkflowEditorPage", () => {
         },
       ],
       edges: [],
-    } as unknown as typeof workflowData.definition;
+    };
     try {
       render(<WorkflowEditorPage workflowId="wf_1" />);
       fireEvent.click(screen.getByRole("button", { name: "Run" }));
