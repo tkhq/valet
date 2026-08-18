@@ -62,6 +62,27 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+/**
+ * Google API error bodies are structured JSON like
+ * {"error":{"code":400,"message":"...","errors":[...]}}. Pull out the
+ * human-readable message; fall back to the raw body when it isn't JSON.
+ */
+function extractApiErrorMessage(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+      const err = (parsed as { error: unknown }).error;
+      if (typeof err === "object" && err !== null && "message" in err) {
+        const message = (err as { message: unknown }).message;
+        if (typeof message === "string" && message.length > 0) return message;
+      }
+    }
+  } catch {
+    // Not JSON — fall through to the raw body.
+  }
+  return body;
+}
+
 // ─── Credential Helper ─────────────────────────────────────────────────────────
 
 async function getAccessToken(ctx: PluginActionContext): Promise<string> {
@@ -637,7 +658,7 @@ const queryFreeBusy = action(
         if (res.status === 400)
           return {
             success: false,
-            error: `Calendar rejected the free/busy query: ${body}. Check that timeMin/timeMax are valid RFC3339 timestamps.`,
+            error: `Calendar rejected the free/busy query: ${extractApiErrorMessage(body)}. Check that timeMin/timeMax are valid RFC3339 timestamps.`,
           };
         return { success: false, error: `Failed to query free/busy: ${res.status} ${body}` };
       }
@@ -664,6 +685,16 @@ const queryFreeBusy = action(
           error = `Free/busy lookup failed for this calendar: ${reasons.join(", ")}.`;
         }
         calendars[id] = { busy: cal.busy ?? [], error };
+      }
+      // The API can omit a queried ID from the response body entirely;
+      // backfill so every queried calendar has an entry.
+      for (const id of p.items) {
+        if (!(id in calendars)) {
+          calendars[id] = {
+            busy: [],
+            error: "The API returned no result for this calendar. Check the calendar ID.",
+          };
+        }
       }
       return {
         success: true,

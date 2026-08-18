@@ -465,6 +465,67 @@ describe('google-calendar actions', () => {
     });
   });
 
+  it('query_free_busy backfills a queried calendar the API response omits', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        calendars: {
+          'alice@example.com': { busy: [] },
+        },
+      }),
+    );
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com', 'missing@example.com'],
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        timeMin: '2026-04-20T08:00:00Z',
+        timeMax: '2026-04-20T18:00:00Z',
+        calendars: {
+          'alice@example.com': { busy: [], error: null },
+          'missing@example.com': {
+            busy: [],
+            error: 'The API returned no result for this calendar. Check the calendar ID.',
+          },
+        },
+      },
+    });
+  });
+
+  it('query_free_busy extracts the message from a structured 400 error body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(400, {
+        error: {
+          code: 400,
+          message: 'Invalid value for: Invalid format: "not-a-timestamp"',
+          errors: [{ domain: 'global', reason: 'badRequest' }],
+        },
+      }),
+    );
+
+    const result = await action('calendar.query_free_busy').execute(
+      {
+        items: ['alice@example.com'],
+        timeMin: 'not-a-timestamp',
+        timeMax: '2026-04-20T18:00:00Z',
+      },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        'Calendar rejected the free/busy query: Invalid value for: Invalid format: "not-a-timestamp". Check that timeMin/timeMax are valid RFC3339 timestamps.',
+    });
+  });
+
   it('query_free_busy rejects more than 50 calendars without calling fetch', async () => {
     const items = Array.from({ length: 51 }, (_, i) => `user${i}@example.com`);
 
