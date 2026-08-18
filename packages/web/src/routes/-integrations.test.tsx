@@ -12,6 +12,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type {
   GetGithubOrgStatusResponse,
+  IdentityLinkStatus,
   ListPluginsResponse,
   OrgResponse,
   PluginServiceSummary,
@@ -198,6 +199,23 @@ vi.mock("~/api/integrations", () => ({
   useDisconnectCredential: () => ({ mutateAsync: disconnectMutateAsync, isPending: false, error: null }),
 }));
 
+// The org-provided tile's pairing block (identity-link-block.tsx) reads
+// these three hooks. importOriginal: see -new-session-dialog.test.tsx for
+// why a bare replacement is unsafe under vitest.config.ts's isolate:false.
+let identityLinksData: { links: IdentityLinkStatus[] } | undefined;
+const startLinkMutateAsync = vi.fn();
+const unlinkIdentityMutate = vi.fn();
+
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useIdentityLinks: () => ({ data: identityLinksData, isLoading: false, error: null }),
+    useStartIdentityLink: () => ({ mutateAsync: startLinkMutateAsync, isPending: false }),
+    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false }),
+  };
+});
+
 import { IntegrationsPage } from "./integrations";
 
 function org(callerRole: "admin" | "member", organizations = true): OrgResponse {
@@ -217,6 +235,9 @@ describe("IntegrationsPage", () => {
     currentOrg = org("member");
     connectMutateAsync.mockClear();
     disconnectMutateAsync.mockClear();
+    identityLinksData = undefined;
+    startLinkMutateAsync.mockReset();
+    unlinkIdentityMutate.mockClear();
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -897,5 +918,93 @@ describe("an unconfigured service an org admin can fix", () => {
 
     expect(screen.getByRole("button", { name: "Connect Google Calendar" })).toBeTruthy();
     expect(screen.queryByText(/restart the server/)).toBeNull();
+  });
+});
+
+/**
+ * The org-provided tile ("org" connect mode): the org credential powers the
+ * integration, so the member's only step is pairing their account through
+ * the identity-link code flow. No token entry, ever.
+ */
+describe("IntegrationsPage — org-provided pairing", () => {
+  function slackOrgPlugins(): ListPluginsResponse {
+    return {
+      plugins: [
+        {
+          name: "slack",
+          version: "0.1.0",
+          description: "Slack integration for messages, channels, and users",
+          actionCount: 11,
+          services: [
+            {
+              service: "slack",
+              type: "bot_token" as const,
+              configKeys: ["accessToken"],
+              connected: false,
+              connect: "org" as const,
+              actions: [],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  function slackLink(overrides: Partial<IdentityLinkStatus> = {}): IdentityLinkStatus {
+    return { provider: "slack", linked: false, channelReady: true, ...overrides };
+  }
+
+  beforeEach(() => {
+    currentPluginsData = slackOrgPlugins();
+    currentOrg = org("member");
+    identityLinksData = undefined;
+    startLinkMutateAsync.mockReset();
+    unlinkIdentityMutate.mockClear();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  it("offers pairing instead of token entry when the provider declares an identity link", () => {
+    identityLinksData = { links: [slackLink()] };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByRole("button", { name: "Link Slack account" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Connect Slack/ })).toBeNull();
+    expect(screen.queryByText(/Provided by your organization/)).toBeNull();
+  });
+
+  it("starting the link shows the code, the provider's instructions, and the expiry", async () => {
+    identityLinksData = { links: [slackLink()] };
+    startLinkMutateAsync.mockResolvedValue({
+      code: "VLT-1234",
+      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+      expiresInSeconds: 600,
+    });
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Link Slack account" }));
+
+    await waitFor(() => expect(screen.getByText("VLT-1234")).toBeTruthy());
+    expect(startLinkMutateAsync).toHaveBeenCalledWith("slack");
+    expect(screen.getByText(/open a DM with the Valet app/)).toBeTruthy();
+    expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
+  });
+
+  it("a linked account reads as linked, with a confirm-gated Unlink", () => {
+    identityLinksData = { links: [slackLink({ linked: true, externalId: "U0123ABCD" })] };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("U0123ABCD")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
+    expect(unlinkIdentityMutate).toHaveBeenCalled();
+  });
+
+  it("falls back to the generic org note when the provider declares no identity link", () => {
+    identityLinksData = { links: [] };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText(/Provided by your organization/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
   });
 });

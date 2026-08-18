@@ -38,6 +38,7 @@ import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { displayName, pluginDisplayName } from "./display-name";
 import { GithubOrgAppLine } from "./github-org-app-line";
+import { IdentityLinkBlock, useServiceIdentityLink } from "./identity-link-block";
 import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
 
 
@@ -327,14 +328,18 @@ function ServiceBlock({
     </p>
   );
 
-  // The org-provided note replaces the connect control, not the tile: the
-  // service works in sessions through the org credential, so the tile stays
-  // to say who provides it.
+  // The org-provided tile carries the member's OWN step in place of token
+  // entry: pairing their account through the identity-link code flow, for
+  // providers that declare one (the hook returns null otherwise, and for a
+  // provider whose transport is not ready). The generic note stands in when
+  // there is no pairing to offer.
   const orgProvidedNote = orgProvided ? (
     <p className="text-xs leading-relaxed text-muted">
       Provided by your organization. An admin manages it in Settings → Organization.
     </p>
   ) : undefined;
+  const identityLink = useServiceIdentityLink(service.service);
+  const pairing = orgProvided && identityLink?.channelReady ? identityLink : null;
 
   return (
     <>
@@ -350,7 +355,7 @@ function ServiceBlock({
       {(orgNote || unconfiguredNote || orgProvidedNote || (service.connected && (service.health?.login || note))) && (
         <div className="mt-1.5 space-y-1 pl-12">
           {unconfiguredNote}
-          {orgProvidedNote}
+          {pairing ? <IdentityLinkBlock link={pairing} title={title} /> : orgProvidedNote}
           {service.connected && service.health?.login && (
             <p className="truncate text-xs text-muted">Account: {service.health.login}</p>
           )}
