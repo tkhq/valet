@@ -94,12 +94,16 @@ export function useSlackWorkspaceUsers() {
 
 /** Shape returned by both `/me/slack/link` and `/me/slack/link/quick` when
  * the code was DMed. The `dmMessageText` echoes the exact bot DM so the card
- * can show the user what to look for in Slack. */
+ * can show the user what to look for in Slack. `dmDelivered` is `false`
+ * when the DM send failed — the verification row is still minted, so the
+ * user can complete the flow from the echoed preview, but the card should
+ * stop telling them to check Slack. */
 export interface InitiateSlackLinkResult {
   slackUserId: string;
   slackDisplayName?: string;
   expiresAt: string;
   dmMessageText: string;
+  dmDelivered: boolean;
 }
 
 /** `202` variant of the quick endpoint: the caller's email did not resolve
@@ -120,7 +124,7 @@ export function useInitiateSlackLink() {
 export function useQuickSlackLink() {
   return useMutation({
     mutationFn: () =>
-      api.post<InitiateSlackLinkResult | QuickSlackLinkFallback>('/me/slack/link/quick', {}),
+      api.post<InitiateSlackLinkResult | QuickSlackLinkFallback>('/me/slack/link/quick'),
   });
 }
 

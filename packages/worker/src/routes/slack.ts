@@ -1,8 +1,32 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import type { Env, Variables } from '../env.js';
 import { adminMiddleware } from '../middleware/admin.js';
 import * as db from '../lib/db.js';
 import * as slackService from '../services/slack.js';
+import { SlackScopeError, SlackTransportError } from '../services/slack.js';
+
+/**
+ * Map a thrown Slack service error to an HTTP status:
+ * - `SlackScopeError` (missing OAuth scope) → 400, actionable by an admin.
+ * - `SlackTransportError` (upstream HTTP or network fault) → 502, not the
+ *   caller's fault.
+ * - Anything else → 500.
+ */
+function mapSlackError(
+  c: Context<{ Bindings: Env; Variables: Variables }>,
+  err: unknown,
+  fallbackMessage: string,
+) {
+  const message = err instanceof Error ? err.message : fallbackMessage;
+  if (err instanceof SlackScopeError) {
+    return c.json({ error: message }, 400);
+  }
+  if (err instanceof SlackTransportError) {
+    return c.json({ error: message }, 502);
+  }
+  return c.json({ error: message }, 500);
+}
 
 // ─── Admin Router (mounted at /api/admin/slack) ────────────────────────────
 
@@ -136,13 +160,21 @@ slackUserRouter.post('/link', async (c) => {
     return c.json({ error: 'Invalid slackUserId' }, 400);
   }
 
+  // Guard: a second successful link would overwrite the first identity
+  // link. Caller must unlink first.
+  const existingLinks = await db.getUserIdentityLinks(c.get('db'), user.id);
+  const existingLink = existingLinks.find((l) => l.provider === 'slack');
+  if (existingLink) {
+    return c.json({ error: 'Slack identity is already linked. Unlink it first to link a different account.' }, 409);
+  }
+
   try {
     const result = await slackService.initiateSlackLink(
       c.env, user.id, body.slackUserId, body.slackDisplayName,
     );
     return c.json(result);
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : 'Failed to initiate link' }, 400);
+    return mapSlackError(c, err, 'Failed to initiate link');
   }
 });
 
@@ -157,6 +189,14 @@ slackUserRouter.post('/link', async (c) => {
  */
 slackUserRouter.post('/link/quick', async (c) => {
   const user = c.get('user');
+
+  // Same guard as `/link`: don't silently overwrite an existing link.
+  const existingLinks = await db.getUserIdentityLinks(c.get('db'), user.id);
+  const existingLink = existingLinks.find((l) => l.provider === 'slack');
+  if (existingLink) {
+    return c.json({ error: 'Slack identity is already linked. Unlink it first to link a different account.' }, 409);
+  }
+
   try {
     const result = await slackService.initiateSlackLinkByEmail(c.env, user.id, user.email);
     if (!result) {
@@ -164,7 +204,7 @@ slackUserRouter.post('/link/quick', async (c) => {
     }
     return c.json(result);
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : 'Failed to initiate link' }, 400);
+    return mapSlackError(c, err, 'Failed to initiate link');
   }
 });
 

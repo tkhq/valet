@@ -9,6 +9,32 @@ export { slackLinkDmText };
 
 const SLACK_API = 'https://slack.com/api';
 
+// ─── Typed errors for Slack service ─────────────────────────────────────────
+
+/**
+ * The bot is missing a required OAuth scope. Actionable by an admin
+ * (reinstall the app) — callers should map to a 4xx so the message reaches
+ * the operator instead of being masked as a transport hiccup.
+ */
+export class SlackScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SlackScopeError';
+  }
+}
+
+/**
+ * Transport-level failure talking to Slack (non-2xx HTTP, network error,
+ * unexpected API `ok: false` we can't classify). Callers should map to a
+ * 502 — the upstream, not the caller, is at fault.
+ */
+export class SlackTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SlackTransportError';
+  }
+}
+
 // ─── Install Slack App (org-level) ─────────────────────────────────────────
 
 export type InstallSlackResult =
@@ -388,11 +414,18 @@ export async function lookupSlackUserByEmail(
   const botToken = await getSlackBotToken(env);
   if (!botToken) throw new Error('Slack is not installed for this organization');
 
-  const resp = await fetch(
-    `${SLACK_API}/users.lookupByEmail?email=${encodeURIComponent(email)}`,
-    { method: 'GET', headers: { Authorization: `Bearer ${botToken}` } },
-  );
-  if (!resp.ok) throw new Error(`Slack lookupByEmail HTTP ${resp.status}`);
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `${SLACK_API}/users.lookupByEmail?email=${encodeURIComponent(email)}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${botToken}` } },
+    );
+  } catch (err) {
+    throw new SlackTransportError(
+      `Slack lookupByEmail network error: ${err instanceof Error ? err.message : 'unknown'}`,
+    );
+  }
+  if (!resp.ok) throw new SlackTransportError(`Slack lookupByEmail HTTP ${resp.status}`);
 
   const result = (await resp.json()) as {
     ok: boolean;
@@ -408,12 +441,15 @@ export async function lookupSlackUserByEmail(
   if (!result.ok) {
     // Distinguish "no such user in this workspace" from real errors like
     // missing scope — the first is a normal fallback path; the second is a
-    // configuration bug we should surface.
-    if (result.error === 'users_not_found') return null;
+    // configuration bug we should surface. Slack's actual error code is
+    // `user_not_found` (singular).
+    if (result.error === 'user_not_found') return null;
     if (result.error === 'missing_scope') {
-      throw new Error('Slack bot is missing the users:read.email scope. Reinstall the app to grant it.');
+      throw new SlackScopeError(
+        'Slack bot is missing the users:read.email scope. Reinstall the app to grant it.',
+      );
     }
-    throw new Error(`Slack lookupByEmail error: ${result.error || 'unknown'}`);
+    throw new SlackTransportError(`Slack lookupByEmail error: ${result.error || 'unknown'}`);
   }
 
   const u = result.user;
@@ -433,12 +469,18 @@ export interface InitiateSlackLinkResult {
    * screen so the user knows what to look for in Slack and — if the DM does
    * not arrive — can complete verification without switching apps. */
   dmMessageText: string;
+  /** `true` when `chat.postMessage` succeeded, `false` when it threw or
+   * Slack returned `ok: false`. The verification row is minted either way,
+   * so the client can still complete the flow from the echoed DM preview —
+   * but the intro copy should stop pointing at Slack when we know the DM
+   * did not land. */
+  dmDelivered: boolean;
 }
 
 /** Mint a fresh 6-char code, replace any prior pending verification for
- * `userId`, and DM it to `slackUserId`. Split out so the by-email and
- * by-typeahead entrypoints share one code path. */
-async function mintCodeAndDm(
+ * `userId`, and DM it to `slackUserId`. Shared by the by-email and
+ * by-typeahead entrypoints. */
+async function initiateSlackLinkCommon(
   env: Env,
   userId: string,
   slackUserId: string,
@@ -502,9 +544,13 @@ async function mintCodeAndDm(
 
   // Send verification code via DM. Non-fatal on send failure: the
   // verification row is persisted, so the user can still complete the flow
-  // by reading the code echoed on the connect card.
+  // by reading the code echoed on the connect card. Track whether the DM
+  // actually landed so the client can adjust its "check Slack" copy — a
+  // silent success there is worse than a silent failure elsewhere, because
+  // it points the user at a badge that will never appear.
+  let dmDelivered = false;
   try {
-    await fetch(`${SLACK_API}/chat.postMessage`, {
+    const postResp = await fetch(`${SLACK_API}/chat.postMessage`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
@@ -512,11 +558,27 @@ async function mintCodeAndDm(
       },
       body: JSON.stringify({ channel: dmChannelId, text: dmMessageText }),
     });
-  } catch {
-    // Non-fatal: verification row is created, user can still verify
+    if (postResp.ok) {
+      const postResult = (await postResp.json().catch(() => ({ ok: false }))) as {
+        ok?: boolean;
+        error?: string;
+      };
+      dmDelivered = postResult.ok === true;
+      if (!dmDelivered) {
+        console.warn(
+          `[Slack] chat.postMessage returned ok=false: error=${postResult.error} user=${slackUserId}`,
+        );
+      }
+    } else {
+      console.warn(
+        `[Slack] chat.postMessage HTTP ${postResp.status} user=${slackUserId}`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[Slack] chat.postMessage threw for user=${slackUserId}:`, err);
   }
 
-  return { slackUserId, slackDisplayName, expiresAt, dmMessageText };
+  return { slackUserId, slackDisplayName, expiresAt, dmMessageText, dmDelivered };
 }
 
 export async function initiateSlackLink(
@@ -525,7 +587,7 @@ export async function initiateSlackLink(
   slackUserId: string,
   slackDisplayName?: string,
 ): Promise<InitiateSlackLinkResult> {
-  return mintCodeAndDm(env, userId, slackUserId, slackDisplayName);
+  return initiateSlackLinkCommon(env, userId, slackUserId, slackDisplayName);
 }
 
 /**
@@ -542,7 +604,7 @@ export async function initiateSlackLinkByEmail(
   if (!email) return null;
   const match = await lookupSlackUserByEmail(env, email);
   if (!match) return null;
-  return mintCodeAndDm(env, userId, match.id, match.displayName);
+  return initiateSlackLinkCommon(env, userId, match.id, match.displayName);
 }
 
 // ─── Verify Slack Link ──────────────────────────────────────────────────────

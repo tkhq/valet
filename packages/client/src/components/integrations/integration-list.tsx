@@ -417,6 +417,7 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
   const [search, setSearch] = React.useState('');
   const [selectedUser, setSelectedUser] = React.useState<{ id: string; displayName: string } | null>(null);
   const [dmPreview, setDmPreview] = React.useState<string | null>(null);
+  const [dmDelivered, setDmDelivered] = React.useState<boolean>(true);
   const [quickFallbackNote, setQuickFallbackNote] = React.useState<string | null>(null);
   const [code, setCode] = React.useState('');
   const [copied, setCopied] = React.useState<'dm' | null>(null);
@@ -424,6 +425,7 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
   function acceptInitiateResult(res: InitiateSlackLinkResult, display: string) {
     setSelectedUser({ id: res.slackUserId, displayName: res.slackDisplayName || display });
     setDmPreview(res.dmMessageText);
+    setDmDelivered(res.dmDelivered);
     setStep('verify');
   }
 
@@ -435,7 +437,7 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
           // Server could not resolve caller's email in the workspace — drop
           // into the manual typeahead and tell the user why.
           setQuickFallbackNote(
-            "We couldn't find your Slack account by email. Pick yourself from the list — the DM goes out the same way.",
+            "We couldn't find your Slack account by email. We'll still DM you the code once you pick yourself from the list.",
           );
           setStep('search');
           return;
@@ -481,9 +483,11 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
       await navigator.clipboard.writeText(dmPreview);
       setCopied('dm');
       setTimeout(() => setCopied(null), 1500);
-    } catch {
+    } catch (err) {
       // Clipboard write can be denied (insecure origin, permissions). The
-      // preview is still selectable — silently swallow.
+      // preview is still selectable — no UI, but log so debugging is not
+      // impossible.
+      console.warn('[SlackLinkFlow] clipboard.writeText failed:', err);
     }
   }
 
@@ -525,9 +529,15 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
   if (step === 'verify') {
     return (
       <div className="space-y-3">
-        <p className="text-xs text-neutral-500 dark:text-neutral-400">
-          We just DMed <span className="font-medium text-neutral-700 dark:text-neutral-300">{selectedUser?.displayName || 'you'}</span> on Slack. Check for a red badge from the Valet app.
-        </p>
+        {dmDelivered ? (
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            We just DMed <span className="font-medium text-neutral-700 dark:text-neutral-300">{selectedUser?.displayName || 'you'}</span> on Slack. Check for a red badge from the Valet app.
+          </p>
+        ) : (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            We couldn&apos;t send the DM to <span className="font-medium">{selectedUser?.displayName || 'you'}</span> — use the code below to finish linking.
+          </p>
+        )}
         {dmPreview && (
           <div className="space-y-1 rounded-md border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-700 dark:bg-neutral-800/50">
             <div className="flex items-start justify-between gap-2">
