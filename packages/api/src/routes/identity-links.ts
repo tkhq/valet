@@ -1,15 +1,16 @@
 /**
  * `/api/me/identity-links` — per-user channel account linking (Phase 7).
- * Just `telegram` this pass: `GET` reports link status built from
- * `identityForUser` + `channelHost.isRunning`; `POST .../start` mints a
- * short-lived link code and returns a `t.me` deep link; `PATCH` flips
- * `notifyAttention`; `DELETE` unlinks (always 200, same idempotent
- * convention as `/api/credentials`).
+ * Provider-parameterized: each `ValetPlugin` with an `identityLink` field
+ * declares one provider. `GET` lists all declaring plugins; `POST .../start`
+ * mints a short-lived link code and returns a deep link when the provider
+ * supports it; `PATCH` flips `notifyAttention`; `DELETE` unlinks (always 200,
+ * same idempotent convention as `/api/credentials`).
  *
  * Mounted BEFORE `/api/me` in `app.ts` so the longer, more specific prefix
  * wins under Hono's route matching.
  */
 import { Hono } from "hono";
+import type { ValetPlugin, IdentityLinkDeclaration } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import {
   identityForUser,
@@ -30,50 +31,91 @@ export const identityLinksRouter = new Hono<AppEnv>();
 
 const START_LINK_TTL_SECONDS = 600;
 
+/** Builds a map from provider key to declaration for all declaring plugins. */
+function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDeclaration> {
+  const map = new Map<string, IdentityLinkDeclaration>();
+  for (const plugin of plugins) {
+    if (plugin.identityLink) map.set(plugin.identityLink.provider, plugin.identityLink);
+  }
+  return map;
+}
+
 identityLinksRouter.get("/", async (c) => {
-  const { db, channelHost } = c.var.providers;
+  const { db, channelHost, plugins } = c.var.providers;
   const user = c.var.user;
 
-  const identity = await identityForUser(db, "telegram", user.id);
-  const link: IdentityLinkStatus = identity
-    ? {
-        provider: "telegram",
-        linked: true,
-        externalId: identity.externalId,
-        notifyAttention: identity.notifyAttention,
-        createdAt: identity.createdAt,
-        channelReady: channelHost.isRunning("telegram"),
-      }
-    : {
-        provider: "telegram",
-        linked: false,
-        channelReady: channelHost.isRunning("telegram"),
-      };
+  const declarations = linkDeclarations(plugins);
+  const links: IdentityLinkStatus[] = [];
 
-  const resp: ListIdentityLinksResponse = { links: [link] };
+  for (const [provider, _decl] of declarations) {
+    const identity = await identityForUser(db, provider, user.id);
+    const link: IdentityLinkStatus = identity
+      ? {
+          provider,
+          linked: true,
+          externalId: identity.externalId,
+          notifyAttention: identity.notifyAttention,
+          createdAt: identity.createdAt,
+          channelReady: channelHost.isRunning(provider),
+        }
+      : {
+          provider,
+          linked: false,
+          channelReady: channelHost.isRunning(provider),
+        };
+    links.push(link);
+  }
+
+  const resp: ListIdentityLinksResponse = { links };
   return c.json(resp);
 });
 
-identityLinksRouter.post("/telegram/start", async (c) => {
-  const { db, channelHost } = c.var.providers;
+identityLinksRouter.post("/:provider/start", async (c) => {
+  const { db, channelHost, plugins } = c.var.providers;
   const user = c.var.user;
+  const provider = c.req.param("provider");
 
-  const botUsername = channelHost.botUsername("telegram");
-  if (!channelHost.isRunning("telegram") || !botUsername) {
-    return c.json({ error: "telegram bot not configured" }, 409);
+  const declarations = linkDeclarations(plugins);
+  const decl = declarations.get(provider);
+  if (!decl) {
+    return c.json({ error: `unknown identity provider "${provider}"` }, 404);
   }
 
-  const code = await mintLinkCode(db, user.id, "telegram");
+  if (!channelHost.isRunning(provider)) {
+    return c.json(
+      {
+        error: `${provider} transport is not running. Configure the ${provider} bot token, then retry.`,
+      },
+      409,
+    );
+  }
+
+  const code = await mintLinkCode(db, user.id, provider);
+
+  let deepLink: string | undefined;
+  if (decl.deepLink) {
+    const dl = decl.deepLink({ botUsername: channelHost.botUsername(provider), code });
+    if (dl !== null) deepLink = dl;
+  }
+
   const resp: StartIdentityLinkResponse = {
-    deepLink: `https://t.me/${botUsername}?start=${code}`,
+    code,
+    instructions: decl.instructions,
     expiresInSeconds: START_LINK_TTL_SECONDS,
+    ...(deepLink !== undefined ? { deepLink } : {}),
   };
   return c.json(resp);
 });
 
-identityLinksRouter.patch("/telegram", async (c) => {
-  const { db } = c.var.providers;
+identityLinksRouter.patch("/:provider", async (c) => {
+  const { db, plugins } = c.var.providers;
   const user = c.var.user;
+  const provider = c.req.param("provider");
+
+  const declarations = linkDeclarations(plugins);
+  if (!declarations.has(provider)) {
+    return c.json({ error: `unknown identity provider "${provider}"` }, 404);
+  }
 
   let body: PatchIdentityLinkRequest;
   try {
@@ -85,22 +127,28 @@ identityLinksRouter.patch("/telegram", async (c) => {
     return c.json({ error: "notifyAttention must be a boolean" }, 400);
   }
 
-  const existing = await identityForUser(db, "telegram", user.id);
+  const existing = await identityForUser(db, provider, user.id);
   if (!existing) {
     return c.json({ error: "not linked" }, 404);
   }
 
-  await setNotifyAttention(db, "telegram", user.id, body.notifyAttention);
+  await setNotifyAttention(db, provider, user.id, body.notifyAttention);
 
   const resp: PatchIdentityLinkResponse = { ok: true };
   return c.json(resp);
 });
 
-identityLinksRouter.delete("/telegram", async (c) => {
-  const { db } = c.var.providers;
+identityLinksRouter.delete("/:provider", async (c) => {
+  const { db, plugins } = c.var.providers;
   const user = c.var.user;
+  const provider = c.req.param("provider");
 
-  await unlinkIdentity(db, "telegram", user.id);
+  const declarations = linkDeclarations(plugins);
+  if (!declarations.has(provider)) {
+    return c.json({ error: `unknown identity provider "${provider}"` }, 404);
+  }
+
+  await unlinkIdentity(db, provider, user.id);
 
   const resp: DeleteIdentityLinkResponse = { ok: true };
   return c.json(resp);

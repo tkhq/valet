@@ -1,8 +1,8 @@
 /**
- * `/api/me/identity-links` — Telegram account linking route tests
- * (channel-link Phase 7, Task 9). Also proves the app.ts mount order: this
- * router is mounted BEFORE `/api/me` so the longer, more specific prefix
- * wins under Hono's route matching (see `app.ts`'s comment).
+ * `/api/me/identity-links` — provider-parameterized identity-link routes
+ * (channel-link Phase 7). Also proves the app.ts mount order: this router is
+ * mounted BEFORE `/api/me` so the longer, more specific prefix wins under
+ * Hono's route matching (see `app.ts`'s comment).
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { ChannelTransport, OutboundChannelMessage, ValetPlugin } from "@valet/engine";
@@ -53,8 +53,25 @@ function telegramPlugin(): { plugin: ValetPlugin; transport: FakeTelegramTranspo
     name: "telegram",
     version: "0",
     transports: [{ channelType: "telegram", create: () => transport }],
+    identityLink: {
+      provider: "telegram",
+      instructions: "Tap the link or send /start <code> to the bot.",
+      deepLink: ({ botUsername, code }) =>
+        botUsername ? `https://t.me/${botUsername}?start=${code}` : null,
+    },
   };
   return { plugin, transport };
+}
+
+function slackPlugin(): ValetPlugin {
+  return {
+    name: "slack-user",
+    version: "0",
+    identityLink: {
+      provider: "slack",
+      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+    },
+  };
 }
 
 /** Boots with the fake telegram transport registered + a bot token
@@ -72,6 +89,23 @@ async function bootWithRunningTelegram(): Promise<TestApi> {
   return booted;
 }
 
+/** Boots with both telegram and slack plugins, telegram running (transport
+ *  started), slack declared but no transport (channelHost.isRunning("slack")
+ *  will be false unless the slack transport is also seeded). */
+async function bootWithBothPlugins(): Promise<TestApi> {
+  const { plugin: tg } = telegramPlugin();
+  const sl = slackPlugin();
+  const booted = await bootTestApi({ plugins: [tg, sl] });
+  await booted.providers.engineCredentials.save({ type: "org", id: "local-org" }, "telegram", {
+    type: "bot_token",
+    accessToken: "tg-test-token",
+  });
+  await booted.providers.channelHost.start();
+  return booted;
+}
+
+// ── GET / ────────────────────────────────────────────────────────────────────
+
 describe("GET /api/me/identity-links", () => {
   it("reports linked:false, channelReady:false when no transport is running", async () => {
     api = await bootTestApi();
@@ -79,8 +113,36 @@ describe("GET /api/me/identity-links", () => {
     const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListIdentityLinksResponse;
+    // No plugins with identityLink declarations → empty list.
+    expect(body.links).toHaveLength(0);
+  });
+
+  it("returns one entry per declaring plugin (telegram only)", async () => {
+    const { plugin } = telegramPlugin();
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListIdentityLinksResponse;
     expect(body.links).toHaveLength(1);
     expect(body.links[0]).toMatchObject({ provider: "telegram", linked: false, channelReady: false });
+  });
+
+  it("returns two entries when both telegram and slack declare identityLink", async () => {
+    api = await bootWithBothPlugins();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListIdentityLinksResponse;
+    expect(body.links).toHaveLength(2);
+    const providers = body.links.map((l) => l.provider);
+    expect(providers).toContain("telegram");
+    expect(providers).toContain("slack");
+    // Telegram is running; slack has no transport seeded so channelReady is false.
+    const tg = body.links.find((l) => l.provider === "telegram");
+    const sl = body.links.find((l) => l.provider === "slack");
+    expect(tg).toMatchObject({ linked: false, channelReady: true });
+    expect(sl).toMatchObject({ linked: false, channelReady: false });
   });
 
   it("401s without auth configured", async () => {
@@ -96,36 +158,169 @@ describe("GET /api/me/identity-links", () => {
   });
 });
 
-describe("POST /api/me/identity-links/telegram/start", () => {
-  it("409s when the transport isn't running", async () => {
+// ── POST /:provider/start ────────────────────────────────────────────────────
+
+describe("POST /api/me/identity-links/:provider/start", () => {
+  it("404s on an unknown provider", async () => {
     api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/nope/start`, { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown identity provider "nope"' });
+  });
+
+  it("409s when the transport isn't running (telegram)", async () => {
+    const { plugin } = telegramPlugin();
+    api = await bootTestApi({ plugins: [plugin] });
 
     const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram/start`, { method: "POST" });
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "telegram bot not configured" });
+    expect(await res.json()).toEqual({
+      error: "telegram transport is not running. Configure the telegram bot token, then retry.",
+    });
   });
 
-  it("200s with a deep link when the transport is running; consuming the code links the caller", async () => {
+  it("200s with code + deepLink for telegram when running", async () => {
     api = await bootWithRunningTelegram();
 
     const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram/start`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as StartIdentityLinkResponse;
     expect(body.expiresInSeconds).toBe(600);
+    expect(body.code).toMatch(/^[A-Za-z0-9_-]{20,}$/);
     expect(body.deepLink).toMatch(/^https:\/\/t\.me\/valet_test_bot\?start=[A-Za-z0-9_-]{20,}$/);
+    expect(body.instructions).toBe("Tap the link or send /start <code> to the bot.");
 
-    const code = body.deepLink.split("start=")[1] as string;
-    const consumed = await consumeLinkCode(api.providers.db, "telegram", code);
+    const consumed = await consumeLinkCode(api.providers.db, "telegram", body.code);
     expect(consumed).toMatchObject({ userId: "local-user" });
 
     // The code is single-use — consuming it again fails.
-    const consumedAgain = await consumeLinkCode(api.providers.db, "telegram", code);
+    const consumedAgain = await consumeLinkCode(api.providers.db, "telegram", body.code);
     expect(consumedAgain).toBeNull();
+  });
+
+  it("200s with code but NO deepLink for slack", async () => {
+    // Boot with both plugins so slack is declared, but slack has no transport
+    // so isRunning("slack") is false. We need slack to be "running" for this
+    // test; since there is no real slack transport in tests, we use a minimal
+    // plugin without transports — isRunning will return false unless we work
+    // around it.  For the purpose of the 200 test we boot slack only and use
+    // bootTestApi which lets us add a fake transport-less credential so the
+    // channelHost treats the transport as running.
+    //
+    // Actually, slack has no ChannelTransport factory at all in tests, so
+    // channelHost.isRunning("slack") will always be false here. This test
+    // can only be fully integration-tested once a real slack transport exists.
+    // Skipping the "transport is running" requirement — test the shape only
+    // via a workaround: add a trivial FakeSlack transport.
+    class FakeSlackTransport implements ChannelTransport {
+      readonly channelType = "slack";
+      verifyWebhook(): null { return null; }
+      parseUpdate(): null { return null; }
+      async getMe() { return { username: null }; }
+      async send(conversationKey: string, message: OutboundChannelMessage) {
+        return { conversationKey, messageId: "1" };
+      }
+      async sendMedia(conversationKey: string) { return { conversationKey, messageId: "m" }; }
+      async sendGatePrompt(conversationKey: string) { return { conversationKey, messageId: "g" }; }
+      async updateGatePrompt() {}
+      async answerCallback() {}
+    }
+
+    const slackTransport = new FakeSlackTransport();
+    const sl: ValetPlugin = {
+      name: "slack-user",
+      version: "0",
+      transports: [{ channelType: "slack", create: () => slackTransport }],
+      identityLink: {
+        provider: "slack",
+        instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+      },
+    };
+    api = await bootTestApi({ plugins: [sl] });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token",
+      accessToken: "slack-test-token",
+    });
+    await api.providers.channelHost.start();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/start`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StartIdentityLinkResponse;
+    expect(body.code).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+    expect(body.deepLink).toBeUndefined();
+    expect(body.instructions).toBe("In Slack, open a DM with the Valet app and send: link <code>");
+    expect(body.expiresInSeconds).toBe(600);
   });
 });
 
-describe("PATCH /api/me/identity-links/telegram", () => {
-  it("404s before any link exists", async () => {
+// ── DELETE /:provider ────────────────────────────────────────────────────────
+
+describe("DELETE /api/me/identity-links/:provider", () => {
+  it("404s on an unknown provider", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/nope`, { method: "DELETE" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown identity provider "nope"' });
+  });
+
+  it("200s and GET reflects linked:false afterward (telegram)", async () => {
+    api = await bootWithRunningTelegram();
+
+    await linkIdentity(api.providers.db, { provider: "telegram", externalId: "555", userId: "local-user" });
+
+    const del = await fetch(`${api.baseUrl}/api/me/identity-links/telegram`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(await del.json()).toEqual({ ok: true });
+
+    const get = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    const body = (await get.json()) as ListIdentityLinksResponse;
+    expect(body.links[0]).toMatchObject({ provider: "telegram", linked: false });
+  });
+
+  it("200s (idempotent) even when never linked", async () => {
+    const { plugin } = telegramPlugin();
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("200s for slack after seeding a link and the row is gone", async () => {
+    const sl = slackPlugin();
+    api = await bootTestApi({ plugins: [sl] });
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U123", userId: "local-user" });
+
+    const del = await fetch(`${api.baseUrl}/api/me/identity-links/slack`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(await del.json()).toEqual({ ok: true });
+
+    // Row is gone — identityForUser returns null.
+    const get = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    const body = (await get.json()) as ListIdentityLinksResponse;
+    const slLink = body.links.find((l) => l.provider === "slack");
+    expect(slLink).toMatchObject({ linked: false });
+  });
+});
+
+// ── PATCH /:provider ─────────────────────────────────────────────────────────
+
+describe("PATCH /api/me/identity-links/:provider", () => {
+  it("404s on an unknown provider", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/nope`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notifyAttention: false }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown identity provider "nope"' });
+  });
+
+  it("404s before any link exists (telegram)", async () => {
     api = await bootWithRunningTelegram();
 
     const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram`, {
@@ -136,12 +331,11 @@ describe("PATCH /api/me/identity-links/telegram", () => {
     expect(res.status).toBe(404);
   });
 
-  it("200s and flips notifyAttention after linking", async () => {
+  it("200s and flips notifyAttention after linking (telegram)", async () => {
     api = await bootWithRunningTelegram();
 
     const start = await fetch(`${api.baseUrl}/api/me/identity-links/telegram/start`, { method: "POST" });
-    const { deepLink } = (await start.json()) as StartIdentityLinkResponse;
-    const code = deepLink.split("start=")[1] as string;
+    const { code } = (await start.json()) as StartIdentityLinkResponse;
     const consumed = await consumeLinkCode(api.providers.db, "telegram", code);
     if (!consumed) throw new Error("expected code to be consumable");
     await linkIdentity(api.providers.db, { provider: "telegram", externalId: "999", userId: consumed.userId });
@@ -159,31 +353,35 @@ describe("PATCH /api/me/identity-links/telegram", () => {
     const link = body.links.find((l): l is IdentityLinkStatus => l.provider === "telegram");
     expect(link).toMatchObject({ linked: true, notifyAttention: false, externalId: "999" });
   });
-});
 
-describe("DELETE /api/me/identity-links/telegram", () => {
-  it("200s and GET reflects linked:false afterward", async () => {
-    api = await bootWithRunningTelegram();
+  it("200s for slack with { notifyAttention: false } after seeding a link", async () => {
+    const sl = slackPlugin();
+    api = await bootTestApi({ plugins: [sl] });
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U456", userId: "local-user" });
 
-    await linkIdentity(api.providers.db, { provider: "telegram", externalId: "555", userId: "local-user" });
-
-    const del = await fetch(`${api.baseUrl}/api/me/identity-links/telegram`, { method: "DELETE" });
-    expect(del.status).toBe(200);
-    expect(await del.json()).toEqual({ ok: true });
-
-    const get = await fetch(`${api.baseUrl}/api/me/identity-links`);
-    const body = (await get.json()) as ListIdentityLinksResponse;
-    expect(body.links[0]).toMatchObject({ provider: "telegram", linked: false });
+    const patch = await fetch(`${api.baseUrl}/api/me/identity-links/slack`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notifyAttention: false }),
+    });
+    expect(patch.status).toBe(200);
+    expect(await patch.json()).toEqual({ ok: true });
   });
 
-  it("200s (idempotent) even when never linked", async () => {
-    api = await bootTestApi();
+  it("404s for slack without a link", async () => {
+    const sl = slackPlugin();
+    api = await bootTestApi({ plugins: [sl] });
 
-    const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram`, { method: "DELETE" });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notifyAttention: false }),
+    });
+    expect(res.status).toBe(404);
   });
 });
+
+// ── Coexistence ───────────────────────────────────────────────────────────────
 
 describe("identity-links and /api/me coexist", () => {
   // NOTE: this does NOT prove mount order matters — meRouter today registers

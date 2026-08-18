@@ -2229,7 +2229,12 @@ export interface ListIdentityLinksResponse {
 }
 
 export interface StartIdentityLinkResponse {
-  deepLink: string;
+  /** The link code, for providers where the user types it (e.g. Slack DM). */
+  code: string;
+  /** One-tap delivery URL when the provider supports it (Telegram t.me). */
+  deepLink?: string;
+  /** How to deliver the code — from the plugin's identityLink.instructions. */
+  instructions: string;
   expiresInSeconds: number;
 }
 
