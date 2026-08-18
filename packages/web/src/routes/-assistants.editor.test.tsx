@@ -236,6 +236,18 @@ describe("AssistantEditorPage", () => {
     expect(screen.getByRole("link", { name: /open \/chat/i })).toBeTruthy();
   });
 
+  it("team assistant ownership clause names the team", () => {
+    teamsData = [makeTeam({ id: "team_1", name: "Engineering" })];
+    assistantsData = [
+      makeAssistant({ id: "asst_1", owner: { type: "team", id: "team_1" } }),
+    ];
+    meData = { id: "u1", orgRole: "admin" };
+    render(<AssistantEditorPage />);
+    expect(
+      screen.getByText(/This assistant belongs to Engineering\. Everyone on the team can use it\./),
+    ).toBeTruthy();
+  });
+
   it("member viewing a team assistant sees inputs disabled and the read-only note", () => {
     meData = { id: "u1", orgRole: "member" };
     teamsData = [makeTeam({ id: "team_1", callerRole: "member" })];

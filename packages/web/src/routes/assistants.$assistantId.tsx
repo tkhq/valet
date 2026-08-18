@@ -97,12 +97,18 @@ export function AssistantEditorPage() {
   const canEdit = canEditAssistant(assistant, teamsQ.data?.teams, meQ.data);
   const plugins = pluginsQ.data?.plugins;
   const integrationOpts = integrationOptions(plugins);
+  const owningTeam =
+    assistant.owner.type === "team"
+      ? (teamsQ.data?.teams ?? []).find((t) => t.id === assistant.owner.id)
+      : undefined;
 
   return (
     <AssistantEditorForm
       assistant={assistant}
       canEdit={canEdit}
       integrationOpts={integrationOpts}
+      owningTeamName={owningTeam?.name}
+      pluginsResolved={pluginsQ.data !== undefined}
     />
   );
 }
@@ -113,10 +119,14 @@ function AssistantEditorForm({
   assistant,
   canEdit,
   integrationOpts,
+  owningTeamName,
+  pluginsResolved,
 }: {
   assistant: AssistantSummary;
   canEdit: boolean;
   integrationOpts: { service: string; label: string; actions: { id: string; name: string }[] }[];
+  owningTeamName: string | undefined;
+  pluginsResolved: boolean;
 }) {
   const patch = usePatchAssistant();
   const archive = useArchiveAssistant();
@@ -149,6 +159,11 @@ function AssistantEditorForm({
   const skillsQ = useSkills(ownerQuery);
   const pluginSkillsQ = useSkills();
 
+  // Section-level gates: skills and integrations wait on their own catalogs.
+  // The identity section renders immediately without waiting on slow catalogs.
+  const skillsResolved =
+    skillsQ.data !== undefined && pluginSkillsQ.data !== undefined;
+
   const catalogSkillNames = useMemo(() => {
     const all: string[] = [];
     for (const s of skillsQ.data?.skills ?? []) all.push(s.name);
@@ -160,17 +175,6 @@ function AssistantEditorForm({
 
   // Archive dialog state.
   const [archiveOpen, setArchiveOpen] = useState(false);
-
-  // ── ownership clause ─────────────────────────────────────────────────
-
-  const ownershipClause =
-    assistant.owner.type === "user"
-      ? "This assistant stays in your personal workspace."
-      : (() => {
-          // We can't call useTeams() here — it's already called above in the
-          // parent. Pass through what we have.
-          return null; // rendered inline below
-        })();
 
   // ── save handlers ────────────────────────────────────────────────────
 
@@ -299,7 +303,7 @@ function AssistantEditorForm({
       <p className="text-sm text-muted">
         {assistant.owner.type === "user"
           ? "This assistant stays in your personal workspace."
-          : `This assistant belongs to this team. Everyone on the team can use it.`}
+          : `This assistant belongs to ${owningTeamName ?? "this team"}. Everyone on the team can use it.`}
       </p>
 
       {/* Read-only notice */}
@@ -348,6 +352,11 @@ function AssistantEditorForm({
 
       {/* 2. Skills section */}
       <Section title="Skills" description="Which skills this assistant can use. Skills extend what the assistant knows how to do.">
+        {!skillsResolved ? (
+          <div className="flex items-center gap-2 py-4 text-sm text-muted">
+            <Spinner size={14} /> Loading skills…
+          </div>
+        ) : (
         <div className="py-4 space-y-4">
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -433,10 +442,16 @@ function AssistantEditorForm({
             </Button>
           </div>
         </div>
+        )}
       </Section>
 
       {/* 3. Integrations section */}
       <Section title="Integrations" description="Which integrations this assistant can use. An integration is a connected service like GitHub.">
+        {!pluginsResolved ? (
+          <div className="flex items-center gap-2 py-4 text-sm text-muted">
+            <Spinner size={14} /> Loading integrations…
+          </div>
+        ) : (
         <div className="py-4 space-y-4">
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -524,6 +539,7 @@ function AssistantEditorForm({
             </Button>
           </div>
         </div>
+        )}
       </Section>
 
       {/* 4. Manage section */}
