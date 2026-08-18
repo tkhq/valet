@@ -28,11 +28,15 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
-vi.mock("~/stores/stream", () => ({
-  useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ addUserMessage, setMessageQueueItemId }),
-  useQueueStateForThread: () => undefined,
-}));
+vi.mock("~/stores/stream", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/stores/stream")>();
+  return {
+    ...actual,
+    useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
+      selector({ addUserMessage, setMessageQueueItemId }),
+    useQueueStateForThread: () => undefined,
+  };
+});
 
 vi.mock("~/hooks/use-commands", () => ({
   useCommands: () => ({ data: { commands: [] } }),

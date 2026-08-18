@@ -48,11 +48,15 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
-vi.mock("~/stores/stream", () => ({
-  useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ addUserMessage, setMessageQueueItemId }),
-  useQueueStateForThread: () => queueStateRef.current,
-}));
+vi.mock("~/stores/stream", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/stores/stream")>();
+  return {
+    ...actual,
+    useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
+      selector({ addUserMessage, setMessageQueueItemId }),
+    useQueueStateForThread: () => queueStateRef.current,
+  };
+});
 
 vi.mock("~/hooks/use-commands", () => ({
   useCommands: () => ({
@@ -139,6 +143,38 @@ describe("Composer — stop button", () => {
     await userEvent.click(stopButton);
     expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
   });
+
+  // The reload-mid-tool case: the live `status` events were missed (the
+  // client connected after they fired), so `agentStatus` still reads idle,
+  // but the durable queue state says a submission is running. The Stop
+  // button must key off the queue too — the agent holds the execution
+  // context for the whole turn, not just while transition events flow.
+  it("shows Stop while the queue reports a running turn, even with agentStatus idle", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    queueStateRef.current = queueState("followup");
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer("idle");
+
+    const stopButton = screen.getByRole("button", { name: /stop/i }) as HTMLButtonElement;
+    expect(stopButton.disabled).toBe(false);
+
+    await userEvent.click(stopButton);
+    expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+  });
+
+  it("shows Stop while the queue is blocked on a decision gate", () => {
+    useComposerPrefillStore.setState({ text: null });
+    queueStateRef.current = {
+      mode: "followup",
+      status: "blocked_on_decision_gate",
+      activeItemId: "q-0",
+      pendingIds: [],
+      collectingIds: [],
+      blockedGateId: "gate-1",
+    };
+    renderComposer("idle");
+    expect(screen.getByRole("button", { name: /stop/i })).toBeDefined();
+  });
 });
 
 describe("Composer — Escape interrupts the running turn", () => {
@@ -158,6 +194,17 @@ describe("Composer — Escape interrupts the running turn", () => {
     renderComposer("idle");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(abortMutate).not.toHaveBeenCalled();
+  });
+
+  // Same durable-queue fallback as the Stop button: Escape must interrupt
+  // whenever the agent holds the execution context, including after a
+  // reload that missed the live status events.
+  it("aborts on Escape while the queue reports a running turn, even with agentStatus idle", () => {
+    queueStateRef.current = queueState("followup");
+    renderComposer("idle");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(abortMutate).toHaveBeenCalledTimes(1);
+    expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1" });
   });
 
   it("skips an Escape already claimed by another layer (defaultPrevented)", () => {

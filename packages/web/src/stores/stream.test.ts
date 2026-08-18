@@ -7,8 +7,8 @@
  * and gate replay idempotence.
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import type { WireEvent } from "@valet/api/wire";
-import { useStreamStore } from "./stream";
+import type { WireEvent, WireQueueState } from "@valet/api/wire";
+import { queueBusy, useStreamStore } from "./stream";
 
 const SESSION = "sess-1";
 const THREAD = "thread-1";
@@ -838,5 +838,36 @@ describe("store default slice", () => {
     // exercises the same underlying state it reads from instead.
     const slice = useStreamStore.getState().bySession["nope"];
     expect(slice).toBeUndefined();
+  });
+});
+
+describe("queueBusy", () => {
+  const base: WireQueueState = {
+    mode: "followup",
+    status: "idle",
+    pendingIds: [],
+    collectingIds: [],
+  };
+
+  it("is false for an unknown or idle queue", () => {
+    expect(queueBusy(undefined)).toBe(false);
+    expect(queueBusy(base)).toBe(false);
+  });
+
+  it("is true for a running or gate-blocked turn", () => {
+    expect(queueBusy({ ...base, status: "running", activeItemId: "q-1" })).toBe(true);
+    expect(
+      queueBusy({ ...base, status: "blocked_on_decision_gate", blockedGateId: "g-1" }),
+    ).toBe(true);
+  });
+
+  it("is true while submissions wait to run — a paused queue included", () => {
+    expect(queueBusy({ ...base, status: "queued" })).toBe(true);
+    expect(queueBusy({ ...base, status: "paused", pendingIds: ["q-1"] })).toBe(true);
+    expect(queueBusy({ ...base, collectingIds: ["q-2"] })).toBe(true);
+  });
+
+  it("is false for a paused queue with nothing pending", () => {
+    expect(queueBusy({ ...base, status: "paused" })).toBe(false);
   });
 });

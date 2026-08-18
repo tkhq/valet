@@ -239,7 +239,10 @@ describe("ws resume protocol", () => {
 
       const c = connect(`${api.wsUrl}/api/sessions/${sessionId}/ws?fromOffset=0`);
       const settled = await c.waitFor((f) => f.type === "submission.settled");
-      const queueState = c.frames.find((f) => f.type === "queue.state");
+      // Select by threadId: the handshake also seeds a `queue.state` frame
+      // for the session's default thread, and this test wants the REPLAYED
+      // t1 frame, not that seed.
+      const queueState = c.frames.find((f) => f.type === "queue.state" && f.threadId === "t1");
 
       expect(queueState).toBeDefined();
       const qsState = (queueState as { state: { pendingIds: string[]; collectingIds: string[]; activeItemId?: string } })

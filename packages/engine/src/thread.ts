@@ -62,6 +62,7 @@ import type {
   DecisionResolution,
   DecisionWithdrawReason,
   EngineEvent,
+  EngineEventStatus,
   MessageCost,
   MessagePart,
   MessageEntry,
@@ -142,6 +143,12 @@ export class Thread {
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
+  /**
+   * The most recent `status` event this instance emitted. In-memory only —
+   * feeds `currentAgentStatus` so a client that connects mid-turn can seed
+   * its status view without waiting for the next transition event.
+   */
+  private lastEmittedStatus: EngineEventStatus = "idle";
   /**
    * The submission currently being run by this instance (claimed → settled).
    * Set by the claim loop, held across the whole turn (including a gate block),
@@ -1199,6 +1206,22 @@ export class Thread {
   /** True when this thread is mid-turn (a submission is claimed and running). */
   get hasActiveRun(): boolean {
     return this.runningItem != null;
+  }
+
+  /**
+   * Best current reading of this thread's agent status, for a subscriber that
+   * connects mid-turn (the WS handshake seeds a `status` frame from it).
+   * Derived from live in-memory state, so it self-corrects where
+   * `lastEmittedStatus` alone would mislead: a resolved gate un-blocks back
+   * to `tool_calling` (the gate was raised inside a tool call that is still
+   * running), and a claimed-but-not-yet-streaming turn reads `thinking`.
+   */
+  get currentAgentStatus(): EngineEventStatus {
+    if (this.blockedGateId) return "blocked_on_decision_gate";
+    if (!this.runningItem) return "idle";
+    if (this.lastEmittedStatus === "blocked_on_decision_gate") return "tool_calling";
+    if (this.lastEmittedStatus === "idle") return "thinking";
+    return this.lastEmittedStatus;
   }
 
   /**
@@ -2796,6 +2819,7 @@ export class Thread {
             ),
           );
         }
+        this.lastEmittedStatus = "blocked_on_decision_gate";
         await this.fencedEmit(
           {
             type: "status",
@@ -2920,6 +2944,7 @@ export class Thread {
           { type: "thread_start", threadId: this.id },
           { queueItemId: this.runningItem?.id },
         );
+        this.lastEmittedStatus = "thinking";
         await this.fencedEmit(
           { type: "status", threadId: this.id, status: "thinking" },
           { queueItemId: this.runningItem?.id },
@@ -3090,6 +3115,7 @@ export class Thread {
           },
           { queueItemId: this.runningItem?.id },
         );
+        this.lastEmittedStatus = "tool_calling";
         await this.fencedEmit(
           { type: "status", threadId: this.id, status: "tool_calling" },
           { queueItemId: this.runningItem?.id },
@@ -3264,6 +3290,7 @@ export class Thread {
           },
           { queueItemId: this.runningItem?.id },
         );
+        this.lastEmittedStatus = "idle";
         await this.fencedEmit(
           { type: "status", threadId: this.id, status: "idle" },
           { queueItemId: this.runningItem?.id },

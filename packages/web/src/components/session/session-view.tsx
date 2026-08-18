@@ -12,9 +12,11 @@ import {
 import { api } from "~/api/client";
 import { useSessionWebSocket } from "~/api/ws";
 import {
+  queueBusy,
   useSessionStream,
   useStreamStore,
   usePendingGateForThread,
+  useQueueStateForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
@@ -126,6 +128,15 @@ export function SessionView({
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
 
+  // "Agent is busy" for the header badge and the transcript indicator, from
+  // the same two signals the composer's Stop/Escape affordance uses: the
+  // live `status` events plus the durable queue state (which the WS
+  // handshake seeds, so it survives a mid-turn page load or reconnect).
+  const threadQueueState = useQueueStateForThread(sessionId, effectiveThreadId);
+  const agentBusy =
+    (stream.agentStatus !== "idle" && stream.agentStatus !== "error") ||
+    queueBusy(threadQueueState);
+
   // Auto-title: fire whenever we see an assistant reply on either an
   // un-titled session OR an un-titled active thread. The orchestrator's
   // own session ships with a fixed "Assistant" title, so a session-only
@@ -230,7 +241,7 @@ export function SessionView({
             messages={stream.messages}
             threadId={effectiveThreadId}
             onOpenChild={onOpenChild}
-            agentBusy={stream.agentStatus !== "idle" && stream.agentStatus !== "error"}
+            agentBusy={agentBusy}
           />
           {stream.error && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
