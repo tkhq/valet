@@ -22,6 +22,7 @@ import type {
 } from "@valet/engine";
 import { InMemoryCredentialStore } from "@valet/engine";
 import type { WorkflowDefinition } from "@valet/workflow";
+import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { PgDb } from "@valet/store-postgres";
@@ -465,6 +466,42 @@ describe("listWorkflowTemplateSummaries", () => {
     const list = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(list.find((t) => t.id === "gmail-sweep")?.schedule).toEqual({ cron: "0 12 * * 1-5", timezone: "UTC" });
     expect(list.find((t) => t.id === "linear-digest")?.schedule).toBeNull();
+  });
+});
+
+// ─── The shipped gallery, with Slack not available ───────────────────────
+
+/**
+ * Every other case in this file uses fixtures, so the assertions do not
+ * move when a template's copy does. This one runs the REAL plugin set,
+ * because what it guards is a shipped card silently leaving the gallery:
+ * `SERVICES_NOT_READY` drops any template whose `requires` names Slack, and
+ * `requires` is derived from tool nodes rather than declared by an author.
+ * A slack tool node added back to either template below is therefore a
+ * change nobody sees until the card is gone.
+ */
+describe("the shipped gallery, with Slack not available", () => {
+  async function shippedIds(): Promise<string[]> {
+    const list = await listWorkflowTemplateSummaries(deps(bundledPlugins), OWNER);
+    return list.map((t) => t.id);
+  }
+
+  it("offers the two templates that report through the orchestrator", async () => {
+    const list = await listWorkflowTemplateSummaries(deps(bundledPlugins), OWNER);
+    for (const id of ["github.assign-reviewers", "github.unclaimed-pull-request-routing"]) {
+      const summary = list.find((t) => t.id === id);
+      expect(summary).toBeDefined();
+      expect(summary?.requires.map((r) => r.service)).not.toContain("slack");
+    }
+  });
+
+  it("still hides the two that read Slack for their data", async () => {
+    // `list_channels` and `read_history` have no substitute: an orchestrator
+    // cannot supply channel history nothing ever read. These two stay hidden
+    // until Slack works, which is the right outcome rather than a gap.
+    const ids = await shippedIds();
+    expect(ids).not.toContain("workflows.daily-triage-digest");
+    expect(ids).not.toContain("workflows.meeting-prep");
   });
 });
 

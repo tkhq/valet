@@ -465,7 +465,7 @@ describe("install keeps the per-run fields on the run form", () => {
   });
 
   it("leaves the exclude field, which is the only answer to a decline", () => {
-    // No node type parks on an inbound Slack message, so the template's
+    // No node type parks on an inbound message, so the template's
     // stated mitigation for "sorry, cannot do" is a second run with the
     // handle excluded. Baking this field removes that mitigation.
     const baked = bakeInputs(definition, dialogPayload());

@@ -96,6 +96,14 @@ const FOREACH_RESULT_KEYS = new Set([
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/** One shipped template, by id. A miss is a failed test rather than an
+ * `undefined` that reads as a passing assertion three lines later. */
+function ownedById(id: string): OwnedTemplate {
+  const found = owned.find((o) => o.template.id === id);
+  if (!found) throw new Error(`no shipped template with id "${id}"`);
+  return found;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -381,14 +389,13 @@ describe("template requirements", () => {
   });
 
   it("flips a service to connected once the caller has it", () => {
-    const assign = owned.find((o) => o.template.id === "github.assign-reviewers");
-    if (!assign) throw new Error("no github.assign-reviewers template");
-    const connected = new Set(["github", "slack", "google_calendar"]);
+    const assign = ownedById("github.assign-reviewers");
+    const connected = new Set(["github", "google_calendar"]);
     const required = templateRequirements(assign.definition, actionPluginByService, connected);
     expect(required.filter((r) => !r.connected)).toEqual([]);
     // The calendar service is named by its READ key, which is the key the
     // connect flow writes as well.
-    expect(required.map((r) => r.service).sort()).toEqual(["github", "google_calendar", "slack"]);
+    expect(required.map((r) => r.service).sort()).toEqual(["github", "google_calendar"]);
   });
 
   /**
@@ -398,12 +405,15 @@ describe("template requirements", () => {
    * connect link for one and name the admin's setup for the other.
    */
   it("marks a service this organization has not configured", () => {
-    const assign = owned.find((o) => o.template.id === "github.assign-reviewers");
-    if (!assign) throw new Error("no github.assign-reviewers template");
+    // The digest reads Slack channel history, so Slack is its DATA and this
+    // template cannot lose it. The two templates that used Slack only to
+    // tell somebody something deliver through the orchestrator instead, and
+    // the test below pins that they name no service for it.
+    const digest = ownedById("workflows.daily-triage-digest");
     const required = templateRequirements(
-      assign.definition,
+      digest.definition,
       actionPluginByService,
-      new Set(["github", "google_calendar"]),
+      new Set(["github", "linear"]),
       new Set(["slack"]),
     );
     const slack = required.find((r) => r.service === "slack");
@@ -411,6 +421,30 @@ describe("template requirements", () => {
     // Every other service stays as it was: an unconfigured one is reported,
     // not spread.
     expect(required.filter((r) => r.unconfigured === true).map((r) => r.service)).toEqual(["slack"]);
+  });
+
+  /**
+   * Slack is not available in this deployment, and `SERVICES_NOT_READY`
+   * (`templates.ts`) hides every template whose `requires` names it. These
+   * two used Slack only to TELL somebody something, so they now report
+   * through the run owner's orchestrator — a node type, not a service, and
+   * therefore a delivery that appears in no requirement.
+   *
+   * One slack tool node left in either definition puts the card back behind
+   * the same wall and the work is undone, so this is the assertion that the
+   * change held. `templates.test.ts` runs the gallery listing itself.
+   */
+  it.each([
+    "github.assign-reviewers",
+    "github.unclaimed-pull-request-routing",
+  ])("%s needs no Slack, and still reports somewhere a person reads", (id) => {
+    const { definition } = ownedById(id);
+    const required = templateRequirements(definition, actionPluginByService, nothingConnected);
+    expect(required.map((r) => r.service)).not.toContain("slack");
+    expect(toolNodesOf(definition).map((node) => node.service)).not.toContain("slack");
+    // Dropping the message without keeping the report would be a run that
+    // tells nobody anything.
+    expect(definition.nodes.some((node) => node.type === "orchestrator")).toBe(true);
   });
 });
 

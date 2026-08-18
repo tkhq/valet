@@ -27,7 +27,9 @@ import {
   validateWorkflowDefinition,
   type IfCondition,
   type IfNode,
+  type ForeachNode,
   type LlmNode,
+  type OrchestratorNode,
   type TemplateContext,
   type ToolNode,
   type ValidateEnvironment,
@@ -138,6 +140,14 @@ function toolNode(definition: WorkflowDefinition, id: string): ToolNode {
   // `nodes` is a discriminated union, so `type` narrows it without a cast.
   const node = definition.nodes.find((n): n is ToolNode => n.type === "tool" && n.id === id);
   if (!node) throw new Error(`no tool node "${id}"`);
+  return node;
+}
+
+function orchestratorNode(definition: WorkflowDefinition, id: string): OrchestratorNode {
+  const node = definition.nodes.find(
+    (n): n is OrchestratorNode => n.type === "orchestrator" && n.id === id,
+  );
+  if (!node) throw new Error(`no orchestrator node "${id}"`);
   return node;
 }
 
@@ -292,9 +302,10 @@ function fullContext(
 
 // ─── Every template ──────────────────────────────────────────────────────
 
-/** Templates this package can validate on its own. The routing template
- * also calls Slack, and only `packages/api` loads every plugin, so its own
- * suite is where a cross-service definition is validated. */
+/** Templates this package can validate on its own. The assign-reviewers
+ * template also calls Google Calendar, and only `packages/api` loads every
+ * plugin, so its own suite is where a cross-service definition is
+ * validated. */
 const githubOnly = githubTemplates.filter((template) => {
   const definition = template.definition as WorkflowDefinition;
   return definition.nodes.every((node) => {
@@ -313,12 +324,78 @@ describe("github workflow templates", () => {
     expect(githubOnly.map((t) => t.id)).toContain(REVIEW_ID);
   });
 
+  it("calls no service this deployment cannot offer", () => {
+    // `SERVICES_NOT_READY` (`api/src/workflows/templates.ts`) hides every
+    // template that needs Slack, and `requires` is read off the TOOL NODES.
+    // So one slack tool node anywhere in this file takes the whole card out
+    // of the gallery. The api suite pins the derived `requires`; this pins
+    // the node that would produce it, in the file an author edits.
+    const services = githubTemplates.flatMap((template) => {
+      const definition = template.definition as WorkflowDefinition;
+      return definition.nodes.flatMap((node) => {
+        if (node.type === "tool") return [node.service];
+        if (node.type === "foreach" && node.body.type === "tool") return [node.body.service];
+        return [];
+      });
+    });
+    expect([...new Set(services)].sort()).toEqual(["github", "google_calendar"]);
+  });
+
+  it("routes without Slack, so the routing template is validated here too", () => {
+    // It used to send the reviewer a direct message beside the comment,
+    // which made it a cross-service definition this package could not
+    // validate. The comment is now the whole delivery.
+    expect(githubOnly.map((t) => t.id)).toContain("github.unclaimed-pull-request-routing");
+  });
+
   describe.each(githubOnly)("$id", (template) => {
     it("passes the definition validator against the real action list", () => {
       const result = validateWorkflowDefinition(template.definition as WorkflowDefinition, env);
       // The validator's own messages name the node and the corrected path.
       expect(result.ok ? [] : result.errors).toEqual([]);
     });
+  });
+});
+
+// ─── The routing template ────────────────────────────────────────────────
+
+const ROUTING_ID = "github.unclaimed-pull-request-routing";
+
+describe(`${ROUTING_ID} — the comment is the whole delivery`, () => {
+  const definition = definitionOf(ROUTING_ID);
+  const template = templateById(ROUTING_ID);
+
+  it("gives the report the per-comment outcomes it asks the model to name", () => {
+    // The report asks for the reviewers a failed comment left untold. The
+    // counts cannot answer that: `completedCount` and `failedCount` are
+    // numbers, and the status and the error of one attempt live only in
+    // `ForeachResult.items` (`workflow/src/nodes/foreach.ts`). Without that
+    // path the model either drops the names or invents a pair from the
+    // routed list, and the caveat below states the names as fact.
+    const report = orchestratorNode(definition, "report");
+    expect(report.prompt).toContain("{{ nodes.comment.result.items }}");
+    expect(report.prompt).toContain("A comment that failed is a reviewer nobody told");
+    expect(report.prompt).toContain("name each one");
+    // Index-aligned with the routed list, which is how a model turns a
+    // failed entry back into a pull request and a handle.
+    expect(report.prompt).toContain("{{ nodes.route.result.output.routed }}");
+    expect(report.prompt).toContain("SAME order as the routed list");
+  });
+
+  it("collects a failed comment instead of stopping the rest", () => {
+    const comment = definition.nodes.find((n): n is ForeachNode => n.type === "foreach" && n.id === "comment");
+    expect(comment?.onItemError).toBe("collect");
+  });
+
+  it("says that a comment which posts is not proof a person was reached", () => {
+    // The run reads a 201 from `create_comment`, and nothing more. A handle
+    // that is no longer an account renders as plain text, so GitHub
+    // notifies nobody and the report still reads "Failed: 0". The Slack
+    // message used to be the second addressed channel that surfaced a stale
+    // routing row; with it gone the card has to carry the limit.
+    const text = (template.caveats ?? []).join("\n");
+    expect(text).toContain("not proof");
+    expect(text).toContain("correct that handle in the routing file");
   });
 });
 
@@ -1099,18 +1176,17 @@ describe(`${ASSIGN_ID} — what it writes and who it tells`, () => {
   });
 
   it("tells the person who started the run why nobody was assigned", () => {
-    const gap = toolNode(definition, "report_gap");
-    expect(gap.service).toBe("slack");
-    // `dm_owner` needs no Slack id, so the reason reaches the requester
-    // without another identity mapping.
-    expect(gap.action).toBe("dm_owner");
-    expect(JSON.stringify(gap.params)).toContain("nodes.select.result.output.failureReason");
-    // A Slack that cannot deliver must not swallow the reason. `dm_owner`
-    // fails outright when the owner has not linked a Slack identity, and
-    // `continue` hides that, so the stop node below carries the SAME
-    // failureReason rather than a generic instruction. Nothing else reports
-    // on this branch.
-    expect(gap.onError).toBe("continue");
+    // The orchestrator, not a direct message: it is the run owner's own
+    // session, so it needs no second identity mapping and no integration.
+    const gap = orchestratorNode(definition, "report_gap");
+    expect(gap.prompt).toContain("{{ nodes.select.result.output.failureReason }}");
+    // An orchestrator node takes no `onError` policy, so a failed node
+    // starves this branch and the stop node below never renders. Under
+    // `until_idle` any turn outcome other than `completed` fails the node,
+    // which would make one bad turn cost the reason as well as the report.
+    // `none` completes the node once the followup is queued, so only a
+    // failed dispatch can starve the stop node.
+    expect(gap.wait?.mode).toBe("none");
 
     const stop = nodeOf(definition, "assignment_failed");
     const message = isRecord(stop) && typeof stop.message === "string" ? stop.message : "";
@@ -1153,46 +1229,62 @@ describe(`${ASSIGN_ID} — what it writes and who it tells`, () => {
     expect(JSON.stringify(definitionOf(ASSIGN_ID))).toContain("nodes.verify.result.assignees");
   });
 
-  it("messages only the people the read-back confirmed", () => {
-    const notify = definition.nodes.find((n) => n.type === "foreach" && n.id === "notify");
-    expect(notify?.type).toBe("foreach");
+  it("reports only the names the read-back confirmed", () => {
     // Not `nodes.select.result.output.assignees`: a name GitHub dropped
-    // must not receive a message saying it was assigned.
-    expect(notify?.type === "foreach" ? notify.items : "").toBe("{{ nodes.confirm.result.output.landed }}");
-    expect(notify?.type === "foreach" ? notify.body.id : "").toBe("send_dm");
+    // must not be reported as assigned. `confirm` splits the two lists and
+    // the report names both halves.
+    const report = nodeOf(definition, "report");
+    const prompt = isRecord(report) && typeof report.prompt === "string" ? report.prompt : "";
+    expect(prompt).toContain("{{ nodes.confirm.result.output.dropped }}");
+    expect(prompt).toContain("{{ nodes.verify.result.assignees }}");
+    expect(prompt).not.toContain("{{ nodes.select.result.output.assignees }}");
   });
 
-  it("tells the confirm step to copy the Slack id it is about to address", () => {
-    // `send_dm` addresses `{{ item.slackUserId }}`, and that item comes from
-    // `confirm`, not from the roster read. So a model re-writes the delivery
-    // address, and its schema REQUIRES the field — it will emit something
-    // whatever it was told. Without an instruction to copy the id from the
-    // selection entry with the same handle, a transposed or invented id
-    // delivers one person's review assignment to an unrelated Slack account.
-    // The handle rule alone never covered this: it constrains handles.
-    const dm = definition.nodes.find((n) => n.type === "foreach" && n.id === "notify");
-    const body = dm?.type === "foreach" ? dm.body : undefined;
-    const params = body && "params" in body ? body.params : undefined;
-    expect(isRecord(params) ? params.user : "").toBe("{{ item.slackUserId }}");
+  it("writes one report per run, and addresses nobody by an id a model wrote", () => {
+    // The whole reason a model may not write a delivery address: nothing in
+    // this run has one. `confirm` compares two lists of handles and returns
+    // two lists of handles.
+    const confirm = definition.nodes.find((n): n is LlmNode => n.type === "llm" && n.id === "confirm");
+    expect(JSON.stringify(confirm?.outputSchema ?? {})).not.toContain("slackUserId");
+    expect(confirm?.prompt ?? "").not.toContain("slack");
 
-    const confirm = definition.nodes.find(
-      (n): n is LlmNode => n.type === "llm" && n.id === "confirm",
-    );
-    expect(confirm?.prompt ?? "").toContain(
-      "Take each landed person's slackUserId from the selection entry that carries the same handle",
-    );
-    expect(confirm?.prompt ?? "").toContain("Never write an id you did not read in that list");
-    expect(confirm?.system ?? "").toContain(
-      "You never write a Slack user id that is not in the data you were given",
-    );
+    // One report, not three messages. The orchestrator nodes sit on the two
+    // branches a run can take, so a single run reaches exactly one of them.
+    const orchestrators = definition.nodes.filter((n) => n.type === "orchestrator").map((n) => n.id);
+    expect(orchestrators).toEqual(["report_gap", "report"]);
+    expect(definition.edges.filter((e) => e.to === "report_gap").map((e) => e.from)).toEqual(["coverage_met"]);
+    expect(definition.edges.filter((e) => e.to === "report").map((e) => e.from)).toEqual(["confirm"]);
+  });
+
+  it("says in the report that GitHub is what tells an assignee", () => {
+    // The behaviour change a reader has to see: the run assigns, and the
+    // assignment is the notification. Nothing else reaches those people.
+    const report = nodeOf(definition, "report");
+    const prompt = isRecord(report) && typeof report.prompt === "string" ? report.prompt : "";
+    expect(prompt).toContain("GitHub tells each person it assigned");
+    expect(prompt).toContain("do not say I messaged them");
+  });
+
+  it("carries the passed-over candidates the requester used to get by message", () => {
+    // The direct message to the requester held these, and it is gone. A
+    // consolidated report that drops half its content is a regression.
+    const report = nodeOf(definition, "report");
+    const prompt = isRecord(report) && typeof report.prompt === "string" ? report.prompt : "";
+    expect(prompt).toContain("{{ nodes.select.result.output.excluded }}");
+    expect(prompt).toContain("{{ nodes.shortlist.result.output.rosterProblems }}");
   });
 
   it("ends the run failed when GitHub kept a chosen name off", () => {
     const gate = assignIfNode("everyone_landed");
     expect(gate.conditions[0]?.left).toBe("nodes.confirm.result.output.dropped");
     expect(gate.conditions[0]?.operation).toBe("isEmpty");
-    // After the report, so the report is delivered either way.
+    // After the report, so the report is delivered either way. The report
+    // does not park: `assignment_dropped` is the only text that names push
+    // access and collaborator status as the fix, and an orchestrator node
+    // that parks fails on any turn outcome other than `completed`, which
+    // would starve this gate.
     expect(definition.edges.filter((e) => e.to === "everyone_landed").map((e) => e.from)).toEqual(["report"]);
+    expect(orchestratorNode(definition, "report").wait?.mode).toBe("none");
     const miss = definition.edges.filter((e) => e.from === "everyone_landed" && e.fromOutput === "false");
     expect(miss.map((e) => e.to)).toEqual(["assignment_dropped"]);
   });
@@ -1274,6 +1366,17 @@ describe(`${ASSIGN_ID} — what it says it cannot do`, () => {
   it("leads with the four gaps against the request, before any other limit", () => {
     const opening = caveatList.slice(0, GAPS.length).map((line) => line.slice(0, line.indexOf(".") + 1));
     expect(opening).toEqual(GAPS);
+  });
+
+  it("puts the missing direct message with the gaps, not at the end", () => {
+    // The request asked for a message to each assignee. It is not sent, and
+    // burying that under fifteen lines about calendars and caps is how a
+    // reader installs this expecting one. The three lines that state who is
+    // told sit fifth, sixth and seventh, before any limit of the workflow.
+    const next = caveatList.slice(GAPS.length, GAPS.length + 3);
+    expect(next[0]).toContain("told by GitHub");
+    expect(next[1]).toContain("one report per run");
+    expect(next[2]).toContain("a later addition");
   });
 
   it("names the roster inside the opening the card can actually show", () => {
@@ -1400,11 +1503,41 @@ describe(`${ASSIGN_ID} — what it says it cannot do`, () => {
     expect(caveats).not.toContain("owners covered is reported as uncovered");
   });
 
-  it("says the organization has to set Slack up before anybody can connect it", () => {
-    // #305 hides an unconfigured service from the integrations page, so a
-    // reader who is told only "connect Slack" finds no Slack to connect.
-    expect(caveats).toContain("an admin does in Settings, then Organization");
-    expect(caveats).toContain("this template cannot be installed");
+  it("names who is told and who is not, in the description and in the caveats", () => {
+    // The request that produced this template asked for a direct message to
+    // each assignee, and it is not sent. The card may not leave that as a
+    // silence: a reader who expects a message and reads none of the caveats
+    // has to meet it in the description.
+    expect(template.description).toContain("GitHub tells each assignee it accepts");
+    expect(template.description).toContain("this workflow sends them nothing else");
+    expect(template.description).not.toContain("Slack");
+    expect(caveats).toContain("told by GitHub");
+    expect(caveats).toContain("one report per run, in your orchestrator session");
+    expect(template.steps.join("\n")).not.toContain("Slack");
+  });
+
+  it("says the direct message is a later addition, and keeps the column for it", () => {
+    // The roster is a file a person maintains. Dropping the column would
+    // make the day Slack arrives a data migration for every install.
+    expect(caveats).toContain("a later addition, for when Slack is available");
+    expect(caveats).toContain("The roster keeps its slack_user_id column");
+    expect(caveats).toContain("Nothing reads slack_user_id yet; keep the column");
+  });
+
+  it("stops claiming a roster row without a Slack id cannot be assigned", () => {
+    // The rule existed because the run told every assignee on Slack. It
+    // told nobody now, so the row is assignable and the shortlist step must
+    // not drop it.
+    const shortlist = definitionOf(ASSIGN_ID).nodes.find(
+      (n): n is LlmNode => n.type === "llm" && n.id === "shortlist",
+    );
+    // The column stays in the prompt's description of the file: a model
+    // that does not know a column exists reads the CSV wrongly. What is
+    // gone is the RULE that acted on it, and the field it wrote out.
+    expect(shortlist?.prompt ?? "").toContain("the columns github_handle, groups, slack_user_id");
+    expect(shortlist?.prompt ?? "").not.toContain("Drop a row that has no slack_user_id");
+    expect(JSON.stringify(shortlist?.outputSchema ?? {})).not.toContain("slackUserId");
+    expect(caveats).not.toContain("a person it cannot tell");
   });
 
   it("says Google Calendar has to be connected before the install", () => {
