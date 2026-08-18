@@ -418,7 +418,17 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         { sessionId: assistant.sessionId },
       );
       const thread = session.thread(`signal:workflow:${runId}`);
-      const content: SignalContent = { kind: "signal", signalType: "workflow.request", body: promptText };
+      // `runId` as an attribute, so the client can render a link back to the
+      // run instead of the bare signal type. `attributes` is flat and
+      // string-valued by contract (`SignalContent`), and nothing set it
+      // before — which is why a workflow report showed up in a person's
+      // assistant as an envelope labelled "workflow.request" and nothing else.
+      const content: SignalContent = {
+        kind: "signal",
+        signalType: "workflow.request",
+        body: promptText,
+        attributes: { runId },
+      };
       const receipt = await thread.submitPrompt(content, {
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,

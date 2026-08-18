@@ -910,7 +910,22 @@ export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
     createdAt: cp.createdAt,
     sessionId: typeof effects?.sessionId === "string" ? effects.sessionId : undefined,
     childRunId: typeof effects?.childRunId === "string" ? effects.childRunId : undefined,
+    // A `session` or `orchestrator` node's dispatch receipt names the THREAD
+    // it submitted to (`workflow/src/nodes/submission-node.ts` persists
+    // `effects.receipt`). Without it here, "Open session" could only name
+    // the session — and for the caller's own assistant that redirects to
+    // /chat, which then lands on the NEWEST thread rather than the run's.
+    threadId: threadIdOf(effects),
   };
+}
+
+/** `effects.receipt.threadId`, when the node recorded one. `effects` is
+ * stored JSON, so every hop is checked rather than asserted. */
+function threadIdOf(effects: NodeCheckpoint["effects"]): string | undefined {
+  const receipt = effects?.receipt;
+  if (typeof receipt !== "object" || receipt === null) return undefined;
+  const threadId = (receipt as Record<string, unknown>).threadId;
+  return typeof threadId === "string" ? threadId : undefined;
 }
 
 /** Owner-gated run lookup shared by cancel/approval below. */

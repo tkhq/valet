@@ -1032,6 +1032,13 @@ export interface WorkflowRunCheckpoint {
   sessionId?: string;
   /** The run a `workflow` node started. */
   childRunId?: string;
+  /**
+   * The thread a `session` or `orchestrator` node submitted to. Present
+   * only for those node kinds. `/chat` and `/sessions/:id` both take a
+   * `thread` search param, so this is what makes a run link back to the
+   * exact conversation it started rather than the newest one.
+   */
+  threadId?: string;
 }
 
 /** One pending approval gate on a parked workflow run. */

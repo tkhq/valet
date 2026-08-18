@@ -249,7 +249,9 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     expect(session).not.toBeNull();
 
     // The queued item carries the followup queueMode and the SignalContent
-    // envelope shape (kind/signalType/body) — never a raw string prompt.
+    // envelope shape (kind/signalType/body/attributes) — never a raw string
+    // prompt. `attributes.runId` is what lets the client render a link back
+    // to the run instead of a bare "workflow.request" label.
     const item = await engineStore.getQueueItem(receipt.sessionId, receipt.queueItemId);
     expect(item).toBeDefined();
     expect(item?.dispatchId).toBe(dispatchId);
@@ -257,6 +259,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       kind: "signal",
       signalType: "workflow.request",
       body: "please look into this",
+      attributes: { runId: "wfrun_orch_unit" },
       tagName: "signal",
     });
   });
