@@ -176,6 +176,18 @@ vi.mock("~/api/settings", async (importOriginal) => {
   };
 });
 
+// The Teams page carries `TeamSyncSection`, whose visibility gate reads the
+// auth config. `sso: null` keeps the section out of this suite — it pins the
+// page and the panel; the section has its own suite
+// (components/settings/team-sync-section.test.tsx).
+vi.mock("~/api/auth-config", () => ({
+  useAuthConfig: () => ({
+    data: { stub: true, social: [], sso: null },
+    isLoading: false,
+    error: null,
+  }),
+}));
+
 vi.mock("~/api/invites", () => ({
   useInvites: () => ({ data: invitesData, isLoading: false, error: null }),
   useCreateInvite: () => ({ mutate: createInviteMutate, isPending: false, error: null }),
