@@ -27,19 +27,27 @@ afterEach(async () => {
   api = undefined;
 });
 
-function action(id: string): PluginAction {
+function action(
+  id: string,
+  parameters: PluginAction["parameters"] = Type.Object({}),
+): PluginAction {
   return {
     id,
     name: id,
     description: id,
     riskLevel: "low",
-    parameters: Type.Object({}),
+    parameters,
     execute: () => Promise.resolve({ success: true, data: {} }),
   };
 }
 
 const gmailActions: ActionPlugin = { service: "gmail", actions: [action("gmail.list_labels")] };
-const notesActions: ActionPlugin = { service: "notes", actions: [action("notes.read")] };
+/** The read action declares the params its fixture template sends — the
+ * save-time params lint checks tool params against this schema. */
+const notesActions: ActionPlugin = {
+  service: "notes",
+  actions: [action("notes.read", Type.Object({ id: Type.String() }))],
+};
 
 function definition(nodes: unknown[], edges: unknown[]): unknown {
   return { version: "dag/v1", nodes, edges };

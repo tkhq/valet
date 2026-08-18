@@ -1183,6 +1183,128 @@ describe('validateWorkflowDefinition — linter checks', () => {
     }
   });
 
+  describe('environment params hook', () => {
+    /** The schema shape `getActionParams` returns — the production case
+     * this lint exists for: `pull_number` instead of `pullNumber` saved
+     * fine and failed at run time. */
+    const GET_PR_PARAMS: Record<string, unknown> = {
+      type: 'object',
+      properties: {
+        owner: { type: 'string' },
+        repo: { type: 'string' },
+        pullNumber: { type: 'number' },
+      },
+      required: ['owner', 'repo', 'pullNumber'],
+    };
+
+    const env = {
+      getActionParams: (service: string, action: string) =>
+        service === 'github' && action === 'get_pull_request' ? GET_PR_PARAMS : undefined,
+    };
+
+    function toolWithParams(params: Record<string, unknown>): WorkflowDefinition {
+      return linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'fetch_pr', type: 'tool', service: 'github', action: 'get_pull_request', params },
+        { id: 'stop', type: 'stop' },
+      ]);
+    }
+
+    it('accepts params that satisfy the schema', () => {
+      const result = validateWorkflowDefinition(
+        toolWithParams({ owner: 'acme', repo: 'widgets', pullNumber: 42 }),
+        env,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('rejects params missing a required key', () => {
+      const result = validateWorkflowDefinition(toolWithParams({ owner: 'acme', repo: 'widgets' }), env);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) =>
+            e.includes('node "fetch_pr": params is missing required parameter "pullNumber"'),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('rejects an unknown key with a did-you-mean hint', () => {
+      const result = validateWorkflowDefinition(
+        toolWithParams({ owner: 'acme', repo: 'widgets', pull_number: 42 }),
+        env,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some(
+            (e) =>
+              e.includes('params.pull_number is not a parameter of github.get_pull_request') &&
+              e.includes('did you mean "pullNumber"'),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('never type-checks a templated value', () => {
+      // pullNumber is declared a number; the template only resolves at run
+      // time, so a string carrying `{{...}}` must pass.
+      const result = validateWorkflowDefinition(
+        toolWithParams({ owner: 'acme', repo: 'widgets', pullNumber: '{{trigger.data.pr}}' }),
+        env,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('rejects a plain value of the wrong type', () => {
+      const result = validateWorkflowDefinition(
+        toolWithParams({ owner: 'acme', repo: 'widgets', pullNumber: 'forty-two' }),
+        env,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) => e.includes('params.pullNumber has the wrong type') && e.includes('declares it as number')),
+        ).toBe(true);
+      }
+    });
+
+    it('rejects an explicit null against a primitive-typed property', () => {
+      const result = validateWorkflowDefinition(
+        toolWithParams({ owner: 'acme', repo: 'widgets', pullNumber: null }),
+        env,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some(
+            (e) =>
+              e.includes('params.pullNumber is null') &&
+              e.includes('declares it as number; set a number value or remove the key'),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('leaves params unchecked when the hook returns no schema', () => {
+      const result = validateWorkflowDefinition(
+        linear([
+          { id: 'trigger', type: 'trigger' },
+          { id: 'call', type: 'tool', service: 'linear', action: 'create_issue', params: { anything: 'goes' } },
+          { id: 'stop', type: 'stop' },
+        ]),
+        env,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('leaves params unchecked without the hook (env unchanged)', () => {
+      const result = validateWorkflowDefinition(toolWithParams({ owner: 'acme', repo: 'widgets' }), {});
+      expect(result).toEqual({ ok: true });
+    });
+  });
+
   it('accepts a fully-featured valid workflow (kitchen sink)', () => {
     const result = validateWorkflowDefinition({
       version: 'dag/v1',

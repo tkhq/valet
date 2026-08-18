@@ -40,13 +40,17 @@ const OWNER = { userId: "u-1", orgId: "org-1" };
 
 // ─── Fixture plugins ─────────────────────────────────────────────────────
 
-function action(id: string, riskLevel: PluginAction["riskLevel"]): PluginAction {
+function action(
+  id: string,
+  riskLevel: PluginAction["riskLevel"],
+  parameters: PluginAction["parameters"] = Type.Object({}),
+): PluginAction {
   return {
     id,
     name: id,
     description: id,
     riskLevel,
-    parameters: Type.Object({}),
+    parameters,
     execute: () => Promise.resolve({ success: true, data: {} }),
   };
 }
@@ -64,8 +68,23 @@ const linearActions: ActionPlugin = {
   resolveActions: () => Promise.resolve([action("linear.list_issues", "medium")]),
 };
 
-/** No credential declaration anywhere, so nothing needs connecting. */
-const localActions: ActionPlugin = { service: "notes", actions: [action("notes.read", "low")] };
+/** No credential declaration anywhere, so nothing needs connecting.
+ * The read action declares the params its fixture templates send — the
+ * save-time params lint checks tool params against this schema. */
+const localActions: ActionPlugin = {
+  service: "notes",
+  actions: [
+    action(
+      "notes.read",
+      "low",
+      Type.Object({
+        id: Type.String(),
+        depth: Type.Optional(Type.Number()),
+        label: Type.Optional(Type.String()),
+      }),
+    ),
+  ],
+};
 
 function definition(nodes: unknown[], edges: unknown[]): unknown {
   return { version: "dag/v1", nodes, edges };

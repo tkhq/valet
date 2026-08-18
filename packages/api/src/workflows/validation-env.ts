@@ -27,6 +27,11 @@ export function isKnownModelSpec(spec: string): boolean {
   return false;
 }
 
+/** Narrows a TypeBox schema (a plain object at runtime) without a cast. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function buildValidateEnvironment(
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
 ): ValidateEnvironment {
@@ -44,6 +49,23 @@ export function buildValidateEnvironment(
             (a) => a.id === qualified || a.id === action,
           );
           return known ? "ok" : "unknown-action";
+        }
+      : undefined,
+    // The linter checks a tool node's params keys against this schema at
+    // save time — `pull_number` for `pullNumber` used to pass the linter
+    // and fail only inside the run, at the runtime ajv check.
+    getActionParams: actionPluginByService
+      ? (service, action) => {
+          const entry = actionPluginByService.get(service);
+          // Dynamic (MCP-style) plugins carry no static schemas — same
+          // pass-through as isKnownAction's "dynamic".
+          if (!entry || entry.actionPlugin.resolveActions) return undefined;
+          const qualified = `${service}.${action}`;
+          const found = entry.actionPlugin.actions.find(
+            (a) => a.id === qualified || a.id === action,
+          );
+          const schema: unknown = found?.parameters;
+          return isRecord(schema) ? schema : undefined;
         }
       : undefined,
   };

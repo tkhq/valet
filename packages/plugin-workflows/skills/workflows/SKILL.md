@@ -118,7 +118,7 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 
 ## Working practices
 
-- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, and tool service/actions. On error it returns a bulleted list — fix each item and retry; never save around validation.
+- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation.
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
 - Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.
 - To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start) — a parked run can be waiting on a node from an OLDER definition version; read the run's own checkpoints, not the current definition.
