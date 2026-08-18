@@ -109,7 +109,7 @@ export function authCodeEnvReady(oauth: AuthCodeDecl, env: Record<string, string
   return Boolean(env[oauth.clientIdEnv] && env[oauth.clientSecretEnv]);
 }
 
-async function tokenPost(tokenUrl: string, form: Record<string, string>): Promise<TokenResponse> {
+async function tokenPostRaw(tokenUrl: string, form: Record<string, string>): Promise<unknown> {
   const res = await fetch(tokenUrl, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
@@ -119,7 +119,11 @@ async function tokenPost(tokenUrl: string, form: Record<string, string>): Promis
     const body = await res.text().catch(() => "");
     throw new Error(`OAuth token request failed: ${res.status} ${body.slice(0, 200)}`);
   }
-  const payload: unknown = await res.json();
+  return res.json();
+}
+
+async function tokenPost(tokenUrl: string, form: Record<string, string>): Promise<TokenResponse> {
+  const payload = await tokenPostRaw(tokenUrl, form);
   if (
     typeof payload !== "object" ||
     payload === null ||
@@ -128,6 +132,22 @@ async function tokenPost(tokenUrl: string, form: Record<string, string>): Promis
     throw new Error("OAuth token response missing access_token");
   }
   return payload as TokenResponse;
+}
+
+export async function exchangeAuthorizationCodeRaw(params: {
+  oauth: AuthCodeDecl;
+  env: Record<string, string | undefined>;
+  code: string;
+  redirectUri: string;
+}): Promise<unknown> {
+  const { clientId, clientSecret } = resolveClientEnv(params.oauth, params.env);
+  return tokenPostRaw(params.oauth.tokenUrl, {
+    grant_type: "authorization_code",
+    client_id: clientId,
+    client_secret: clientSecret,
+    code: params.code,
+    redirect_uri: params.redirectUri,
+  });
 }
 
 export async function exchangeAuthorizationCode(params: {
