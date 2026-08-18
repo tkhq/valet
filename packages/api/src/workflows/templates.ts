@@ -401,6 +401,25 @@ export function summarizeTemplate(
  * failing the whole page. The template-contract test fails CI on the same
  * condition, so a broken template never reaches a deployment silently.
  */
+/**
+ * Services a template may name but that a person cannot use yet.
+ *
+ * A template needing one of these is hidden rather than shown with a
+ * "Connect" button that leads nowhere. The card would promise an outcome the
+ * run cannot deliver, and the person only finds out after installing it.
+ *
+ * This is a temporary list. Remove a service the day its integration works,
+ * and its templates come back with no other change. Keep it empty otherwise:
+ * a template whose service is merely NOT CONNECTED belongs in the gallery,
+ * because connecting it is exactly what the card asks for.
+ */
+const SERVICES_NOT_READY: ReadonlySet<string> = new Set(["slack"]);
+
+/** The services a template cannot run without. */
+function requiredServices(summary: WorkflowTemplateSummary): string[] {
+  return summary.requires.map((r) => r.service);
+}
+
 export async function listWorkflowTemplateSummaries(
   deps: TemplateServiceDeps,
   userId: string,
@@ -415,6 +434,18 @@ export async function listWorkflowTemplateSummaries(
       console.error(
         `workflow templates: hiding "${owned.template.id}" from "${owned.pluginName}" — ` +
           `its definition is invalid: ${result.errors.join("; ")}`,
+      );
+      continue;
+    }
+    const blocked = requiredServices(result.value.summary).filter((svc) =>
+      SERVICES_NOT_READY.has(svc),
+    );
+    if (blocked.length > 0) {
+      // Not an error. Say it once so the list is explainable when somebody
+      // asks where a template went.
+      console.info(
+        `workflow templates: hiding "${owned.template.id}" — it needs ` +
+          `${blocked.join(", ")}, which is not available yet.`,
       );
       continue;
     }

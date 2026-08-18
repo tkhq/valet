@@ -81,6 +81,30 @@ const batchAction: WorkflowTemplateSummary = {
   caveats: ["Runs over at most 100 rows. The report names anything past the cap."],
 };
 
+/**
+ * The same shape, but on a timer. A scheduled run arrives with no form to
+ * answer, so its required value must be supplied before the install — this
+ * is the one case where the dialog holds the button.
+ */
+const nightlySweep: WorkflowTemplateSummary = {
+  id: "nightly-sweep",
+  name: "Nightly sweep",
+  description: "Sweeps every night.",
+  steps: ["Sweep"],
+  schedule: { cron: "0 6 * * *", timezone: "UTC" },
+  requires: [],
+  inputs: [
+    {
+      name: "instruction",
+      type: "string",
+      label: "What to do with each row",
+      placeholder: "Tier this account as enterprise, mid-market or SMB",
+      required: true,
+    },
+  ],
+  caveats: [],
+};
+
 beforeEach(() => {
   navigate.mockReset();
   installMutateAsync.mockReset();
@@ -164,21 +188,54 @@ describe("TemplateGallery", () => {
     expect(dialog.getByText("Runs when you start it")).toBeTruthy();
   });
 
-  it("blocks install while a required field is empty, then sends it and opens the installed workflow", async () => {
+  it("installs a template that runs on demand without answering its fields first", async () => {
+    // The field is declared `required`, but this template runs when a person
+    // starts it, so the run form asks for it. Holding the install button
+    // would stop somebody installing a template to read it and edit it.
     templatesQuery.data = { templates: [batchAction] };
     render(<TemplateGallery />);
     fireEvent.click(screen.getByRole("button", { name: "Use template" }));
 
-    const install = screen.getByRole("button", { name: "Install" }) as HTMLButtonElement;
-    expect(install.disabled).toBe(true);
-
-    const field = screen.getByLabelText("What to do with each row *") as HTMLInputElement;
-    expect(field.placeholder).toBe("Tier this account as enterprise, mid-market or SMB");
-    fireEvent.change(field, { target: { value: "Tier each account" } });
     expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
+    // No asterisk either: nothing here is required to install.
+    const field = screen.getByLabelText("What to do with each row") as HTMLInputElement;
+    expect(field.placeholder).toBe("Tier this account as enterprise, mid-market or SMB");
 
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(installMutateAsync).toHaveBeenCalledTimes(1));
+    expect(installMutateAsync.mock.calls[0]![0]).toEqual({
+      templateId: "batch-action-over-inputs",
+      body: { inputs: {} },
+    });
+  });
+
+  it("holds the install of a SCHEDULED template until its required field is answered", async () => {
+    // A timer brings no form, so this value has nowhere else to come from.
+    templatesQuery.data = { templates: [nightlySweep] };
+    render(<TemplateGallery />);
+    fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+
+    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.change(screen.getByLabelText("What to do with each row *"), {
+      target: { value: "Tier each account" },
+    });
+    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it("sends the values a person did supply, and opens the installed workflow", async () => {
+    templatesQuery.data = { templates: [batchAction] };
+    render(<TemplateGallery />);
+    fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+
+    fireEvent.change(screen.getByLabelText("What to do with each row"), {
+      target: { value: "Tier each account" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Install" }));
 
     await waitFor(() => expect(installMutateAsync).toHaveBeenCalledTimes(1));
@@ -203,7 +260,7 @@ describe("TemplateGallery", () => {
     );
     render(<TemplateGallery />);
     fireEvent.click(screen.getByRole("button", { name: "Use template" }));
-    fireEvent.change(screen.getByLabelText("What to do with each row *"), {
+    fireEvent.change(screen.getByLabelText("What to do with each row"), {
       target: { value: "Tier each account" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Install" }));

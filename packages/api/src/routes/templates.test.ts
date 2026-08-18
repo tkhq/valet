@@ -248,3 +248,19 @@ describe("POST /api/templates/:id/install", () => {
     expect(body.errors.join(" ")).toContain("noteId");
   });
 });
+
+describe("a service that is not available yet", () => {
+  it("hides the templates that need it, and keeps the rest", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/templates`);
+    const body = (await res.json()) as ListWorkflowTemplatesResponse;
+    const ids = body.templates.map((t) => t.id);
+
+    // Nothing on offer may require a service a person cannot connect.
+    for (const t of body.templates) {
+      expect(t.requires.map((r) => r.service)).not.toContain("slack");
+    }
+    // And the gallery is not empty as a result — the fixture plugins remain.
+    expect(ids).toContain("notes-echo");
+  });
+});
