@@ -34,6 +34,12 @@ import {
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
+import {
+  identityForExternal,
+  identityForUser,
+  linkIdentity,
+  unlinkIdentity,
+} from "../channels/identity-links.js";
 
 export const credentialConnectRouter = new Hono<AppEnv>();
 
@@ -255,14 +261,33 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
   }
 
-  await engineCredentials.save({ type: "user", id: user.id }, verified.service, {
-    type: "oauth2",
-    accessToken: saved.accessToken,
-    refreshToken: saved.refreshToken,
-    expiresAt: saved.expiresAt,
-    scopes: saved.scopes,
-    metadata: saved.metadata,
-  });
+  let restoreLink: (() => Promise<void>) | null = null;
+  if (saved.identity) {
+    const identity = saved.identity;
+    const existing = await identityForExternal(db, identity.provider, identity.externalId);
+    if (existing && existing.userId !== user.id) {
+      return c.redirect(`${returnTo}/integrations?error=identity_conflict`, 302);
+    }
+    const prior = await identityForUser(db, identity.provider, user.id);
+    await linkIdentity(db, { provider: identity.provider, externalId: identity.externalId, userId: user.id });
+    restoreLink = prior
+      ? () => linkIdentity(db, { provider: identity.provider, externalId: prior.externalId, userId: user.id })
+      : () => unlinkIdentity(db, identity.provider, user.id);
+  }
+  try {
+    await engineCredentials.save({ type: "user", id: user.id }, verified.service, {
+      type: "oauth2",
+      accessToken: saved.accessToken,
+      refreshToken: saved.refreshToken,
+      expiresAt: saved.expiresAt,
+      scopes: saved.scopes,
+      metadata: saved.metadata,
+    });
+  } catch (err) {
+    console.error(`oauth callback: credential save failed for ${verified.service}:`, err);
+    if (restoreLink) await restoreLink().catch(() => undefined); // best-effort compensation
+    return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
+  }
 
   return c.redirect(`${returnTo}/integrations?connected=${encodeURIComponent(verified.service)}`, 302);
 });

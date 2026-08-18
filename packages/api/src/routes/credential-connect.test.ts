@@ -12,6 +12,7 @@ import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oaut
 import type { ListCredentialsResponse } from "../wire/types.js";
 import { verifyOAuthConnectState } from "./credential-connect.js";
 import { signState } from "../lib/oauth-state.js";
+import { identityForExternal, linkIdentity } from "../channels/identity-links.js";
 
 let api: TestApi | undefined;
 let fake: FakeOAuthServer;
@@ -387,6 +388,128 @@ describe("cross-origin return redirect (dev web origin)", () => {
       { redirect: "manual" },
     );
     expect(cb.headers.get("location")).toBe("http://localhost:5173/integrations?error=access_denied");
+  });
+});
+
+describe("identity auto-link (slackish plugin)", () => {
+  async function startSlackishCallback(baseUrl: string, fakeUrl: string): Promise<{ state: string }> {
+    process.env.SLACKISH_ID = "slack-id";
+    process.env.SLACKISH_SECRET = "slack-secret";
+    const res = await fetch(`${baseUrl}/api/credentials/slackish/connect`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    const authUrl = new URL(res.headers.get("location") ?? "");
+    const state = authUrl.searchParams.get("state") ?? "";
+    return { state };
+  }
+
+  it("auto-link on success: writes a user_identity_links row after a successful connect", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-9", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?connected=slackish");
+
+    const link = await identityForExternal(api.providers.db, "slack", "U9");
+    expect(link).not.toBeNull();
+    expect(link?.userId).toBe("local-user");
+  });
+
+  it("cross-user conflict: redirects to error=identity_conflict and saves no credential", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    // Seed a link for U9 to a DIFFERENT user.
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U9", userId: "test-member" });
+
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-9", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?error=identity_conflict");
+
+    // No credential saved.
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "slackish");
+    expect(stored).toBeNull();
+
+    // Existing link is untouched — still points to the original user.
+    const link = await identityForExternal(api.providers.db, "slack", "U9");
+    expect(link?.userId).toBe("test-member");
+  });
+
+  it("same-user reconnect: succeeds and credential is saved, link remains present", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    // Seed a link for U9 to the SAME user who will complete the callback.
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U9", userId: "local-user" });
+
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-reconnect", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?connected=slackish");
+
+    // Credential is saved.
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "slackish");
+    expect(stored).not.toBeNull();
+
+    // Link is still present.
+    const link = await identityForExternal(api.providers.db, "slack", "U9");
+    expect(link?.userId).toBe("local-user");
+  });
+
+  it("compensation: when credential save throws, the new identity link is removed", async () => {
+    api = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+
+    // Intercept save to throw.
+    const origSave = api.providers.engineCredentials.save.bind(api.providers.engineCredentials);
+    let threw = false;
+    api.providers.engineCredentials.save = async (...args) => {
+      if (!threw) {
+        threw = true;
+        throw new Error("simulated credential save failure");
+      }
+      return origSave(...args);
+    };
+
+    fake.tokenResponse = {
+      ok: true,
+      authed_user: { id: "U9", access_token: "xoxp-comp", scope: "chat:write,search:read" },
+    };
+
+    const { state } = await startSlackishCallback(api.baseUrl, fake.url);
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
+
+    // No link row should remain — compensation unlinkIdentity ran.
+    const link = await identityForExternal(api.providers.db, "slack", "U9");
+    expect(link).toBeNull();
   });
 });
 

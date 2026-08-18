@@ -117,8 +117,11 @@ Three additions, all generic:
    transaction: the credential goes through the engine store contract
    (`engineCredentials.save`), the link lives in the app schema. Ordering
    plus compensation covers the gap:
-   - The existing unique index on `(provider, externalId)` is the
-     collision check. Same user reconnecting → upsert, flow continues.
+   - The callback calls `identityForExternal` first; a hit for a different
+     Valet user stops the flow before any write (`linkIdentity` must never
+     run on a cross-user hit — it deletes-then-inserts, so it would steal
+     the identity). The unique index remains a backstop against races. Same
+     user reconnecting → flow continues.
      Identity already linked to a different Valet user → stop before any
      credential write and redirect to
      `/integrations?error=identity_conflict`.
