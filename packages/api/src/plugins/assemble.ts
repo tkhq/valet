@@ -230,10 +230,16 @@ function collectSkills(plugins: ValetPlugin[]): SkillSource[] {
  * unfiltered-listing rule). An explicit `requiresCredential` on the
  * ActionPlugin wins either way; credential-less plugins (workflows) stay
  * unflagged and are never probed.
+ *
+ * A declaration that omits `service` names the PLUGIN's service (the
+ * `decl.service ?? plugin.name` default every other consumer applies) —
+ * without that fallback here, every such plugin (slack, google-*, linear)
+ * silently lost the inference and `list_tools` listed their tools while
+ * unconnected. Exported for its tests.
  */
-function withCredentialRequirement(plugin: ValetPlugin): ActionPlugin[] {
+export function withCredentialRequirement(plugin: ValetPlugin): ActionPlugin[] {
   const credentialServices = new Set(
-    (plugin.credentials ?? []).map((c) => c.service),
+    (plugin.credentials ?? []).map((c) => c.service ?? plugin.name),
   );
   return (plugin.actions ?? []).map((actionPlugin) => {
     if (actionPlugin.requiresCredential !== undefined) return actionPlugin;
