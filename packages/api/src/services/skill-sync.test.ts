@@ -1,8 +1,8 @@
 /**
- * `syncOnce` — the one entry point that mirrors a public repository's skills
+ * `syncOnce` — the one entry point that mirrors a repository's skills
  * into the `skills` table.
  *
- * Every case runs the real `PublicSkillRepoReader` against the shared GitHub
+ * Every case runs the real `GitHubSkillRepoReader` against the shared GitHub
  * fixture, so "how many API calls did that poll cost" is a property this
  * suite can assert directly. That number is the design: a poll that finds an
  * unmoved head commit must cost exactly one call.
@@ -12,13 +12,25 @@ import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { orgMembers, orgs, skills, skillSources, users } from "../schema/index.js";
+import {
+  orgMembers,
+  orgs,
+  skills,
+  skillSources,
+  teamMembers,
+  teams,
+  users,
+} from "../schema/index.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createSkill, type SkillOwner } from "./skills.js";
 import { createSkillSource } from "./skill-sources.js";
-import { PublicSkillRepoReader } from "./skill-repo-reader.js";
+import { GitHubSkillRepoReader } from "./skill-repo-reader.js";
+import { skillRepoReaderFactory } from "./skill-source-credential.js";
 import { claimDueSkillSources, SkillSyncService, SYNC_INTERVAL_MS } from "./skill-sync.js";
 
 const ORG = "org1";
+const TEAM = "team_1";
 
 function owner(userId: string): SkillOwner {
   return { userId, orgId: ORG };
@@ -43,6 +55,9 @@ interface FakeRepo {
   files?: string[];
   /** Directory the skill directories sit in. Empty means the root. */
   root?: string;
+  /** Plays a PRIVATE repository: every request without this bearer token
+   * gets the same 404 GitHub gives for a repository that is not there. */
+  requireToken?: string;
 }
 
 let fixture: GithubFixture | undefined;
@@ -50,9 +65,17 @@ let fixture: GithubFixture | undefined;
 /** Serves `repo` over the GitHub fixture. Mutate `repo` between syncs to
  * move the repository forward. */
 function serve(repo: FakeRepo): GithubFixture {
+  const notFound = { status: 404 as const, body: { message: "Not Found" } };
+  // The fixture records a request BEFORE it calls the handler, so the last
+  // recorded call is the one being answered. That is the only way a handler
+  // can see the header that arrived.
+  const denied = (): boolean =>
+    repo.requireToken !== undefined &&
+    fixture?.calls[fixture.calls.length - 1]?.authHeader !== `Bearer ${repo.requireToken}`;
   fixture = startGithubFixture({
-    getCommit: () => ({ body: { sha: repo.sha } }),
+    getCommit: () => (denied() ? notFound : { body: { sha: repo.sha } }),
     getContents: (_owner, _name, path) => {
+      if (denied()) return notFound;
       const root = repo.root ?? "";
       const prefix = root.length > 0 ? `${root}/` : "";
       // Root listing: skill directories + loose files.
@@ -115,13 +138,22 @@ function entry(name: string, type: "file" | "dir") {
 
 describe("skill sync", () => {
   let db: AppDb;
+  let credentials: PgCredentialStore;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    const { pgdb, appDb } = await freshTestPgDb();
+    db = appDb;
+    credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     await db.insert(orgs).values({ id: ORG, name: "Org", createdAt: Date.now() });
     for (const id of ["u1", "u2"]) {
       await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
       await db.insert(orgMembers).values({ orgId: ORG, userId: id, role: "member" });
+    }
+    // A real team holding both users. A team source's credential now depends
+    // on live membership, so the team cases need rows to take away.
+    await db.insert(teams).values({ id: TEAM, orgId: ORG, name: "Team", createdAt: Date.now() });
+    for (const id of ["u1", "u2"]) {
+      await db.insert(teamMembers).values({ teamId: TEAM, userId: id, role: "member" });
     }
   });
 
@@ -131,7 +163,26 @@ describe("skill sync", () => {
   });
 
   function serviceFor(f: GithubFixture): SkillSyncService {
-    return new SkillSyncService({ db, reader: new PublicSkillRepoReader({ apiUrl: f.url }) });
+    return new SkillSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }) });
+  }
+
+  /** The service as `providers/node.ts` builds it: a per-source reader that
+   * carries the credential the source's owner holds. */
+  function credentialedServiceFor(f: GithubFixture): SkillSyncService {
+    const deps = { db, credentials, key: deriveSecretKey("cache-key"), apiUrl: f.url };
+    return new SkillSyncService({
+      db,
+      reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
+      readerFor: skillRepoReaderFactory(deps, { apiUrl: f.url }),
+    });
+  }
+
+  async function connectGitHub(userId: string, token: string, login: string): Promise<void> {
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: token,
+      metadata: { login },
+    });
   }
 
   it("imports every skill directory on the first sync", async () => {
@@ -436,7 +487,7 @@ Read the reference.
     expect(rows[0]?.content).toBe("# Local\n");
   });
 
-  it("reports a missing repository with the public-only limit, and backs off", async () => {
+  it("reports a missing repository, names what to connect, and backs off", async () => {
     fixture = startGithubFixture({
       getCommit: () => ({ status: 404, body: { message: "Not Found" } }),
     });
@@ -445,13 +496,169 @@ Read the reference.
     const outcome = await serviceFor(fixture).syncOnce(source.id);
 
     expect(outcome?.status).toBe("error");
-    expect(outcome?.error).toContain("public");
+    // The message a person reads when nothing is connected must name the
+    // screen that fixes it, and must NOT tell them to publish the repository.
+    expect(outcome?.error).toContain("no GitHub credential");
+    expect(outcome?.error).toContain("Connected accounts");
+    expect(outcome?.error).not.toContain("make the repository public");
     const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
     expect(row?.status).toBe("error");
     expect(row?.attempts).toBe(1);
-    expect(row?.lastError).toContain("public");
+    expect(row?.lastError).toContain("Connected accounts");
     expect(row?.nextAttemptAt).toBeGreaterThan(Date.now());
     expect(row?.lastSha).toBeNull();
+  });
+
+  describe("a private repository", () => {
+    const PRIVATE = {
+      sha: "commit-1",
+      skills: { deploy: skillMd("deploy", "Deploy it.") },
+      requireToken: "ghu_u1",
+    } as const;
+
+    it("mirrors when the owner's GitHub account can read it", async () => {
+      const f = serve({ ...PRIVATE });
+      await connectGitHub("u1", "ghu_u1", "octocat");
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+
+      const outcome = await credentialedServiceFor(f).syncOnce(source.id);
+
+      expect(outcome?.status).toBe("ok");
+      expect(outcome?.imported).toBe(1);
+      expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["deploy"]);
+      expect(f.calls.every((call) => call.authHeader === "Bearer ghu_u1")).toBe(true);
+    });
+
+    it("tells an unconnected owner what to connect, and mirrors nothing", async () => {
+      const f = serve({ ...PRIVATE });
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+
+      const outcome = await credentialedServiceFor(f).syncOnce(source.id);
+
+      expect(outcome?.status).toBe("error");
+      expect(outcome?.error).toContain("no GitHub credential");
+      expect(outcome?.error).toContain("Connected accounts");
+      expect(outcome?.error).not.toContain("make the repository public");
+      expect(await db.select().from(skills)).toEqual([]);
+      expect(f.calls[0]?.authHeader).toBeUndefined();
+    });
+
+    it("names the account when a connected one cannot see it", async () => {
+      const f = serve({ ...PRIVATE });
+      // Connected, but to an account the repository does not admit.
+      await connectGitHub("u1", "ghu_other", "hubot");
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+
+      const outcome = await credentialedServiceFor(f).syncOnce(source.id);
+
+      expect(outcome?.error).toContain("the GitHub account hubot");
+      expect(outcome?.error).toContain("Get access to the repository on GitHub");
+      // The token that failed must not travel with the reason it failed.
+      expect(outcome?.error).not.toContain("ghu_other");
+    });
+
+    it("keeps no token material in the row the wire and the UI read", async () => {
+      const f = serve({ ...PRIVATE });
+      await connectGitHub("u1", "ghu_other", "hubot");
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+
+      await credentialedServiceFor(f).syncOnce(source.id);
+
+      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      expect(row?.lastError).not.toContain("ghu_other");
+      expect(row?.lastError).toContain("hubot");
+    });
+
+    it("does not let a team source borrow the credential of a nearby user", async () => {
+      // The source was added by u2, who has no GitHub connection. u1 IS
+      // connected and could read the repository. The sync must stay
+      // anonymous rather than reach for whatever credential is nearby.
+      const f = serve({ ...PRIVATE });
+      await connectGitHub("u1", "ghu_u1", "octocat");
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      await db
+        .update(skillSources)
+        .set({ ownerType: "team", ownerId: TEAM, createdBy: "u2" })
+        .where(eq(skillSources.id, source.id));
+
+      const outcome = await credentialedServiceFor(f).syncOnce(source.id);
+
+      expect(outcome?.status).toBe("error");
+      expect(outcome?.error).toContain("no GitHub credential");
+      expect(f.calls.every((call) => call.authHeader === undefined)).toBe(true);
+    });
+
+    it("stops pulling with the creator's credential once they leave the team", async () => {
+      // The whole loop, end to end, because this is what the product runs on
+      // a timer and on "Sync now". u2 legitimately added a private repository
+      // for their team. u2 then leaves the team, which deletes one
+      // `team_members` row and nothing else — their `users` row, their org
+      // membership and their GitHub credential all survive.
+      const f = serve({ ...PRIVATE, requireToken: "ghu_u2" });
+      await connectGitHub("u2", "ghu_u2", "hubot");
+      const source = await createSkillSource(db, owner("u2"), { repo: "tkhq/tk-brain" });
+      await db
+        .update(skillSources)
+        .set({ ownerType: "team", ownerId: TEAM, createdBy: "u2" })
+        .where(eq(skillSources.id, source.id));
+
+      // While u2 is a member the mirror fills, which is the intended feature.
+      expect((await credentialedServiceFor(f).syncOnce(source.id))?.status).toBe("ok");
+      expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["deploy"]);
+      const callsBeforeLeaving = f.calls.length;
+      expect(callsBeforeLeaving).toBeGreaterThan(0);
+
+      await db
+        .delete(teamMembers)
+        .where(and(eq(teamMembers.teamId, TEAM), eq(teamMembers.userId, "u2")));
+      // Force the next sync to do real work rather than stop at an unmoved
+      // head commit, the way a repository push would.
+      await db.update(skillSources).set({ lastSha: null }).where(eq(skillSources.id, source.id));
+
+      const after = await credentialedServiceFor(f).syncOnce(source.id);
+
+      expect(after?.status).toBe("error");
+      expect(after?.error).toContain("no GitHub credential");
+      // Not one request after the departure carried the ex-member's token.
+      expect(f.calls.slice(callsBeforeLeaving).map((call) => call.authHeader)).not.toContain(
+        "Bearer ghu_u2",
+      );
+    });
+
+    it("names an action the team reader can take, and no GitHub login", async () => {
+      // A team source's error is read by the whole team, and the reader is
+      // usually not the person whose credential the sync uses. Telling them
+      // to get access does nothing, and naming the login exposes one person
+      // on a row that otherwise names nobody.
+      const f = serve({ ...PRIVATE });
+      await connectGitHub("u2", "ghu_other", "hubot");
+      const source = await createSkillSource(db, owner("u2"), { repo: "tkhq/tk-brain" });
+      await db
+        .update(skillSources)
+        .set({ ownerType: "team", ownerId: TEAM, createdBy: "u2" })
+        .where(eq(skillSources.id, source.id));
+
+      await credentialedServiceFor(f).syncOnce(source.id);
+
+      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      expect(row?.lastError).not.toContain("ghu_other");
+      expect(row?.lastError).not.toContain("hubot");
+      expect(row?.lastError).toContain("the GitHub account that added this source");
+      expect(row?.lastError).toContain("add the source again yourself");
+    });
+  });
+
+  it("still mirrors a public repository with no credential connected", async () => {
+    // The regression this change must not cause: tracking a public
+    // repository has never needed a GitHub connection, and still does not.
+    const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await credentialedServiceFor(f).syncOnce(source.id);
+
+    expect(outcome?.status).toBe("ok");
+    expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["deploy"]);
+    expect(f.calls.every((call) => call.authHeader === undefined)).toBe(true);
   });
 
   it("keeps the mirrored skills when one file read fails mid-sync", async () => {

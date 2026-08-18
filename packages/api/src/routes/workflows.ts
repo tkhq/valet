@@ -54,7 +54,7 @@ import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
 import { parseRepoInput, SkillSourceInputError } from "../services/skill-sources.js";
 import {
-  PublicSkillRepoReader,
+  GitHubSkillRepoReader,
   SkillRepoReadError,
   SkillRepoTimeoutError,
 } from "../services/skill-repo-reader.js";
@@ -273,13 +273,20 @@ workflowsRouter.get("/runs", async (c) => {
  * Reads one file out of a PUBLIC GitHub repository, so the import dialog can
  * take a definition that lives in version control.
  *
- * PUBLIC REPOSITORIES ONLY, through the tokenless `PublicSkillRepoReader`.
- * The reason is the one its module comment gives for skill sources, and it
- * applies here word for word: a token resolved on this path would be the
- * organization GitHub App's, which reaches every repository the App is
- * installed on, and nothing in this codebase yet checks that the caller may
- * read the repository they typed. Until such a check exists, the App's reach
- * must not sit behind a box that takes a repository name.
+ * PUBLIC REPOSITORIES ONLY. The reader accepts a credential (skill sync
+ * gives it one), and this route does not pass one yet. That is a gap, not a
+ * rule: this route has the caller in `c.var.user`, so the correct credential
+ * here is that person's own, through `resolveUserApiToken`, passed as
+ * `{ kind: "user", token, ownerScope: "user" }` — the caller reads their own
+ * error here, which is what `ownerScope` selects the wording for.
+ *
+ * Do NOT reach for `services/skill-source-credential.ts` when you close the
+ * gap. That module re-checks team and org membership because a source row
+ * outlives the membership that justified it; this route is authenticated per
+ * request, so the caller's membership is already live. And do NOT resolve
+ * the org App installation token, which reaches every repository the App is
+ * installed on and would let a caller read a repository they cannot see on
+ * GitHub.
  *
  * The file is returned as TEXT. The client owns the one parser that reads
  * both a pasted file and this response, so the two sources cannot drift into
@@ -322,7 +329,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
   try {
     // Constructed per request so the GitHub base URL is read now, not at
     // module load — the same rule `repos/github-host.ts` follows.
-    content = await new PublicSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
+    content = await new GitHubSkillRepoReader().readFile(parsed.repoFullName, parsed.subpath, parsed.ref);
   } catch (err) {
     // The reader words its own messages for the skill sync sweep, which
     // tells the reader to wait for the next poll. An import has a person in

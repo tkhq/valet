@@ -843,6 +843,12 @@ export const skillSources = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
+    /** The user who added the source. This is the only user identity a team
+     * source or an org source carries, and the sweep runs with no request
+     * context, so it is what `services/skill-source-credential.ts` reads to
+     * pick a team source's GitHub credential. NULL means the row predates
+     * this column, and a NULL row syncs with no credential. */
+    createdBy: text("created_by"),
     /** `owner/repo`. */
     repoFullName: text("repo_full_name").notNull(),
     /** Branch, tag, or commit. Empty means the default branch. */

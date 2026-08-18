@@ -496,6 +496,7 @@ CREATE TABLE "skill_sources" (
 	"org_id" text NOT NULL,
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
+	"created_by" text,
 	"repo_full_name" text NOT NULL,
 	"ref" text DEFAULT '' NOT NULL,
 	"subpath" text DEFAULT '' NOT NULL,

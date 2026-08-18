@@ -30,7 +30,8 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { SkillSyncService } from "../services/skill-sync.js";
-import { PublicSkillRepoReader } from "../services/skill-repo-reader.js";
+import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
+import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -571,12 +572,22 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     deliverToOrchestrator,
   });
 
-  // Skill-repository sync (agent-skills design). Reads PUBLIC repositories
-  // only, so the reader takes no credential deps — see
-  // `services/skill-repo-reader.ts` for why an authenticated importer is
-  // deliberately not wired in yet. `start()`/`stop()` are called from
-  // `main.ts` alongside the other loops.
-  const skillSync = new SkillSyncService({ db, reader: new PublicSkillRepoReader() });
+  // Skill-repository sync (agent-skills design). `readerFor` gives each
+  // source the GitHub credential its OWNER holds, so a private repository
+  // syncs without letting a source borrow reach it does not have — the rule
+  // is in `services/skill-source-credential.ts`. A source with no resolvable
+  // credential falls back to the anonymous `reader`, which is what every
+  // public repository uses. `start()`/`stop()` are called from `main.ts`
+  // alongside the other loops.
+  const skillSync = new SkillSyncService({
+    db,
+    reader: new GitHubSkillRepoReader(),
+    readerFor: skillRepoReaderFactory({
+      db,
+      credentials: engineCredentials,
+      key: deriveSecretKey(opts.encryptionKey),
+    }),
+  });
 
   return {
     db,

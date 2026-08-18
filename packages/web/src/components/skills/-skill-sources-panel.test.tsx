@@ -134,12 +134,24 @@ describe("SkillSourcesPanel", () => {
     onCursorsChange.mockReset();
   });
 
-  it("states that only public repositories can be imported", () => {
+  it("says a public repository needs no GitHub connection, and names the one used for a private one", () => {
     renderPanel();
 
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
 
-    expect(screen.getByText(/public repositories only/i)).toBeTruthy();
+    expect(screen.getByText(/needs no GitHub connection/i)).toBeTruthy();
+    expect(screen.getByText(/your connected GitHub account/i)).toBeTruthy();
+    // The claim this change removes: sync reads private repositories now.
+    expect(screen.queryByText(/public repositories only/i)).toBeNull();
+  });
+
+  it("names the GitHub App instead on the org panel, where a personal account is not what reads", () => {
+    renderPanel(PERSONAL, { owner: { type: "org", id: "org1" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+
+    expect(screen.getByText(/GitHub App installed for this organization/i)).toBeTruthy();
+    expect(screen.queryByText(/your connected GitHub account/i)).toBeNull();
   });
 
   it("imports what was typed into the box", () => {

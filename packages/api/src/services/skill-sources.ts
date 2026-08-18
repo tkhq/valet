@@ -2,8 +2,8 @@
  * Tracked skill repositories — CRUD over the `skill_sources` table, plus the
  * parsing that turns a pasted repository address into one row.
  *
- * A source is a subscription to a public GitHub repository laid out to the
- * Agent Skills spec (`<root>/<skill-name>/SKILL.md`). The repository is
+ * A source is a subscription to a GitHub repository laid out to the Agent
+ * Skills spec (`<root>/<skill-name>/SKILL.md`). The repository is
  * authoritative: `services/skill-sync.ts` is the only writer of the
  * `origin='repo'` skills a source carries, and deleting a source deletes
  * them, because a mirror has no existence apart from what it mirrors.
@@ -189,6 +189,10 @@ export async function createSkillSource(
     orgId: owner.orgId,
     ownerType: isOrgOwned ? "org" : teamId ? "team" : "user",
     ownerId: isOrgOwned ? owner.orgId : teamId ?? owner.userId,
+    // Recorded for every owner type. A team row has no other user identity
+    // on it, and the unattended sweep needs one to pick a GitHub credential
+    // — see `services/skill-source-credential.ts`.
+    createdBy: owner.userId,
     repoFullName: parsed.repoFullName,
     ref: parsed.ref,
     subpath: parsed.subpath,
