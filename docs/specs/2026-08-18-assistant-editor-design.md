@@ -1,6 +1,6 @@
 # Assistant editor and per-assistant behavior
 
-Status: designed, not yet implemented. Builds on
+Status: implemented. Builds on
 `2026-08-13-assistants-design.md`, which deferred skill restriction and tool
 assignment. This pass delivers both, plus per-assistant personality and the
 editor page. Per-assistant documents stay deferred.
