@@ -48,6 +48,13 @@ export interface CredentialDeclaration {
   connectLabel?: string;
   /** How the connect UI obtains this credential via OAuth. Absent = manual token entry only. Only valid on `type: "oauth2"`. */
   oauth?: OAuthDeclaration;
+  /** Deployment/org prerequisite for offering this credential. Absent = the
+   * credential is self-sufficient (a personal token works with no org setup)
+   * and the service is always offered. `orgCredential: true` = an org-scoped
+   * credential for this service must exist before users can connect; an
+   * admin creates it in Settings → Organization. Evaluated by the API host,
+   * never by the engine. */
+  requires?: { orgCredential: true };
 }
 
 /** A webhook event that passed signature verification. */
