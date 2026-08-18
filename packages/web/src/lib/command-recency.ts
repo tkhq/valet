@@ -79,7 +79,11 @@ export function recordCommandUse(
 }
 
 /** In-memory fallback when real storage is absent or non-functional — same
- * rationale as `theme.ts` (Node ≥22 ships a stub `localStorage` global). */
+ * rationale as `theme.ts` (Node ≥22 ships a stub `localStorage` global).
+ * Module-level and therefore shared for the process lifetime: tests that
+ * call `readCommandRecency`/`recordCommandUse` WITHOUT an explicit
+ * `storage` argument share this map and can bleed into each other — pass a
+ * per-test storage instead (see `command-recency.test.ts`). */
 const memoryStorage = new Map<string, string>();
 
 function safeLocalStorage(): StorageReader & StorageWriter {

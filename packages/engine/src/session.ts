@@ -980,6 +980,12 @@ export class Session {
     // Load first, invalidate after: when a provider throws, the previous
     // registry (and its skill list) keeps serving — a stale list beats an
     // empty one mid-session. The rejection still reaches the caller.
+    //
+    // The refresh is atomic across BOTH providers on purpose: Promise.all
+    // fails fast, so one provider's rejection discards the other's result
+    // and keeps both previous sets serving. Applying a half-refresh would
+    // let the two skill views drift apart mid-session; the caller retries
+    // on the next refresh event either way.
     const [workspaceSkills, managedSkills] = await Promise.all([
       workspaceProvider ? workspaceProvider() : Promise.resolve([]),
       skillsProvider ? skillsProvider() : Promise.resolve(null),

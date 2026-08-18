@@ -42,6 +42,9 @@ const SOURCE_LABEL: Record<WireCommandInfo["source"], string> = {
  * therefore sorts at two levels: groups by their most recently used command,
  * then commands within a group. Sort is stable, so untouched commands keep
  * the registry's order (built-in → skill → plugin, registration order within).
+ * Contiguity holds even when two groups share one max stamp: any cross-group
+ * tie falls through to the deterministic `SOURCE_ORDER` comparison, so every
+ * member of one source still sorts to the same side of the other's.
  */
 export function commandsToItems(
   commands: WireCommandInfo[],

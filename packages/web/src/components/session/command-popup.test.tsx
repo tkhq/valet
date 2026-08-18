@@ -65,6 +65,15 @@ describe("commandsToItems", () => {
     expect(items.map((i) => i.label)).toEqual(["/stop", "/status", "/skill:review"]);
   });
 
+  it("keeps groups contiguous when two groups share one max stamp", () => {
+    // status (builtin) and skill:review (skill) were used in the same ms —
+    // the group tie falls through to SOURCE_ORDER, so Built-in stays whole
+    // and ahead of Skill instead of interleaving.
+    const items = commandsToItems(FIXTURE, { status: 1000, "skill:review": 1000 });
+    expect(items.map((i) => i.group)).toEqual(["Built-in", "Built-in", "Skill"]);
+    expect(items.map((i) => i.label)).toEqual(["/status", "/stop", "/skill:review"]);
+  });
+
   it("keeps the default source order with no recency", () => {
     const items = commandsToItems(FIXTURE, {});
     expect(items.map((i) => i.label)).toEqual(["/status", "/stop", "/skill:review"]);
