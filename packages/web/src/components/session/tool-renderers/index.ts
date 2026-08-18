@@ -16,6 +16,7 @@ import { findReplaceRenderer } from "./find-replace";
 import { memPatchRenderer } from "./mem-patch";
 import { memReadRenderer } from "./mem-read";
 import { memWriteRenderer } from "./mem-write";
+import { openaiMediaRenderer } from "./openai-media";
 import { readRenderer } from "./read";
 import { threadReadRenderer } from "./thread-read";
 import { workflowRenderer } from "./workflow";
@@ -33,6 +34,7 @@ const RENDERERS: ToolRenderer[] = [
   threadReadRenderer,
   workflowRenderer,
   findReplaceRenderer,
+  openaiMediaRenderer,
   // … add plugin-specific renderers here as the ecosystem grows.
   fallbackRenderer,
 ];
