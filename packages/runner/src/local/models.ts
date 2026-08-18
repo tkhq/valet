@@ -87,21 +87,26 @@ export async function listModels(): Promise<Array<{ name: string; path: string; 
 
     for (const file of files) {
       const filePath = path.join(modelsDir, file);
-      const stat = await fs.stat(filePath);
-      if (stat.isFile() && file.endsWith(".gguf")) {
-        // Try to find the model name from registry
-        let modelName = "unknown";
-        for (const [name, info] of Object.entries(MODEL_REGISTRY)) {
-          if (info.file === file) {
-            modelName = name;
-            break;
+      try {
+        const stat = await fs.stat(filePath);
+        if (stat.isFile() && file.endsWith(".gguf")) {
+          // Try to find the model name from registry
+          let modelName = "unknown";
+          for (const [name, info] of Object.entries(MODEL_REGISTRY)) {
+            if (info.file === file) {
+              modelName = name;
+              break;
+            }
           }
+          models.push({
+            name: modelName,
+            path: filePath,
+            size: formatBytes(stat.size),
+          });
         }
-        models.push({
-          name: modelName,
-          path: filePath,
-          size: formatBytes(stat.size),
-        });
+      } catch {
+        // Skip files we can't stat
+        continue;
       }
     }
 
@@ -136,22 +141,18 @@ export async function removeModel(name: string): Promise<void> {
 }
 
 /**
- * Download a model from HuggingFace using huggingface-hub CLI.
- * Requires 'huggingface-hub' to be installed.
+ * Download a model from HuggingFace using node-llama-cpp model downloader.
+ * Uses the safe API without shell injection.
  */
 export async function pullModel(name: string): Promise<void> {
-  const modelInfo = MODEL_REGISTRY[name];
-  if (!modelInfo) {
-    const available = Object.keys(MODEL_REGISTRY).join(", ");
-    throw new Error(`Unknown model: ${name}\nAvailable: ${available}`);
-  }
+  const entry = MODEL_REGISTRY[name];
+  if (!entry) throw new Error(`Unknown model: ${name}`);
 
   const modelsDir = getModelsDir();
   await fs.mkdir(modelsDir, { recursive: true });
 
-  const modelPath = path.join(modelsDir, modelInfo.file);
-
   // Check if already exists
+  const modelPath = path.join(modelsDir, entry.file);
   try {
     await fs.access(modelPath);
     console.log(`✓ Model already downloaded: ${name}`);
@@ -160,33 +161,18 @@ export async function pullModel(name: string): Promise<void> {
     // Not found, proceed with download
   }
 
-  console.log(`⏳ Downloading ${name} (${modelInfo.size})...`);
-  console.log(`   From: ${modelInfo.repo}/${modelInfo.file}`);
+  console.log(`⏳ Downloading ${name} (${entry.size})...`);
+  console.log(`   From: ${entry.repo}/${entry.file}`);
 
-  // Use huggingface_hub CLI if available, otherwise show instructions
   try {
-    const { execSync } = await import("child_process");
-    try {
-      // Try using huggingface-hub Python module
-      const command = `huggingface-cli download ${modelInfo.repo} ${modelInfo.file} --local-dir ${modelsDir} --local-dir-use-symlinks false`;
-      console.log(`   Running: ${command}`);
-      execSync(command, { stdio: "inherit" });
-      console.log(`✓ Downloaded: ${name}`);
-    } catch {
-      // Fallback to wget/curl
-      console.log(
-        `\n⚠️  huggingface-cli not found. Installing huggingface-hub:\n`,
-      );
-      console.log(`  pip install huggingface-hub[cli]\n`);
-      console.log(`  Or manually download from:\n`);
-      console.log(
-        `  https://huggingface.co/${modelInfo.repo}/blob/main/${modelInfo.file}\n`,
-      );
-      console.log(`  And save to: ${modelPath}\n`);
-      throw new Error(
-        "Download requires huggingface-hub. See instructions above.",
-      );
-    }
+    const { createModelDownloader } = await import("node-llama-cpp");
+    const downloader = await createModelDownloader({
+      modelUri: `hf:${entry.repo}/${entry.file}`,
+      dirPath: modelsDir,
+    });
+
+    await downloader.download();
+    console.log(`✓ Downloaded: ${name}`);
   } catch (err) {
     throw err instanceof Error ? err : new Error(String(err));
   }

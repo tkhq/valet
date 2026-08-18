@@ -3,8 +3,11 @@
  * Handles model loading and streaming generation.
  */
 
+import { getLlama, LlamaChatSession } from "node-llama-cpp";
+
 export interface LocalSession {
   context: any;
+  session: LlamaChatSession;
   modelPath: string;
 }
 
@@ -14,22 +17,17 @@ export interface LocalSession {
  * @returns A session object with the context
  */
 export async function createLocalSession(modelPath: string): Promise<LocalSession> {
-  // Dynamically import node-llama-cpp to avoid loading when not needed
-  const { Llama } = await import("node-llama-cpp");
-
   console.log(`Loading model: ${modelPath}`);
 
-  // Load the model and create a context
-  const llama = new Llama({
-    model: modelPath,
-    n_gpu_layers: 0, // CPU-only inference (no GPU)
-    n_threads: 4, // Use 4 threads
-  });
-
-  const context = llama.createContext();
+  // Load the model using node-llama-cpp v3 API
+  const llama = await getLlama();
+  const model = await llama.loadModel({ modelPath });
+  const context = await model.createContext();
+  const session = new LlamaChatSession({ contextSequence: context.getSequence() });
 
   return {
     context,
+    session,
     modelPath,
   };
 }
@@ -45,50 +43,45 @@ export async function* streamCompletion(
   session: LocalSession,
   prompt: string,
 ): AsyncGenerator<string> {
-  // Default inference parameters
-  const maxTokens = 256; // Reduced for faster response
-  const temperature = 0.7;
-  const topP = 0.9;
-
   try {
-    // Encode the prompt
-    const promptTokens = session.context.encode(prompt);
-
-    // Generate completions with streaming
-    // node-llama-cpp context.evaluate returns token IDs
-    let totalTokens = 0;
-    let currentOutput = "";
-
-    // Evaluate the prompt first
-    await session.context.evaluate(promptTokens);
-
-    // Then generate new tokens
-    while (totalTokens < maxTokens) {
-      // Sample the next token
-      const token = session.context.sample({
-        temperature,
-        topP,
-      });
-
-      // Check for end-of-sequence
-      if (token === 0) break; // EOS token
-
-      // Evaluate this token and get its text
-      const tokenText = session.context.decode([token]);
-      currentOutput += tokenText;
-
-      yield tokenText;
-      totalTokens++;
-
-      // Stop on double newline
-      if (currentOutput.endsWith("\n\n")) {
-        break;
+    let full = "";
+    await session.session.prompt(prompt, {
+      onTextChunk: (chunk: string) => {
+        full += chunk;
       }
-    }
+    });
+    yield full;
   } catch (err) {
     console.error("Error during generation:", err);
     throw err;
   }
+}
+
+/**
+ * Stream completion tokens in realtime, calling a callback for each token.
+ * @param modelPath Full path to the GGUF model file
+ * @param prompt The input prompt
+ * @param onToken Callback invoked for each token generated
+ * @returns The full generated text
+ */
+export async function streamCompletionRealtime(
+  modelPath: string,
+  prompt: string,
+  onToken: (token: string) => void
+): Promise<string> {
+  const llama = await getLlama();
+  const model = await llama.loadModel({ modelPath });
+  const context = await model.createContext();
+  const session = new LlamaChatSession({ contextSequence: context.getSequence() });
+
+  let full = "";
+  await session.prompt(prompt, {
+    onTextChunk: (chunk: string) => {
+      full += chunk;
+      onToken(chunk);
+    },
+  });
+  return full;
 }
 
 /**

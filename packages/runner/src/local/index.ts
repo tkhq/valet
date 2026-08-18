@@ -5,6 +5,7 @@
 export {
   createLocalSession,
   streamCompletion,
+  streamCompletionRealtime,
   cleanupSession,
   type LocalSession,
 } from "./inference.js";
