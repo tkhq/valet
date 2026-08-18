@@ -117,9 +117,26 @@ function mapToolToAction(
   };
 }
 
+/**
+ * Map MCP tool annotations (spec 2025-03-26) to a risk level. Only explicit
+ * hints move risk: the spec defines defaults for absent hints
+ * (destructiveHint true, openWorldHint true), but we cannot tell "server
+ * chose the default" from "server never set annotations", so absent hints
+ * keep the service default instead of inflating every unannotated write
+ * to critical.
+ */
 function deriveRiskLevel(tool: McpTool, defaultRiskLevel: RiskLevel): RiskLevel {
-  if (tool.annotations?.readOnlyHint) return 'low';
-  if (tool.annotations?.destructiveHint) return 'critical';
+  const hints = tool.annotations;
+  if (!hints) return defaultRiskLevel;
+  if (hints.readOnlyHint === true) return 'low';
+  if (hints.destructiveHint === true) return 'critical';
+  if (hints.destructiveHint === false) {
+    // Declared non-destructive write. Idempotent → retry-safe update.
+    // Open-world without idempotency → outward side effects (e.g. send
+    // email) that cannot be un-sent, so gate harder than a plain write.
+    if (hints.idempotentHint === true) return 'medium';
+    if (hints.openWorldHint === true) return 'high';
+  }
   return defaultRiskLevel;
 }
 
