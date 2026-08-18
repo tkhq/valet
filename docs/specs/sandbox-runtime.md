@@ -53,7 +53,7 @@ OPENCODE_PORT = 4096
 GATEWAY_PORT = 9000
 GATEWAY_INTERNAL_PORT = 9001  # loopback-only; never tunnelled
 NODE_VERSION = "22"
-OPENCODE_VERSION = "1.1.52"
+OPENCODE_VERSION = "1.18.18"
 ```
 
 ## Service Topology

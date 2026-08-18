@@ -21,7 +21,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0"
+    "@anthropic-ai/sdk": "^0.117.1"
   },
   "devDependencies": {
     "@types/bun": "latest",

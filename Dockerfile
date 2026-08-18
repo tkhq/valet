@@ -21,7 +21,7 @@ ENV BUN_INSTALL="/root/.bun"
 ENV PATH="$BUN_INSTALL/bin:$PATH"
 
 # OpenCode CLI — pinned to same version as production (backend/images/base.py)
-ARG OPENCODE_VERSION=1.1.52
+ARG OPENCODE_VERSION=1.18.18
 RUN npm install -g opencode-ai@${OPENCODE_VERSION}
 
 # Copy OpenCode config and custom tools

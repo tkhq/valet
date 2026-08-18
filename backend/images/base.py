@@ -17,7 +17,7 @@ import modal
 
 from config import NODE_VERSION
 
-OPENCODE_VERSION = "1.15.10"
+OPENCODE_VERSION = "1.18.18"
 REVIEWS_CLI_VERSION = "cli-v0.0.1-alpha.0"
 
 
