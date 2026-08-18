@@ -8,6 +8,8 @@ export interface McpTool {
   annotations?: {
     destructiveHint?: boolean;
     readOnlyHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
   };
 }
 
