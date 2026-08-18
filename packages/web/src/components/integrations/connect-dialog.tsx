@@ -195,14 +195,17 @@ function DecisionPane({
 
   return (
     <div className="flex min-h-0 flex-col gap-5 overflow-y-auto p-6">
-      <header className="flex flex-col gap-2">
+      <header className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <DialogTitle className="font-display text-xl text-ink">
             Set up your {title} connection
           </DialogTitle>
           {service.connected && <Badge variant="success">Connected</Badge>}
         </div>
-        <div className="space-y-1">
+        {/* `space-y-2`, not `space-y-1`: `leading-relaxed` puts ~9px between
+            the lines INSIDE a wrapped paragraph, so a 4px gap between two
+            paragraphs made them read as one block with erratic spacing. */}
+        <div className="space-y-2">
           {summaryLines(disclosure, title).map((line) => (
             <p key={line} className="text-sm leading-relaxed text-muted">
               {line}
@@ -340,11 +343,12 @@ function FactCard({
   return (
     <section
       aria-label={heading}
-      className="flex flex-col gap-2 rounded-md border border-line bg-paper p-3"
+      className="flex flex-col gap-3 rounded-md border border-line bg-paper p-3"
     >
       <div className="rounded bg-ink-wash p-2">{illustration}</div>
       <h3 className="text-sm font-medium text-ink">{heading}</h3>
-      <div className="space-y-1">
+      {/* Same rhythm rule as the header's summary lines. */}
+      <div className="space-y-2">
         {lines.map((line) => (
           <p key={line} className="text-xs leading-relaxed text-muted">
             {line}
@@ -420,7 +424,10 @@ function PreviewPane({
   disclosure: ReturnType<typeof toolDisclosure>;
 }) {
   return (
-    <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto border-t border-line bg-ink-wash p-5 lg:border-l lg:border-t-0">
+    // `lg:overflow-hidden` hands scrolling to the list below rather than to
+    // this column, so the two cannot both scroll. Below `lg` the panes are
+    // stacked and the dialog's own scroller owns the movement.
+    <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto border-t border-line bg-ink-wash p-5 lg:overflow-hidden lg:border-l lg:border-t-0">
       <div className="flex items-center gap-2">
         <ServiceIcon slug={slug} label={title} />
         <div className="min-w-0">
@@ -434,7 +441,12 @@ function PreviewPane({
       </div>
 
       {disclosure.kind === "known" ? (
-        <ScrollArea className="mt-4 max-h-72 lg:max-h-[26rem]">
+        // `lg:flex-1` instead of a fixed cap: 26rem left the list short of the
+        // column on a tall dialog, so the pane ended in dead space with the
+        // list still scrolling. `min-h-0` is what lets a flex child shrink
+        // below its content. The `max-h-72` stays for the stacked layout,
+        // where there is no column height to fill.
+        <ScrollArea className="mt-4 max-h-72 lg:max-h-none lg:min-h-0 lg:flex-1">
           <ul className="space-y-1 pr-2">
             {[...disclosure.asking, ...disclosure.running].map((action) => (
               <li
