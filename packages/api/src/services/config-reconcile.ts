@@ -30,9 +30,12 @@ import type { InstanceConfig, ToolPolicyRule } from "../config/instance-config.j
 import { InstanceConfigError } from "../config/instance-config.js";
 import {
   ensureOrg,
+  getSsoTeamGroups,
+  normalizeSsoTeamGroups,
   renameOrg,
   setOrgModelPreferences,
   setOrgMemberRole,
+  setSsoTeamGroups,
   LAST_ADMIN_ERROR,
 } from "./org.js";
 import {
@@ -131,6 +134,42 @@ async function reconcileOrgPass(
   sourceService?: SourceService,
 ): Promise<void> {
   const org = await ensureOrg(db, sourceService);
+
+  // Team-sync group allowlist — declared under auth.sso.teams.groups, not
+  // org.*, but it lands on the org row because the login sync reads it per
+  // login (`auth/provisioning.ts`) and Settings edits the same column. The
+  // file wins at every boot, the same rule as org.features below.
+  const declaredGroups = cfg.auth?.sso?.teams?.groups;
+  if (declaredGroups !== undefined) {
+    // Normalize BEFORE the comparison, because the column always holds the
+    // normalized list. Compared raw, a duplicate in the file makes the
+    // lengths differ at every boot, and the line below prints forever with
+    // nothing actually changing. The file validator already enforces the
+    // same path shape (`config/instance-config.ts`), so a throw here means
+    // the two guards drifted apart — that is a config the api must not
+    // half-apply, and the error must name the file.
+    let declared: string[];
+    try {
+      declared = normalizeSsoTeamGroups(declaredGroups);
+    } catch (e) {
+      throw new InstanceConfigError(
+        `${configFileLabel(configPath)}: auth.sso.teams.groups: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    const stored = await getSsoTeamGroups(db, org.id);
+    const changed =
+      stored === null ||
+      stored.length !== declared.length ||
+      stored.some((path, i) => path !== declared[i]);
+    if (changed) {
+      console.warn(
+        `[config-reconcile] auth.sso.teams.groups set to [${declared.join(", ")}] from ` +
+          `${configFileLabel(configPath)}. The file wins at every boot, so a group list edited ` +
+          `in Settings does not last. To control the list in Settings, remove the key from that file.`,
+      );
+    }
+    await setSsoTeamGroups(db, org.id, declared);
+  }
 
   const orgCfg = cfg.org;
   if (!orgCfg) return;

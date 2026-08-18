@@ -149,8 +149,10 @@ export interface ReconcileOptions {
   /** Sub-group name that grants admin on the parent team, e.g. `admins`. */
   adminGroupName: string;
   /**
-   * Top-level group paths this instance mirrors, from
-   * `auth.sso.teams.groups`. Required, and an empty list mirrors nothing.
+   * Top-level group paths this instance mirrors, from the org row
+   * (`orgs.sso_team_groups`) — Settings edits it per group, and the boot
+   * reconciler writes `auth.sso.teams.groups` over it when the file
+   * declares the key. Required, and an empty list mirrors nothing.
    *
    * There is no "mirror everything" value on purpose. A deployment that
    * names no group cannot have decided which groups are teams, and an
@@ -568,8 +570,8 @@ export async function reportTeamSyncState(
   if (opts.enabled && opts.ssoConfigured && opts.mirroredGroups.length === 0) {
     console.warn(
       `team sync: the ssoTeamSync feature is on and no group is listed, so no team will be created. ` +
-        `Add the group paths to auth.sso.teams.groups in ${configFileLabel(opts.configPath)}, ` +
-        `then restart the api.`,
+        `Add the groups in Settings → Organization → Teams, or to auth.sso.teams.groups in ` +
+        `${configFileLabel(opts.configPath)} and restart the api.`,
     );
   }
 
@@ -590,11 +592,11 @@ export async function reportTeamSyncState(
       .map((row) => `'${row.name}' (${row.externalId ?? "unknown group"})`)
       .join(", ");
     console.warn(
-      `team sync: ${unlisted.length} team(s) mirror a group that auth.sso.teams.groups does not ` +
-        `list: ${named}. Valet keeps each team and its members, and updates neither. To mirror a ` +
-        `group again, add its path to auth.sso.teams.groups in ${configFileLabel(opts.configPath)} ` +
-        `and restart the api. To edit or delete the team by hand, turn team sync off in Settings ` +
-        `first.`,
+      `team sync: ${unlisted.length} team(s) mirror a group the allowlist does not list: ${named}. ` +
+        `Valet keeps each team and its members, and updates neither. To mirror a group again, turn ` +
+        `it on in Settings → Organization → Teams, or add its path to auth.sso.teams.groups in ` +
+        `${configFileLabel(opts.configPath)} and restart the api. To edit or delete the team by ` +
+        `hand, turn team sync off in Settings first.`,
     );
   }
 

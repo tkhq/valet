@@ -33,17 +33,11 @@ export interface AuthConfig {
     teamAssertedClaim: string;
     /** Sub-group name that grants admin on the parent team, e.g. `admins`. */
     teamAdminGroup: string;
-    /**
-     * Top-level group paths this instance mirrors, e.g. `["/platform"]`.
-     * Undefined means the deployment named no group, and the sync then
-     * mirrors NOTHING — see `ReconcileOptions.mirroredGroups`.
-     *
-     * No environment variable sets this one. It comes from
-     * `auth.sso.teams.groups` in `valet.yaml`, because a list is awkward in
-     * an env var and because the boot validator uses it to reject a group
-     * that would collide with a declared team name.
-     */
-    teamGroups?: string[];
+    // The mirrored-group allowlist is NOT here. It lives on the org row
+    // (`orgs.sso_team_groups`), where Settings edits it and the boot
+    // reconciler writes `auth.sso.teams.groups` over it at every start
+    // (`services/config-reconcile.ts`). The login sync and the boot report
+    // read that column, so this boot-time snapshot has no reader.
   };
   social: {
     google?: {

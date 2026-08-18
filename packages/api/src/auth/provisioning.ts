@@ -10,7 +10,7 @@ import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
-import { ensureOrg, findOrg, getOrgFeatures } from "../services/org.js";
+import { ensureOrg, findOrg, getOrgFeatures, getSsoTeamGroups } from "../services/org.js";
 import { readTeamClaim, reconcileIdpTeams } from "../services/team-sync.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
@@ -381,9 +381,13 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
         userId: data.user.id,
         claim,
         adminGroupName: oidc.teamAdminGroup,
-        // No declared list means no group was named, which mirrors nothing.
-        // The boot report names the fix (`services/team-sync.ts`).
-        mirroredGroups: oidc.teamGroups ?? [],
+        // The allowlist lives on the org row, where Settings edits it and
+        // the boot reconciler asserts `auth.sso.teams.groups` over it at
+        // every start (`services/config-reconcile.ts`). Read per login,
+        // like the gate above, so a Settings edit needs no restart. NULL
+        // means no list was ever set, which mirrors nothing — the boot
+        // report names the fix (`services/team-sync.ts`).
+        mirroredGroups: (await getSsoTeamGroups(db, org.id)) ?? [],
         configPath,
       });
     } catch (err) {

@@ -226,6 +226,14 @@ auth:
 it gives the validator the one thing a runtime check cannot have: the set of
 team names the identity provider will ask for, before any row exists.
 
+The file is one of two writers. The list itself lives on the org row
+(`orgs.sso_team_groups`), where an org admin edits it per group in Settings →
+Organization → Teams and the login sync reads it per login. When the file
+declares `groups`, the boot reconciler writes the file's list over the column
+at every start and prints one line naming the file when the value changes —
+the same file-wins rule as `org.features`. A deployment that wants the list
+managed in Settings leaves the key out of the file.
+
 It is optional in the YAML and fail-closed at run time. Omit it and the sync
 mirrors NOTHING — not every group, which was the earlier behaviour. The two
 readings differ only for a deployment that named no group, and that

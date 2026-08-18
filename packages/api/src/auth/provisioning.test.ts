@@ -13,7 +13,7 @@ import { orgMembers, orgs, users, invites, teams, teamMembers } from "../schema/
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createInvite } from "./invites.js";
-import { ensureOrg, setOrgFeatures } from "../services/org.js";
+import { ensureOrg, setOrgFeatures, setSsoTeamGroups } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
@@ -536,7 +536,7 @@ describe("buildAuthHooks", () => {
   describe("provisionUser (team sync)", () => {
     const ssoUser = { id: "existing", email: "existing@x.test" };
 
-    function ssoConfig(overrides: { teamGroups?: string[] } = {}): AuthConfig {
+    function ssoConfig(): AuthConfig {
       return baseConfig({
         oidc: {
           issuer: "https://idp.test/realms/valet",
@@ -547,17 +547,15 @@ describe("buildAuthHooks", () => {
           teamClaim: "groups",
           teamAssertedClaim: "groups_asserted",
           teamAdminGroup: "admins",
-          // The allowlist. Declared in every test that expects a team,
-          // because an absent list mirrors nothing.
-          teamGroups: ["/platform", "/research"],
-          ...overrides,
         },
       });
     }
 
     /**
      * Puts the deployment in the state an operator reaches deliberately:
-     * an org exists and `ssoTeamSync` is on. Returns the org id.
+     * an org exists, `ssoTeamSync` is on, and the allowlist names the
+     * groups these tests mirror. The list lives on the org row, where
+     * Settings and the boot reconciler write it — not in the AuthConfig.
      *
      * Nothing here is the default. A test that does not call this is testing
      * a deployment that set nothing, which must mirror nothing.
@@ -565,6 +563,7 @@ describe("buildAuthHooks", () => {
     async function enableMirroring(): Promise<string> {
       const org = await ensureOrg(db);
       await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      await setSsoTeamGroups(db, org.id, ["/platform", "/research"]);
       return org.id;
     }
 
@@ -652,7 +651,7 @@ describe("buildAuthHooks", () => {
   describe("provisionUser — the ssoTeamSync gate", () => {
     const ssoUser = { id: "existing", email: "existing@x.test" };
 
-    function ssoConfig(teamGroups: string[] = ["/platform", "/research"]): AuthConfig {
+    function ssoConfig(): AuthConfig {
       return baseConfig({
         oidc: {
           issuer: "https://idp.test/realms/valet",
@@ -663,7 +662,6 @@ describe("buildAuthHooks", () => {
           teamClaim: "groups",
           teamAssertedClaim: "groups_asserted",
           teamAdminGroup: "admins",
-          teamGroups,
         },
       });
     }
@@ -734,6 +732,7 @@ describe("buildAuthHooks", () => {
     it("mirrors a listed group once the gate is on", async () => {
       const org = await ensureOrg(db);
       await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      await setSsoTeamGroups(db, org.id, ["/platform", "/research"]);
 
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
       await provisionUser({
@@ -749,8 +748,9 @@ describe("buildAuthHooks", () => {
       // have nothing to do with Valet.
       const org = await ensureOrg(db);
       await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      await setSsoTeamGroups(db, org.id, ["/platform"]);
 
-      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(["/platform"]), credentialStore });
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
       await provisionUser({
         user: ssoUser,
         userInfo: {
@@ -765,10 +765,12 @@ describe("buildAuthHooks", () => {
     });
 
     it("mirrors nothing when the gate is on and no group is listed", async () => {
+      // The column is never set here, so it reads NULL — the never-set
+      // state a fresh deployment is in. Same answer as an empty list.
       const org = await ensureOrg(db);
       await setOrgFeatures(db, org.id, { ssoTeamSync: true });
 
-      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig([]), credentialStore });
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
       await provisionUser({
         user: ssoUser,
         userInfo: { groups: ["/platform", "/research"], groups_asserted: "true" },
@@ -821,6 +823,7 @@ describe("buildAuthHooks", () => {
       // row it created before the gate went off is the row it adopts again.
       const org = await ensureOrg(db);
       await setOrgFeatures(db, org.id, { ssoTeamSync: true });
+      await setSsoTeamGroups(db, org.id, ["/platform", "/research"]);
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
 
       await provisionUser({

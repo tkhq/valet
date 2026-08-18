@@ -225,6 +225,7 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     name: "Acme",
     createdAt: 0,
     features: { organizations, ssoTeamSync: false },
+    ssoTeamGroups: [],
     callerRole,
   };
 }

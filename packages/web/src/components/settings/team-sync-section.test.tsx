@@ -13,17 +13,36 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 let callerRole: "admin" | "member" = "admin";
 let ssoTeamSync = false;
 let sso: { name: string } | null = { name: "Keycloak" };
+let ssoTeamGroups: string[] = [];
+/** `origin: "idp"` team rows the group list unions in by `externalId`. */
+let mirroredTeamPaths: string[] = [];
 
 const mutateAsync = vi.fn().mockResolvedValue({});
 let patchError: Error | null = null;
 
 vi.mock("~/api/settings", () => ({
   useOrg: () => ({
-    data: { features: { organizations: true, ssoTeamSync }, callerRole },
+    data: { features: { organizations: true, ssoTeamSync }, ssoTeamGroups, callerRole },
     isLoading: false,
     error: null,
   }),
   usePatchOrg: () => ({ mutateAsync, isPending: false, error: patchError }),
+  useTeams: () => ({
+    data: {
+      teams: mirroredTeamPaths.map((path, i) => ({
+        id: `team_${i}`,
+        orgId: "org_1",
+        name: path.slice(1),
+        origin: "idp",
+        externalId: path,
+        createdAt: 1,
+        memberCount: 1,
+        callerRole: null,
+      })),
+    },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 vi.mock("~/api/auth-config", () => ({
@@ -36,6 +55,8 @@ beforeEach(() => {
   callerRole = "admin";
   ssoTeamSync = false;
   sso = { name: "Keycloak" };
+  ssoTeamGroups = [];
+  mirroredTeamPaths = [];
   patchError = null;
   mutateAsync.mockClear();
 });
@@ -96,6 +117,70 @@ describe("TeamSyncSection writes", () => {
     patchError = new Error("features.ssoTeamSync must be a boolean");
     render(<TeamSyncSection />);
     expect(screen.getByText("features.ssoTeamSync must be a boolean")).toBeTruthy();
+  });
+
+  it("turns one group's sync off, keeping the others", async () => {
+    ssoTeamSync = true;
+    ssoTeamGroups = ["/platform", "/research"];
+    render(<TeamSyncSection />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "Sync /platform" }));
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ ssoTeamGroups: ["/research"] }),
+    );
+  });
+
+  it("offers a dormant mirror's group as an off switch, and turns it back on", async () => {
+    // The team exists (origin idp) but its group left the allowlist. The
+    // list is the union, so the group still has a row — off — and turning
+    // it on adds the path back.
+    ssoTeamSync = true;
+    ssoTeamGroups = ["/platform"];
+    mirroredTeamPaths = ["/platform", "/legacy"];
+    render(<TeamSyncSection />);
+
+    const dormant = screen.getByRole("switch", { name: "Sync /legacy" });
+    expect(dormant.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(dormant);
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ ssoTeamGroups: ["/platform", "/legacy"] }),
+    );
+  });
+
+  it("adds a new group path from the input", async () => {
+    ssoTeamSync = true;
+    ssoTeamGroups = ["/platform"];
+    render(<TeamSyncSection />);
+
+    fireEvent.change(screen.getByLabelText("Group path"), { target: { value: "/research" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ ssoTeamGroups: ["/platform", "/research"] }),
+    );
+  });
+
+  it("says so when the added group is already listed, and writes nothing", () => {
+    ssoTeamSync = true;
+    ssoTeamGroups = ["/platform"];
+    render(<TeamSyncSection />);
+
+    fireEvent.change(screen.getByLabelText("Group path"), { target: { value: "/platform" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+
+    expect(mutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByText(/already listed/)).toBeTruthy();
+  });
+
+  it("rejects a bad path in place, naming the shape, and writes nothing", () => {
+    ssoTeamSync = true;
+    render(<TeamSyncSection />);
+
+    fireEvent.change(screen.getByLabelText("Group path"), { target: { value: "platform" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+
+    expect(mutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByText(/top-level group path/)).toBeTruthy();
   });
 
   it("keeps a failed PATCH from escaping as an unhandled rejection", async () => {
