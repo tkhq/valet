@@ -41,6 +41,7 @@ import type {
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
 import { Button, Input } from "~/components/primitives";
+import { CopyButton } from "~/components/session/tool-renderers/tool-shell";
 import {
   useDeliverIdentityLink,
   useIdentityLinks,
@@ -100,7 +101,10 @@ function CodePanel({
   return (
     <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3">
       {intro}
-      <p className="break-all font-mono text-xs text-ink">{value}</p>
+      <div className="flex items-center gap-1">
+        <p className="break-all font-mono text-xs text-ink">{value}</p>
+        <CopyButton getText={() => value} label="Copy" className="shrink-0 opacity-100" />
+      </div>
       {note !== undefined && <p className="text-xs leading-relaxed text-muted">{note}</p>}
       <ExpiryLine seconds={expiresInSeconds} />
     </div>
@@ -341,8 +345,7 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
               <span className="font-medium text-ink">
                 {delivery.displayName ? `@${delivery.displayName}` : "you"}
               </span>{" "}
-              on {title}. Reply to that message with exactly this line — the DM never contains
-              it:
+              on {title}. Reply with:
             </p>
           }
           value={delivery.replyText}

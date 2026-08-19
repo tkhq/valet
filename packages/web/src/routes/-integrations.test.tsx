@@ -1067,7 +1067,8 @@ describe("IntegrationsPage — org-provided pairing", () => {
     expect(screen.getByText("@conner")).toBeTruthy();
     // The full copyable reply line, not a bare code the transport ignores.
     expect(screen.getByText("link VLT-1234")).toBeTruthy();
-    expect(screen.getByText(/the DM never contains it/)).toBeTruthy();
+    expect(screen.getByText(/Reply with:/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
   });
 
