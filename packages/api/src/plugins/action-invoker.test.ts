@@ -387,6 +387,136 @@ describe("buildActionInvoker", () => {
     expect(result.ok).toBe(true);
     expect(fixture.calls()).toBe(1);
   });
+
+  it("hands the ORG credential to a handler when the run owner is a member (owner escalation)", async () => {
+    // The gate above only proves the availability check opens. It says
+    // nothing about the token the handler actually receives, because
+    // `countingAction` never reads one — which is how an org-provided
+    // service could pass the gate and then fail inside the action.
+    //
+    // `requires.orgCredential` means the org credential IS the integration
+    // (integration-availability rule 5): a member has nothing of their own
+    // to connect, and a session resolves it by escalating from the user
+    // owner to the org (`engine/host.ts`'s slack branch). A workflow tool
+    // node runs as the workflow's owner — a user — so without the same
+    // escalation every org-provided service reads null here and every such
+    // node fails with the plugin's own missing-credential message.
+    let seenToken: string | null = null;
+    const action: PluginAction = {
+      id: "gated.whoami",
+      name: "whoami",
+      description: "reports the token it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        seenToken = (await ctx.credentials.get())?.accessToken ?? null;
+        return { success: true, data: { token: seenToken } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "gated", { type: "bot_token", accessToken: "org-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["gated", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "gated", action: "whoami", params: {}, invocationId: "workflow:r1:gated-token" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
+    expect(seenToken).toBe("org-tok");
+  });
+
+  it("prefers the run owner's OWN credential over the org one", async () => {
+    // Escalation is a fallback, never an override: a personal credential for
+    // the same service still wins, the same precedence `engine/host.ts` gives
+    // a personal Slack token over the org bot token.
+    let seenToken: string | null = null;
+    const action: PluginAction = {
+      id: "gated.whoami",
+      name: "whoami",
+      description: "reports the token it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        seenToken = (await ctx.credentials.get())?.accessToken ?? null;
+        return { success: true, data: { token: seenToken } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "gated", { type: "bot_token", accessToken: "org-tok" });
+    store.seed({ type: "user", id: "u1" }, "gated", { type: "bot_token", accessToken: "my-own-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["gated", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "gated", action: "whoami", params: {}, invocationId: "workflow:r1:gated-own" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "my-own-tok" } });
+    expect(seenToken).toBe("my-own-tok");
+  });
+
+  it("does NOT escalate to the org for a service the org does not provide", async () => {
+    // A plain personal service (no `requires.orgCredential`) resolves to
+    // "manual", not "org". Reading another owner's credential for it would
+    // be a privilege escalation, so the miss must stay a miss.
+    let seenToken: string | null = null;
+    const action: PluginAction = {
+      id: "personal.whoami",
+      name: "whoami",
+      description: "reports the token it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        seenToken = (await ctx.credentials.get())?.accessToken ?? null;
+        return { success: true, data: { token: seenToken } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "personal", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "personal",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "personal", { type: "api_key", apiKey: "someone-elses" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["personal", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "personal", action: "whoami", params: {}, invocationId: "workflow:r1:personal" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: null } });
+    expect(seenToken).toBeNull();
+  });
 });
 
 /**
