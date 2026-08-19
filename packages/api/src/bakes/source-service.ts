@@ -132,8 +132,15 @@ export function baseImageRefFor(backend: string, sourceId: string, identityHash:
   }
 }
 
-/** Deletes stale bake IMAGES (never the `bakes` ROWS — those are history). */
-export type RetentionFn = (backend: string, imageRefs: string[]) => Promise<void>;
+/** Deletes stale bake IMAGES (never the `bakes` ROWS — those are history).
+ * Returns true when every image is settled (deleted, already gone, or
+ * skipped by design); false when an attempted delete failed — the cache
+ * ceiling then keeps the victim's row so its bytes stay counted. */
+export type RetentionFn = (backend: string, imageRefs: string[]) => Promise<boolean>;
+
+/** Minimum gap between retention passes triggered by FAILED bakes of one
+ * source. Bounds the org-wide ceiling scan while a registry stays unhealthy. */
+const FAILED_RETENTION_COOLDOWN_MS = 5 * 60_000;
 
 function dockerRmi(spawnFn: SpawnFn, imageRef: string): Promise<void> {
   return new Promise((resolvePromise) => {
@@ -150,27 +157,30 @@ function dockerRmi(spawnFn: SpawnFn, imageRef: string): Promise<void> {
 }
 
 /** Deletes one image from a Docker Registry HTTP API v2 endpoint (HEAD for
- * the digest, then DELETE by digest). Best-effort — every failure is
- * swallowed. External (non-insecure) registries are skipped with a warning
- * because no credential is wired. */
-async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch, insecure: boolean): Promise<void> {
+ * the digest, then DELETE by digest). Never throws. Returns true when the
+ * image is SETTLED — deleted, already gone, or unreachable by design (bad
+ * ref; external registry, skipped with a warning because no credential is
+ * wired). Returns false when a delete was attempted and failed, so the
+ * caller keeps its accounting for the still-present image. */
+async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch, insecure: boolean): Promise<boolean> {
   const parsed = parseRegistryImageRef(imageRef);
-  if (!parsed) return;
+  if (!parsed) return true;
   const { host, name } = parsed;
   const headRes = await headRegistryManifest(imageRef, fetchImpl, insecure);
-  if (!headRes) return;
+  if (!headRes) return false; // network error — image state unknown
   const digest = headRes.headers.get("docker-content-digest");
-  if (!digest) return;
+  if (!digest) return true; // 404 — already gone
   if (!insecure) {
     console.warn(
       `prebuild retention: external registry retention requires credentials — skipping delete of ${imageRef}`,
     );
-    return;
+    return true;
   }
   try {
-    await fetchImpl(`http://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
+    const res = await fetchImpl(`http://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
+    return res.ok || res.status === 404;
   } catch {
-    // best-effort — see docblock
+    return false;
   }
 }
 
@@ -181,18 +191,25 @@ export function defaultRetention(
   registryPushHost?: string,
 ): RetentionFn {
   return async (backend, imageRefs) => {
-    if (imageRefs.length === 0) return;
+    if (imageRefs.length === 0) return true;
     if (backend === "docker") {
+      // A local-daemon rmi failure is indistinguishable from an
+      // already-removed image, and the docker backend has no shared disk to
+      // protect — report settled.
       for (const imageRef of imageRefs) {
         await dockerRmi(spawnFn, imageRef);
       }
-      return;
+      return true;
     }
     if (backend === "kubernetes") {
+      let allSettled = true;
       for (const imageRef of imageRefs) {
-        await registryManifestDelete(pushRefFor(imageRef, registryPushHost), fetchImpl, registryInsecure);
+        const settled = await registryManifestDelete(pushRefFor(imageRef, registryPushHost), fetchImpl, registryInsecure);
+        allSettled &&= settled;
       }
+      return allSettled;
     }
+    return true;
   };
 }
 
@@ -422,6 +439,8 @@ export class SourceService {
    * `enforceCacheCeiling` after each per-source retention pass. */
   private readonly cacheBudgetGb: number;
   private readonly activeBuildIds = new Map<string, string>();
+  /** Last failed-bake retention pass per source (`FAILED_RETENTION_COOLDOWN_MS`). */
+  private readonly failedRetentionAt = new Map<string, number>();
   private readonly registryInsecure: boolean;
   private readonly registryPushHost: string | undefined;
   private pollTimer?: ReturnType<typeof setInterval>;
@@ -835,9 +854,7 @@ export class SourceService {
         } catch {
           // best-effort — size measurement never blocks the push transition
         }
-        await this.applyRetention(row.sourceId, builder.backend);
-        const src = (await this.db.select().from(imageSources).where(eq(imageSources.id, row.sourceId)).limit(1))[0];
-        if (src) await this.enforceCacheCeiling(src.orgId, builder.backend);
+        await this.runPostBakeRetention(row.sourceId, builder.backend);
         await this.cascadeBaseChildren(row.sourceId);
       } else {
         await this.db
@@ -847,14 +864,30 @@ export class SourceService {
         // Retention must run on failure too. A registry at ENOSPC fails
         // every push; when retention only ran on the pushed transition, a
         // full registry could never drain itself (agents-dev, 2026-08-19).
-        try {
-          await this.applyRetention(row.sourceId, builder.backend);
-          const src = (await this.db.select().from(imageSources).where(eq(imageSources.id, row.sourceId)).limit(1))[0];
-          if (src) await this.enforceCacheCeiling(src.orgId, builder.backend);
-        } catch (err) {
-          console.warn(`bake retention after failed push (source ${row.sourceId}):`, err);
+        // Cooldown-limited per source: repeated failures while the registry
+        // stays unhealthy must not re-run the org-wide ceiling scan on
+        // every poll.
+        const last = this.failedRetentionAt.get(row.sourceId) ?? 0;
+        if (this.now() - last >= FAILED_RETENTION_COOLDOWN_MS) {
+          this.failedRetentionAt.set(row.sourceId, this.now());
+          await this.runPostBakeRetention(row.sourceId, builder.backend);
         }
       }
+    }
+  }
+
+  /**
+   * Per-source retention + org cache ceiling, shared by the pushed and
+   * failed transitions of `syncActiveBuilds`. Never throws — a retention
+   * failure must not block the status transition that already happened.
+   */
+  private async runPostBakeRetention(sourceId: string, backend: string): Promise<void> {
+    try {
+      await this.applyRetention(sourceId, backend);
+      const src = (await this.db.select().from(imageSources).where(eq(imageSources.id, sourceId)).limit(1))[0];
+      if (src) await this.enforceCacheCeiling(src.orgId, backend);
+    } catch (err) {
+      console.warn(`bake retention (source ${sourceId}):`, err);
     }
   }
 
@@ -941,10 +974,21 @@ export class SourceService {
 
         remaining.delete(victim.id);
         // Skip the image delete when any OTHER remaining bake (kept or pending
-        // eviction) still references the same ref — but always delete the row.
+        // eviction) still references the same ref — the row alone is deleted.
         const refStillUsed = rows.some((r) => remaining.has(r.id) && r.imageRef === victim.imageRef);
         if (!refStillUsed) {
-          await this.retention(backend, [victim.imageRef]);
+          const settled = await this.retention(backend, [victim.imageRef]);
+          if (!settled) {
+            // The image is still in the registry. Deleting the row anyway
+            // would erase its bytes from this accounting while the disk
+            // stays full — the ceiling would undercount forever. Keep the
+            // row and stop this pass; the registry is unhealthy, so further
+            // deletes are futile until the next pass.
+            console.warn(
+              `prebuild cache ceiling: image delete failed for ${victim.imageRef}; keeping its bake row and ending this pass`,
+            );
+            break;
+          }
         }
         await this.db.delete(bakes).where(eq(bakes.id, victim.id));
         total -= victim.sizeBytes ?? 0;
