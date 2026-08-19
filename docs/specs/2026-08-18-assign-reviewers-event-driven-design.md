@@ -47,10 +47,13 @@ installer fills in (`filters[].fromInput`) — the template knows it needs the
 filter, and only the installer knows the repository. Without that filter the
 subscription matches every repository the webhook reaches.
 
-The comment subscription cannot be narrowed further. GitHub fires
-`issue_comment` for issues as well as pull requests, and the catalog declares
-no filter that separates them, so every comment in the repository starts a
-run. The run decides: a comment on an issue reaches a `stop` with outcome
+The comment subscription cannot be narrowed to pull requests. GitHub fires
+`issue_comment` for issues as well as pull requests, and the payload's only
+marker is the `issue.pull_request` object — no scalar a catalog filter can
+read — so every comment in the repository starts a run. (The catalog has
+since gained a `comment_body` text filter — see the 2026-08-19 code-review
+mention-trigger design — but this template must read every comment to catch
+a decline, so it declares no text filter.) The run decides: a comment on an issue reaches a `stop` with outcome
 `success` and does nothing. Deliberately not a failure — a failed run per
 issue comment fills the run list with red that names no fixable problem. A
 run that carried no recognizable event at all is still a failure, and still
