@@ -355,8 +355,6 @@ export class WorkflowClient extends SmokeClient {
       // Type guards: skip malformed nodes
       if (typeof service !== 'string' || typeof action !== 'string') continue;
 
-      const inputs = data.inputs as Record<string, any>;
-
       // GitHub destructive patterns
       if (service === 'github') {
         if (action === 'dismiss_pull_request_review' || action === 'dismiss_reviews') {
