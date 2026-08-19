@@ -175,6 +175,47 @@ describe("Composer — image intake", () => {
     expect(screen.queryByAltText("pasted.png")).toBeNull();
   });
 
+  it("calls useSendPrompt with attachments when images are attached", async () => {
+    renderComposer();
+    const textarea = screen.getByPlaceholderText(/Send a message/i);
+    pasteFiles(textarea, [png("shot.png")]);
+    await waitFor(() => expect(screen.getByAltText("shot.png")).toBeDefined());
+    fireEvent.change(textarea, { target: { value: "look at this" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    const arg = sendMutateAsync.mock.calls[0][0] as {
+      text: string;
+      attachments?: Array<{ kind: string; name: string; mimeType: string; url: string }>;
+    };
+    expect(arg.text).toBe("look at this");
+    expect(arg.attachments).toHaveLength(1);
+    expect(arg.attachments![0]).toMatchObject({
+      kind: "image",
+      name: "shot.png",
+      mimeType: "image/png",
+    });
+    expect(arg.attachments![0].url.startsWith("data:image/png")).toBe(true);
+  });
+
+  it("records attachments on the optimistic addUserMessage", async () => {
+    renderComposer();
+    const textarea = screen.getByPlaceholderText(/Send a message/i);
+    pasteFiles(textarea, [png("shot.png")]);
+    await waitFor(() => expect(screen.getByAltText("shot.png")).toBeDefined());
+    fireEvent.change(textarea, { target: { value: "look at this" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(addUserMessage).toHaveBeenCalled());
+    const args = addUserMessage.mock.calls[0] as [string, string, string, unknown];
+    expect(args[0]).toBe("orchestrator:user-1");
+    expect(args[1]).toBe("look at this");
+    expect(args[2]).toBe("thread-1");
+    expect(args[3]).toHaveLength(1);
+    expect((args[3] as Array<{ kind: string; name: string }>)[0]).toMatchObject({
+      kind: "image",
+      name: "shot.png",
+    });
+  });
+
   it("keeps the images when the send fails, so the user can retry", async () => {
     sendMutateAsync.mockRejectedValueOnce(new Error("network down"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
