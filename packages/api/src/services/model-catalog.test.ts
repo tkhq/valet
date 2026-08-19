@@ -13,7 +13,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { setOrgModelPreferences } from "./org.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
-import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { buildOrgCatalog, catalogValidIds, preferenceModelResolvable } from "./model-catalog.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 
 const orgId = "org1";
@@ -263,6 +263,26 @@ describe("model catalog", () => {
       } finally {
         vi.unstubAllEnvs();
       }
+    });
+  });
+
+  describe("preferenceModelResolvable", () => {
+    it("treats a no-row OpenRouter registry id as resolvable", () => {
+      expect(preferenceModelResolvable("openrouter", "moonshotai/kimi-k2.6", undefined)).toBe(true);
+    });
+
+    it("rejects a no-row OpenRouter id that is not in the registry", () => {
+      expect(preferenceModelResolvable("openrouter", "vendor/never-heard-of-it", undefined)).toBe(
+        false,
+      );
+    });
+
+    it("rejects a stale Anthropic registry id", () => {
+      expect(preferenceModelResolvable("anthropic", "not-a-real-model", undefined)).toBe(false);
+    });
+
+    it("accepts a live Anthropic registry id with no row", () => {
+      expect(preferenceModelResolvable("anthropic", "claude-haiku-4-5", undefined)).toBe(true);
     });
   });
 });

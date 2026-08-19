@@ -29,6 +29,7 @@ describe("GET /api/me", () => {
       orgId: "local-org",
       orgRole: "admin",
       defaultModel: null,
+      modelPreferences: [],
     });
   });
 
@@ -203,5 +204,157 @@ describe("PATCH /api/me", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+describe("PATCH /api/me modelPreferences", () => {
+  it("accepts an ordered list of known model ids (bare + namespaced) and returns it on GET", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelPreferences: ["anthropic/claude-haiku-4-5", "claude-sonnet-4-5"],
+        }),
+      });
+      expect(patch.status).toBe(200);
+      const patched = (await patch.json()) as MeResponse;
+      expect(patched.modelPreferences).toEqual([
+        "anthropic/claude-haiku-4-5",
+        "claude-sonnet-4-5",
+      ]);
+
+      const res = await fetch(`${api.baseUrl}/api/me`);
+      const body = (await res.json()) as MeResponse;
+      expect(body.modelPreferences).toEqual([
+        "anthropic/claude-haiku-4-5",
+        "claude-sonnet-4-5",
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("writes name and modelPreferences in one request", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Ada",
+          modelPreferences: ["claude-haiku-4-5"],
+        }),
+      });
+      expect(patch.status).toBe(200);
+      const body = (await patch.json()) as MeResponse;
+      expect(body.name).toBe("Ada");
+      expect(body.modelPreferences).toEqual(["claude-haiku-4-5"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("clears the user list when passed []", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+
+      await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelPreferences: ["claude-haiku-4-5"] }),
+      });
+
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelPreferences: [] }),
+      });
+      expect(patch.status).toBe(200);
+      const body = (await patch.json()) as MeResponse;
+      expect(body.modelPreferences).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("400s when modelPreferences is not an array", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelPreferences: "claude-haiku-4-5" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("array");
+    expect(body.error).toContain("JSON array");
+  });
+
+  it("400s when a modelPreferences entry is not a string", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelPreferences: ["ok", 42] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when a modelPreferences entry is unknown/inactive, naming the id", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelPreferences: ["not-a-model"] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not-a-model");
+    expect(body.error).toContain("GET /api/models");
+  });
+
+  it("400s when modelPreferences exceeds the 20-entry cap", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+      const prefs = Array(21).fill("claude-haiku-4-5");
+
+      const res = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelPreferences: prefs }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("20");
+      expect(body.error).toContain("Remove extra entries");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("400s when a modelPreferences entry exceeds 255 chars", async () => {
+    api = await bootTestApi();
+    const longId = "a".repeat(256);
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelPreferences: [longId] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("255");
+    expect(body.error).toContain("GET /api/models");
   });
 });

@@ -91,6 +91,14 @@ export const users = pgTable("user", {
   // Nullable user preference feeding `EngineHost`'s model override seam;
   // null falls back to the host default (split-settings design, decision 9).
   defaultModel: text("default_model"),
+  // Ordered list of namespaced model ids (e.g. `"anthropic/claude-opus-4"`)
+  // the USER has opted into, most-preferred first. Mirrors
+  // `orgs.modelPreferences` in shape/semantics; consulted by
+  // `EngineHost.resolveModelForBuild` AFTER `defaultModel` and BEFORE the
+  // org preference list (restores the v1 per-user ordered `modelPreferences`
+  // that regressed in dev-v2). jsonb, default `[]`; read/written as JSON in
+  // `services/user.ts` (`getUserModelPreferences`/`setUserModelPreferences`).
+  modelPreferences: jsonb("model_preferences").notNull().default([]),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────

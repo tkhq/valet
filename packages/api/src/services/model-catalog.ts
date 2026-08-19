@@ -36,7 +36,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { getOrgModelPreferences } from "./org.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "./openrouter.js";
-import type { LlmProviderModel } from "../schema/index.js";
+import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type { ModelInfo } from "../wire/types.js";
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
@@ -59,13 +59,46 @@ const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
 /** True when an org credential exists at `llm:{rowId}` — the sole
  * resolvability signal for a custom (`openai_compatible`) row (no env
  * fallback, mirrors `resolveModelSpec`'s throw condition). Exported so
- * `engine/host.ts`'s `orgPreferredModel` can reuse this exact check instead
+ * `engine/host.ts`'s `preferredModel` can reuse this exact check instead
  * of re-deriving "is this row usable" logic that could drift from the
  * catalog's own `active` definition. */
 export async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
-  return stored !== null;
+  const key = stored?.apiKey;
+  // Match `resolveModelSpec`'s `orgKey`: empty / whitespace-only is missing.
+  return typeof key === "string" && key.trim() !== "";
+}
+
+function isRegistryKind(namespace: string): namespace is KnownCatalogKind {
+  return (KNOWN_KINDS as readonly string[]).includes(namespace);
+}
+
+/**
+ * True when this preference still resolves as a model. Used by the
+ * new-session walker so a stale id is skipped instead of throwing in
+ * `resolveModelObject`.
+ *
+ * Custom rows: the declared `models` list. OpenRouter: row selection or
+ * the pi-ai registry (and the registry alone when there is no row).
+ * Anthropic/OpenAI/Google: the pi-ai registry, with or without a row.
+ */
+export function preferenceModelResolvable(
+  namespace: string,
+  modelId: string,
+  row: LlmProviderRow | undefined,
+): boolean {
+  if (row?.kind === "openai_compatible") {
+    return row.models.some((m) => m.id === modelId);
+  }
+  if (namespace === "openrouter" || row?.kind === "openrouter") {
+    if (row?.models.some((m) => m.id === modelId)) return true;
+    return openrouterRegistry().has(modelId);
+  }
+  if (isRegistryKind(namespace)) {
+    return getModels(namespace).some((m) => m.id === modelId);
+  }
+  return false;
 }
 
 function knownKindEntries(
@@ -231,4 +264,19 @@ export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
     if (namespace === "anthropic") ids.add(modelId);
   }
   return ids;
+}
+
+/** Type guard for a JSON preference list (`string[]`) on `/api/me` and `/preferences`. */
+export function isModelPreferenceList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/** Ids in `ids` that are missing from the active catalog set. */
+export function unknownActiveCatalogIds(ids: readonly string[], validIds: Set<string>): string[] {
+  return ids.filter((id) => !validIds.has(id));
+}
+
+/** User-facing 400 copy when a preference id is missing from the active catalog. */
+export function unknownActiveCatalogIdsError(unknownIds: readonly string[]): string {
+  return `unknown or inactive model id(s): ${unknownIds.join(", ")}. Pick an active model from GET /api/models.`;
 }

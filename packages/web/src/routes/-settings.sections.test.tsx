@@ -33,6 +33,7 @@ let meData: {
   orgId: string;
   orgRole: "admin" | "member";
   defaultModel: string | null;
+  modelPreferences: string[];
 } | undefined = {
   id: "u1",
   email: "me@example.com",
@@ -42,6 +43,7 @@ let meData: {
   orgId: "org_1",
   orgRole: "admin",
   defaultModel: null,
+  modelPreferences: [],
 };
 
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined = {
@@ -136,6 +138,7 @@ describe("ProfilePage", () => {
       orgId: "org_1",
       orgRole: "admin",
       defaultModel: null,
+      modelPreferences: [],
     };
     orgData = { callerRole: "admin", features: { organizations: false } };
   });
@@ -200,6 +203,7 @@ describe("AssistantPage", () => {
       orgId: "org_1",
       orgRole: "admin",
       defaultModel: null,
+      modelPreferences: [],
     };
   });
 
@@ -209,9 +213,71 @@ describe("AssistantPage", () => {
     expect(screen.getByLabelText(/Personality/)).toBeTruthy();
     expect(
       screen.getByText(
-        "New conversations start on this model; you can still switch per-thread in the chat header.",
+        "New conversations start on this model. You can still switch per thread in the chat header. If you clear this field, Valet uses the fallback list below.",
       ),
     ).toBeTruthy();
+  });
+
+  it("adding a model to the fallback list PATCHes modelPreferences", async () => {
+    const user = userEvent.setup();
+    render(<AssistantPage />);
+    const search = screen.getByRole("combobox", { name: "Search models to add" });
+    await user.type(search, "haiku");
+    await user.click(screen.getByText("Claude Haiku 4.5"));
+    expect(patchMeMutate).toHaveBeenCalledWith(
+      { modelPreferences: ["claude-haiku-4-5"] },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("moving a fallback row down PATCHes the reordered list", async () => {
+    const user = userEvent.setup();
+    meData = {
+      ...meData!,
+      modelPreferences: ["claude-haiku-4-5", "claude-sonnet-4-5"],
+    };
+    render(<AssistantPage />);
+    await user.click(screen.getByRole("button", { name: "Move Claude Haiku 4.5 down" }));
+    expect(patchMeMutate).toHaveBeenCalledWith(
+      { modelPreferences: ["claude-sonnet-4-5", "claude-haiku-4-5"] },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("removing a fallback row PATCHes the list without it", async () => {
+    const user = userEvent.setup();
+    meData = {
+      ...meData!,
+      modelPreferences: ["claude-haiku-4-5", "claude-sonnet-4-5"],
+    };
+    render(<AssistantPage />);
+    await user.click(screen.getByRole("button", { name: "Remove Claude Haiku 4.5" }));
+    expect(patchMeMutate).toHaveBeenCalledWith(
+      { modelPreferences: ["claude-sonnet-4-5"] },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("shows the mutation error when a fallback-list save fails", async () => {
+    const user = userEvent.setup();
+    patchMeMutate.mockImplementation((_body, opts?: { onError?: (err: Error) => void }) => {
+      opts?.onError?.(new Error("save failed"));
+    });
+    render(<AssistantPage />);
+    const search = screen.getByRole("combobox", { name: "Search models to add" });
+    await user.type(search, "haiku");
+    await user.click(screen.getByText("Claude Haiku 4.5"));
+    expect(screen.getByText("save failed")).toBeTruthy();
+  });
+
+  it("hides the add typeahead when the fallback list is at the 20-entry cap", () => {
+    meData = {
+      ...meData!,
+      modelPreferences: Array.from({ length: 20 }, (_, i) => `pref-${i}`),
+    };
+    render(<AssistantPage />);
+    expect(screen.queryByRole("combobox", { name: "Search models to add" })).toBeNull();
+    expect(screen.getByText("This list can hold 20 models. Remove one to add another.")).toBeTruthy();
   });
 
   it("the model combobox filters to curated sonnet entries on 'sonnet'", () => {

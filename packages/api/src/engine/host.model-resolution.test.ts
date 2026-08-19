@@ -22,6 +22,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
 import { setOrgModelPreferences } from "../services/org.js";
+import { setUserModelPreferences } from "../services/user.js";
 import { NoCredentialsError } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -375,6 +376,7 @@ describe("EngineHost model resolution wiring", () => {
   afterEach(async () => {
     await api?.cleanup();
     api = undefined;
+    vi.unstubAllEnvs();
   });
 
   it("new-session precedence: orgPreferences[0] used when no user default", async () => {
@@ -474,6 +476,170 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("claude-haiku-4-5");
   });
 
+  it("new-session precedence: user modelPreferences[0] used before orgPreferences when no user default", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await setUserModelPreferences(db, "local-user", ["anthropic/claude-opus-4-1"]);
+    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    // Namespaced input keeps the namespace as the session's model.id — same
+    // pattern as the "orgPreferences[0] used when no user default" test.
+    expect(session.options.model.id).toBe("anthropic/claude-opus-4-1");
+  });
+
+  it("new-session precedence: user defaultModel wins over user modelPreferences", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.update(users).set({ defaultModel: "claude-sonnet-4-5" }).where(eq(users.id, "local-user"));
+    await setUserModelPreferences(db, "local-user", ["anthropic/claude-opus-4-1"]);
+    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-haiku-4-5"]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("claude-sonnet-4-5");
+  });
+
+  it("new-session precedence: user modelPreferences falls through a disabled provider to the next entry", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+    await setUserModelPreferences(db, "local-user", [
+      `${row.id}/m1`,
+      "anthropic/claude-haiku-4-5",
+    ]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+  });
+
+  it("new-session precedence: user modelPreferences all inactive falls through to org preferences", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+    await setUserModelPreferences(db, "local-user", [`${row.id}/m1`]);
+    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+  });
+
+  it("new-session precedence: user modelPreferences skips a custom model removed from the provider list", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineCredentials } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [
+        { id: "m1", name: "M1", contextWindow: 8000 },
+        { id: "m2", name: "M2", contextWindow: 8000 },
+      ],
+    });
+    await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
+      type: "api_key",
+      apiKey: "org-custom",
+    });
+    await updateLlmProvider(db, "local-org", row.id, {
+      models: [{ id: "m2", name: "M2", contextWindow: 8000 }],
+    });
+    await setUserModelPreferences(db, "local-user", [
+      `${row.id}/m1`,
+      "anthropic/claude-haiku-4-5",
+    ]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+  });
+
+  it("new-session precedence: user modelPreferences uses a zero-config OpenRouter id (no provider row)", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    vi.stubEnv("OPENROUTER_API_KEY", "env-openrouter");
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await setUserModelPreferences(db, "local-user", [
+      "openrouter/moonshotai/kimi-k2.6",
+      "anthropic/claude-haiku-4-5",
+    ]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.modelSpec).toBe("openrouter/moonshotai/kimi-k2.6");
+    expect(session.options.model.id).toBe("moonshotai/kimi-k2.6");
+  });
+
+  it("new-session precedence: user modelPreferences skips a stale known-kind registry id", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await setUserModelPreferences(db, "local-user", [
+      "anthropic/not-a-real-model",
+      "anthropic/claude-haiku-4-5",
+    ]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+  });
+
+  it("new-session precedence: user modelPreferences skips a custom row whose org key is whitespace-only", async () => {
+    api = await bootTestApi();
+    const { db, engineCredentials } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
+      type: "api_key",
+      apiKey: "   ",
+    });
+    await setUserModelPreferences(db, "local-user", [
+      `${row.id}/m1`,
+      "anthropic/claude-haiku-4-5",
+    ]);
+
+    const session = await defaultAssistantSessionFor(api.providers, 
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+  });
+
   it("restore still throws when the persisted model's provider was disabled after the fact", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineCredentials } = api.providers;
@@ -549,6 +715,45 @@ describe("EngineHost model resolution wiring", () => {
     });
     expect(restored.options.modelSpec).toBe(spec);
     expect(restored.options.model.id).toBe("m1"); // wire id, restored verbatim
+    expect(restored.options.model.provider).toBe(row.id);
+  });
+
+  it("restore-no-clobber: persisted model wins over user modelPreferences", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineCredentials } = api.providers;
+
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
+      type: "api_key",
+      apiKey: "org-custom",
+    });
+    const spec = `${row.id}/m1`;
+
+    const session = await engineHost.sessionFor("restore-user-prefs", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await session.setModel(spec);
+    expect(session.options.modelSpec).toBe(spec);
+
+    engineHost.evictAll();
+    await setUserModelPreferences(db, "local-user", ["anthropic/claude-opus-4-1"]);
+    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
+
+    const restored = await engineHost.sessionFor("restore-user-prefs", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    expect(restored.options.modelSpec).toBe(spec);
+    expect(restored.options.model.id).toBe("m1");
     expect(restored.options.model.provider).toBe(row.id);
   });
 });

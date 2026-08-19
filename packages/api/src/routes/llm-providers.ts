@@ -23,7 +23,7 @@ import { completeSimple, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin, getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";
-import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { buildOrgCatalog, catalogValidIds, isModelPreferenceList, unknownActiveCatalogIds, unknownActiveCatalogIdsError } from "../services/model-catalog.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
@@ -168,7 +168,7 @@ llmProvidersRouter.put("/preferences", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  if (!Array.isArray(body.preferences) || !body.preferences.every((p) => typeof p === "string")) {
+  if (!isModelPreferenceList(body.preferences)) {
     return c.json({ error: "preferences must be an array of strings" }, 400);
   }
 
@@ -176,9 +176,9 @@ llmProvidersRouter.put("/preferences", async (c) => {
   // back-compat for Anthropic (services/model-catalog.ts's catalogValidIds).
   const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
   const validIds = catalogValidIds(entries);
-  const unknownIds = body.preferences.filter((id) => !validIds.has(id));
+  const unknownIds = unknownActiveCatalogIds(body.preferences, validIds);
   if (unknownIds.length > 0) {
-    return c.json({ error: `unknown or inactive model id(s): ${unknownIds.join(", ")}` }, 400);
+    return c.json({ error: unknownActiveCatalogIdsError(unknownIds) }, 400);
   }
 
   await setOrgModelPreferences(db, user.orgId, body.preferences);
@@ -378,7 +378,7 @@ llmProvidersRouter.delete("/:id/key", async (c) => {
   // Custom (openai_compatible) providers have NO env fallback — deleting the
   // key backing `orgPreferences[0]` leaves new sessions with nothing to fall
   // back to until the array is rewritten (same failure `EngineHost.
-  // orgPreferredModel`'s active-provider walk now guards against on the
+  // preferredModel`'s active-provider walk now guards against on the
   // read side). Known kinds are exempt: they may still resolve via an env
   // var, and even when no env var is configured that's a deployment-time
   // fact the read-side fall-through already covers, not something this

@@ -564,6 +564,7 @@ describe("pg app schema + migrations", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
       { table: "skill_sources", column: "created_by" },
       { table: "orgs", column: "sso_team_groups" },
+      { table: "user", column: "model_preferences" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {

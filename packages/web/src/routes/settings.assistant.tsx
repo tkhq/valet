@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { ModelCombobox } from "~/components/settings/model-combobox";
+import { UserModelPreferencesSection } from "~/components/settings/user-model-preferences-section";
 import { IdentityFields } from "~/components/assistant/identity-fields";
 import { Spinner } from "~/components/primitives";
 import { useOrchestratorInfo } from "~/api/orchestrator";
@@ -45,7 +46,7 @@ export function AssistantPage() {
 
       <FieldRow
         label="Default model"
-        hint="New conversations start on this model; you can still switch per-thread in the chat header."
+        hint="New conversations start on this model. You can still switch per thread in the chat header. If you clear this field, Valet uses the fallback list below."
       >
         <ModelCombobox
           value={meQ.data?.defaultModel ?? null}
@@ -53,6 +54,10 @@ export function AssistantPage() {
           onClear={() => patchMe.mutate({ defaultModel: null })}
         />
       </FieldRow>
+
+      <div className="border-t border-line pt-4">
+        <UserModelPreferencesSection />
+      </div>
     </Section>
   );
 }

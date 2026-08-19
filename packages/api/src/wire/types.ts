@@ -2068,13 +2068,26 @@ export interface MeResponse {
   orgId: string;
   orgRole: "admin" | "member";
   defaultModel: string | null;
+  /**
+   * Ordered per-user model preferences, most-preferred first. Entries are
+   * usually namespaced catalog ids (`anthropic/claude-haiku-4-5`); bare
+   * Anthropic ids (`claude-haiku-4-5`) are also valid back-compat and
+   * mean the same model. Distinct from `defaultModel`: `defaultModel` wins
+   * for new sessions when set; this list is the fallback order consulted
+   * after it and BEFORE the org preference list. `[]` when unset.
+   */
+  modelPreferences: string[];
 }
 
-/** Whitelisted fields only — unknown keys 400. `defaultModel: null` clears the override. */
+/**
+ * Whitelisted fields only — unknown keys 400. `defaultModel: null` clears
+ * the override. `modelPreferences: []` clears the user's ordered list.
+ */
 export interface PatchMeRequest {
   name?: string;
   avatarUrl?: string;
   defaultModel?: string | null;
+  modelPreferences?: string[];
 }
 
 export type PatchMeResponse = MeResponse;

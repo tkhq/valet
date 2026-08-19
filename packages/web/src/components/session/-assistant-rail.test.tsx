@@ -163,6 +163,7 @@ function me(orgRole: "admin" | "member" = "member"): MeResponse {
     orgId: "org_1",
     orgRole,
     defaultModel: null,
+    modelPreferences: [],
   };
 }
 

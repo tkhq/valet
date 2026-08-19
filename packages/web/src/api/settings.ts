@@ -10,6 +10,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -71,6 +72,69 @@ export const qkSettings = {
   /** One manifest per requested app name; `""` is the server default name. */
   slackApp: (name?: string) => ["settings", "slackApp", name ?? ""] as const,
 };
+
+/** Shared across every `usePatchMe()` instance so overlapping default-model
+ * and preference writes see each other in `isMutating`. */
+export const patchMeMutationKey = ["settings", "patchMe"] as const;
+export const putLlmProviderPreferencesMutationKey = ["settings", "putLlmProviderPreferences"] as const;
+
+/** Serializes overlapping list edits so an earlier PATCH/PUT cannot overwrite
+ * a later one. Distinct from `mutationKey` — TanStack scopes by this id. */
+const patchMeMutationScope = { id: "settings.patchMe" } as const;
+const putLlmProviderPreferencesMutationScope = {
+  id: "settings.putLlmProviderPreferences",
+} as const;
+
+/**
+ * TanStack Query 5.90 runs `onSettled` while this mutation is still
+ * `pending`, so `isMutating` still counts it. Invalidate when at most this
+ * one remains — a zero check never fires after the last write.
+ */
+function noOtherMutationsPending(qc: QueryClient, mutationKey: readonly string[]): boolean {
+  return qc.isMutating({ mutationKey: [...mutationKey] }) <= 1;
+}
+
+export function sameStringList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
+/** Optimistic `/api/me` cache write used by list add/remove/reorder. */
+export function mergePatchMe(previous: MeResponse, body: PatchMeRequest): MeResponse {
+  return {
+    ...previous,
+    ...(body.name !== undefined ? { name: body.name } : {}),
+    ...(body.avatarUrl !== undefined ? { avatarUrl: body.avatarUrl } : {}),
+    ...("defaultModel" in body ? { defaultModel: body.defaultModel ?? null } : {}),
+    ...(body.modelPreferences !== undefined ? { modelPreferences: body.modelPreferences } : {}),
+  };
+}
+
+/**
+ * Roll back only fields this mutation wrote, and only if the cache still
+ * holds that optimistic value. A later overlapping PATCH must not lose its
+ * write when an earlier one fails.
+ */
+export function revertPatchMe(
+  current: MeResponse,
+  previous: MeResponse,
+  body: PatchMeRequest,
+): MeResponse {
+  const next = { ...current };
+  if (body.name !== undefined && current.name === body.name) next.name = previous.name;
+  if (body.avatarUrl !== undefined && current.avatarUrl === body.avatarUrl) {
+    next.avatarUrl = previous.avatarUrl;
+  }
+  if ("defaultModel" in body && current.defaultModel === (body.defaultModel ?? null)) {
+    next.defaultModel = previous.defaultModel;
+  }
+  if (
+    body.modelPreferences !== undefined &&
+    sameStringList(current.modelPreferences, body.modelPreferences)
+  ) {
+    next.modelPreferences = previous.modelPreferences;
+  }
+  return next;
+}
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
@@ -166,10 +230,37 @@ export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMe
 
 export function usePatchMe() {
   const qc = useQueryClient();
-  return useMutation<PatchMeResponse, Error, PatchMeRequest>({
+  return useMutation<
+    PatchMeResponse,
+    Error,
+    PatchMeRequest,
+    { previous: MeResponse | undefined }
+  >({
+    mutationKey: patchMeMutationKey,
+    scope: patchMeMutationScope,
     mutationFn: (body) => api.patchMe(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.me() });
+    onMutate: async (body) => {
+      // Optimistic: list edits (add/remove/reorder) read from this cache.
+      // Without a sync write, two quick edits both send the same stale array.
+      await qc.cancelQueries({ queryKey: qkSettings.me() });
+      const previous = qc.getQueryData<MeResponse>(qkSettings.me());
+      if (previous) {
+        qc.setQueryData<MeResponse>(qkSettings.me(), mergePatchMe(previous, body));
+      }
+      return { previous };
+    },
+    onError: (_err, body, context) => {
+      if (!context?.previous) return;
+      const current = qc.getQueryData<MeResponse>(qkSettings.me());
+      if (!current) return;
+      qc.setQueryData(qkSettings.me(), revertPatchMe(current, context.previous, body));
+    },
+    onSettled: () => {
+      // Skip refetch while another PATCH /api/me is in flight — it would
+      // overwrite that mutation's optimistic list.
+      if (noOtherMutationsPending(qc, patchMeMutationKey)) {
+        qc.invalidateQueries({ queryKey: qkSettings.me() });
+      }
     },
   });
 }
@@ -290,11 +381,42 @@ export function useTestLlmProvider() {
 
 export function usePutLlmProviderPreferences() {
   const qc = useQueryClient();
-  return useMutation<PutLlmProviderPreferencesResponse, Error, PutLlmProviderPreferencesRequest>({
+  return useMutation<
+    PutLlmProviderPreferencesResponse,
+    Error,
+    PutLlmProviderPreferencesRequest,
+    { previous: GetLlmProviderPreferencesResponse | undefined }
+  >({
+    mutationKey: putLlmProviderPreferencesMutationKey,
+    scope: putLlmProviderPreferencesMutationScope,
     mutationFn: (body) => api.putLlmProviderPreferences(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviderPreferences() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    onMutate: async (body) => {
+      await qc.cancelQueries({ queryKey: qkSettings.llmProviderPreferences() });
+      const previous = qc.getQueryData<GetLlmProviderPreferencesResponse>(
+        qkSettings.llmProviderPreferences(),
+      );
+      if (previous) {
+        qc.setQueryData<GetLlmProviderPreferencesResponse>(qkSettings.llmProviderPreferences(), {
+          preferences: body.preferences,
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, body, context) => {
+      if (!context?.previous) return;
+      const current = qc.getQueryData<GetLlmProviderPreferencesResponse>(
+        qkSettings.llmProviderPreferences(),
+      );
+      if (!current) return;
+      if (sameStringList(current.preferences, body.preferences)) {
+        qc.setQueryData(qkSettings.llmProviderPreferences(), context.previous);
+      }
+    },
+    onSettled: () => {
+      if (noOtherMutationsPending(qc, putLlmProviderPreferencesMutationKey)) {
+        qc.invalidateQueries({ queryKey: qkSettings.llmProviderPreferences() });
+        qc.invalidateQueries({ queryKey: qkSettings.models() });
+      }
     },
   });
 }
