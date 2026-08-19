@@ -323,7 +323,12 @@ export function Composer({
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
     // the server's persisted copy.
-    const localId = addUserMessage(sessionId, t, threadId);
+    const localId = addUserMessage(
+      sessionId,
+      t,
+      threadId,
+      pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined,
+    );
     try {
       const res = await send.mutateAsync({
         text: t,

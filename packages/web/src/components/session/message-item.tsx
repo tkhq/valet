@@ -1,5 +1,5 @@
 import { Bot, User as UserIcon } from "lucide-react";
-import type { MessagePart } from "@valet/api/wire";
+import type { MessagePart, PromptImageAttachment } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
@@ -56,6 +56,9 @@ export function MessageItem({
             )}
           </div>
           <div className="space-y-2">
+            {isUser && message.attachments && message.attachments.length > 0 && (
+              <UserAttachmentStrip attachments={message.attachments} />
+            )}
             {message.parts.length === 0 && message.content && (
               <TextBlock text={message.content} />
             )}
@@ -121,6 +124,26 @@ function PartView({ part }: { part: MessagePart }) {
 function TextBlock({ text }: { text: string }) {
   if (!text) return null;
   return <Markdown>{text}</Markdown>;
+}
+
+/**
+ * Read-only thumbnail strip for a user message's image attachments. Mirrors
+ * the composer's `<ComposerImageStrip>` visually (small rounded thumbs on a
+ * flex-wrap row), minus the remove control — sent messages are immutable.
+ */
+function UserAttachmentStrip({ attachments }: { attachments: PromptImageAttachment[] }) {
+  return (
+    <div className="flex flex-wrap gap-2 mb-1.5" aria-label="Attached images">
+      {attachments.map((a, i) => (
+        <img
+          key={i}
+          src={a.url}
+          alt={a.name}
+          className="max-h-40 rounded-lg border border-[--border]"
+        />
+      ))}
+    </div>
+  );
 }
 
 function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
