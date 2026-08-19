@@ -8,7 +8,8 @@ import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 // (packages/api/src/orchestrator/persona.ts); this skill is the deeper
 // guide for curation sessions, dedup, journal distillation, and link
 // hygiene. Revived from the v1 memory-compaction plugin's skill, rewritten
-// for the v2 tool surface (five tools; no mem_move/mem_links, no prune cap).
+// for the v2 tool surface (seven mem_* tools, derived link graph, no
+// prune cap).
 const memoryMd = readFileSync(fileURLToPath(new URL("../skills/memory/SKILL.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {

@@ -8,17 +8,19 @@
  * colons are rejected in stored paths, which is also what keeps writes
  * from ever crossing scope: a `team:...` path fails `normalizePath`).
  *
- * Scope fence (decision 12 — do NOT build here): the links graph /
- * `mem_move` / `mem_links`, expiry sweeps (the `expires` column exists and
- * `searchFiles` excludes expired rows — that's the entire expiry story
- * this phase), relevance boosting, shareable-export filtering, reranking,
- * and tag-similarity hints.
+ * Scope fence (decision 12 — do NOT build here): expiry sweeps (the
+ * `expires` column exists and `searchFiles` excludes expired rows —
+ * that's the entire expiry story this phase), relevance boosting,
+ * shareable-export filtering, reranking, and tag-similarity hints.
+ * `moveFile`/`linksForFile` were originally behind this fence too; they
+ * are now built (on the derived graph — still no stored links table).
  */
 import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
 import { NotFoundError, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
+import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
 import { memoryFiles, teamMembers, type MemoryFileRow } from "../schema/index.js";
 import { listTeamsForUser } from "./teams.js";
 import {
@@ -328,6 +330,151 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
         eq(memoryFiles.path, normalized),
       ),
     );
+}
+
+// ─── moveFile ──────────────────────────────────────────────────────────
+
+export interface MoveFileParams {
+  from: string;
+  to: string;
+}
+
+export interface MoveFileResult {
+  file: MemoryFileRow;
+  /** Paths of other files whose markdown links were rewritten to `to`. */
+  referencersUpdated: string[];
+  warnings: string[];
+}
+
+/**
+ * Renames a memory file and rewrites inbound markdown links in every other
+ * file of the same scope (rewritten to the bundle-rooted `/to` form). The
+ * row moves in place — metadata, pin state, and `type` all carry over
+ * unchanged. `type` staying put is deliberate: metadata is sticky
+ * everywhere else, and a silent directory-based reclassify would be the
+ * one exception — the result warns instead when the new directory implies
+ * a different type. Own-scope only, like every write.
+ */
+export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFileParams): Promise<MoveFileResult> {
+  assertWritablePath(params.from);
+  assertWritablePath(params.to);
+  const from = normalizePath(params.from);
+  const to = normalizePath(params.to);
+  if (from === to) {
+    throw new ValidationError("from and to are the same path — nothing to move");
+  }
+
+  const rows = await db
+    .select()
+    .from(memoryFiles)
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+  const source = rows.find((r) => r.path === from);
+  if (!source) {
+    throw new NotFoundError("memory file", from);
+  }
+  if (rows.some((r) => r.path === to)) {
+    throw new ValidationError(`${to} already exists — merge into it with mem_patch, or remove it first`);
+  }
+
+  const referencers: { row: MemoryFileRow; content: string }[] = [];
+  for (const row of rows) {
+    if (row.path === from) continue;
+    const { content, rewrote } = rewriteLinkTargets(row.path, row.content, from, to);
+    if (rewrote) referencers.push({ row, content });
+  }
+
+  const now = Date.now();
+  await db.transaction(async (tx) => {
+    await tx
+      .update(memoryFiles)
+      .set({
+        path: to,
+        title: extractTitle(source.content, to),
+        version: source.version + 1,
+        updatedAt: now,
+        actorUserId: scope.actorUserId,
+      })
+      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, from)));
+    for (const ref of referencers) {
+      await tx
+        .update(memoryFiles)
+        .set({ content: ref.content, version: ref.row.version + 1, updatedAt: now, actorUserId: scope.actorUserId })
+        .where(
+          and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, ref.row.path)),
+        );
+    }
+  });
+
+  const warnings: string[] = [];
+  if (defaultTypeForPath(to) !== source.type) {
+    warnings.push(`type remains '${source.type}' — reclassify with a metadata-only write if the new location implies a different type`);
+  }
+
+  const movedRows = await db
+    .select()
+    .from(memoryFiles)
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, to)))
+    .limit(1);
+  const moved = movedRows[0];
+  if (!moved) {
+    throw new NotFoundError("memory file", to);
+  }
+  return { file: moved, referencersUpdated: referencers.map((r) => r.row.path).sort(), warnings };
+}
+
+// ─── linksForFile ──────────────────────────────────────────────────────
+
+export interface MemoryLinkEdge {
+  path: string;
+  title: string;
+  type: string;
+  /** Outbound only: the target resolves to no stored file. */
+  phantom?: boolean;
+}
+
+export interface FileLinksResult {
+  path: string;
+  outbound: MemoryLinkEdge[];
+  inbound: MemoryLinkEdge[];
+}
+
+/**
+ * One file's edges in the derived link graph: outbound (markdown-link
+ * targets in its body, phantom targets included) and inbound (files whose
+ * links resolve to it). Derived per call from stored content, same as
+ * `GET /api/memory/graph` — V2 keeps no links table. Own-scope only, the
+ * same reasoning as `/tree` and `/graph`.
+ */
+export async function linksForFile(db: AppDb, scope: MemoryScope, path: string): Promise<FileLinksResult> {
+  const normalized = normalizePath(path);
+  const rows = await db
+    .select()
+    .from(memoryFiles)
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+  const byPath = new Map(rows.map((r) => [r.path, r]));
+  const source = byPath.get(normalized);
+  if (!source) {
+    throw new NotFoundError("memory file", path);
+  }
+
+  const outbound: MemoryLinkEdge[] = [];
+  for (const target of extractLinkTargets(normalized, source.content)) {
+    const resolved = byPath.has(target) ? target : byPath.has(`${target}.md`) ? `${target}.md` : target;
+    const row = byPath.get(resolved);
+    if (row) {
+      outbound.push({ path: resolved, title: row.title, type: row.type });
+    } else if (isPathShaped(resolved)) {
+      outbound.push({ path: resolved, title: "", type: "", phantom: true });
+    }
+  }
+
+  const inbound: MemoryLinkEdge[] = rows
+    .filter((r) => r.path !== normalized)
+    .filter((r) => extractLinkTargets(r.path, r.content).some((t) => t === normalized || `${t}.md` === normalized))
+    .map((r) => ({ path: r.path, title: r.title, type: r.type }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  return { path: normalized, outbound, inbound };
 }
 
 // ─── readFile (file or virtual directory index) ───────────────────────

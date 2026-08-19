@@ -4,7 +4,17 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
-import { listFiles, patchFile, readFile, removeFile, searchFiles, writeFile, type MemoryScope } from "./memory.js";
+import {
+  linksForFile,
+  listFiles,
+  moveFile,
+  patchFile,
+  readFile,
+  removeFile,
+  searchFiles,
+  writeFile,
+  type MemoryScope,
+} from "./memory.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -262,6 +272,113 @@ describe("memory service", () => {
       // a defensive backstop, but this specific input no longer exercises it.
       const scope = scopeFor("u1");
       await expect(searchFiles(db, scope, { query: '"foo' })).resolves.not.toThrow();
+    });
+  });
+
+  describe("moveFile", () => {
+    it("moves a file and rewrites inbound links in referencing files", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "people/alice.md", content: "# Alice\n\nFacts about Alice.\n" });
+      await writeFile(db, scope, {
+        path: "journal/2026-08-19.md",
+        content: "Met [Alice](/people/alice.md) and [Alice again](../people/alice.md).\n",
+      });
+      await writeFile(db, scope, { path: "notes/unrelated.md", content: "No links here.\n" });
+
+      const result = await moveFile(db, scope, { from: "people/alice.md", to: "people/alice-smith.md" });
+      expect(result.file.path).toBe("people/alice-smith.md");
+      expect(result.referencersUpdated).toEqual(["journal/2026-08-19.md"]);
+
+      const journal = await readFile(db, scope, "journal/2026-08-19.md");
+      if (journal.kind !== "file") throw new Error("expected file");
+      expect(journal.file.content).toBe(
+        "Met [Alice](/people/alice-smith.md) and [Alice again](/people/alice-smith.md).\n",
+      );
+      // Referencer version bumped by the rewrite.
+      expect(journal.file.version).toBe(2);
+
+      await expect(readFile(db, scope, "people/alice.md")).rejects.toThrow(/not found|memory file/i);
+    });
+
+    it("keeps type and pin state, bumps version, and warns when the new directory implies a different type", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "people/carol.md", content: "# Carol\n", pinned: true });
+
+      const result = await moveFile(db, scope, { from: "people/carol.md", to: "workflows/carol.md" });
+      expect(result.file.type).toBe("person");
+      expect(result.file.pinned).toBe(true);
+      expect(result.file.version).toBe(2);
+      expect(result.warnings.join(" ")).toContain("type remains 'person'");
+    });
+
+    it("recomputes a basename-derived title for the new path", async () => {
+      const scope = scopeFor("u1");
+      // No H1: title falls back to the basename, so it must follow the move.
+      await writeFile(db, scope, { path: "notes/old-name.md", content: "plain body, no heading\n" });
+      const result = await moveFile(db, scope, { from: "notes/old-name.md", to: "notes/new-name.md" });
+      expect(result.file.title).toBe("new-name");
+    });
+
+    it("refuses a missing source, an occupied destination, and a same-path move", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "a\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "b\n" });
+
+      await expect(moveFile(db, scope, { from: "notes/missing.md", to: "notes/x.md" })).rejects.toThrow(/not found/i);
+      await expect(moveFile(db, scope, { from: "notes/a.md", to: "notes/b.md" })).rejects.toThrow(/already exists/);
+      await expect(moveFile(db, scope, { from: "notes/a.md", to: "notes/a.md" })).rejects.toThrow(/same path/);
+    });
+
+    it("never rewrites links in another scope's files", async () => {
+      await writeFile(db, scopeFor("u1"), { path: "notes/target.md", content: "# Target\n" });
+      await writeFile(db, scopeFor("u2"), {
+        path: "notes/ref.md",
+        content: "[t](/notes/target.md)\n",
+      });
+
+      await moveFile(db, scopeFor("u1"), { from: "notes/target.md", to: "notes/moved.md" });
+      const other = await readFile(db, scopeFor("u2"), "notes/ref.md");
+      if (other.kind !== "file") throw new Error("expected file");
+      expect(other.file.content).toBe("[t](/notes/target.md)\n");
+    });
+  });
+
+  describe("linksForFile", () => {
+    it("reports outbound edges (phantoms included) and inbound edges", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, {
+        path: "projects/valet/overview.md",
+        content: "# Overview\n\nSee [Alice](/people/alice.md) and [missing](/notes/missing.md).\n",
+      });
+      await writeFile(db, scope, { path: "people/alice.md", content: "# Alice\n" });
+      await writeFile(db, scope, {
+        path: "journal/2026-08-19.md",
+        content: "Worked on [overview](/projects/valet/overview.md).\n",
+      });
+
+      const result = await linksForFile(db, scope, "projects/valet/overview.md");
+      expect(result.outbound).toEqual([
+        { path: "people/alice.md", title: "Alice", type: "person" },
+        { path: "notes/missing.md", title: "", type: "", phantom: true },
+      ]);
+      expect(result.inbound).toEqual([
+        { path: "journal/2026-08-19.md", title: "2026-08-19", type: "journal-entry" },
+      ]);
+    });
+
+    it("tolerates extension drift on both directions", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "[b](/notes/b)\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "# B\n" });
+
+      const a = await linksForFile(db, scope, "notes/a.md");
+      expect(a.outbound.map((e) => e.path)).toEqual(["notes/b.md"]);
+      const b = await linksForFile(db, scope, "notes/b.md");
+      expect(b.inbound.map((e) => e.path)).toEqual(["notes/a.md"]);
+    });
+
+    it("throws NotFound for a path with no file behind it", async () => {
+      await expect(linksForFile(db, scopeFor("u1"), "notes/nope.md")).rejects.toThrow(/not found/i);
     });
   });
 });

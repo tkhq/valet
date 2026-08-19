@@ -10,9 +10,9 @@ Load this skill when the task is *about the memory store itself*: writing new me
 ## Mental model (30 seconds)
 
 - Memory is a bundle of typed markdown files. Metadata (`type`, `tags`, `description`, `resource`, `sensitivity`, `origin`, `expires`, `pinned`) lives in columns; the frontmatter you see on `mem_read` is a **projection** — set metadata via `mem_write` params, never by writing YAML into the body. Embedded frontmatter is stripped on write.
-- The tool surface is five tools: `mem_write`, `mem_patch`, `mem_read`, `mem_search`, `mem_rm`. There is no move tool and no links tool — a rename is a manual three-step (see the reorganization playbook).
+- The tool surface is seven tools: `mem_write`, `mem_patch`, `mem_read`, `mem_search`, `mem_move`, `mem_links`, `mem_rm`.
 - Directories imply a default `type`: `preferences/` → preference, `projects/` → project-note, `workflows/` → workflow, `journal/` → journal-entry, `people/` → person; anything else → note. Paths cap at 5 levels — flatten under `projects/<name>/` rather than nesting deeper.
-- Markdown links between memory files build a derived graph, rendered in the memory UI. Relative (`../people/alice.md`) and absolute (`/projects/valet/overview.md`) targets both resolve.
+- Markdown links between memory files build a derived graph — there is no stored links table; edges are read from your markdown on demand. Relative (`../people/alice.md`) and absolute (`/projects/valet/overview.md`) targets both resolve. `mem_links` shows one file's inbound and outbound edges; the memory UI renders the whole graph.
 - Pinned files load in full at orchestrator wake, alongside recent journal entries and the memory index. Pins cost context every session — keep them few and short.
 - Reads union in team memories under a virtual `team:{teamId}/` prefix. You can read those; writes only ever touch your own scope.
 
@@ -34,7 +34,8 @@ On update, an omitted param means *unchanged* — a body-only `mem_write` can't 
 - Add a `## Related` section linking cluster members: a project's files to each other, workflows to the projects that use them. Meaning lives in the surrounding prose — say *why* each file is related, not just that it is.
 - **People hubs**: one `people/<name>.md` per person (`type: person`, `resource:` their email or handle), then link the hub from every file that mentions them. Durable facts about a person live in the hub, not scattered across journal entries.
 - **Journal entries link every file they touch.** The journal is the chronological spine: a day's entry that links what it changed makes the session reconstructable later.
-- A link to a file that doesn't exist yet is either a TODO stub — create the file — or a typo — fix the link. End a curation pass with only phantoms you can name and justify.
+- Use `mem_links` to orient on a topic's cluster before working on it, and to check inbound edges before a move or delete.
+- A phantom in `mem_links` output (a link target with no file behind it) is either a TODO stub — create the file — or a typo — fix the link. End a curation pass with only phantoms you can name and justify.
 
 ## Playbook: full curation session
 
@@ -53,21 +54,19 @@ Close by appending a journal entry describing what you did, linking every touche
 ## Playbook: dedup / merge
 
 1. Find candidates: `mem_search` by topic and by the resource handle — two files about one repo or doc is the classic duplicate.
-2. Pick the canonical file: the better-located path, or the one other files already link to (search for its path to find referencers).
+2. Pick the canonical file: more inbound links wins (`mem_links` on each candidate); otherwise the better-located path.
 3. Move unique content into the canonical file (`mem_patch` append under a section).
-4. Patch every referencer of the duplicate to point at the canonical file, then `mem_rm` the duplicate. Deletion is permanent and nothing rewrites inbound links for you — a skipped referencer becomes a phantom link.
+4. Check the duplicate's inbound edges (`mem_links`), patch those referencers to point at the canonical file, then `mem_rm` the duplicate. Deletion rewrites nothing — a skipped referencer becomes a phantom link.
 
-## Playbook: reorganization (no move tool)
+## Playbook: reorganization
 
-There is no `mem_move` — a rename is write + relink + remove, and the link graph will not follow you automatically:
-
-1. Before anything, find referencers: `mem_search` for the old path.
-2. `mem_write` the content to the new path, carrying the metadata forward explicitly — `type` especially, since the new directory's default only applies to files created without one, and a cross-directory move usually needs a reclassify anyway.
-3. `mem_patch` each referencer's link from the old path to the new one.
-4. `mem_rm` the old path last, after the referencers are clean.
+1. Before moving anything, `mem_links` on the file — know who points at it.
+2. `mem_move(from, to)` — one file at a time. It rewrites inbound links in referencing files for you (to the absolute `/path` form) and reports which files it updated; never hand-edit referencers after a move.
+3. **`mem_move` does not reclassify `type`.** A cross-directory move keeps the old type — the response warns when the new directory implies a different one. Follow up with a metadata-only `mem_write(to, type: ...)`.
+4. Spot-check one rewritten referencer to confirm the link resolves.
 5. Journal the mapping (`old → new`) so future-you can follow stale references.
 
-Version history does not carry across a rename — prefer leaving well-linked files where they are unless the location is actively misleading.
+Never reorganize with write + rm — you'd orphan every inbound link. `mem_move` exists so the graph follows the file.
 
 ## Playbook: journal distillation
 

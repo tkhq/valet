@@ -7,10 +7,12 @@
  * order, canonical YAML emission, virtual index.md, reserved-name /
  * path-depth rules) as re-landed for the clean-slate owner-tuple memory
  * core (Phase 4 decision 12). It deliberately does NOT implement the
- * legacy spec's links graph, mem_move, expiry sweeps, relevance boosting,
- * shareable-export filtering, reranker, or tag-similarity hints — those
- * are out of scope for this phase (see docs/plans/2026-07-13-engine-v2-
- * phase-4-orchestrator.md, decision 12).
+ * legacy spec's expiry sweeps, relevance boosting, shareable-export
+ * filtering, reranker, or tag-similarity hints — those are out of scope
+ * (see docs/plans/2026-07-13-engine-v2-phase-4-orchestrator.md, decision
+ * 12). The links graph and mem_move, deferred by the same decision, now
+ * live in `memory-graph.ts` and `../services/memory.ts` — still not here;
+ * this module stays format-only.
  *
  * The DB is the source of truth; frontmatter is a deterministic
  * projection rendered at every boundary. The stored `content` column
