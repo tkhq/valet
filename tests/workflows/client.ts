@@ -171,6 +171,10 @@ export class WorkflowClient extends SmokeClient {
    *
    * SAFETY: This method runs full validation + safety auditing before publishing.
    * It will reject workflows containing destructive patterns.
+   *
+   * WARNINGS: Non-destructive issues (e.g., LLM output limits, missing optional fields)
+   * are logged but do not block publication. Warnings are informational only and do not
+   * affect workflow safety. The workflow will still publish successfully.
    */
   async publishDraft(idOrSlug: string, opts?: { publishNote?: string }) {
     // Fetch the draft first to audit it locally
@@ -182,7 +186,7 @@ export class WorkflowClient extends SmokeClient {
     }
 
     if (audit.warnings.length > 0) {
-      console.warn(`⚠️  Publishing with warnings:\n${audit.warnings.map((w) => `  - ${w}`).join('\n')}`);
+      console.warn(`⚠️  Publishing with informational warnings (non-blocking):\n${audit.warnings.map((w) => `  - ${w}`).join('\n')}`);
     }
 
     return this.request<{
