@@ -4,9 +4,12 @@
  * Linear reaches Valet over MCP, which has two consequences these
  * definitions are built around.
  *
- * First, the action list resolves at run time, so `list_my_issues` passes
- * save-time validation whatever it is named upstream. A wrong name here
- * fails on the first run, not on install, so the card names that risk.
+ * First, the action list resolves at run time. `list_issues` is the tool the
+ * official Linear MCP server exposes for this (verified against a live
+ * `tools/list`; it reads `assignee: "me"` as the authenticated user). Because
+ * names resolve upstream, a future rename would still pass save-time
+ * validation and fail on the first run, not on install — so the card names
+ * that risk.
  *
  * Second, an MCP action returns its text content as the node result — a
  * STRING, not a parsed object. So the triage step reads the whole result
@@ -29,9 +32,9 @@ const weeklyIssueTriage: WorkflowDefinition = {
       id: 'my_issues',
       type: 'tool',
       service: 'linear',
-      action: 'list_my_issues',
+      action: 'list_issues',
       summary: 'Read the issues assigned to you',
-      params: {},
+      params: { assignee: 'me' },
     },
     {
       id: 'triage',
