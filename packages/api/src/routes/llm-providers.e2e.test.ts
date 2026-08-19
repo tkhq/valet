@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { driveTurn } from "../integration/_test-utils.js";
 import type {

@@ -19,7 +19,7 @@
     "@valet/engine": "workspace:*"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "0.73.1",
+    "@earendil-works/pi-ai": "0.84.2",
     "@types/node": "^20.0.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"

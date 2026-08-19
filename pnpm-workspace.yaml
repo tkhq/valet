@@ -3,12 +3,11 @@ packages:
 
 # Dependency version overrides. These MUST live here, not in package.json's
 # `pnpm` field: pnpm 11 stopped reading that field, which silently drops these
-# pins. The zod pin keeps pi-ai and pi-agent-core on one zod copy, so their
-# provider registry stays a shared singleton. See CLAUDE.md "Node & workspace
-# traps".
+# pins. The typebox pin keeps pi-ai and @valet/engine on one TypeBox copy, so
+# `Static<T>` stays the same type across plugin manifests. See CLAUDE.md
+# "Node & workspace traps".
 overrides:
-  '@mariozechner/pi-ai>zod': 4.4.3
-  '@mariozechner/pi-agent-core>zod': 4.4.3
+  typebox: 1.3.7
 
 # Dependencies allowed to run install scripts (native builds). pnpm 10 blocks
 # unlisted build scripts and prints an "Ignored build scripts" warning; pnpm 11

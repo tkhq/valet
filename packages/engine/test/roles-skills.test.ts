@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Type, fauxAssistantMessage, registerFauxProvider, type Context, type StreamOptions } from "@mariozechner/pi-ai";
+import { Type, fauxAssistantMessage, registerFauxProvider, type Context, type StreamOptions } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

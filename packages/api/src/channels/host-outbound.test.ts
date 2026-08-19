@@ -6,7 +6,7 @@ import {
   fauxToolCall,
   registerFauxProvider,
   type FauxProviderRegistration,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import {
   VirtualSandboxProvider,
   type BusEvent,

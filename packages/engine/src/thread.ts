@@ -1,7 +1,7 @@
-import { Agent } from "@mariozechner/pi-agent-core";
-import type { AgentEvent, AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
-import { getModel, isContextOverflow } from "@mariozechner/pi-ai";
-import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@mariozechner/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
@@ -2689,6 +2689,7 @@ export class Thread {
         model: this.session.options.model,
         systemPrompt: this.buildBaseSystemPrompt(),
       },
+      streamFn: streamSimple,
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {

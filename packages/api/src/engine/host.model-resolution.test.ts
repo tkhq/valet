@@ -30,7 +30,7 @@ import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js
 const orgId = "org-res";
 const ANTHROPIC_MODEL = "claude-haiku-4-5";
 const OPENAI_MODEL = "gpt-4.1";
-const GOOGLE_MODEL = "gemini-1.5-pro";
+const GOOGLE_MODEL = "gemini-2.5-pro";
 
 describe("resolveModelSpec (catalog-aware bridge)", () => {
   let db: AppDb;
@@ -392,14 +392,14 @@ describe("EngineHost model resolution wiring", () => {
   it("new-session precedence: user default wins over orgPreferences[0]", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
-    await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
     await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
 
     const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("claude-opus-4-1");
+    expect(session.options.model.id).toBe("claude-opus-4-5");
   });
 
   it("new-session precedence: hardcoded claude-haiku-4-5 when nothing is set", async () => {
@@ -540,7 +540,7 @@ describe("EngineHost model resolution wiring", () => {
 
     engineHost.evictAll();
     // Change the user default to prove restore prefers the persisted model.
-    await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
     const restored = await engineHost.sessionFor("restore-custom", {
       userId: "local-user",

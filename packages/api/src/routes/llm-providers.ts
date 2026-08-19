@@ -19,7 +19,7 @@
  * `/:id` routes so `"preferences"` isn't captured as a provider id.
  */
 import { Hono, type Context } from "hono";
-import { completeSimple, getEnvApiKey } from "@mariozechner/pi-ai";
+import { completeSimple, getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin, getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";

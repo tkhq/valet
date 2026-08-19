@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider } from "@mariozechner/pi-ai";
-import type { Context } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import type { Context } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

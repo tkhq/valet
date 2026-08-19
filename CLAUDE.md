@@ -133,7 +133,7 @@ Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/mig
 
 - Tests failing with `WebSocket is not defined` = the Node-20-vs-22 trap, not a regression. Re-verify under Node 22 (`nvm use 22`).
 - Any package importing `ws` must declare BOTH `@types/ws` AND `@types/node` in its own devDependencies, or pnpm may resolve the wrong Node types from an ancestor `node_modules`.
-- A new workspace dep edge can silently FORK a peer-dep'd "singleton" (e.g. `pi-ai`'s provider registry) into two copies. Symptom: a no-network test goes live, or module-level state stops being shared. Check `pnpm why <pkg>` for duplicate versions; fix by pinning via `overrides` in `pnpm-workspace.yaml` (see the `zod` pin). Do NOT use package.json's `pnpm.overrides` — pnpm 11 ignores that field and drops the pin silently.
+- A new workspace dep edge can silently FORK a peer-dep'd "singleton" (e.g. `pi-ai`'s provider registry) into two copies. Symptom: a no-network test goes live, or module-level state stops being shared. Check `pnpm why <pkg>` for duplicate versions; fix by pinning via `overrides` in `pnpm-workspace.yaml` (see the `typebox` pin). Do NOT use package.json's `pnpm.overrides` — pnpm 11 ignores that field and drops the pin silently.
 
 ### Sandbox gotchas
 

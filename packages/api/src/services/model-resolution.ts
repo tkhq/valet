@@ -42,7 +42,7 @@
  *     model not active on a custom provider). These fail the turn the way
  *     model-resolution errors do today, with a clear message.
  */
-import { getEnvApiKey, getModel, type Model } from "@mariozechner/pi-ai";
+import { getEnvApiKey, getModel, type Model } from "@earendil-works/pi-ai/compat";
 import { NoCredentialsError, type CredentialOwner, type CredentialStore, type ResolvedModel } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";

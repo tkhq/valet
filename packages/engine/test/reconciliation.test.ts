@@ -3,7 +3,7 @@ import {
   fauxAssistantMessage,
   registerFauxProvider,
   Type,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import {
   decideReconciliation,
   Engine,

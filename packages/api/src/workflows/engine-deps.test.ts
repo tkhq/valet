@@ -10,7 +10,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
-import type { Usage } from "@mariozechner/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai/compat";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";

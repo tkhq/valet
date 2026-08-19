@@ -597,7 +597,7 @@ The active conversation path is reconstructed by following `parentId` pointers f
 
 ### Agent Loop
 
-The engine uses `@mariozechner/pi-agent-core` for the inner agent loop and `@mariozechner/pi-ai` for the LLM provider layer. The engine wraps these with session/thread management, tool context injection, and event routing.
+The engine uses `@earendil-works/pi-agent-core` for the inner agent loop and `@earendil-works/pi-ai` for the LLM provider layer. The engine wraps these with session/thread management, tool context injection, and event routing.
 
 **Per-thread agent instance:** Each thread gets its own `Agent` instance (from pi-agent-core). The agent manages the LLM streaming, parallel tool execution, and turn lifecycle. The engine subscribes to the agent's events and translates them to `EngineEvent` emissions.
 
@@ -637,9 +637,9 @@ prompt received on thread
 
 ### LLM Provider Layer
 
-The engine adopts `@mariozechner/pi-ai` for model abstraction. pi-ai provides a unified streaming interface across 20+ providers (Anthropic, OpenAI, Google, Mistral, Bedrock, etc.), typed streaming events, tool type definitions, vision support detection, context serialization, and cross-provider handoffs.
+The engine adopts `@earendil-works/pi-ai` for model abstraction. pi-ai provides a unified streaming interface across 20+ providers (Anthropic, OpenAI, Google, Mistral, Bedrock, etc.), typed streaming events, tool type definitions, vision support detection, context serialization, and cross-provider handoffs.
 
-The engine adopts `@mariozechner/pi-agent-core` for the inner agent loop. pi-agent-core provides the `Agent` class that handles the LLM streaming, parallel tool execution, abort handling, and event emission cycle.
+The engine adopts `@earendil-works/pi-agent-core` for the inner agent loop. pi-agent-core provides the `Agent` class that handles the LLM streaming, parallel tool execution, abort handling, and event emission cycle.
 
 **What pi-ai gives us:**
 - Model discovery and provider configuration (`getModel('anthropic', 'claude-sonnet-4-6')`)

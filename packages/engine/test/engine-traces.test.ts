@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryBlobStore,

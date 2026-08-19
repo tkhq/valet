@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

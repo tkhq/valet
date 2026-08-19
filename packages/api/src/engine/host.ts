@@ -1,4 +1,4 @@
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 import { eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";

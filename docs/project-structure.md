@@ -51,7 +51,7 @@ valet/
 | Layer | Tech | Key Files |
 |-------|------|-----------|
 | API server | Hono 4, @hono/node-server + node-ws, better-auth, Drizzle, pi-ai | `packages/api/src/` |
-| Engine | @mariozechner/pi-agent-core, TypeBox schemas | `packages/engine/src/` |
+| Engine | @earendil-works/pi-agent-core, TypeBox schemas | `packages/engine/src/` |
 | Store | Postgres (PGlite dev / node-postgres prod), raw SQL migrations | `packages/store-postgres/` |
 | Web | React 19, Vite 6, TanStack Router/Query, Zustand, Tailwind, Radix UI | `packages/web/src/` |
 | Sandboxes | dockerode / agent-sandbox CRs / host processes | `packages/sandbox-*/` |

@@ -35,8 +35,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { definitionVersionId } from "./definition-version.js";
-import { completeSimple, getModel } from "@mariozechner/pi-ai";
-import type { Api, Model, Usage } from "@mariozechner/pi-ai";
+import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, Usage } from "@earendil-works/pi-ai/compat";
 import {
   parseAssistantSessionId,
   parsePrincipal,

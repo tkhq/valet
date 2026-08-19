@@ -13,7 +13,7 @@
  * naming logic is unit-testable without spinning up Hono.
  */
 import { and, eq } from "drizzle-orm";
-import { completeSimple, getModel } from "@mariozechner/pi-ai";
+import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
 

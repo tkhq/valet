@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
   registerFauxProvider,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
