@@ -119,7 +119,7 @@ function chatIdFromKey(conversationKey: string): string {
 /** Feature-detects a transport that opens a direct conversation with one of
  * its users. A provider whose user id is not also a conversation id (Slack:
  * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
-function hasOpenDirect(
+export function hasOpenDirect(
   transport: ChannelTransport,
 ): transport is ChannelTransport & { openDirectConversation(externalId: string): Promise<string> } {
   return typeof (transport as { openDirectConversation?: unknown }).openDirectConversation === "function";

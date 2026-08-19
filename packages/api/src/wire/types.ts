@@ -2253,6 +2253,12 @@ export interface IdentityLinkStatus {
   createdAt?: number;
   /** Transport availability — false when no bot token is configured. */
   channelReady: boolean;
+  /** True when `POST .../deliver` works for this provider: the transport can
+   * look the caller up by email and DM them the code. */
+  codeDelivery: boolean;
+  /** True when `GET .../members` works: the transport has a member
+   * directory for the "find me by name" fallback. */
+  memberSearch: boolean;
 }
 
 export interface ListIdentityLinksResponse {
@@ -2267,6 +2273,50 @@ export interface StartIdentityLinkResponse {
   /** How to deliver the code — from the plugin's identityLink.instructions. */
   instructions: string;
   expiresInSeconds: number;
+}
+
+/** One workspace member from `GET .../members` — the "find me by name"
+ * fallback for users whose provider email differs from their Valet email. */
+export interface LinkMemberEntry {
+  externalId: string;
+  /** Human name (Slack: real name, falling back to the handle). */
+  displayName: string;
+  /** Provider-side handle (Slack: the username). */
+  handle: string;
+}
+
+export interface ListLinkMembersResponse {
+  members: LinkMemberEntry[];
+}
+
+/** Optional body of `POST .../deliver`. Empty/absent = resolve the caller by
+ * their Valet email. With `externalId`, DM that member instead — the
+ * "find me by name" path. `displayName` only shapes the card copy. */
+export interface DeliverIdentityLinkRequest {
+  externalId?: string;
+  displayName?: string;
+}
+
+/** 200 body of `POST /api/me/identity-links/:provider/deliver`: the bot DMed
+ * the caller a link code. `messageText` is the exact DM, byte-identical, so
+ * the card can show the user what to look for — and, if the DM never
+ * arrives, the flow still completes from `code` via the show-code path. */
+export interface DeliverIdentityLinkResponse {
+  delivered: true;
+  /** Provider-side account the DM went to (Slack: the `U…` user id). */
+  externalId: string;
+  displayName?: string;
+  /** The exact DM the bot sent. */
+  messageText: string;
+  /** The same code the DM carries, for the show-code fallback. */
+  code: string;
+  expiresInSeconds: number;
+}
+
+/** 202 body of `POST .../deliver`: the caller's email names nobody in the
+ * provider workspace. Not an error — the client falls back to show-code. */
+export interface DeliverIdentityLinkFallback {
+  reason: "email_not_in_workspace";
 }
 
 export interface PatchIdentityLinkRequest {

@@ -332,6 +332,21 @@ export interface ChannelTransport {
    * team id lives on the transport, not in the thread key.
    */
   conversationKeyFromThreadKey?(threadKey: string): string | null;
+  /**
+   * Resolve a workspace member by email (Slack: `users.lookupByEmail`).
+   * `null` = the email names nobody in the workspace — a normal outcome the
+   * caller uses to fall back to another flow, never an error. Rejects with
+   * `ChannelLookupError` so the caller can tell a missing bot scope (an
+   * admin must act) from a transport fault. Optional: providers without a
+   * directory lookup omit it.
+   */
+  lookupUserByEmail?(email: string): Promise<{ externalId: string; displayName: string } | null>;
+  /**
+   * Workspace-member typeahead (Slack: `users.list`). Backs the "find me by
+   * name" identity-link fallback for users whose provider email differs from
+   * their Valet email. Optional: providers without a member directory omit it.
+   */
+  listWorkspaceMembers?(query: string): Promise<Array<{ id: string; name: string; realName?: string }>>;
 
   // ── Streaming egress ────────────────────────────────────────────────
   //
@@ -394,6 +409,34 @@ export interface IdentityLinkDeclaration {
   /** Optional deep link for one-tap delivery (Telegram's t.me URL). Return
    *  null when the transport is not ready. */
   deepLink?: (ctx: { botUsername: string | null; code: string }) => string | null;
+  /**
+   * Build the exact DM the bot sends when the host delivers a link code to
+   * the user (the "DM me the code" flow). The web card echoes the returned
+   * string byte-identical, so the user knows what to look for — keep it
+   * deterministic. The code's TTL is ten minutes; say so in the text.
+   * Meaningful only for providers whose transport implements
+   * `lookupUserByEmail`.
+   */
+  deliveryDm?: (ctx: { code: string }) => string;
+}
+
+/**
+ * Why `lookupUserByEmail` failed, in terms the caller can act on:
+ * - `missing_scope`: the bot credential lacks a required OAuth scope. An
+ *   admin can fix it, so surface the message as a 4xx.
+ * - `transport`: upstream HTTP/network fault or an unclassified provider
+ *   error. Not the caller's fault — surface as a 502.
+ */
+export type ChannelLookupErrorKind = "missing_scope" | "transport";
+
+export class ChannelLookupError extends Error {
+  constructor(
+    readonly kind: ChannelLookupErrorKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ChannelLookupError";
+  }
 }
 
 export interface ValetPlugin {

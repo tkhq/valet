@@ -403,3 +403,278 @@ describe("identity-links and /api/me coexist", () => {
     expect(meBody).toMatchObject({ id: "local-user", email: "local@dev" });
   });
 });
+
+// ── POST /:provider/deliver ──────────────────────────────────────────────────
+
+import { ChannelLookupError } from "@valet/engine";
+import type { DeliverIdentityLinkResponse } from "../wire/types.js";
+
+/** A slack-shaped transport with the delivery capabilities: email lookup and
+ * a direct-conversation opener. `send` records outbound DMs. */
+class FakeDeliverySlackTransport implements ChannelTransport {
+  readonly channelType = "slack";
+  sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
+  /** Members keyed by email. */
+  members = new Map<string, { externalId: string; displayName: string }>();
+  lookupError: ChannelLookupError | null = null;
+  sendError: Error | null = null;
+  verifyWebhook(): null {
+    return null;
+  }
+  parseUpdate(): null {
+    return null;
+  }
+  async lookupUserByEmail(email: string) {
+    if (this.lookupError) throw this.lookupError;
+    return this.members.get(email) ?? null;
+  }
+  async listWorkspaceMembers(query: string) {
+    return [
+      { id: "U777", name: "conner", realName: "Conner Swann" },
+      { id: "U888", name: "pat" },
+    ].filter((m) => m.name.includes(query.toLowerCase()));
+  }
+  async openDirectConversation(externalId: string): Promise<string> {
+    return `slack:T1:D-${externalId}:1700000000.000001`;
+  }
+  async send(conversationKey: string, message: OutboundChannelMessage) {
+    if (this.sendError) throw this.sendError;
+    this.sent.push({ conversationKey, message });
+    return { conversationKey, messageId: String(this.sent.length) };
+  }
+  async sendMedia(conversationKey: string) {
+    return { conversationKey, messageId: "m" };
+  }
+  async sendGatePrompt(conversationKey: string) {
+    return { conversationKey, messageId: "g" };
+  }
+  async updateGatePrompt() {}
+  async answerCallback() {}
+}
+
+function deliverySlackPlugin(): { plugin: ValetPlugin; transport: FakeDeliverySlackTransport } {
+  const transport = new FakeDeliverySlackTransport();
+  const plugin: ValetPlugin = {
+    name: "slack-user",
+    version: "0",
+    transports: [{ channelType: "slack", create: () => transport }],
+    identityLink: {
+      provider: "slack",
+      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+      deliveryDm: ({ code }) => `Reply with:\n\`link ${code}\`\nThe code expires in 10 minutes.`,
+    },
+  };
+  return { plugin, transport };
+}
+
+/** Boots with the delivery-capable slack fake running. */
+async function bootWithDeliverySlack(): Promise<{ api: TestApi; transport: FakeDeliverySlackTransport }> {
+  const { plugin, transport } = deliverySlackPlugin();
+  const booted = await bootTestApi({ plugins: [plugin] });
+  await booted.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+    type: "bot_token",
+    accessToken: "slack-test-token",
+  });
+  await booted.providers.channelHost.start();
+  return { api: booted, transport };
+}
+
+describe("POST /api/me/identity-links/:provider/deliver", () => {
+  it("404s on an unknown provider", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/nope/deliver`, { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown identity provider "nope"' });
+  });
+
+  it("409s when the transport is not running", async () => {
+    const { plugin } = deliverySlackPlugin();
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(409);
+  });
+
+  it("404s when the provider cannot deliver (telegram: no deliveryDm, no lookup)", async () => {
+    api = await bootWithRunningTelegram();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram/deliver`, { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("does not support code delivery");
+  });
+
+  it("202s with email_not_in_workspace when the caller's email names nobody", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ reason: "email_not_in_workspace" });
+    // No code was burned, no DM sent.
+    expect(booted.transport.sent).toHaveLength(0);
+  });
+
+  it("200s, DMs the exact echoed text, and the code inside completes the link", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    // The local-auth stub user is local-user <local@dev>.
+    booted.transport.members.set("local@dev", { externalId: "U777", displayName: "conner" });
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeliverIdentityLinkResponse;
+    expect(body).toMatchObject({
+      delivered: true,
+      externalId: "U777",
+      displayName: "conner",
+      expiresInSeconds: 600,
+    });
+    // The DM and the on-card echo are byte-identical, and carry the code.
+    expect(booted.transport.sent).toHaveLength(1);
+    expect(booted.transport.sent[0]?.message.markdown).toBe(body.messageText);
+    expect(body.messageText).toContain(body.code);
+    // The DM went to the opened direct conversation, not a guessed key.
+    expect(booted.transport.sent[0]?.conversationKey).toBe("slack:T1:D-U777:1700000000.000001");
+    // The code the DM carries is the minted one — consuming it links the user.
+    const consumed = await consumeLinkCode(api.providers.db, "slack", body.code);
+    expect(consumed).toMatchObject({ userId: "local-user" });
+  });
+
+  it("400s with the corrective action when the bot lacks the lookup scope", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    booted.transport.lookupError = new ChannelLookupError(
+      "missing_scope",
+      "The Slack app is missing the users:read.email scope. Reinstall the Slack app to grant it.",
+    );
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("users:read.email");
+  });
+
+  it("502s when the provider lookup fails upstream", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    booted.transport.lookupError = new ChannelLookupError("transport", "Slack users.lookupByEmail failed: http 500");
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(502);
+  });
+
+  it("200s and DMs the picked member when the body carries externalId (find-me-by-name)", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    // No members map entry: the email lookup would 202, proving the body
+    // path never consults it.
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ externalId: "U888", displayName: "Pat" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeliverIdentityLinkResponse;
+    expect(body).toMatchObject({ delivered: true, externalId: "U888", displayName: "Pat" });
+    expect(booted.transport.sent).toHaveLength(1);
+    expect(booted.transport.sent[0]?.conversationKey).toBe("slack:T1:D-U888:1700000000.000001");
+    const consumed = await consumeLinkCode(api.providers.db, "slack", body.code);
+    expect(consumed).toMatchObject({ userId: "local-user" });
+  });
+
+  it("400s on a malformed JSON body", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("502s and names the fallback when the DM send fails", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    booted.transport.members.set("local@dev", { externalId: "U777", displayName: "conner" });
+    booted.transport.sendError = new Error("channel_not_found");
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("show-code");
+  });
+});
+
+describe("GET /api/me/identity-links — codeDelivery flag", () => {
+  it("is true only for a running transport with email lookup + deliveryDm", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    const body = (await res.json()) as ListIdentityLinksResponse;
+    expect(body.links.find((l) => l.provider === "slack")).toMatchObject({
+      channelReady: true,
+      codeDelivery: true,
+      memberSearch: true,
+    });
+  });
+
+  it("is false for telegram (no deliveryDm, no email lookup) even when running", async () => {
+    api = await bootWithRunningTelegram();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    const body = (await res.json()) as ListIdentityLinksResponse;
+    expect(body.links.find((l) => l.provider === "telegram")).toMatchObject({
+      channelReady: true,
+      codeDelivery: false,
+      memberSearch: false,
+    });
+  });
+});
+
+// ── GET /:provider/members ───────────────────────────────────────────────────
+
+describe("GET /api/me/identity-links/:provider/members", () => {
+  it("404s on an unknown provider", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/nope/members`);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s when the provider has no member directory (telegram)", async () => {
+    api = await bootWithRunningTelegram();
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/telegram/members`);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("does not support member search");
+  });
+
+  it("200s with mapped entries, realName falling back to the handle", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/members?query=`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { members: Array<Record<string, unknown>> };
+    expect(body.members).toEqual([
+      { externalId: "U777", displayName: "Conner Swann", handle: "conner" },
+      { externalId: "U888", displayName: "pat", handle: "pat" },
+    ]);
+  });
+
+  it("filters by the query string", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/members?query=pat`);
+    const body = (await res.json()) as { members: Array<{ externalId: string }> };
+    expect(body.members.map((m) => m.externalId)).toEqual(["U888"]);
+  });
+});
