@@ -1955,6 +1955,23 @@ export type ChildReader = (
 ) => Promise<SessionEntry[] | null>;
 
 /**
+ * Reports a child session's liveness on behalf of its parent — the
+ * observability leg of the child toolset (`task` spawns, `child_read`
+ * reads, `child_send` steers, `child_status` checks). `settled` mirrors
+ * the host's watch row; `lastActivityAt` is the child's queue activity
+ * clock (`SessionStore.latestActivityAt`), null when the child has no
+ * queue items yet. A status read never wakes the child.
+ *
+ * Returns `null` when `childSessionId` is not a child of
+ * `parentSessionId`, with the same "not yours" / "does not exist"
+ * ambiguity as `ChildReader`.
+ */
+export type ChildStatusReader = (
+  req: { childSessionId: string },
+  ctx: { parentSessionId: string },
+) => Promise<{ settled: boolean; lastActivityAt: number | null } | null>;
+
+/**
  * Sends a message into a child session on behalf of its parent — the
  * steering half of the child toolset (`task` spawns, `child_read` reads,
  * `child_send` redirects). `interrupt: true` supersedes the child's

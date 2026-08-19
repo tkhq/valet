@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -23,6 +23,7 @@ import {
   buildChildReader,
   buildChildSender,
   buildChildSpawner,
+  buildChildStatusReader,
   ChildWatcher,
 } from "../orchestrator/children.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
@@ -340,6 +341,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
+  let statusRef: ChildStatusReader | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -377,6 +379,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
       return senderRef(req, ctx);
     },
+    childStatusReader: (req, ctx) => {
+      if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
+      return statusRef(req, ctx);
+    },
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
@@ -401,6 +407,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
+  statusRef = buildChildStatusReader(childrenDeps);
 
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.

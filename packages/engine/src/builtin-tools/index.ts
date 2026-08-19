@@ -4,6 +4,7 @@ import type {
   ChildReader,
   ChildSender,
   ChildSpawner,
+  ChildStatusReader,
   ExecJobHandle,
   JobPoll,
   MessageQuery,
@@ -400,6 +401,53 @@ export const childSendTool = defineTool({
   },
 });
 
+export const childStatusTool = defineTool({
+  name: "child_status",
+  description:
+    "Check whether a child session is still making progress: settled or " +
+    "running, plus its last queue activity time. Use it to decide between " +
+    "waiting, steering with child_send, or reading the transcript with " +
+    "child_read. A status check never wakes the child.",
+  parameters: Type.Object({
+    child_session_id: Type.String({
+      description: "The child session to check, as returned by `task` or named in a child.settled signal.",
+    }),
+  }),
+  execute: async (args, ctx) => {
+    // Same `toolConfig` passthrough convention as `child_read`'s
+    // childReader: `ctx.config` is verbatim `Record<string, unknown>`, so a
+    // reader-shaped value is known only by convention.
+    const rawReader = ctx.config?.childStatusReader;
+    if (typeof rawReader !== "function") {
+      return { text: "[child_status_unavailable] this session cannot check child sessions" };
+    }
+    const reader = rawReader as ChildStatusReader; // narrowed by typeof check above
+
+    const status = await reader(
+      { childSessionId: args.child_session_id },
+      { parentSessionId: ctx.sessionId },
+    );
+    if (status === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    const state = status.settled ? "settled" : "running";
+    if (status.lastActivityAt === null) {
+      return { text: `child ${args.child_session_id}: ${state}; no queue activity recorded yet.` };
+    }
+    const ageS = Math.max(0, Math.round((Date.now() - status.lastActivityAt) / 1000));
+    const age = ageS < 120 ? `${ageS}s ago` : `${Math.round(ageS / 60)}m ago`;
+    return {
+      text:
+        `child ${args.child_session_id}: ${state}; last queue activity ` +
+        `${new Date(status.lastActivityAt).toISOString()} (${age}).`,
+    };
+  },
+});
+
 export const listThreadsTool = defineTool({
   name: "list_threads",
   description:
@@ -552,4 +600,5 @@ export const builtinTools: ToolDef[] = [
   taskTool,
   childReadTool,
   childSendTool,
+  childStatusTool,
 ];
