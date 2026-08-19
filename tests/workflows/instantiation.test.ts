@@ -487,17 +487,30 @@ describe('Workflow safety and interoperability', () => {
 afterAll(async () => {
   console.log('\n📋 Cleaning up test workflows...');
 
-  for (const [key, wf] of Object.entries(workflows)) {
+  // Collect deletion promises for all workflows
+  const deletionPromises = Object.entries(workflows).map(async ([key, wf]) => {
     if (!wf.id) {
       console.log(`  ⊘ ${key}: no ID, skipping`);
-      continue;
+      return { key, status: 'skipped' as const };
     }
 
     try {
       await client.deleteWorkflow(wf.id);
       console.log(`  ✓ Deleted ${key}`);
+      return { key, status: 'deleted' as const };
     } catch (err) {
       console.warn(`  ✗ Failed to delete ${key}:`, (err as Error).message);
+      return { key, status: 'failed' as const, error: err };
     }
-  }
+  });
+
+  // Execute all deletions in parallel
+  const results = await Promise.allSettled(deletionPromises);
+
+  // Log any unexpected promise rejections
+  results.forEach((result, idx) => {
+    if (result.status === 'rejected') {
+      console.warn(`  ✗ Cleanup task failed:`, result.reason);
+    }
+  });
 });
