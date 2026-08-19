@@ -191,20 +191,24 @@ Each restart generates a fresh UUID suffix. This means each restart gets a **new
 
 1. Check if identity exists. If yes AND a healthy session exists, return `already_exists`.
 2. Ensure user record exists in D1.
-3. If no identity: validate handle uniqueness, create `orchestratorIdentity`.
-4. If identity exists but session is terminal: update identity with new params.
-5. Call `restartOrchestratorSession`.
+3. If no identity: validate handle/name uniqueness, then insert `orchestratorIdentity`. Concurrent inserts for the same user use `ON CONFLICT (org_id, user_id) DO NOTHING` and reuse the winner's row. A concurrent handle collision returns `handle_taken` after re-reading the table (do not match Drizzle/D1 error strings).
+4. If identity exists (including after a same-user race) but session is terminal or missing: update identity with new params.
+5. Call `ensureOrchestratorSession`. If a live orchestrator session already exists, return it. Otherwise claim a new row via the partial unique index `idx_sessions_one_live_orchestrator` (`ON CONFLICT (user_id) ... DO NOTHING`) and spawn a Durable Object only if this request inserted the row.
 6. Return session ID, identity, and session record.
 
 ### Restart (`restartOrchestratorSession`)
 
-1. Build persona files via `buildOrchestratorPersonaFiles`.
-2. Generate new session ID: `orchestrator:{userId}:{uuid}`.
-3. Create session record in D1 with `isOrchestrator: true`, `purpose: 'orchestrator'`, workspace `'orchestrator'`.
-4. Assemble environment: provider API keys, user credential keys, `IS_ORCHESTRATOR: 'true'`.
-5. Build DO WebSocket URL.
-6. Fetch user preferences: idle timeout, queue mode, model preferences.
-7. Initialize SessionAgent DO via `POST http://do/start`.
+Admin and cron rotation bump `orchestrator_identities.session_generation`, stop the live session, then claim a new row stamped with that generation. Concurrent inserts still hit the unique index. `/start` and sandbox spawn refuse a row whose stamped generation no longer matches the identity (409 / drop spawn). If Modal already returned a sandbox after the bump, spawn terminates that sandbox.
+
+1. Bump `session_generation` (invalidates in-flight `/start` for the previous live row).
+2. Stop the current live orchestrator session (DO `/stop` + D1 `terminated`), if any.
+3. Build persona files via `buildOrchestratorPersonaFiles`.
+4. Generate new session ID: `orchestrator:{userId}:{uuid}`.
+5. Insert with `insertLiveOrchestratorSession`, copying the current generation onto the row. A concurrent insert for the same user returns the winner's row and does not call `/start`.
+6. Assemble environment: provider API keys, user credential keys, `IS_ORCHESTRATOR: 'true'`.
+7. Build DO WebSocket URL.
+8. Fetch user preferences: idle timeout, queue mode, model preferences.
+9. Call `POST http://do/start` only if `isOrchestratorSpawnClaimHeld` is still true. The Durable Object repeats that check before and after sandbox create.
 
 The DO's `/start` handler explicitly clears old session data (messages, queue, audit log) for orchestrator DOs that get reused.
 
@@ -214,10 +218,10 @@ The DO's `/start` handler explicitly clears old session data (messages, queue, a
 SELECT * FROM sessions
 WHERE user_id = ? AND is_orchestrator = 1
   AND status NOT IN ('terminated', 'archived', 'error')
-ORDER BY created_at DESC LIMIT 1
+LIMIT 1
 ```
 
-Returns the most recent non-terminal orchestrator session. Supports ID rotation by always picking the newest.
+At most one live orchestrator session exists per user (`UNIQUE(user_id) WHERE is_orchestrator = 1 AND status NOT IN ('terminated', 'archived', 'error')`). Restart rotates by terminating that row, then inserting a new id.
 
 ### Canonical Web Chat Route
 
