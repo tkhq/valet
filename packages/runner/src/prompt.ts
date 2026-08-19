@@ -1402,6 +1402,9 @@ export class PromptHandler {
         effectiveContent = `${prefix}\n\n${effectiveContent}`;
       }
       let effectiveAttachments = attachments ?? [];
+      // Preserve images throughout processing — they should be passed directly to the model
+      const imageAttachments = effectiveAttachments.filter(a => a.mime.startsWith('image/'));
+      
       const hasAudio = effectiveAttachments.some(a => a.mime.startsWith('audio/'));
       if (hasAudio) {
         let transcribed = false;
@@ -1502,6 +1505,13 @@ export class PromptHandler {
         if (!textExtracted && !effectiveContent?.trim()) {
           effectiveContent = '[The user sent a text file but extraction failed. Please ask them to paste the content instead.]';
         }
+      }
+
+      // Re-add image attachments that were preserved earlier — they should always reach the model.
+      // Filter to avoid duplicates in case images weren't explicitly stripped by other processors.
+      const hasImageInRemaining = effectiveAttachments.some(a => a.mime.startsWith('image/'));
+      if (imageAttachments.length > 0 && !hasImageInRemaining) {
+        effectiveAttachments = [...effectiveAttachments, ...imageAttachments];
       }
 
       console.log(

@@ -1360,4 +1360,67 @@ describe("PromptHandler text file extraction", () => {
     const fileParts = body.parts.filter((p) => p.type === "file");
     expect(fileParts).toHaveLength(0);
   });
+
+  it("preserves image attachments throughout the processing pipeline", async () => {
+    const agentClient = createAgentClientMock();
+    const handler = createHandler(agentClient);
+    const fetchCalls: FetchCall[] = [];
+
+    const imageDataUrl = `data:image/jpeg;base64,${Buffer.from("fake image data").toString("base64")}`;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      fetchCalls.push({ url, method, body });
+
+      if (url === "http://opencode.test/session" && method === "POST") {
+        return jsonResponse({ id: "image-test-session" });
+      }
+
+      if (url === "http://opencode.test/session/image-test-session/message" && method === "POST") {
+        return jsonResponse({ info: { role: "assistant", content: "I see the image" }, parts: [] });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handler.handlePrompt(
+      "msg-image-test",
+      "What do you see in this image?",
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          type: "file",
+          mime: "image/jpeg",
+          url: imageDataUrl,
+          filename: "test.jpg",
+        },
+      ],
+      "thread",
+      "ch-image-test",
+    );
+
+    const syncCall = fetchCalls.find(
+      (c) => c.url === "http://opencode.test/session/image-test-session/message" && c.method === "POST",
+    );
+    expect(syncCall).toBeDefined();
+    const body = syncCall!.body as { parts: Array<{ type: string; mime?: string; url?: string; filename?: string; text?: string }> };
+
+    // Verify that the image part is included in the request
+    const imagePart = body.parts.find((p) => p.type === "file" && p.mime?.startsWith("image/"));
+    expect(imagePart).toBeDefined();
+    expect(imagePart?.mime).toBe("image/jpeg");
+    expect(imagePart?.url).toBe(imageDataUrl);
+    expect(imagePart?.filename).toBe("test.jpg");
+
+    // Verify that the text part is also present
+    const textPart = body.parts.find((p) => p.type === "text");
+    expect(textPart).toBeDefined();
+    expect(textPart?.text).toContain("What do you see in this image?");
+  });
 });
