@@ -135,8 +135,19 @@ export function Composer({
   // Per-browser last-used ranking for the command popup. Loaded once per
   // mount; `submit` records each sent slash command and refreshes it.
   const [commandRecency, setCommandRecency] = useState<CommandRecency>(() => readCommandRecency());
-  const filteredCommands = commandQuery !== null
-    ? allCommands.filter((c) => c.name.startsWith(commandQuery))
+  // Substring match, not prefix: "/review" must surface "skill:review"
+  // without the user typing the "skill:" namespace. Prefix matches sort
+  // ahead of substring matches; the sort is stable, so ties keep registry
+  // order and `commandsToItems` still sees contiguous source groups.
+  const commandQueryLower = commandQuery?.toLowerCase() ?? null;
+  const filteredCommands = commandQueryLower !== null
+    ? allCommands
+        .filter((c) => c.name.toLowerCase().includes(commandQueryLower))
+        .sort(
+          (a, b) =>
+            Number(b.name.toLowerCase().startsWith(commandQueryLower)) -
+            Number(a.name.toLowerCase().startsWith(commandQueryLower)),
+        )
     : [];
   const argCommand = argMatch ? allCommands.find((c) => c.name === argMatch[1]) : undefined;
   const argPrefix = argMatch?.[2] ?? "";

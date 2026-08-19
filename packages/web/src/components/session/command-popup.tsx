@@ -33,7 +33,8 @@ const SOURCE_LABEL: Record<WireCommandInfo["source"], string> = {
 };
 
 /**
- * Adapt registry commands (already prefix-filtered) into popup items.
+ * Adapt registry commands (already filtered by the composer's substring
+ * match) into popup items.
  *
  * `recency` (command name → last-used epoch ms, from `~/lib/command-recency`)
  * floats what the user actually uses to the top. Groups must stay contiguous —

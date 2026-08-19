@@ -64,6 +64,9 @@ vi.mock("~/hooks/use-commands", () => ({
       commands: [
         { name: "status", description: "Show session status", source: "builtin" },
         { name: "stop", description: "Stop the agent", source: "builtin" },
+        // "top" vs "stop": typing "/top" prefix-matches one and
+        // substring-matches the other — the ranking test needs both.
+        { name: "top", description: "Show resource usage", source: "builtin" },
         { name: "skill:review", description: "Run code review", source: "skill" },
         {
           name: "model",
@@ -352,6 +355,49 @@ describe("Composer — slash-command keyboard handling", () => {
     // The selected command "status" (first prefix match) is inserted with trailing space.
     // If Enter had sent instead, the textarea would have been cleared to "".
     expect(textarea.value).toBe("/status ");
+  });
+
+  it("matches commands by substring, so a skill surfaces without its namespace", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    // "review" is not a prefix of any command name; "skill:review" contains it.
+    await userEvent.type(textarea, "/review");
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    expect(screen.getByText("/skill:review")).toBeTruthy();
+
+    await userEvent.keyboard("{Enter}");
+    expect(textarea.value).toBe("/skill:review ");
+  });
+
+  it("matches command names case-insensitively", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/REVIEW");
+    expect(screen.getByText("/skill:review")).toBeTruthy();
+  });
+
+  it("ranks a prefix match ahead of a substring match", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    // "top" prefix-matches "top" and substring-matches "stop". "stop" comes
+    // first in registry order, so only the prefix-first sort puts "top" on top.
+    await userEvent.type(textarea, "/top");
+    const options = screen.getAllByRole("option");
+    expect(options.map((o) => o.textContent)).toHaveLength(2);
+    expect(options[0]?.textContent).toContain("/top");
+    expect(options[1]?.textContent).toContain("/stop");
+
+    await userEvent.keyboard("{Enter}");
+    expect(textarea.value).toBe("/top ");
   });
 
   it("pressing Esc while popup is open closes the popup without modifying text", async () => {
