@@ -11,7 +11,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { SEARCH_DEBOUNCE_MS } from "~/components/skills/skill-grid";
+import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type { ReactNode } from "react";
 import type { ListSkillsResponse, ListSkillSourcesResponse } from "@valet/api/wire";
 
