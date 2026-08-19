@@ -6,6 +6,7 @@ import type {
   ChildSpawner,
   ExecJobHandle,
   JobPoll,
+  MessagePart,
   MessageQuery,
   SessionEntry,
   SpawnChildRequest,
@@ -276,6 +277,55 @@ export const threadReadTool = defineTool({
 });
 
 /**
+ * Per-part ceiling on a rendered tool result in thread_read/child_read
+ * output. The full result stays in the store; the reader gets a bounded
+ * view so one verbose call cannot flood the caller's context.
+ */
+export const RENDERED_TOOL_RESULT_MAX_CHARS = 1_500;
+
+/** Extract display text from a persisted tool result. Handles the engine's
+ * own `{ text }` shape, bare strings, and anything else via JSON. */
+function renderToolResultText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object") {
+    const text = (result as Record<string, unknown>).text;
+    if (typeof text === "string") return text;
+  }
+  try {
+    return JSON.stringify(result) ?? "";
+  } catch {
+    return "<unserializable result>";
+  }
+}
+
+/** Non-text message parts, rendered after the entry's content. Text parts
+ * are already flattened into `content`; a turn that was only a tool call
+ * has empty content, and before this rendering it read as a blank turn. */
+function renderNonTextParts(parts: MessagePart[], lines: string[]): void {
+  for (const p of parts) {
+    if (p.type === "tool_call") {
+      lines.push(`\n[tool_call ${p.toolName} — ${p.status}]`);
+      if (p.status === "running") {
+        lines.push("(no result recorded — the call was still in flight when this entry was read)");
+      } else if (p.error) {
+        lines.push(`error: ${p.error}`);
+      } else if (p.elided) {
+        lines.push("(result elided to reclaim context; the original output is no longer available)");
+      } else if (p.result !== undefined) {
+        const text = renderToolResultText(p.result);
+        lines.push(
+          text.length > RENDERED_TOOL_RESULT_MAX_CHARS
+            ? `${text.slice(0, RENDERED_TOOL_RESULT_MAX_CHARS)} [+${text.length - RENDERED_TOOL_RESULT_MAX_CHARS} more chars]`
+            : text,
+        );
+      }
+    } else if (p.type === "attachment") {
+      lines.push(`\n[attachment: ${p.attachment.type}]`);
+    }
+  }
+}
+
+/**
  * Renders session entries as markdown. Shared by `thread_read` and
  * `child_read` so one reader cannot drift from the other.
  */
@@ -286,6 +336,10 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
       const author = e.author?.name ? ` (${e.author.name})` : "";
       lines.push(`\n## ${e.role}${author} @ ${new Date(e.createdAt).toISOString()}`);
       lines.push(e.content);
+      for (const a of e.attachments ?? []) {
+        lines.push(`[image attachment: ${a.name ?? "unnamed"} (${a.mimeType})]`);
+      }
+      if (e.parts) renderNonTextParts(e.parts, lines);
     } else if (e.type === "compaction") {
       lines.push(`\n## [compaction summary]`);
       lines.push(e.summary);
