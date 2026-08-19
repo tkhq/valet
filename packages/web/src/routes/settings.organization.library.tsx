@@ -19,6 +19,7 @@ import {
 } from "~/lib/cursor-stack";
 import { useOrg } from "~/api/settings";
 import { useSkills } from "~/api/skills";
+import { textParam } from "~/lib/search-params";
 
 /**
  * `/settings/organization/library` — Organization · Library.
@@ -53,15 +54,11 @@ interface LibrarySearch {
 }
 
 function readLibrarySearch(raw: unknown): LibrarySearch {
-  const search: Record<string, unknown> =
-    typeof raw === "object" && raw !== null ? { ...raw } : {};
-  const text = (key: string): string | undefined =>
-    typeof search[key] === "string" ? search[key] : undefined;
   return {
-    filter: text("filter"),
-    q: text("q"),
-    page: text("page"),
-    sourcePage: text("sourcePage"),
+    filter: textParam(raw, "filter"),
+    q: textParam(raw, "q"),
+    page: textParam(raw, "page"),
+    sourcePage: textParam(raw, "sourcePage"),
   };
 }
 

@@ -6,6 +6,8 @@ import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
 import { pluginDisplayName } from "~/components/integrations/display-name";
+import { matchesNeedle } from "~/lib/text-match";
+import { textParam } from "~/lib/search-params";
 
 /**
  * `/integrations` — the services a person can connect, in the settings
@@ -30,29 +32,13 @@ interface IntegrationsSearch {
  * `?connected=`/`?error=` stay off this schema: `useConnectResult` reads
  * and clears them from `window.location` on mount. */
 function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
-  const search: Record<string, unknown> =
-    typeof raw === "object" && raw !== null ? { ...raw } : {};
-  return { q: typeof search.q === "string" ? search.q : undefined };
+  return { q: textParam(raw, "q") };
 }
 
 export const Route = createFileRoute("/integrations")({
   component: IntegrationsPage,
   validateSearch: readIntegrationsSearch,
 });
-
-/** True when the tile answers the query — by display name, raw plugin
- * name, or description. Case-insensitive substring. */
-function matchesQuery(
-  plugin: { name: string; displayName?: string; description?: string },
-  needle: string,
-): boolean {
-  if (needle.length === 0) return true;
-  return (
-    pluginDisplayName(plugin).toLowerCase().includes(needle) ||
-    plugin.name.toLowerCase().includes(needle) ||
-    (plugin.description ?? "").toLowerCase().includes(needle)
-  );
-}
 
 type ConnectResult = { kind: "connected" | "error"; value: string; detail?: string } | null;
 
@@ -106,17 +92,17 @@ export function IntegrationsPage() {
   const search = readIntegrationsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
   const query = search.q ?? "";
-  const needle = query.trim().toLowerCase();
 
   // `hasVisibleSurface` drops plugins whose every service is unconfigured,
   // unconnected, and unfixable by this caller — nothing on such a tile could
   // work, and nothing on it would tell the reader what to do. An org admin
   // keeps the tile, because the API tells them which setting is missing.
   const reachable = plugins.filter(isService).filter(hasVisibleSurface);
+  // A tile answers the query by its display name, raw name, or description.
   const services = reachable
-    .filter((plugin) => matchesQuery(plugin, needle))
+    .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
-  const searching = needle.length > 0;
+  const searching = query.trim().length > 0;
   // The box stays up through an empty match — hiding it would leave the
   // search with no box to clear it in.
   const showSearch = reachable.length > 0 || searching;

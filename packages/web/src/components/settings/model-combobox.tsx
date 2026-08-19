@@ -4,6 +4,7 @@ import { Input, Badge } from "~/components/primitives";
 import { useModels } from "~/api/settings";
 import { curatedForCatalogId, type ModelOption } from "~/lib/models";
 import type { ModelInfo } from "@valet/api/wire";
+import { matchesNeedle } from "~/lib/text-match";
 
 /**
  * Text `Input` + filtered popover list — the model typeahead (split-settings
@@ -153,9 +154,7 @@ export function ModelCombobox({
 }
 
 function matchesQuery(id: string, label: string, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return id.toLowerCase().includes(q) || label.toLowerCase().includes(q);
+  return matchesNeedle(query, [id, label]);
 }
 
 function tierBadgeVariant(tier: ModelOption["tier"]): "neutral" | "accent" | "success" {
