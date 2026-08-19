@@ -285,10 +285,24 @@ const COVERAGE_REPORT = [
 ].join("\n");
 
 /**
- * Reviews one pull request when a GitHub event names it.
+ * Reviews one pull request when a comment on it asks for a review.
  *
- * This is the first event-driven template in the gallery, and the event is
- * what shapes the graph.
+ * The trigger is a mention, not a push. The first shipped shape subscribed
+ * to `github.pull_request.synchronize`, which GitHub fires for every push
+ * to the branch — so a ten-commit afternoon bought ten reviews nobody asked
+ * for, and the feedback said so. A review now starts only when a pull
+ * request comment contains the mention the installer chooses, expressed as
+ * a `comment_body contains` subscription filter — so an unwanted event is
+ * dropped at ingest, before a run starts, rather than inside a run that
+ * already paid to start.
+ *
+ * Two consequences of the mention trigger shape the gates below:
+ * - `issue_comment` fires for issues as well as pull requests, and the
+ *   payload's only marker is the `issue.pull_request` object — no scalar a
+ *   subscription filter could read — so PR-versus-issue is a gate here.
+ * - The person who mentions the agent has asked for a review, so a draft
+ *   pull request is reviewed when asked. The old trigger had to skip drafts
+ *   because nobody had asked yet.
  *
  * A dag/v1 definition does not name its own trigger — `TriggerNode` carries
  * an id, a type, and an optional `dataSchema`, and the payload's `type` is
@@ -297,12 +311,6 @@ const COVERAGE_REPORT = [
  * `{ key, summary, refs, payload }` in `trigger.data`
  * (`api/src/events/dispatcher.ts`), which is why every repository and pull
  * request value here is a `trigger.data.payload.…` path.
- *
- * Install cannot arm that trigger. `WorkflowTemplate` has no field for an
- * event subscription and `installWorkflowTemplate` writes none, so the
- * installed workflow is inert until a person adds the trigger by hand. The
- * caveats say so first, because a workflow that looks installed and never
- * fires is worse than one that refuses to install.
  *
  * `policy.onUnresolvedPath: "fail"` is what stops a run started by hand
  * from posting half a review built out of empty strings. The first gate is
@@ -343,11 +351,21 @@ const pullRequestReview: WorkflowDefinition = {
           description:
             "The repository whose pull requests this reviews. Give it as owner/name, exactly as GitHub shows it — only this repository's pull requests start a run.",
         },
+        // Also read by no node — it becomes the `comment_body contains`
+        // filter on the subscription, which is the whole mention gate.
+        mention: {
+          type: "string",
+          required: true,
+          label: "Mention that requests a review",
+          placeholder: "@valet",
+          description:
+            "A review starts when a pull request comment contains this text. The match is case-sensitive and matches inside words, so pick something nobody types by accident — an @handle works.",
+        },
         payload: {
           type: "object",
           hidden: true,
           description:
-            "The GitHub pull_request webhook body. An event trigger maps it in; nobody types it.",
+            "The GitHub issue_comment webhook body. An event trigger maps it in; nobody types it.",
         },
       },
     },
@@ -358,7 +376,7 @@ const pullRequestReview: WorkflowDefinition = {
       id: "started_by_event",
       type: "if",
       conditions: [
-        { left: "trigger.data.payload.pull_request.number", dataType: "number", operation: "exists" },
+        { left: "trigger.data.payload.issue.number", dataType: "number", operation: "exists" },
       ],
     },
     {
@@ -366,25 +384,53 @@ const pullRequestReview: WorkflowDefinition = {
       type: "stop",
       outcome: "failure",
       message:
-        "This workflow reviews the pull request a GitHub event names, and this run carried no " +
-        "pull request. Open the workflow, then Triggers, then New trigger, and subscribe it to " +
-        "github.pull_request.opened, github.pull_request.synchronize, " +
-        "github.pull_request.reopened and github.pull_request.ready_for_review.",
+        "This workflow reviews a pull request when a comment on it asks for a review, and this " +
+        "run carried no comment. To start a review, write a comment that contains the mention " +
+        "this workflow was installed with, on the pull request you want reviewed. Installing the " +
+        "template arms the trigger itself; to arm one by hand, open the workflow, then Triggers, " +
+        "then New trigger, and subscribe it to github.issue_comment.created with a repo filter " +
+        "and a comment_body contains filter.",
     },
     {
-      // Three reasons to leave a pull request alone, and all three are in
-      // the event payload, so none of them costs a GitHub call.
+      // `issue_comment` fires for issues as well as pull requests. The only
+      // marker is the `issue.pull_request` object — no scalar path — so the
+      // subscription filter cannot separate them, and this gate has to.
+      id: "on_pull_request",
+      type: "if",
+      conditions: [
+        { left: "trigger.data.payload.issue.pull_request", dataType: "object", operation: "exists" },
+      ],
+    },
+    {
+      // A success, not a failure: a mention on a plain issue is ordinary
+      // traffic for this subscription, and a red run per stray mention
+      // fills the run list with alarms naming no fixable problem.
+      id: "not_a_pull_request",
+      type: "stop",
+      outcome: "success",
+      message:
+        "Nothing was reviewed. The comment that started this run is on an issue, not a pull " +
+        "request. Write the mention in a comment on a pull request to start a review.",
+    },
+    {
+      // Two reasons to leave the mention alone, both in the event payload,
+      // so neither costs a GitHub call.
       //
-      // The bot check is the loop guard. Subscription filters cannot do it:
-      // the matcher offers eq, in, prefix and contains, with no negation
-      // (`api/src/events/match.ts`), so "not a bot" has to be a node.
+      // The bot check is the loop guard: a run must not start from text an
+      // application wrote, or a bot that quotes the mention back — this
+      // workflow's own posts included — starts the next run. Subscription
+      // filters cannot do it: the matcher offers eq, in, prefix and
+      // contains, with no negation (`api/src/events/match.ts`), so "not a
+      // bot" has to be a node.
+      //
+      // No draft check, unlike the push-triggered shape this replaces: the
+      // person who wrote the mention asked for the review, draft or not.
       id: "worth_reviewing",
       type: "if",
       conditions: [
-        { left: "trigger.data.payload.pull_request.state", dataType: "string", operation: "equals", right: "open" },
-        { left: "trigger.data.payload.pull_request.draft", dataType: "boolean", operation: "isFalse" },
+        { left: "trigger.data.payload.issue.state", dataType: "string", operation: "equals", right: "open" },
         {
-          left: "trigger.data.payload.pull_request.user.login",
+          left: "trigger.data.payload.comment.user.login",
           dataType: "string",
           operation: "doesNotContain",
           right: "[bot]",
@@ -396,9 +442,9 @@ const pullRequestReview: WorkflowDefinition = {
       type: "stop",
       outcome: "success",
       message:
-        "Pull request {{ trigger.data.payload.pull_request.number }} was not reviewed. It is " +
-        "closed, it is a draft, or an application opened it. Mark a draft ready for review to " +
-        "start a review.",
+        "Pull request {{ trigger.data.payload.issue.number }} was not reviewed. It is closed, " +
+        "or an application wrote the mention. Reopen the pull request and write the mention " +
+        "yourself to start a review.",
     },
     {
       id: "inspect",
@@ -410,7 +456,7 @@ const pullRequestReview: WorkflowDefinition = {
       params: {
         owner: "{{ trigger.data.payload.repository.owner.login }}",
         repo: "{{ trigger.data.payload.repository.name }}",
-        pullNumber: "{{ trigger.data.payload.pull_request.number }}",
+        pullNumber: "{{ trigger.data.payload.issue.number }}",
         includePatch: true,
         patchBytesLimit: PATCH_BYTES,
         filesLimit: FILES_LIMIT,
@@ -446,7 +492,7 @@ const pullRequestReview: WorkflowDefinition = {
       params: {
         owner: "{{ trigger.data.payload.repository.owner.login }}",
         repo: "{{ trigger.data.payload.repository.name }}",
-        pullNumber: "{{ trigger.data.payload.pull_request.number }}",
+        pullNumber: "{{ trigger.data.payload.issue.number }}",
         event: "COMMENT",
         updateExisting: true,
         updateKey: "valet-review-size",
@@ -545,49 +591,14 @@ const pullRequestReview: WorkflowDefinition = {
       },
     },
     {
-      // Two pushes are two deliveries and two runs — event idempotency is
-      // per delivery, and nothing debounces. Re-reading the head SHA after
-      // the model call is what collapses a burst back to one review: the
-      // run that reviewed an overtaken commit posts nothing, and the run
-      // that reviewed the newest one posts.
-      id: "recheck_head",
-      type: "tool",
-      service: "github",
-      action: "inspect_pull_request",
-      credential: "app",
-      summary: "Read the head commit again, to see whether a newer push landed during the review",
-      params: {
-        owner: "{{ trigger.data.payload.repository.owner.login }}",
-        repo: "{{ trigger.data.payload.repository.name }}",
-        pullNumber: "{{ trigger.data.payload.pull_request.number }}",
-        filesLimit: 1,
-        commentsLimit: 1,
-      },
-    },
-    {
-      // The whole comparison is the `left` expression: an `if` condition's
-      // `right` is a literal and is never rendered, so two moving values
-      // can only be compared inside one expression.
-      id: "head_unchanged",
-      type: "if",
-      conditions: [
-        {
-          left: "nodes.recheck_head.result.head.sha == trigger.data.payload.pull_request.head.sha",
-          dataType: "boolean",
-          operation: "isTrue",
-        },
-      ],
-    },
-    {
-      id: "superseded",
-      type: "stop",
-      outcome: "success",
-      message:
-        "Nothing was posted. A newer commit ({{ nodes.recheck_head.result.head.sha }}) landed on " +
-        "pull request {{ trigger.data.payload.pull_request.number }} while this review was being " +
-        "written, and the run started by that commit reviews it instead.",
-    },
-    {
+      // No supersede recheck, unlike the push-triggered shape this
+      // replaces. That shape got one run per push, so a run that found a
+      // newer head could stand down and let the newer run post. A mention
+      // starts exactly one run, so a push that lands mid-review no longer
+      // brings a replacement — dropping the review here would answer the
+      // person's ask with nothing. The `commitId` pin below keeps the
+      // posted review anchored to the commit the diff was read at.
+      //
       // `onError: "continue"` is what makes the next gate reachable.
       // GitHub answers 422 and rejects the WHOLE review when one comment
       // names a line outside the diff, so without a fallback one bad line
@@ -615,7 +626,7 @@ const pullRequestReview: WorkflowDefinition = {
       params: {
         owner: "{{ trigger.data.payload.repository.owner.login }}",
         repo: "{{ trigger.data.payload.repository.name }}",
-        pullNumber: "{{ trigger.data.payload.pull_request.number }}",
+        pullNumber: "{{ trigger.data.payload.issue.number }}",
         event: "{{ nodes.review.result.output.verdict }}",
         // The SHA the diff was read at, not the SHA at post time. The gate
         // above proves they are the same; pinning it keeps them the same if
@@ -677,7 +688,7 @@ const pullRequestReview: WorkflowDefinition = {
       params: {
         owner: "{{ trigger.data.payload.repository.owner.login }}",
         repo: "{{ trigger.data.payload.repository.name }}",
-        pullNumber: "{{ trigger.data.payload.pull_request.number }}",
+        pullNumber: "{{ trigger.data.payload.issue.number }}",
         event: "{{ nodes.review.result.output.verdict }}",
         commitId: "{{ nodes.inspect.result.head.sha }}",
         body: [
@@ -697,16 +708,15 @@ const pullRequestReview: WorkflowDefinition = {
   edges: [
     { from: "start", to: "started_by_event" },
     { from: "started_by_event", to: "no_pull_request", fromOutput: "false" },
-    { from: "started_by_event", to: "worth_reviewing", fromOutput: "true" },
+    { from: "started_by_event", to: "on_pull_request", fromOutput: "true" },
+    { from: "on_pull_request", to: "not_a_pull_request", fromOutput: "false" },
+    { from: "on_pull_request", to: "worth_reviewing", fromOutput: "true" },
     { from: "worth_reviewing", to: "not_reviewed", fromOutput: "false" },
     { from: "worth_reviewing", to: "inspect", fromOutput: "true" },
     { from: "inspect", to: "within_diff_cap" },
     { from: "within_diff_cap", to: "report_too_large", fromOutput: "false" },
     { from: "within_diff_cap", to: "review", fromOutput: "true" },
-    { from: "review", to: "recheck_head" },
-    { from: "recheck_head", to: "head_unchanged" },
-    { from: "head_unchanged", to: "superseded", fromOutput: "false" },
-    { from: "head_unchanged", to: "post_review", fromOutput: "true" },
+    { from: "review", to: "post_review" },
     { from: "post_review", to: "posting_denied" },
     { from: "posting_denied", to: "review_not_posted", fromOutput: "true" },
     { from: "posting_denied", to: "inline_comments_accepted", fromOutput: "false" },
@@ -2327,40 +2337,37 @@ export const githubTemplates: WorkflowTemplate[] = [
   },
   {
     id: "github.pull-request-review",
-    name: "Review a pull request when it opens or updates",
+    name: "Review a pull request when a comment asks for it",
     description:
-      "When a GitHub pull_request event arrives, read the pull request and its diff, then post one " +
-      "review with the findings anchored to the lines they belong to. It arms no schedule: you add " +
-      "the event trigger yourself after you install it.",
+      "When a pull request comment contains the mention you choose at install, read the pull request " +
+      "and its diff, then post one review with the findings anchored to the lines they belong to. " +
+      "Nothing runs on a push: a review starts only when somebody asks for one.",
     category: "review",
     apps: ["github", "claude"],
     steps: [
-      "Stop when the run did not come from a pull request event, and say which trigger to add.",
-      "Stop when the pull request is closed, is a draft, or was opened by an application.",
+      "Stop when the run did not come from a comment event, and say how to ask for a review.",
+      "Stop quietly when the mention is on an issue, when the pull request is closed, or when an application wrote it.",
       "Read the pull request, its diff, and the review comments already on it.",
       "Stop before the model call when the pull request changes more than 60 files, and say so on the pull request.",
       "Read the diff and write findings, each one anchored to a file and a line.",
-      "Read the head commit again, and post nothing when a newer push landed during the review.",
       "Post one review with the findings inline, a summary, and a count of what was not read.",
       "Move the findings into the review body when the inline comments cannot be posted.",
     ],
     caveats: [
-      "Installing it arms its own trigger, scoped to the repository you name, matched as owner/name exactly — a typo arms a trigger that never fires and reports nothing. Your organization also needs a GitHub App installed on that repository, or no webhook arrives at all.",
+      "Installing it arms its own trigger, scoped to the repository and the mention you name. The repository is matched as owner/name exactly, and the mention is matched case-sensitively inside the comment text — a typo in either arms a trigger that never fires and reports nothing. Your organization also needs a GitHub App installed on that repository, or no webhook arrives at all.",
       "It posts as the installed GitHub App, never approves (COMMENT or REQUEST_CHANGES only), and skips anything past 60 changed files or 120,000 diff bytes with a one-line note instead. Findings are capped at 20 per review and anchored to changed lines; when GitHub rejects an inline anchor, the same findings post in the review body instead.",
-      "The review reads only the diff and the pull request's own text, which its author controls — so treat REQUEST_CHANGES as one reviewer's opinion, not a merge gate, especially on a public repo taking pull requests from forks.",
+      "Anyone who can comment on the repository can start a review by writing the mention, and the review reads only the diff and the pull request's own text, which its author controls — so treat REQUEST_CHANGES as one reviewer's opinion, not a merge gate, especially on a public repo.",
     ],
     definition: pullRequestReview,
     events: [
       {
-        name: "Pull request opened or updated",
-        eventKeys: [
-          "github.pull_request.opened",
-          "github.pull_request.synchronize",
-          "github.pull_request.reopened",
-          "github.pull_request.ready_for_review",
+        name: "Review asked for in a comment",
+        eventKeys: ["github.issue_comment.created"],
+        filters: [
+          { field: "repo", op: "eq", fromInput: "repository" },
+          { field: "comment_body", op: "contains", fromInput: "mention" },
         ],
-        filters: [{ field: "repo", op: "eq", fromInput: "repository" }],
-        description: "When a pull request opens, updates, reopens, or leaves draft",
+        description: "When a pull request comment contains the mention",
       },
     ],
   },

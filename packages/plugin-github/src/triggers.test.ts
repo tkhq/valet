@@ -254,6 +254,27 @@ const REVIEW_THREAD_PAYLOAD = {
   sender: { login: "octocat", id: 583231 },
 };
 
+/** An issue_comment on a pull request: the `issue.pull_request` object, not a
+ * top-level `pull_request`, is how the payload says so. */
+const ISSUE_COMMENT_PAYLOAD = {
+  action: "created",
+  comment: {
+    id: 995,
+    body: "@valet review this please",
+    created_at: "2026-07-05T12:10:00Z",
+    updated_at: "2026-07-05T12:10:00Z",
+    user: { login: "octocat", id: 583231 },
+  },
+  issue: {
+    number: 42,
+    state: "open",
+    pull_request: { url: "https://api.github.com/repos/acme/widgets/pulls/42" },
+    updated_at: "2026-07-05T12:10:00Z",
+  },
+  repository: { full_name: "acme/widgets" },
+  sender: { login: "octocat", id: 583231 },
+};
+
 /**
  * Mirrors `resolvePath` in `packages/api/src/events/match.ts`, which the
  * subscription filter matcher uses on the raw payload. plugin-github must not
@@ -391,6 +412,20 @@ describe("github review event families", () => {
 
     expect(byField.get("path")).toBe("comment.path");
     expect(byField.get("pr_number")).toBe("pull_request.number");
+    expect(byField.get("comment_body")).toBe("comment.body");
+  });
+
+  it("declares a comment_body filter on issue_comment, so a mention can gate a subscription", () => {
+    // Without this field, "start a run when a comment mentions the agent"
+    // cannot be expressed at the subscription layer at all — every comment
+    // in the repository starts a run and the workflow has to throw most of
+    // them away after paying for the start.
+    const entry = catalogEntry("github.issue_comment", "github.issue_comment.created");
+    const byField = new Map(entry.filters.map((f) => [f.field, f.path]));
+
+    expect(byField.get("comment_body")).toBe("comment.body");
+    expect(byField.get("repo")).toBe("repository.full_name");
+    expect(byField.get("sender")).toBe("sender.login");
   });
 
   it("resolves every declared filter path to a scalar on a real payload", () => {
@@ -406,6 +441,7 @@ describe("github review event families", () => {
         "github.pull_request_review_thread.resolved",
         REVIEW_THREAD_PAYLOAD,
       ],
+      ["github.issue_comment", "github.issue_comment.created", ISSUE_COMMENT_PAYLOAD],
     ];
 
     for (const [triggerId, key, payload] of cases) {

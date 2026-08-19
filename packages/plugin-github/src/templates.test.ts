@@ -276,7 +276,6 @@ function fullContext(
 ): TemplateContext {
   const inspect = { result: inspectResult() };
   const review = { result: { text: "", output: reviewOutput(verdict), usage: {} } };
-  const recheck = { result: inspectResult() };
   const post = {
     result: {
       review_id: 990011,
@@ -291,13 +290,23 @@ function fullContext(
     nodes: {
       inspect,
       review,
-      recheck_head: recheck,
       post_review: post,
       report_too_large: { result: { review_id: 1, state: "COMMENTED", url: "", updated: true, inline_comments: 0 } },
       post_review_body_only: { result: { review_id: 2, state: "CHANGES_REQUESTED", url: "", updated: false, inline_comments: 0 } },
       ...nodeOverrides,
     },
   };
+}
+
+/** The mention the review template is installed with in these tests. */
+const MENTION = "@valet";
+
+/** The delivery that starts a review: an issue_comment on a pull request
+ * whose text contains the mention. `commentBody` and `commentEventTrigger`
+ * are function declarations further down (beside the assign-reviewers suite
+ * that first needed them), so hoisting makes them reachable here. */
+function mentionTrigger(text = `${MENTION} review this please`): WorkflowTriggerPayload {
+  return commentEventTrigger(commentBody("an-engineer", text));
 }
 
 // ─── Every template ──────────────────────────────────────────────────────
@@ -362,7 +371,7 @@ describe(REVIEW_ID, () => {
     expect(definition.edges.length).toBeGreaterThan(0);
   });
 
-  it("arms no schedule, because a review starts from a pull request and not from a clock", () => {
+  it("arms no schedule, because a review starts from a comment and not from a clock", () => {
     expect(template.schedule).toBeUndefined();
   });
 
@@ -373,21 +382,22 @@ describe(REVIEW_ID, () => {
     const caveats = caveatList.join("\n");
     expect(caveats).toContain("Installing it arms its own trigger");
     expect(caveats).toContain("never approves");
-    // The event keys used to live in this prose because a person had to
-    // type them into the Triggers form. Install arms them now, so the
-    // manifest is where they belong — and where a test can check them.
-    expect(template.events?.flatMap((e) => e.eventKeys)).toContain("github.pull_request.opened");
+    // Anyone who can comment can start a run — that is the trigger's own
+    // cost model, and the reader has to hear it before they install.
+    expect(caveats).toContain("Anyone who can comment");
   });
 
-  it("collects only the repository its trigger filter needs, plus the hidden payload", () => {
+  it("collects the repository and the mention its trigger filters need, plus the hidden payload", () => {
     const trigger = definition.nodes.find((node) => node.type === "trigger");
     expect(trigger?.type).toBe("trigger");
     const schema = trigger?.type === "trigger" ? trigger.dataSchema : undefined;
-    // `repository` is read by no node — it exists so install can arm the
-    // event trigger with a repo filter. `payload` is hidden, so the run
-    // dialog still asks for nothing (`visibleTriggerFields`).
-    expect(Object.keys(schema ?? {})).toEqual(["repository", "payload"]);
+    // `repository` and `mention` are read by no node — they exist so
+    // install can arm the event trigger with a repo filter and a
+    // comment_body filter. `payload` is hidden, so the run dialog still
+    // asks for nothing (`visibleTriggerFields`).
+    expect(Object.keys(schema ?? {})).toEqual(["repository", "mention", "payload"]);
     expect(schema?.repository?.required).toBe(true);
+    expect(schema?.mention?.required).toBe(true);
     expect(schema?.payload?.hidden).toBe(true);
     expect(schema?.payload?.type).toBe("object");
     // Not required: the field is never typed by a person, so a required
@@ -399,27 +409,47 @@ describe(REVIEW_ID, () => {
     expect(definition.policy?.onUnresolvedPath).toBe("fail");
   });
 
+  it("gates the subscription on the mention, so a push starts nothing", () => {
+    // The regression this pins: the first shipped shape subscribed to
+    // github.pull_request.synchronize, which GitHub fires per push, and a
+    // review ran for every commit nobody asked about. The subscription must
+    // carry a comment_body filter fed by the mention input, and no
+    // pull_request event key at all.
+    const events = template.events ?? [];
+    expect(events.length).toBe(1);
+    expect(events[0]?.eventKeys).toEqual(["github.issue_comment.created"]);
+    const filters = events[0]?.filters ?? [];
+    expect(filters).toContainEqual({ field: "repo", op: "eq", fromInput: "repository" });
+    expect(filters).toContainEqual({ field: "comment_body", op: "contains", fromInput: "mention" });
+  });
+
   it("names the trigger to add in the message it stops with", () => {
     const stop = nodeOf(definition, "no_pull_request");
     expect(isRecord(stop) && stop.type).toBe("stop");
     const message = isRecord(stop) && typeof stop.message === "string" ? stop.message : "";
-    expect(message).toContain("github.pull_request.opened");
-    expect(message).toContain("github.pull_request.synchronize");
-    expect(message).toContain("github.pull_request.reopened");
-    expect(message).toContain("github.pull_request.ready_for_review");
+    expect(message).toContain("github.issue_comment.created");
+    expect(message).toContain("comment_body");
     // The message must not read the payload it exists to report missing.
     expect(collectTemplatePaths(message)).toEqual([]);
   });
 
-  it("subscribes to event keys the github trigger catalog actually offers", () => {
-    const stop = nodeOf(definition, "no_pull_request");
-    const message = isRecord(stop) && typeof stop.message === "string" ? stop.message : "";
-    const keys = message.match(/github\.pull_request\.[a-z_]+/g) ?? [];
-    expect(keys.length).toBe(4);
-    const catalog = new Set(
-      githubTriggerDefs.flatMap((def) => (def.catalog ?? []).map((entry) => entry.key)),
-    );
-    expect(keys.filter((key) => !catalog.has(key))).toEqual([]);
+  it("subscribes to event keys, and filter fields, the github trigger catalog actually offers", () => {
+    // A key or a field the catalog does not declare arms a subscription
+    // that matches nothing, forever, with no error to read.
+    const catalog = githubTriggerDefs.flatMap((def) => def.catalog ?? []);
+    const keys = new Set(catalog.map((entry) => entry.key));
+    for (const event of template.events ?? []) {
+      for (const key of event.eventKeys) {
+        expect(keys.has(key), `catalog is missing ${key}`).toBe(true);
+        const entry = catalog.find((e) => e.key === key);
+        for (const filter of event.filters ?? []) {
+          expect(
+            entry?.filters.some((f) => f.field === filter.field),
+            `catalog entry ${key} is missing filter field ${filter.field}`,
+          ).toBe(true);
+        }
+      }
+    }
   });
 });
 
@@ -438,8 +468,8 @@ describe(`${REVIEW_ID} — paths`, () => {
     expect(wrong).toEqual([]);
   });
 
-  it("resolves every path against a real pull_request delivery", () => {
-    const ctx = fullContext(eventTrigger(webhookBody("synchronize")));
+  it("resolves every path against a real issue_comment delivery", () => {
+    const ctx = fullContext(mentionTrigger());
     const unresolved: string[] = [];
     for (const entry of templateSources(definition)) {
       for (const path of collectUnresolvedTemplatePaths(entry.source, ctx)) {
@@ -449,14 +479,14 @@ describe(`${REVIEW_ID} — paths`, () => {
     expect(unresolved).toEqual([]);
   });
 
-  it("resolves the same paths for every pull_request action it subscribes to", () => {
-    const ctx = (action: string): TemplateContext => fullContext(eventTrigger(webhookBody(action)));
-    for (const action of ["opened", "synchronize", "reopened", "ready_for_review"]) {
-      const unresolved = templateSources(definition).flatMap((entry) =>
-        collectUnresolvedTemplatePaths(entry.source, ctx(action)),
-      );
-      expect({ action, unresolved }).toEqual({ action, unresolved: [] });
-    }
+  it("reads nothing from a pull_request webhook shape it no longer subscribes to", () => {
+    // A `trigger.data.payload.pull_request.…` path would resolve against the
+    // OLD trigger's payload and render empty against every delivery the new
+    // subscription actually produces.
+    const stale = pathsOf(definition).filter((path) =>
+      path.startsWith("trigger.data.payload.pull_request"),
+    );
+    expect(stale).toEqual([]);
   });
 
   it("leaves nothing to resolve when the run carries no webhook body", () => {
@@ -532,7 +562,7 @@ describe(`${REVIEW_ID} — create_review calls`, () => {
   });
 
   it("renders the inline review into the shape the action takes", () => {
-    const ctx = fullContext(eventTrigger(webhookBody("synchronize")), "REQUEST_CHANGES");
+    const ctx = fullContext(mentionTrigger(), "REQUEST_CHANGES");
     const rendered = renderJsonTemplates(toolNode(definition, "post_review").params, ctx);
     expect(isRecord(rendered)).toBe(true);
     const params = isRecord(rendered) ? rendered : {};
@@ -578,7 +608,7 @@ describe(`${REVIEW_ID} — create_review calls`, () => {
       truncated_files: 3,
       omitted_files: 47,
     };
-    const withPartial = fullContext(eventTrigger(webhookBody("synchronize")), "REQUEST_CHANGES", {
+    const withPartial = fullContext(mentionTrigger(), "REQUEST_CHANGES", {
       inspect: { result: partial },
     });
     const rendered = renderJsonTemplates(toolNode(definition, "post_review").params, withPartial);
@@ -608,7 +638,7 @@ describe(`${REVIEW_ID} — create_review calls`, () => {
   });
 
   it("renders the fallback review with the findings in the body", () => {
-    const ctx = fullContext(eventTrigger(webhookBody("opened")), "COMMENT");
+    const ctx = fullContext(mentionTrigger(), "COMMENT");
     const rendered = renderJsonTemplates(toolNode(definition, "post_review_body_only").params, ctx);
     const params = isRecord(rendered) ? rendered : {};
 
@@ -638,7 +668,7 @@ describe(`${REVIEW_ID} — create_review calls`, () => {
   });
 
   it("names the file count in the note it posts on an oversized pull request", () => {
-    const ctx = fullContext(eventTrigger(webhookBody("opened")));
+    const ctx = fullContext(mentionTrigger());
     const rendered = renderJsonTemplates(toolNode(definition, "report_too_large").params, ctx);
     const params = isRecord(rendered) ? rendered : {};
     const body = typeof params.body === "string" ? params.body : "";
@@ -660,18 +690,49 @@ describe(`${REVIEW_ID} — gates`, () => {
     return node;
   }
 
-  it("skips a draft, a closed pull request, and one an application opened", () => {
+  it("routes a mention on a plain issue to a quiet success, not a review", () => {
+    // issue_comment fires for issues too, and the payload's only marker is
+    // the `issue.pull_request` object — no scalar a subscription filter
+    // could read — so the separation has to be this gate.
+    const gate = ifNode("on_pull_request");
+    expect(gate.conditions[0]?.left).toBe("trigger.data.payload.issue.pull_request");
+    expect(gate.conditions[0]?.operation).toBe("exists");
+
+    const onPr: TemplateContext = { trigger: mentionTrigger(), nodes: {} };
+    expect(renderJsonTemplates(`{{ exists(${gate.conditions[0]?.left}) }}`, onPr)).toBe(true);
+    const issueBody = commentBody("an-engineer", `${MENTION} review this please`);
+    delete (issueBody.issue as Record<string, unknown>).pull_request;
+    const onIssue: TemplateContext = { trigger: commentEventTrigger(issueBody), nodes: {} };
+    expect(renderJsonTemplates(`{{ exists(${gate.conditions[0]?.left}) }}`, onIssue)).toBe(false);
+
+    const branches = definition.edges.filter((edge) => edge.from === "on_pull_request");
+    expect(branches.find((edge) => edge.fromOutput === "false")?.to).toBe("not_a_pull_request");
+    const stop = nodeOf(definition, "not_a_pull_request");
+    expect(isRecord(stop) && stop.outcome).toBe("success");
+  });
+
+  it("skips a closed pull request and a mention an application wrote — and nothing else", () => {
     const conditions = ifNode("worth_reviewing").conditions;
     expect(conditions.map((c) => c.left)).toEqual([
-      "trigger.data.payload.pull_request.state",
-      "trigger.data.payload.pull_request.draft",
-      "trigger.data.payload.pull_request.user.login",
+      "trigger.data.payload.issue.state",
+      "trigger.data.payload.comment.user.login",
     ]);
     // A subscription filter cannot express the bot guard: the matcher has
-    // eq, in, prefix and contains, and no negation.
+    // eq, in, prefix and contains, and no negation. Without it, any bot
+    // that quotes the mention back — this workflow's own posts included —
+    // starts the next run.
     const botGuard = conditions.find((c) => c.left.endsWith("user.login"));
     expect(botGuard?.operation).toBe("doesNotContain");
     expect(botGuard?.right).toBe("[bot]");
+  });
+
+  it("reviews a draft when asked — the mention is the ask", () => {
+    // The push-triggered shape skipped drafts because nobody had asked yet.
+    // A person who writes the mention on a draft has asked.
+    const conditions = definition.nodes
+      .filter((node): node is IfNode => node.type === "if")
+      .flatMap((node) => node.conditions);
+    expect(conditions.filter((c) => c.left.includes("draft"))).toEqual([]);
   });
 
   it("caps the diff before the model call, not after it", () => {
@@ -686,33 +747,23 @@ describe(`${REVIEW_ID} — gates`, () => {
     expect(branches.find((edge) => edge.fromOutput === "false")?.to).toBe("report_too_large");
   });
 
-  it("compares the two head commits inside one expression", () => {
-    // An `if` condition's `right` is a literal and is never rendered, so a
-    // template there would be compared as its own text.
-    const gate = ifNode("head_unchanged").conditions[0];
-    expect(gate?.left).toBe(
-      "nodes.recheck_head.result.head.sha == trigger.data.payload.pull_request.head.sha",
+  it("posts even when a push lands mid-review, pinned to the inspected commit", () => {
+    // The push-triggered shape carried a supersede recheck: it got one run
+    // per push, so a run that found a newer head could stand down and let
+    // the newer run post. A mention starts exactly one run, so standing
+    // down would answer the person's ask with nothing. What remains is the
+    // pin: the posted review anchors to the commit the diff was read at.
+    expect(nodeOf(definition, "recheck_head")).toBeUndefined();
+    expect(nodeOf(definition, "superseded")).toBeUndefined();
+    expect(definition.edges.filter((e) => e.from === "review").map((e) => e.to)).toEqual([
+      "post_review",
+    ]);
+    expect(toolNode(definition, "post_review").params.commitId).toBe(
+      "{{ nodes.inspect.result.head.sha }}",
     );
-    expect(gate?.right).toBeUndefined();
-  });
-
-  it("posts nothing when a newer commit landed during the review", () => {
-    const gate = ifNode("head_unchanged");
-    const branches = definition.edges.filter((edge) => edge.from === gate.id);
-    expect(branches.find((edge) => edge.fromOutput === "false")?.to).toBe("superseded");
-    expect(branches.find((edge) => edge.fromOutput === "true")?.to).toBe("post_review");
-
-    const ctx = fullContext(eventTrigger(webhookBody("synchronize")));
-    const stale: TemplateContext = {
-      ...ctx,
-      trigger: eventTrigger(
-        webhookBody("synchronize", { head: { ref: "cache-settings", sha: "0000000000000000000000000000000000000000" } }),
-      ),
-    };
-    // Rendering the comparison is how the gate is proved to see a
-    // difference at all — the executor evaluates the same expression.
-    expect(renderJsonTemplates(`{{ ${gate.conditions[0]?.left} }}`, ctx)).toBe(true);
-    expect(renderJsonTemplates(`{{ ${gate.conditions[0]?.left} }}`, stale)).toBe(false);
+    expect(toolNode(definition, "post_review_body_only").params.commitId).toBe(
+      "{{ nodes.inspect.result.head.sha }}",
+    );
   });
 
   it("falls back to the body only when GitHub rejected the inline comments", () => {
@@ -763,14 +814,14 @@ describe(`${REVIEW_ID} — gates`, () => {
   it("evaluates the denial gate correctly for both outcomes", () => {
     const gate = ifNode("posting_denied");
     const path = gate.conditions[0]?.left ?? "";
-    const ctx = fullContext(eventTrigger(webhookBody("synchronize")));
+    const ctx = fullContext(mentionTrigger());
 
     // A successful post carries a review id and no `policyDenied`.
     expect(renderJsonTemplates(`{{ exists(${path}) }}`, ctx)).toBe(false);
 
     // A denied gate completes the node with the shape `onDeny: "skip"`
     // writes (`workflow/src/nodes/tool.ts`).
-    const denied = fullContext(eventTrigger(webhookBody("synchronize")), "REQUEST_CHANGES", {
+    const denied = fullContext(mentionTrigger(), "REQUEST_CHANGES", {
       post_review: { result: { approved: false, policyDenied: true, resolvedBy: "a-reviewer" } },
     });
     expect(renderJsonTemplates(`{{ exists(${path}) }}`, denied)).toBe(true);
@@ -1013,6 +1064,7 @@ function commentBody(commenterLogin: string, text: string, overrides: Record<str
     sender: { id: 5252, login: commenterLogin },
     issue: {
       number: PR_NUMBER,
+      state: "open",
       pull_request: { url: `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}` },
     },
     comment: { user: { login: commenterLogin }, body: text },
