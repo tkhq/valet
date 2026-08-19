@@ -5,6 +5,7 @@ import { orgMembers, orgs, users } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
 import {
+  importFiles,
   linksForFile,
   listFiles,
   moveFile,
@@ -319,6 +320,45 @@ describe("memory service", () => {
       expect(result.file.title).toBe("new-name");
     });
 
+    it("roots the moved file's own relative links so they still resolve after a cross-directory move", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "projects/valet/bar.md", content: "# Bar\n" });
+      await writeFile(db, scope, {
+        path: "projects/valet/hub.md",
+        content: "# Hub\n\nsee [bar](bar.md) and [rooted](/projects/valet/bar.md)\n",
+      });
+
+      const result = await moveFile(db, scope, { from: "projects/valet/hub.md", to: "notes/hub.md" });
+      expect(result.ownLinksRewritten).toBe(true);
+      expect(result.file.content).toBe("# Hub\n\nsee [bar](/projects/valet/bar.md) and [rooted](/projects/valet/bar.md)\n");
+
+      // The rooted links still resolve to the original target.
+      const links = await linksForFile(db, scope, "notes/hub.md");
+      expect(links.outbound).toEqual([{ path: "projects/valet/bar.md", title: "Bar", type: "project-note" }]);
+    });
+
+    it("does not warn on a same-directory rename of an explicitly-typed file", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/x.md", content: "# X\n", type: "workflow" });
+      const result = await moveFile(db, scope, { from: "notes/x.md", to: "notes/y.md" });
+      expect(result.warnings).toEqual([]);
+      expect(result.file.type).toBe("workflow");
+    });
+
+    it("keeps a curated title that the content cannot reproduce", async () => {
+      const scope = scopeFor("u1");
+      await importFiles(db, scope, {
+        files: { "notes/q3.md": "---\ntitle: Quarterly Planning Notes\n---\nplain body, no heading\n" },
+        trusted: false,
+      });
+      const before = await readFile(db, scope, "notes/q3.md");
+      if (before.kind !== "file") throw new Error("expected file");
+      expect(before.file.title).toBe("Quarterly Planning Notes");
+
+      const result = await moveFile(db, scope, { from: "notes/q3.md", to: "projects/planning/q3.md" });
+      expect(result.file.title).toBe("Quarterly Planning Notes");
+    });
+
     it("refuses a missing source, an occupied destination, and a same-path move", async () => {
       const scope = scopeFor("u1");
       await writeFile(db, scope, { path: "notes/a.md", content: "a\n" });
@@ -379,6 +419,19 @@ describe("memory service", () => {
 
     it("throws NotFound for a path with no file behind it", async () => {
       await expect(linksForFile(db, scopeFor("u1"), "notes/nope.md")).rejects.toThrow(/not found/i);
+    });
+
+    it("dedups outbound edges when two spellings resolve to the same file", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/foo.md", content: "# Foo\n" });
+      await writeFile(db, scope, { path: "notes/hub.md", content: "[a](/notes/foo) and [b](/notes/foo.md)\n" });
+
+      const result = await linksForFile(db, scope, "notes/hub.md");
+      expect(result.outbound).toEqual([{ path: "notes/foo.md", title: "Foo", type: "note" }]);
+    });
+
+    it("rejects a team: virtual path with a message that names the reason", async () => {
+      await expect(linksForFile(db, scopeFor("u1"), "team:t1/notes/x.md")).rejects.toThrow(/own files only/);
     });
   });
 });

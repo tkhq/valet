@@ -56,13 +56,15 @@ Close by appending a journal entry describing what you did, linking every touche
 1. Find candidates: `mem_search` by topic and by the resource handle — two files about one repo or doc is the classic duplicate.
 2. Pick the canonical file: more inbound links wins (`mem_links` on each candidate); otherwise the better-located path.
 3. Move unique content into the canonical file (`mem_patch` append under a section).
-4. Check the duplicate's inbound edges (`mem_links`), patch those referencers to point at the canonical file, then `mem_rm` the duplicate. Deletion rewrites nothing — a skipped referencer becomes a phantom link.
+4. Check the duplicate's inbound edges with `mem_links`.
+5. Patch each referencer to point at the canonical file. Deletion rewrites nothing — a skipped referencer becomes a phantom link.
+6. `mem_rm` the duplicate.
 
 ## Playbook: reorganization
 
 1. Before moving anything, `mem_links` on the file — know who points at it.
-2. `mem_move(from, to)` — one file at a time. It rewrites inbound links in referencing files for you (to the absolute `/path` form) and reports which files it updated; never hand-edit referencers after a move.
-3. **`mem_move` does not reclassify `type`.** A cross-directory move keeps the old type — the response warns when the new directory implies a different one. Follow up with a metadata-only `mem_write(to, type: ...)`.
+2. `mem_move(from, to)` — one file at a time. It rewrites inbound links in referencing files (to the rooted `/path` form) and roots the moved file's own relative links; never hand-edit referencers after a move.
+3. **`mem_move` does not reclassify `type`.** If the response warns that the type no longer fits the new directory, decide: reclassify with a metadata-only `mem_write(to, type: ...)`, or keep the type if it was deliberate.
 4. Spot-check one rewritten referencer to confirm the link resolves.
 5. Journal the mapping (`old → new`) so future-you can follow stale references.
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  absolutizeLinkTargets,
   buildMemoryGraph,
   extractLinkTargets,
   MAX_GRAPH_NODES,
@@ -77,6 +78,45 @@ describe("rewriteLinkTargets", () => {
     const body = ["```", "[x](/old.md)", "```", "`[y](/old.md)` and [z](/unrelated.md)"].join("\n");
     const result = rewriteLinkTargets("a.md", body, "old.md", "new.md");
     expect(result.rewrote).toBe(false);
+    expect(result.content).toBe(body);
+  });
+
+  it("preserves a percent-encoded anchor (%23) instead of dropping it", () => {
+    const body = "see [x](notes/a.md%23setup) here";
+    const { content, rewrote } = rewriteLinkTargets("index.md", body, "notes/a.md", "archive/a.md");
+    expect(rewrote).toBe(true);
+    expect(content).toBe("see [x](/archive/a.md#setup) here");
+  });
+
+  it("percent-encodes a destination path that would break link parsing", () => {
+    const body = "[x](/notes/a.md)";
+    const { content } = rewriteLinkTargets("index.md", body, "notes/a.md", "notes/c d.md");
+    expect(content).toBe("[x](/notes/c%20d.md)");
+    // The rewritten link must stay visible to extraction.
+    expect(extractLinkTargets("index.md", content)).toEqual(["notes/c d.md"]);
+  });
+
+  it("shares the scan budget with extractLinkTargets — a link past the cap on an early-starting line is not rewritten", () => {
+    const body = `${"x".repeat(MAX_SCAN_CHARS)}[late](/old.md)`;
+    expect(extractLinkTargets("a.md", body)).toEqual([]);
+    const result = rewriteLinkTargets("a.md", body, "old.md", "new.md");
+    expect(result.rewrote).toBe(false);
+    expect(result.content).toBe(body);
+  });
+});
+
+describe("absolutizeLinkTargets", () => {
+  it("roots relative targets to their resolution from the source path, keeping anchors", () => {
+    const body = "see [b](bar.md) and [up](../people/alice.md#bio) and [rooted](/notes/x.md)";
+    const { content, changed } = absolutizeLinkTargets("projects/valet/a.md", body);
+    expect(changed).toBe(true);
+    expect(content).toBe("see [b](/projects/valet/bar.md) and [up](/projects/people/alice.md#bio) and [rooted](/notes/x.md)");
+  });
+
+  it("skips external URLs, anchors, and template garbage; reports changed: false when nothing is relative", () => {
+    const body = "[w](https://example.com) [a](#sec) [t]({url}) [r](/rooted.md)";
+    const result = absolutizeLinkTargets("notes/a.md", body);
+    expect(result.changed).toBe(false);
     expect(result.content).toBe(body);
   });
 });

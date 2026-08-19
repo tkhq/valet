@@ -64,29 +64,66 @@ export interface GraphSourceFile {
 
 const LINK_RE = /\[([^\]]*)\]\(([^)\s]+)\)/g;
 
+/**
+ * The one link scanner. Walks the scannable prefix (`MAX_SCAN_CHARS`) of
+ * `body` line by line — code fences and inline code skipped, the inline-code
+ * mask length-preserving so match indices address the raw line — and calls
+ * `mapTarget` for every markdown link target. A non-null return replaces the
+ * target text in place; the unscanned remainder is appended untouched.
+ *
+ * Extraction (`extractLinkTargets`) and rewriting (`rewriteLinkTargets`,
+ * `absolutizeLinkTargets`) all drive this walker, so the fence, mask, and
+ * scan-budget rules cannot drift between "which links exist" and "which
+ * links get rewritten".
+ */
+function walkLinkTargets(
+  body: string,
+  mapTarget: (target: string) => string | null,
+): { content: string; changed: boolean; targets: string[] } {
+  const head = body.length > MAX_SCAN_CHARS ? body.slice(0, MAX_SCAN_CHARS) : body;
+  const tail = body.slice(head.length);
+  const targets: string[] = [];
+  let inFence = false;
+  let changed = false;
+
+  const lines = head.split("\n").map((rawLine) => {
+    if (rawLine.startsWith("```") || rawLine.startsWith("~~~")) {
+      inFence = !inFence;
+      return rawLine;
+    }
+    if (inFence) return rawLine;
+
+    const masked = rawLine.replace(/`[^`]*`/g, (m) => " ".repeat(m.length));
+    let result = "";
+    let last = 0;
+    LINK_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = LINK_RE.exec(masked)) !== null) {
+      const target = match[2] ?? "";
+      targets.push(target);
+      const replacement = mapTarget(target);
+      if (replacement === null) continue;
+      // `[` + text + `](` precede the target inside the match.
+      const targetStart = match.index + 1 + (match[1]?.length ?? 0) + 2;
+      result += rawLine.slice(last, targetStart) + replacement;
+      last = targetStart + target.length;
+      changed = true;
+    }
+    return result + rawLine.slice(last);
+  });
+
+  return { content: lines.join("\n") + tail, changed, targets };
+}
+
 /** Markdown `[text](target)` targets in `body`, resolved to bundle paths,
  * deduped, code fences and inline code skipped. */
 export function extractLinkTargets(fromPath: string, body: string): string[] {
   const seen = new Set<string>();
-  let inFence = false;
-
-  const scanBody = body.length > MAX_SCAN_CHARS ? body.slice(0, MAX_SCAN_CHARS) : body;
-  for (const rawLine of scanBody.split("\n")) {
-    if (rawLine.startsWith("```") || rawLine.startsWith("~~~")) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-
-    const line = rawLine.replace(/`[^`]*`/g, (m) => " ".repeat(m.length));
-    LINK_RE.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = LINK_RE.exec(line)) !== null) {
-      const toPath = resolveLinkTarget(fromPath, match[2] ?? "");
-      if (toPath !== null && toPath !== fromPath) seen.add(toPath);
-    }
+  const { targets } = walkLinkTargets(body, () => null);
+  for (const target of targets) {
+    const toPath = resolveLinkTarget(fromPath, target);
+    if (toPath !== null && toPath !== fromPath) seen.add(toPath);
   }
-
   return [...seen];
 }
 
@@ -98,14 +135,40 @@ export function isPathShaped(target: string): boolean {
   return target.includes("/") || target.endsWith(".md");
 }
 
+/** `decodeURIComponent` with the same malformed-input fallback
+ * `resolveLinkTarget` uses: a target that fails to decode is treated as
+ * literal text. */
+function tryDecode(target: string): string {
+  try {
+    return decodeURIComponent(target);
+  } catch {
+    return target;
+  }
+}
+
+/** Percent-encodes the characters that would break LINK_RE parsing of a
+ * spliced-in target — whitespace and parens (stored paths may legally
+ * contain both), plus `%` itself so decoding round-trips. Without this, a
+ * rewritten link to `notes/c d.md` could never be matched again. */
+function encodeLinkTarget(target: string): string {
+  return target.replace(/[%\s()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
+/** The `#anchor` suffix of a link target, read from the DECODED form —
+ * `resolveLinkTarget` decodes before splitting on `#`, so a
+ * percent-encoded `%23` anchor must survive a rewrite too. */
+function anchorOf(target: string): string {
+  const decoded = tryDecode(target);
+  const hashIdx = decoded.indexOf("#");
+  return hashIdx > 0 ? decoded.slice(hashIdx) : "";
+}
+
 /**
  * Rewrites markdown link targets in `body` that resolve to `oldTarget`
  * so they point at `newTargetPath` instead (written in the bundle-rooted
- * `/path` form, preserving any `#anchor` suffix). Same scan rules as
- * `extractLinkTargets`: code fences and inline code skipped, extension
- * drift tolerated (`a/b` matches `a/b.md`), links past `MAX_SCAN_CHARS`
- * not discovered. The inline-code mask preserves length, so match indices
- * on the masked line address the raw line directly.
+ * `/path` form, preserving any `#anchor` suffix). Scan rules are shared
+ * with `extractLinkTargets` via `walkLinkTargets`; extension drift is
+ * tolerated (`a/b` matches `a/b.md`).
  */
 export function rewriteLinkTargets(
   fromPath: string,
@@ -113,41 +176,30 @@ export function rewriteLinkTargets(
   oldTarget: string,
   newTargetPath: string,
 ): { content: string; rewrote: boolean } {
-  let rewrote = false;
-  let inFence = false;
-  let offset = 0;
-
-  const lines = body.split("\n").map((rawLine) => {
-    const lineStart = offset;
-    offset += rawLine.length + 1;
-    if (rawLine.startsWith("```") || rawLine.startsWith("~~~")) {
-      inFence = !inFence;
-      return rawLine;
-    }
-    if (inFence || lineStart > MAX_SCAN_CHARS) return rawLine;
-
-    const masked = rawLine.replace(/`[^`]*`/g, (m) => " ".repeat(m.length));
-    let result = "";
-    let last = 0;
-    LINK_RE.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = LINK_RE.exec(masked)) !== null) {
-      const target = match[2] ?? "";
-      const resolved = resolveLinkTarget(fromPath, target);
-      if (resolved === null || (resolved !== oldTarget && `${resolved}.md` !== oldTarget)) continue;
-
-      const hashIdx = target.indexOf("#");
-      const anchor = hashIdx > 0 ? target.slice(hashIdx) : "";
-      // `[` + text + `](` precede the target inside the match.
-      const targetStart = match.index + 1 + (match[1]?.length ?? 0) + 2;
-      result += rawLine.slice(last, targetStart) + `/${newTargetPath}${anchor}`;
-      last = targetStart + target.length;
-      rewrote = true;
-    }
-    return result + rawLine.slice(last);
+  const { content, changed } = walkLinkTargets(body, (target) => {
+    const resolved = resolveLinkTarget(fromPath, target);
+    if (resolved === null || (resolved !== oldTarget && `${resolved}.md` !== oldTarget)) return null;
+    return encodeLinkTarget(`/${newTargetPath}${anchorOf(target)}`);
   });
+  return { content, rewrote: changed };
+}
 
-  return { content: lines.join("\n"), rewrote };
+/**
+ * Rewrites every RELATIVE link target in `body` to the bundle-rooted
+ * `/path` form of what it resolves to from `fromPath`, so the body keeps
+ * resolving to the same files after the file moves to another directory.
+ * Rooted targets are already location-independent and are left alone;
+ * external URLs, anchors, and template garbage are skipped. `moveFile`
+ * runs this over the moved file's own content — without it, a
+ * cross-directory move silently re-points every relative link.
+ */
+export function absolutizeLinkTargets(fromPath: string, body: string): { content: string; changed: boolean } {
+  return walkLinkTargets(body, (target) => {
+    if (tryDecode(target).startsWith("/")) return null;
+    const resolved = resolveLinkTarget(fromPath, target);
+    if (resolved === null) return null;
+    return encodeLinkTarget(`/${resolved}${anchorOf(target)}`);
+  });
 }
 
 export function buildMemoryGraph(files: GraphSourceFile[]): MemoryGraph {

@@ -327,25 +327,24 @@ export const memSearchTool = defineTool({
 
 // ─── mem_move ──────────────────────────────────────────────────────────
 
-interface MoveResultBody {
-  file: { path: string; version?: number };
+interface MoveResultBody extends WriteResultBody {
   referencersUpdated: string[];
-  warnings?: unknown;
+  ownLinksRewritten: boolean;
 }
 
 function asMoveResultBody(body: unknown): MoveResultBody | null {
-  if (!isRecord(body) || !isRecord(body.file) || typeof body.file.path !== "string") return null;
-  const version = typeof body.file.version === "number" ? body.file.version : undefined;
+  const base = asWriteResultBody(body);
+  if (!base || !isRecord(body)) return null;
   const referencersUpdated = Array.isArray(body.referencersUpdated)
     ? body.referencersUpdated.filter((p): p is string => typeof p === "string")
     : [];
-  return { file: { path: body.file.path, version }, referencersUpdated, warnings: body.warnings };
+  return { ...base, referencersUpdated, ownLinksRewritten: body.ownLinksRewritten === true };
 }
 
 export const memMoveTool = defineTool({
   name: "mem_move",
   description:
-    "Rename or move a memory file. Rewrites markdown links in other memory files that pointed at the old path, and reports which files were updated. Metadata carries over unchanged — a cross-directory move keeps the old `type`, so follow it with a metadata-only mem_write to reclassify when the new location implies a different type.",
+    "Rename or move a memory file. Rewrites markdown links in other memory files that pointed at the old path (reporting which files were updated), and roots the moved file's own relative links so they still resolve. Metadata carries over unchanged — when the response warns that the old `type` no longer fits the new location, follow up with a metadata-only mem_write to reclassify.",
   parameters: Type.Object({
     from: Type.String({ description: "Current path of the file to move." }),
     to: Type.String({ description: "New path. Must not already exist — merge into an existing file instead." }),
@@ -364,13 +363,16 @@ export const memMoveTool = defineTool({
       },
       async (res) => {
         const body = asMoveResultBody(await parseJsonBody(res));
-        if (!body) return { text: `moved ${args.from} → ${args.to}` };
+        if (!body) return { text: "[memory_error] unexpected response from /api/memory/move" };
         const versionNote = body.file.version !== undefined ? ` (v${body.file.version})` : "";
         const refNote =
           body.referencersUpdated.length > 0
             ? `\n${body.referencersUpdated.length} referencing file(s) updated: ${body.referencersUpdated.join(", ")}`
             : "\nno referencing files needed updates";
-        return { text: `moved ${args.from} → ${body.file.path}${versionNote}${refNote}${formatWarnings(body.warnings)}` };
+        const ownNote = body.ownLinksRewritten
+          ? "\nits own relative links were rooted (/path form) so they still resolve"
+          : "";
+        return { text: `moved ${args.from} → ${body.file.path}${versionNote}${refNote}${ownNote}${formatWarnings(body.warnings)}` };
       },
     );
   },
@@ -422,7 +424,7 @@ function formatEdges(label: string, edges: LinkEdgeRow[]): string {
 export const memLinksTool = defineTool({
   name: "mem_links",
   description:
-    "List one memory file's link edges: inbound (files whose markdown links point at it) and outbound (files its links point at, phantom targets included). Check inbound before mem_move or mem_rm, and use it to orient on a topic's cluster.",
+    "List one memory file's link edges: inbound (files whose markdown links point at it) and outbound (files its links point at, phantom targets included). Check inbound before mem_move or mem_rm, and use it to orient on a topic's cluster. Own files only — a team:{id}/ path is rejected.",
   parameters: Type.Object({
     path: Type.String({ description: "Memory file path to inspect." }),
   }),
@@ -434,7 +436,9 @@ export const memLinksTool = defineTool({
     url.searchParams.set("path", args.path);
     return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
       const body = asLinksResultBody(await parseJsonBody(res));
-      if (!body) return { text: `links for ${args.path}\ninbound (0)\noutbound (0)` };
+      // Never fabricate "0 links" from an unparseable body — the caller may
+      // be deciding whether a mem_rm is safe.
+      if (!body) return { text: "[memory_error] unexpected response from /api/memory/links" };
       return {
         text: `links for ${body.path}\n${formatEdges("inbound", body.inbound)}\n${formatEdges("outbound", body.outbound)}`,
       };
