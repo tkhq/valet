@@ -221,7 +221,7 @@ describe("WorkflowsIndexPage", () => {
     workflowsData.workflows = [
       {
         id: "wf_event_only",
-        name: "Review a pull request when it opens or updates",
+        name: "Review a pull request when a comment asks for it",
         definition: {
           version: "dag/v1",
           nodes: [
