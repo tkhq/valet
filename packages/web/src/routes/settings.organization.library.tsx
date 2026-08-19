@@ -139,7 +139,7 @@ function OrgSkillsSection({
   // The org id is the pin, so the read waits for it. Without the wait the
   // query would ask for the whole catalog once and show a member's own
   // skills under an "Organization skills" heading.
-  const { data, isLoading, error } = useSkills(
+  const { data, isLoading, error, isPlaceholderData } = useSkills(
     {
       ...skillFilterQuery(filters),
       ...(orgId === undefined ? {} : { ownerType: "org", ownerId: orgId }),
@@ -197,10 +197,12 @@ function OrgSkillsSection({
             label="organization skills"
             page={pageNumber(cursors)}
             hasPrevious={cursors.length > 0}
-            hasNext={data?.nextCursor != null}
+            // While the placeholder shows, `nextCursor` belongs to the
+            // PREVIOUS query, so Next waits for the fetch (see `/skills`).
+            hasNext={!isPlaceholderData && data?.nextCursor != null}
             onPrevious={() => onSearchChange({ page: formatCursorStack(popCursor(cursors)) })}
             onNext={() => {
-              if (data?.nextCursor != null) {
+              if (!isPlaceholderData && data?.nextCursor != null) {
                 onSearchChange({ page: formatCursorStack(pushCursor(cursors, data.nextCursor)) });
               }
             }}

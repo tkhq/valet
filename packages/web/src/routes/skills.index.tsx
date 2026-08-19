@@ -102,7 +102,7 @@ export function SkillsIndexPage() {
   // owner and would hide every ORG-owned skill, which is most of a catalog
   // built from an org-wide repository. See `useCatalogOwner`.
   const owner = useCatalogOwner();
-  const { data, isLoading, error } = useSkills({
+  const { data, isLoading, error, isPlaceholderData } = useSkills({
     ...skillFilterQuery(filters),
     ...(owner ? { ownerType: owner.ownerType, ownerId: owner.ownerId } : {}),
     ...(cursor === undefined ? {} : { cursor }),
@@ -165,10 +165,13 @@ export function SkillsIndexPage() {
                 label="skills"
                 page={pageNumber(skillCursors)}
                 hasPrevious={skillCursors.length > 0}
-                hasNext={data?.nextCursor != null}
+                // While the placeholder shows, `nextCursor` belongs to the
+                // PREVIOUS query. Pushing it onto this query's stack would
+                // page a different question, so Next waits for the fetch.
+                hasNext={!isPlaceholderData && data?.nextCursor != null}
                 onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
                 onNext={() => {
-                  if (data?.nextCursor != null) {
+                  if (!isPlaceholderData && data?.nextCursor != null) {
                     go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
                   }
                 }}

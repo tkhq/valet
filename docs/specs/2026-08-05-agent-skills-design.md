@@ -241,7 +241,7 @@ The `shadowed` flag stays a property of the caller's WHOLE reach, never of the p
 
 The client keeps each list's cursor stack in the route's search params (`packages/web/src/lib/cursor-stack.ts`), so a page is a real history entry: Back pages back instead of leaving Skills, and a link to page three opens page three.
 
-Because every control lives in the URL, each keystroke in the search box is a new catalog query. `useSkills` holds the previous page as placeholder data while the next page loads, so the pages never swap the grid for a spinner mid-search. Without the placeholder, the swap unmounted the search box and dropped its focus after each character.
+Because every control lives in the URL, a changed search is a new catalog query. `useSkills` holds the previous page as placeholder data while the next page loads, so the pages never swap the grid for a spinner mid-search. Without the placeholder, the swap unmounted the search box and dropped its focus after each character. Two guards travel with the placeholder. The search box sends its text only after typing settles (250 ms, the memory-search period), so a word costs one request, not one per character. And the pager holds Next while the placeholder shows: the placeholder's `nextCursor` names a row of the PREVIOUS query, so pushing it onto the new query's cursor stack would page a different question.
 
 Three write surfaces exist, and they share one implementation:
 
