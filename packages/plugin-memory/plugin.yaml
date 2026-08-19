@@ -1,0 +1,6 @@
+name: memory
+version: 0.0.1
+description: Memory curation skill — create, link, and maintain the memory store
+icon: "\U0001F9E0"
+
+v2: true
