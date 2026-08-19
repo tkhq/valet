@@ -163,7 +163,9 @@ export async function installWorkflowTemplate(
   // A repo-scoped trigger is armed for exactly one repository. Establish which
   // one — and that the installer may speak for it — BEFORE anything is created,
   // so the token minted below is worthless against every other repository.
-  if (template.trigger?.repoScoped) {
+  const hasRepoScopedTrigger = template.trigger?.repoScoped;
+  const hasRepoScopedEvents = template.events?.some((e) => e.repoScoped);
+  if (hasRepoScopedTrigger || hasRepoScopedEvents) {
     if (!repoPin?.owner || !repoPin?.repo) {
       throw new ValidationError(
         `Template "${templateId}" is scoped to one repository; provide owner and repo to install it.`,
@@ -264,10 +266,15 @@ export async function installWorkflowTemplate(
           continue;
         }
         const id = crypto.randomUUID();
-        const repoScope =
-          eventEntry.repoScoped && repoPin
-            ? { github: { owner: repoPin.owner, repo: repoPin.repo } }
-            : {};
+        const configPayload: Record<string, unknown> = {
+          type: 'github-app',
+          events: eventEntry.eventKeys,
+        };
+        // Repo-scoped events are guaranteed to have repoPin (validated upfront).
+        if (eventEntry.repoScoped && repoPin) {
+          configPayload.owner = repoPin.owner;
+          configPayload.repo = repoPin.repo;
+        }
         await createTrigger(db, {
           id,
           userId,
@@ -275,11 +282,7 @@ export async function installWorkflowTemplate(
           name: eventEntry.name,
           enabled: true,
           type: 'github-app',
-          config: JSON.stringify({
-            type: 'github-app',
-            events: eventEntry.eventKeys,
-            ...repoScope,
-          }),
+          config: JSON.stringify(configPayload),
           variableMapping: eventEntry.variableMapping ? JSON.stringify(eventEntry.variableMapping) : null,
           now,
         });
