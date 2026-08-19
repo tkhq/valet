@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { CappedOutputBuffer } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -21,6 +22,9 @@ const JOB_EVICTION_BACKSTOP_MS = 5 * 60 * 1000;
 interface LocalJobState {
   status: "running" | "done" | "failed";
   exitCode?: number;
+  /** The append-only buffer pollJob slices by offset. Under a cap this is
+   * the buffer's head while running; the tail (and omission marker) is
+   * appended once, at close. */
   output: string;
   /** Set when the maxOutputBytes cap dropped bytes — pollJob reports it. */
   truncated?: boolean;
@@ -149,16 +153,18 @@ export class LocalSandbox implements Sandbox {
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
+    // Under a cap, keep head + tail (drop the middle): the poll protocol
+    // needs an append-only buffer, so only the head streams live and the
+    // tail joins on at close (see CappedOutputBuffer).
+    const buf = limit ? new CappedOutputBuffer(limit) : undefined;
     const appendOutput = (chunk: string) => {
-      if (limit && state.output.length >= limit) {
-        state.truncated = true;
+      if (!buf) {
+        state.output += chunk;
         return;
       }
-      state.output += chunk;
-      if (limit && state.output.length > limit) {
-        state.output = state.output.slice(0, limit);
-        state.truncated = true;
-      }
+      buf.append(chunk);
+      state.output = buf.headText;
+      if (buf.truncated) state.truncated = true;
     };
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
@@ -175,12 +181,14 @@ export class LocalSandbox implements Sandbox {
 
     child.on("error", () => {
       state.status = "failed";
+      if (buf) state.output += buf.appendix();
       resolveClosed();
       scheduleEviction();
     });
     child.on("close", (code, sig) => {
       state.status = "done";
       state.exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
+      if (buf) state.output += buf.appendix();
       resolveClosed();
       scheduleEviction();
     });
@@ -239,30 +247,25 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
     let timedOut = false;
     const limit = opts.maxOutputBytes;
+    // Under a cap, keep head + tail per stream and drop the middle — test
+    // runners and builds print their summary last (see CappedOutputBuffer).
+    const stdoutBuf = limit ? new CappedOutputBuffer(limit) : undefined;
+    const stderrBuf = limit ? new CappedOutputBuffer(limit) : undefined;
+    let stdout = "";
+    let stderr = "";
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
 
     child.stdout?.on("data", (chunk: string) => {
-      if (limit && stdout.length >= limit) {
-        truncated = true;
-        return;
-      }
-      stdout += chunk;
-      if (limit && stdout.length > limit) {
-        stdout = stdout.slice(0, limit);
-        truncated = true;
-      }
+      if (stdoutBuf) stdoutBuf.append(chunk);
+      else stdout += chunk;
     });
     child.stderr?.on("data", (chunk: string) => {
-      if (limit && stderr.length >= limit) return;
-      stderr += chunk;
-      if (limit && stderr.length > limit) stderr = stderr.slice(0, limit);
+      if (stderrBuf) stderrBuf.append(chunk);
+      else stderr += chunk;
     });
 
     if (opts.stdin !== undefined) {
@@ -296,9 +299,10 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
       const exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
+      const truncated = (stdoutBuf?.truncated ?? false) || (stderrBuf?.truncated ?? false);
       resolveResult({
-        stdout,
-        stderr,
+        stdout: stdoutBuf ? stdoutBuf.value() : stdout,
+        stderr: stderrBuf ? stderrBuf.value() : stderr,
         exitCode,
         timedOut: timedOut ? true : undefined,
         truncated: truncated ? true : undefined,

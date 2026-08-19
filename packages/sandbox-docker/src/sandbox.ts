@@ -14,7 +14,7 @@ import type {
   SandboxProvider,
   SandboxStatus,
 } from "@valet/engine";
-import { CONTAINER_DEATH_PATTERN } from "@valet/engine";
+import { CappedOutputBuffer, CONTAINER_DEATH_PATTERN } from "@valet/engine";
 
 /** 5-minute backstop eviction for job entries nobody polls to completion
  * (spec decision 9). Primary eviction is on first poll observing terminal
@@ -585,19 +585,21 @@ export class DockerSandbox implements Sandbox {
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     let stderrTail = "";
+    // Under a cap, keep head + tail (drop the middle): the poll protocol
+    // needs an append-only buffer, so only the head streams live and the
+    // tail joins on at close (see CappedOutputBuffer).
+    const buf = limit ? new CappedOutputBuffer(limit) : undefined;
     const appendOutput = (chunk: string, isStderr: boolean) => {
       if (isStderr) {
         stderrTail = (stderrTail + chunk).slice(-4096);
       }
-      if (limit && state.output.length >= limit) {
-        state.truncated = true;
+      if (!buf) {
+        state.output += chunk;
         return;
       }
-      state.output += chunk;
-      if (limit && state.output.length > limit) {
-        state.output = state.output.slice(0, limit);
-        state.truncated = true;
-      }
+      buf.append(chunk);
+      state.output = buf.headText;
+      if (buf.truncated) state.truncated = true;
     };
     child.stdout?.on("data", (chunk: string) => appendOutput(chunk, false));
     child.stderr?.on("data", (chunk: string) => appendOutput(chunk, true));
@@ -615,11 +617,13 @@ export class DockerSandbox implements Sandbox {
     child.on("error", (err) => {
       state.status = "failed";
       state.transportError = err;
+      if (buf) state.output += buf.appendix();
       resolveClosed();
       scheduleEviction();
     });
     child.on("close", (code, sig) => {
       const exitCode = code ?? (sig ? 128 : 1);
+      if (buf) state.output += buf.appendix();
       void (async () => {
         try {
           // See the sync exec() comment: CONTAINER_DEATH_PATTERN alone is
@@ -744,30 +748,25 @@ function execProcess(
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
     let timedOut = false;
     const limit = opts.maxOutputBytes;
+    // Under a cap, keep head + tail per stream and drop the middle — test
+    // runners and builds print their summary last (see CappedOutputBuffer).
+    const stdoutBuf = limit ? new CappedOutputBuffer(limit) : undefined;
+    const stderrBuf = limit ? new CappedOutputBuffer(limit) : undefined;
+    let stdout = "";
+    let stderr = "";
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
 
     child.stdout?.on("data", (chunk: string) => {
-      if (limit && stdout.length >= limit) {
-        truncated = true;
-        return;
-      }
-      stdout += chunk;
-      if (limit && stdout.length > limit) {
-        stdout = stdout.slice(0, limit);
-        truncated = true;
-      }
+      if (stdoutBuf) stdoutBuf.append(chunk);
+      else stdout += chunk;
     });
     child.stderr?.on("data", (chunk: string) => {
-      if (limit && stderr.length >= limit) return;
-      stderr += chunk;
-      if (limit && stderr.length > limit) stderr = stderr.slice(0, limit);
+      if (stderrBuf) stderrBuf.append(chunk);
+      else stderr += chunk;
     });
 
     if (opts.stdin !== undefined) {
@@ -798,9 +797,10 @@ function execProcess(
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
       const exitCode = code ?? (sig ? 128 : 1);
+      const truncated = (stdoutBuf?.truncated ?? false) || (stderrBuf?.truncated ?? false);
       resolveResult({
-        stdout,
-        stderr,
+        stdout: stdoutBuf ? stdoutBuf.value() : stdout,
+        stderr: stderrBuf ? stderrBuf.value() : stderr,
         exitCode,
         timedOut: timedOut ? true : undefined,
         truncated: truncated ? true : undefined,

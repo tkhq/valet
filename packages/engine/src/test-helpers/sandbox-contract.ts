@@ -154,15 +154,19 @@ export function runSandboxContract(name: string, ctx: SandboxContractContext) {
 
     it("exec forwards maxOutputBytes and marks the result truncated", () =>
       withSandbox(async (sb) => {
+        // The cap keeps head + tail and inserts an in-band omission marker,
+        // so the result carries a bounded overhead beyond the cap itself.
         if (shell === "virtual") {
           const r = await sb.exec(`echo ${"x".repeat(2000)}`, { maxOutputBytes: 100 });
           expect(r.truncated).toBe(true);
-          expect(r.stdout.length).toBeLessThanOrEqual(100);
+          expect(r.stdout.length).toBeLessThanOrEqual(200);
+          expect(r.stdout).toContain("bytes omitted");
           return;
         }
         const r = await sb.exec("yes x | head -c 100000", { maxOutputBytes: 100 });
         expect(r.truncated).toBe(true);
-        expect(r.stdout.length).toBeLessThanOrEqual(100);
+        expect(r.stdout.length).toBeLessThanOrEqual(200);
+        expect(r.stdout).toContain("bytes omitted");
       }));
 
     it.skipIf(!supportsAbort)("exec makes a best-effort abort on signal", () =>

@@ -123,14 +123,18 @@ describe("LocalSandbox: exec", () => {
     expect(res.exitCode).not.toBe(0);
   });
 
-  it("truncates stdout to maxOutputBytes", async () => {
+  it("caps stdout at maxOutputBytes, keeping head and tail with an omission marker", async () => {
     const sb = new LocalSandbox("test", tmp);
-    // Print 50_000 bytes; cap at 1000.
+    // Print HEAD + 50_000 x's + TAIL; cap at 1000 → head 250, tail 750.
     const res = await sb.exec(
-      "node -e \"process.stdout.write('x'.repeat(50000))\"",
+      "node -e \"process.stdout.write('HEAD' + 'x'.repeat(50000) + 'TAIL')\"",
       { maxOutputBytes: 1000 },
     );
-    expect(res.stdout.length).toBeLessThanOrEqual(1000);
+    // The in-band omission marker adds a bounded overhead beyond the cap.
+    expect(res.stdout.length).toBeLessThanOrEqual(1100);
+    expect(res.stdout.startsWith("HEAD")).toBe(true);
+    expect(res.stdout).toContain("bytes omitted");
+    expect(res.stdout.endsWith("TAIL")).toBe(true);
     expect(res.truncated).toBe(true);
   });
 

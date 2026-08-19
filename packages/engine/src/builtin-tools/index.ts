@@ -40,12 +40,13 @@ export const JOB_POLL_WARMUP_MS = [100, 250, 500, 1000];
 
 /**
  * Appended to bash output when the sandbox reports its output cap dropped
- * bytes. Truncation keeps the head and drops the tail, so the note names
+ * bytes. The cap keeps the head and the tail and omits the middle (an
+ * in-band `[... N bytes omitted ...]` marker shows where); the note names
  * the recovery moves (repo rule: an error message names the corrective
  * action).
  */
 export const BASH_TRUNCATION_NOTE =
-  "\n[output truncated: the sandbox capped this command's output and dropped the tail. " +
+  "\n[output truncated: the sandbox capped this command's output — head and tail kept, middle omitted. " +
   "Narrow the output (grep, tail, --quiet) or redirect it to a file and read the file in slices.]";
 
 function isJobUnsupported(err: unknown): boolean {
