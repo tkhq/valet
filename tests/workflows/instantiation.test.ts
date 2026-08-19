@@ -112,7 +112,9 @@ describe('Workflow 1: Review a pull request when it opens or updates', () => {
     const final = await client.pollExecution(slug, executionId, { maxWaitMs: 60000 });
 
     console.log(`Execution ${executionId} final status:`, final.status);
-    expect(['completed', 'failed', 'waiting_approval', 'waiting_time']).toContain(final.status);
+    // Fail on 'failed' status to catch execution errors
+    expect(final.status).not.toBe('failed');
+    expect(['completed', 'waiting_approval', 'waiting_time']).toContain(final.status);
   });
 
   it('retrieves execution outputs', async () => {
@@ -208,7 +210,9 @@ describe('Workflow 2: Assign reviewers to a pull request', () => {
     const final = await client.pollExecution(slug, executionId, { maxWaitMs: 60000 });
 
     console.log(`Execution ${executionId} final status:`, final.status);
-    expect(['completed', 'failed', 'waiting_approval', 'waiting_time']).toContain(final.status);
+    // Fail on 'failed' status to catch execution errors
+    expect(final.status).not.toBe('failed');
+    expect(['completed', 'waiting_approval', 'waiting_time']).toContain(final.status);
   });
 
   it('handles approval gates if execution is waiting', async () => {
@@ -384,6 +388,9 @@ describe('Workflow 4: Route a review to its owner', () => {
     const final = await client.pollExecution(slug, executionId, { maxWaitMs: 60000 });
 
     console.log(`Execution ${executionId} final status:`, final.status);
+
+    // Fail on 'failed' status to catch execution errors
+    expect(final.status).not.toBe('failed');
 
     // Should be waiting_approval since the routing needs human OK
     if (final.status === 'waiting_approval') {
