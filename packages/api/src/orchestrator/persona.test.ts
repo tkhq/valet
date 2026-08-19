@@ -38,6 +38,12 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("switch_model");
   });
 
+  it("names the push boundary and the child_status check", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("no git or GitHub credentials");
+    expect(persona).toContain("child_status");
+  });
+
   it("keeps the owner-kind identity bodies distinct", () => {
     expect(orchestratorPersona({ type: "user", id: "u1" })).toContain("personal assistant");
     expect(orchestratorPersona({ type: "team", id: "t1" })).toContain("shared assistant for a team");
