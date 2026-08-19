@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -19,8 +19,14 @@ import {
   useQueueStateForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
+import {
+  ComposerDropContext,
+  type ComposerDropChannel,
+  type ComposerDropIntake,
+} from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
+import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
@@ -197,6 +203,34 @@ export function SessionView({
     qc,
   ]);
 
+  // Composer publishes its intake pipeline into this ref. The page-level
+  // drop target reads it on drop — SessionView is the closest common
+  // ancestor of Composer and the chat body, so it owns the handshake. Ref,
+  // not state, so a republish (composer's `intakeBlocked` flip) doesn't
+  // re-render the drop target and re-attach its `document` listeners.
+  const dropIntakeRef = useRef<ComposerDropIntake | null>(null);
+  const dropChannel = useMemo<ComposerDropChannel>(
+    () => ({
+      // The proxy intake reads through the ref on each call. Its identity
+      // is stable across renders, so PageDropTarget's `useEffect` doesn't
+      // re-attach listeners when the composer republishes.
+      intake: {
+        addFiles: (files) => dropIntakeRef.current?.addFiles(files),
+        // Blocked-by-default: no composer published yet means no intake.
+        get blocked() {
+          return dropIntakeRef.current?.blocked ?? true;
+        },
+        get ownedEl() {
+          return dropIntakeRef.current?.ownedEl ?? null;
+        },
+      },
+      publish: (next) => {
+        dropIntakeRef.current = next;
+      },
+    }),
+    [],
+  );
+
   if (session.isLoading) {
     return (
       <div className="flex-1 grid place-items-center text-sm text-muted">
@@ -214,6 +248,7 @@ export function SessionView({
   }
 
   return (
+    <ComposerDropContext.Provider value={dropChannel}>
     <div className="flex-1 flex flex-col min-h-0">
       {panel ? (
         <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} />
@@ -236,7 +271,7 @@ export function SessionView({
         sandbox={stream.sandbox}
       />
       {tab === "chat" ? (
-        <>
+        <PageDropTarget>
           <MessageList
             messages={stream.messages}
             threadId={effectiveThreadId}
@@ -250,9 +285,10 @@ export function SessionView({
           )}
           {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
           <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
-        </>
+        </PageDropTarget>
       ) : null}
     </div>
+    </ComposerDropContext.Provider>
   );
 }
 
