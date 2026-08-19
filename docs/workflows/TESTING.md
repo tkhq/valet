@@ -47,7 +47,7 @@ pnpm test -- tests/workflows/instantiation.test.ts
 
 **Run a single workflow test:**
 ```bash
-pnpm test -- tests/workflows/instantiation.test.ts --grep "Workflow 1"
+pnpm test -- tests/workflows/instantiation.test.ts --grep "Workflow 1:"
 ```
 
 **Run with verbose output:**
