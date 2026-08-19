@@ -880,6 +880,9 @@ export interface JobPoll {
   exitCode?: number;
   output: string;
   nextOffset: number;
+  /** True when the job's capped output buffer (maxOutputBytes) dropped
+   * bytes. Optional: a provider that cannot detect the drop omits it. */
+  truncated?: boolean;
 }
 
 export interface GatewayEndpoint {

@@ -267,15 +267,19 @@ describeDocker("DockerSandbox", () => {
     }
   });
 
-  it("truncates stdout to maxOutputBytes", async () => {
+  it("caps stdout at maxOutputBytes, keeping head and tail with an omission marker", async () => {
     const sb = await makeSandbox();
     try {
-      // Print 50_000 bytes; cap at 1_000.
+      // Print HEAD + 50_000 x's + TAIL; cap at 1_000 → head 250, tail 750.
       const r = await sb.exec(
-        "printf 'x%.0s' $(seq 1 50000)",
+        "printf 'HEAD'; printf 'x%.0s' $(seq 1 50000); printf 'TAIL'",
         { maxOutputBytes: 1_000 },
       );
-      expect(r.stdout.length).toBeLessThanOrEqual(1_000);
+      // The in-band omission marker adds a bounded overhead beyond the cap.
+      expect(r.stdout.length).toBeLessThanOrEqual(1_100);
+      expect(r.stdout.startsWith("HEAD")).toBe(true);
+      expect(r.stdout).toContain("bytes omitted");
+      expect(r.stdout.endsWith("TAIL")).toBe(true);
       expect(r.truncated).toBe(true);
     } finally {
       await provider.destroy(sb.id);

@@ -5,13 +5,19 @@
  * output byte ceiling.
  */
 import { describe, expect, it } from "vitest";
-import { builtinTools, childReadTool, CHILD_READ_MAX_CHARS } from "../src/builtin-tools/index.js";
+import {
+  builtinTools,
+  childReadTool,
+  CHILD_READ_MAX_CHARS,
+  RENDERED_TOOL_RESULT_MAX_CHARS,
+} from "../src/builtin-tools/index.js";
 import type {
   ChildReader,
   Credential,
   CredentialProvider,
   DecisionGateRequest,
   DecisionResolution,
+  MessagePart,
   MessageQuery,
   Sandbox,
   SessionEntry,
@@ -45,16 +51,26 @@ function makeCtx(childReader?: ChildReader): ToolContext {
   };
 }
 
-function messageEntry(content: string, id = "e1"): SessionEntry {
+function messageEntry(
+  content: string,
+  id = "e1",
+  extras: {
+    parts?: MessagePart[];
+    attachments?: Array<{ type: "image"; mimeType: string; name?: string }>;
+    role?: "user" | "assistant";
+  } = {},
+): SessionEntry {
   return {
     id,
     sessionId: "child_abc",
     threadId: "th1",
     parentId: null,
     type: "message",
-    role: "assistant",
+    role: extras.role ?? "assistant",
     content,
     createdAt: 1_700_000_000_000,
+    ...(extras.parts ? { parts: extras.parts } : {}),
+    ...(extras.attachments ? { attachments: extras.attachments } : {}),
   };
 }
 
@@ -93,6 +109,72 @@ describe("childReadTool", () => {
     const reader: ChildReader = async () => [];
     const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
     expect(result.text).toContain("no messages");
+  });
+
+  it("renders a completed tool call's name, status, and result text", async () => {
+    const reader: ChildReader = async () => [
+      messageEntry("", "e1", {
+        parts: [
+          { type: "tool_call", callId: "c1", toolName: "bash", status: "completed", result: { text: "42 passed" } },
+        ],
+      }),
+    ];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.text).toContain("[tool_call bash — completed]");
+    expect(result.text).toContain("42 passed");
+  });
+
+  it("marks an in-flight tool call instead of rendering a blank turn", async () => {
+    const reader: ChildReader = async () => [
+      messageEntry("", "e1", {
+        parts: [{ type: "tool_call", callId: "c1", toolName: "bash", status: "running" }],
+      }),
+    ];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.text).toContain("[tool_call bash — running]");
+    expect(result.text).toContain("in flight");
+  });
+
+  it("renders errored and elided calls distinctly", async () => {
+    const reader: ChildReader = async () => [
+      messageEntry("", "e1", {
+        parts: [
+          {
+            type: "tool_call",
+            callId: "c1",
+            toolName: "bash",
+            status: "error",
+            error: "interrupted — result lost in restart",
+          },
+          { type: "tool_call", callId: "c2", toolName: "read", status: "completed", elided: true },
+        ],
+      }),
+    ];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.text).toContain("error: interrupted — result lost in restart");
+    expect(result.text).toContain("elided");
+  });
+
+  it("bounds one tool result and reports the overflow", async () => {
+    const big = "y".repeat(RENDERED_TOOL_RESULT_MAX_CHARS + 500);
+    const reader: ChildReader = async () => [
+      messageEntry("", "e1", {
+        parts: [{ type: "tool_call", callId: "c1", toolName: "bash", status: "completed", result: { text: big } }],
+      }),
+    ];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.text).toContain("[+500 more chars]");
+  });
+
+  it("marks user image attachments", async () => {
+    const reader: ChildReader = async () => [
+      messageEntry("look at this", "e1", {
+        role: "user",
+        attachments: [{ type: "image", mimeType: "image/png", name: "screenshot.png" }],
+      }),
+    ];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.text).toContain("[image attachment: screenshot.png (image/png)]");
   });
 
   it("bounds the rendered output and keeps the most recent tail", async () => {

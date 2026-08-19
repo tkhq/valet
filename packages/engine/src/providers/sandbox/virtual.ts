@@ -9,6 +9,7 @@ import type {
   SandboxProvider,
   SandboxStatus,
 } from "../../types.js";
+import { CappedOutputBuffer } from "../../sandbox/output-buffer.js";
 
 interface FsEntry {
   type: "file" | "dir";
@@ -122,7 +123,10 @@ export class VirtualSandbox implements Sandbox {
     const cwd = opts?.cwd ?? this.cwd;
     const out = await runVirtualCommand(this, command, cwd, opts?.env);
     if (opts?.maxOutputBytes && out.stdout.length > opts.maxOutputBytes) {
-      return { ...out, stdout: out.stdout.slice(0, opts.maxOutputBytes), truncated: true };
+      // Same head+tail cap as the real sandboxes (see CappedOutputBuffer).
+      const buf = new CappedOutputBuffer(opts.maxOutputBytes);
+      buf.append(out.stdout);
+      return { ...out, stdout: buf.value(), truncated: buf.truncated ? true : undefined };
     }
     return out;
   }
@@ -149,7 +153,13 @@ export class VirtualSandbox implements Sandbox {
     const execId = `job-${this.nextJobId++}`;
     const result = await this.exec(command, opts);
     const output = result.stdout + result.stderr;
-    this.jobs.set(execId, { status: "done", exitCode: result.exitCode, output, nextOffset: output.length });
+    this.jobs.set(execId, {
+      status: "done",
+      exitCode: result.exitCode,
+      output,
+      nextOffset: output.length,
+      ...(result.truncated ? { truncated: true } : {}),
+    });
     return { execId };
   }
 

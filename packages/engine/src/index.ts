@@ -96,6 +96,7 @@ export {
   CONTAINER_DEATH_PATTERN,
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
+export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
 // PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.

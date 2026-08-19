@@ -94,4 +94,26 @@ describe("LocalSandbox: job mode", () => {
     expect(poll.status).toBe("failed");
     expect(poll.output).toBe("");
   });
+
+  it("5. reports truncated and delivers head + omission marker + tail", async () => {
+    const sb = new LocalSandbox("test", tmp);
+    // limit 4 → head 1 ("a"), tail 3 ("hij"), 6 bytes omitted.
+    const { execId } = await sb.execJob("printf 'abcdefghij'", { maxOutputBytes: 4 });
+    let poll = await sb.pollJob(execId, 0);
+    let offset = poll.nextOffset;
+    let output = poll.output;
+    let truncated = poll.truncated === true;
+    while (poll.status === "running") {
+      await new Promise((r) => setTimeout(r, 20));
+      poll = await sb.pollJob(execId, offset);
+      offset = poll.nextOffset;
+      output += poll.output;
+      if (poll.truncated) truncated = true;
+    }
+    expect(poll.status).toBe("done");
+    expect(truncated).toBe(true);
+    expect(output.startsWith("a")).toBe(true);
+    expect(output).toContain("6 bytes omitted");
+    expect(output.endsWith("hij")).toBe(true);
+  });
 });
