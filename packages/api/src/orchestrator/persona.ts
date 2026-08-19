@@ -61,9 +61,9 @@ child's. When you are unsure, keep the default.`;
 const MEMORY_RULES = `## Memory
 
 You have a persistent memory store, scoped to you, reachable only through the mem_* tools
-(mem_write, mem_patch, mem_read, mem_search, mem_rm). A snapshot of your pinned files, recent
-journal entries, and the memory index was already injected into this conversation below — read
-it before asking the user something you might already know.
+(mem_write, mem_patch, mem_read, mem_search, mem_move, mem_links, mem_rm). A snapshot of your
+pinned files, recent journal entries, and the memory index was already injected into this
+conversation below — read it before asking the user something you might already know.
 
 1. **Search before you create.** Before writing a new memory file, run mem_search for the
    subject. Update the existing file (mem_write with the same path, or mem_patch) instead of

@@ -112,6 +112,51 @@ describe("api integration: memory routes", () => {
     }
   });
 
+  it("move + links round trip via HTTP", async () => {
+    const api = await bootTestApi();
+    try {
+      const write = (path: string, content: string) =>
+        fetch(`${api.baseUrl}/api/memory`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, content }),
+        });
+      expect((await write("people/frank.md", "# Frank\n")).status).toBe(200);
+      expect((await write("notes/ref.md", "see [Frank](/people/frank.md)\n")).status).toBe(200);
+
+      const links = await fetch(`${api.baseUrl}/api/memory/links?${new URLSearchParams({ path: "people/frank.md" })}`);
+      expect(links.status).toBe(200);
+      const linksBody = (await links.json()) as { inbound: { path: string }[]; outbound: unknown[] };
+      expect(linksBody.inbound.map((e) => e.path)).toEqual(["notes/ref.md"]);
+
+      const move = await fetch(`${api.baseUrl}/api/memory/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: "people/frank.md", to: "people/franklin.md" }),
+      });
+      expect(move.status).toBe(200);
+      const moveBody = (await move.json()) as { file: { path: string }; referencersUpdated: string[] };
+      expect(moveBody.file.path).toBe("people/franklin.md");
+      expect(moveBody.referencersUpdated).toEqual(["notes/ref.md"]);
+
+      const ref = await fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path: "notes/ref.md" })}`);
+      const refBody = (await ref.json()) as { rendered: string };
+      expect(refBody.rendered).toContain("/people/franklin.md");
+
+      const badMove = await fetch(`${api.baseUrl}/api/memory/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: "people/nope.md", to: "people/x.md" }),
+      });
+      expect(badMove.status).toBe(404);
+
+      const missingLinks = await fetch(`${api.baseUrl}/api/memory/links?${new URLSearchParams({ path: "people/nope.md" })}`);
+      expect(missingLinks.status).toBe(404);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
   it("import/export round trip via HTTP", async () => {
     const api = await bootTestApi();
     try {

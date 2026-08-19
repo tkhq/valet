@@ -91,9 +91,63 @@ export function extractLinkTargets(fromPath: string, body: string): string[] {
 }
 
 /** A dangling target only becomes a phantom node when it plausibly names a
- * memory file — inside a directory or with a .md suffix. */
-function isPathShaped(target: string): boolean {
+ * memory file — inside a directory or with a .md suffix. Exported for
+ * `services/memory.ts`'s `linksForFile`, which applies the same rule to
+ * outbound phantom edges. */
+export function isPathShaped(target: string): boolean {
   return target.includes("/") || target.endsWith(".md");
+}
+
+/**
+ * Rewrites markdown link targets in `body` that resolve to `oldTarget`
+ * so they point at `newTargetPath` instead (written in the bundle-rooted
+ * `/path` form, preserving any `#anchor` suffix). Same scan rules as
+ * `extractLinkTargets`: code fences and inline code skipped, extension
+ * drift tolerated (`a/b` matches `a/b.md`), links past `MAX_SCAN_CHARS`
+ * not discovered. The inline-code mask preserves length, so match indices
+ * on the masked line address the raw line directly.
+ */
+export function rewriteLinkTargets(
+  fromPath: string,
+  body: string,
+  oldTarget: string,
+  newTargetPath: string,
+): { content: string; rewrote: boolean } {
+  let rewrote = false;
+  let inFence = false;
+  let offset = 0;
+
+  const lines = body.split("\n").map((rawLine) => {
+    const lineStart = offset;
+    offset += rawLine.length + 1;
+    if (rawLine.startsWith("```") || rawLine.startsWith("~~~")) {
+      inFence = !inFence;
+      return rawLine;
+    }
+    if (inFence || lineStart > MAX_SCAN_CHARS) return rawLine;
+
+    const masked = rawLine.replace(/`[^`]*`/g, (m) => " ".repeat(m.length));
+    let result = "";
+    let last = 0;
+    LINK_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = LINK_RE.exec(masked)) !== null) {
+      const target = match[2] ?? "";
+      const resolved = resolveLinkTarget(fromPath, target);
+      if (resolved === null || (resolved !== oldTarget && `${resolved}.md` !== oldTarget)) continue;
+
+      const hashIdx = target.indexOf("#");
+      const anchor = hashIdx > 0 ? target.slice(hashIdx) : "";
+      // `[` + text + `](` precede the target inside the match.
+      const targetStart = match.index + 1 + (match[1]?.length ?? 0) + 2;
+      result += rawLine.slice(last, targetStart) + `/${newTargetPath}${anchor}`;
+      last = targetStart + target.length;
+      rewrote = true;
+    }
+    return result + rawLine.slice(last);
+  });
+
+  return { content: lines.join("\n"), rewrote };
 }
 
 export function buildMemoryGraph(files: GraphSourceFile[]): MemoryGraph {

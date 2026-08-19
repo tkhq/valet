@@ -108,6 +108,9 @@ importers:
       '@valet/plugin-linear':
         specifier: workspace:*
         version: link:../plugin-linear
+      '@valet/plugin-memory':
+        specifier: workspace:*
+        version: link:../plugin-memory
       '@valet/plugin-notion':
         specifier: workspace:*
         version: link:../plugin-notion
@@ -608,6 +611,22 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-memory:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.39
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/plugin-notion:
     dependencies:

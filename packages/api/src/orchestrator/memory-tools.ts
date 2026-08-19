@@ -8,8 +8,10 @@
  * must work identically whether the orchestrator host and the API process
  * are the same process (today) or split across a network boundary later.
  *
- * Right-sized per decision 12: only mem_write / mem_patch / mem_read /
- * mem_search / mem_rm this phase (mem_move / mem_links deferred).
+ * Originally right-sized per decision 12 to mem_write / mem_patch /
+ * mem_read / mem_search / mem_rm; mem_move and mem_links joined later,
+ * built on the derived link graph (`../lib/memory-graph.ts` — still no
+ * stored links table).
  *
  * Metadata-setting guidance (when to set `resource`, `sensitivity`,
  * `origin`, `expires`, `pinned`) lives in the TypeBox param descriptions
@@ -81,7 +83,7 @@ async function memoryErrorResult(res: Response): Promise<ToolResult> {
   return { text: `[memory_error] ${message}` };
 }
 
-/** Shared fetch wrapper for all five `mem_*` tools: guarantees a
+/** Shared fetch wrapper for all `mem_*` tools: guarantees a
  * `[memory_error] …` `ToolResult` instead of a throw for *any* failure
  * mode — non-2xx responses (via `memoryErrorResult`) as well as
  * network-level failures (ECONNREFUSED, DNS errors, timeouts, etc.) that
@@ -323,6 +325,123 @@ export const memSearchTool = defineTool({
   },
 });
 
+// ─── mem_move ──────────────────────────────────────────────────────────
+
+interface MoveResultBody {
+  file: { path: string; version?: number };
+  referencersUpdated: string[];
+  warnings?: unknown;
+}
+
+function asMoveResultBody(body: unknown): MoveResultBody | null {
+  if (!isRecord(body) || !isRecord(body.file) || typeof body.file.path !== "string") return null;
+  const version = typeof body.file.version === "number" ? body.file.version : undefined;
+  const referencersUpdated = Array.isArray(body.referencersUpdated)
+    ? body.referencersUpdated.filter((p): p is string => typeof p === "string")
+    : [];
+  return { file: { path: body.file.path, version }, referencersUpdated, warnings: body.warnings };
+}
+
+export const memMoveTool = defineTool({
+  name: "mem_move",
+  description:
+    "Rename or move a memory file. Rewrites markdown links in other memory files that pointed at the old path, and reports which files were updated. Metadata carries over unchanged — a cross-directory move keeps the old `type`, so follow it with a metadata-only mem_write to reclassify when the new location implies a different type.",
+  parameters: Type.Object({
+    from: Type.String({ description: "Current path of the file to move." }),
+    to: Type.String({ description: "New path. Must not already exist — merge into an existing file instead." }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const owner = resolveOwner(ctx);
+    const url = new URL("/api/memory/move", cfg.apiBaseUrl);
+    return memoryRequest(
+      url,
+      {
+        method: "POST",
+        headers: memoryHeaders(cfg, owner, ctx.userId, true),
+        body: JSON.stringify({ from: args.from, to: args.to }),
+      },
+      async (res) => {
+        const body = asMoveResultBody(await parseJsonBody(res));
+        if (!body) return { text: `moved ${args.from} → ${args.to}` };
+        const versionNote = body.file.version !== undefined ? ` (v${body.file.version})` : "";
+        const refNote =
+          body.referencersUpdated.length > 0
+            ? `\n${body.referencersUpdated.length} referencing file(s) updated: ${body.referencersUpdated.join(", ")}`
+            : "\nno referencing files needed updates";
+        return { text: `moved ${args.from} → ${body.file.path}${versionNote}${refNote}${formatWarnings(body.warnings)}` };
+      },
+    );
+  },
+});
+
+// ─── mem_links ─────────────────────────────────────────────────────────
+
+interface LinkEdgeRow {
+  path: string;
+  title: string;
+  type: string;
+  phantom?: boolean;
+}
+
+interface LinksResultBody {
+  path: string;
+  outbound: LinkEdgeRow[];
+  inbound: LinkEdgeRow[];
+}
+
+function asLinkEdgeRow(v: unknown): LinkEdgeRow | null {
+  if (!isRecord(v) || typeof v.path !== "string") return null;
+  return {
+    path: v.path,
+    title: typeof v.title === "string" ? v.title : "",
+    type: typeof v.type === "string" ? v.type : "",
+    phantom: v.phantom === true,
+  };
+}
+
+function asLinksResultBody(body: unknown): LinksResultBody | null {
+  if (!isRecord(body) || typeof body.path !== "string") return null;
+  const edges = (v: unknown): LinkEdgeRow[] =>
+    Array.isArray(v) ? v.map(asLinkEdgeRow).filter((e): e is LinkEdgeRow => e !== null) : [];
+  return { path: body.path, outbound: edges(body.outbound), inbound: edges(body.inbound) };
+}
+
+function formatEdges(label: string, edges: LinkEdgeRow[]): string {
+  if (edges.length === 0) return `${label} (0)`;
+  const lines = edges.map((e) => {
+    if (e.phantom) return `  - ${e.path} (phantom — no file at this path)`;
+    const title = e.title ? ` — ${e.title}` : "";
+    const type = e.type ? ` [${e.type}]` : "";
+    return `  - ${e.path}${title}${type}`;
+  });
+  return `${label} (${edges.length}):\n${lines.join("\n")}`;
+}
+
+export const memLinksTool = defineTool({
+  name: "mem_links",
+  description:
+    "List one memory file's link edges: inbound (files whose markdown links point at it) and outbound (files its links point at, phantom targets included). Check inbound before mem_move or mem_rm, and use it to orient on a topic's cluster.",
+  parameters: Type.Object({
+    path: Type.String({ description: "Memory file path to inspect." }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const owner = resolveOwner(ctx);
+    const url = new URL("/api/memory/links", cfg.apiBaseUrl);
+    url.searchParams.set("path", args.path);
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
+      const body = asLinksResultBody(await parseJsonBody(res));
+      if (!body) return { text: `links for ${args.path}\ninbound (0)\noutbound (0)` };
+      return {
+        text: `links for ${body.path}\n${formatEdges("inbound", body.inbound)}\n${formatEdges("outbound", body.outbound)}`,
+      };
+    });
+  },
+});
+
 // ─── mem_rm ────────────────────────────────────────────────────────────
 
 export const memRmTool = defineTool({
@@ -341,7 +460,7 @@ export const memRmTool = defineTool({
   },
 });
 
-/** All five `mem_*` ToolDefs, in the order they should be registered. */
+/** All seven `mem_*` ToolDefs, in the order they should be registered. */
 export function buildMemoryTools(): ToolDef[] {
-  return [memWriteTool, memPatchTool, memReadTool, memSearchTool, memRmTool];
+  return [memWriteTool, memPatchTool, memReadTool, memSearchTool, memMoveTool, memLinksTool, memRmTool];
 }
