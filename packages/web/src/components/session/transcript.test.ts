@@ -80,6 +80,18 @@ describe("buildTranscript", () => {
     expect(out).toContain("sandbox.state:   ready (epoch 3)");
   });
 
+  it("names the wire-projection fidelity limit in the header", () => {
+    const out = buildTranscript({
+      session,
+      threadId: "th_1",
+      messages,
+      agentStatus: "idle",
+      conn: "open",
+    });
+    expect(out).toContain("wire projection");
+    expect(out).toContain("tool attachment parts");
+  });
+
   it("filters to the active thread when threadId is set", () => {
     const out = buildTranscript({
       session,
