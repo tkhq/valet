@@ -4,6 +4,7 @@ import { describeRunHostContract, makeRunHostFixtureEngine, type RunHostFixture,
 import type { RunSettledInfo } from './interpreter.js';
 import { LocalRunHost } from './local-host.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
+import { createDefaultNodeExecutors, executeStop, type NodeExecutorRegistry } from './nodes/index.js';
 import type { RunParams } from './store.js';
 import type { SessionNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
@@ -249,5 +250,121 @@ describe('LocalRunHost settle reporting', () => {
       outcome: 'completed',
       owner: { ownerType: 'user', ownerId: 'u-9' },
     });
+  });
+});
+
+// ─── LocalRunHost-specific: poisoned-run cap ─────────────────────────────────
+// A run whose drive throws deterministically on every reclaim must settle as
+// `failed` after `maxConsecutiveDriveFailures` strikes instead of retrying
+// forever — the infinite-reclaim loop pinned a live api (two runs with
+// unparseable stored JSON re-driven every lease expiry, 36+ failures/10min).
+
+describe('LocalRunHost poisoned-run cap', () => {
+  function throwingStopExecutors(onThrow: () => void): NodeExecutorRegistry {
+    return {
+      ...createDefaultNodeExecutors(),
+      stop: {
+        execute: async () => {
+          onThrow();
+          throw new SyntaxError('poisoned: stored state is not valid JSON');
+        },
+      },
+    };
+  }
+
+  function makePoisonHost(opts: {
+    store: InMemoryWorkflowStore;
+    clock: () => number;
+    executors: NodeExecutorRegistry;
+    onRunSettled?: (info: RunSettledInfo) => void;
+  }): LocalRunHost {
+    return new LocalRunHost({
+      store: opts.store,
+      engine: makeRunHostFixtureEngine(),
+      clock: opts.clock,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 50,
+      heartbeatMs: 300,
+      maxConsecutiveDriveFailures: 3,
+      executors: opts.executors,
+      onRunSettled: opts.onRunSettled,
+    });
+  }
+
+  it('settles the run as failed after the cap, through the normal settle door (onRunSettled fires)', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const settled: RunSettledInfo[] = [];
+    let throws = 0;
+    const host = makePoisonHost({
+      store,
+      clock: clock.now,
+      executors: throwingStopExecutors(() => (throws += 1)),
+      onRunSettled: (info) => {
+        settled.push(info);
+      },
+    });
+
+    host.startHost();
+    try {
+      await host.start('run-poisoned', runParams(), simpleDefinition());
+      // Each failed drive abandons the lease. Advance the fake clock past
+      // the lease repeatedly so every poll can reclaim, until the cap fires.
+      const advancer = setInterval(() => clock.advance(60), 10);
+      try {
+        await waitFor(async () => (await store.getRun('run-poisoned'))?.status === 'settled');
+      } finally {
+        clearInterval(advancer);
+      }
+    } finally {
+      await host.stopHost();
+    }
+
+    const run = await store.getRun('run-poisoned');
+    expect(run?.status).toBe('settled');
+    expect(run?.outcome).toBe('failed');
+    // Exactly the budget: three strikes, no fourth drive after the settle.
+    expect(throws).toBe(3);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({ runId: 'run-poisoned', outcome: 'failed' });
+  });
+
+  it('a drive that recovers below the cap settles normally — transient failures keep retry-via-reclaim', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    let throws = 0;
+    const flaky: NodeExecutorRegistry = {
+      ...createDefaultNodeExecutors(),
+      stop: {
+        execute: async (args) => {
+          if (throws < 2) {
+            throws += 1;
+            throw new Error('transient: dependency hiccup');
+          }
+          return executeStop(args);
+        },
+      },
+    };
+    const host = makePoisonHost({ store, clock: clock.now, executors: flaky });
+
+    host.startHost();
+    try {
+      await host.start('run-flaky', runParams(), simpleDefinition());
+      const advancer = setInterval(() => clock.advance(60), 10);
+      try {
+        await waitFor(async () => (await store.getRun('run-flaky'))?.status === 'settled');
+      } finally {
+        clearInterval(advancer);
+      }
+    } finally {
+      await host.stopHost();
+    }
+
+    const run = await store.getRun('run-flaky');
+    // Two strikes (below the cap of three), then the third drive succeeded:
+    // the run completes, proving the cap never fires on a recovered run.
+    expect(throws).toBe(2);
+    expect(run?.outcome).toBe('completed');
   });
 });
