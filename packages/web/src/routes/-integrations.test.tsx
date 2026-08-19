@@ -204,7 +204,9 @@ vi.mock("~/api/integrations", () => ({
 // why a bare replacement is unsafe under vitest.config.ts's isolate:false.
 let identityLinksData: { links: IdentityLinkStatus[] } | undefined;
 let identityLinksLoading = false;
+let linkMembersData: { members: Array<{ externalId: string; displayName: string; handle: string }> } | undefined;
 const startLinkMutateAsync = vi.fn();
+const deliverLinkMutateAsync = vi.fn();
 const unlinkIdentityMutate = vi.fn();
 
 vi.mock("~/api/queries", async (importOriginal) => {
@@ -213,6 +215,13 @@ vi.mock("~/api/queries", async (importOriginal) => {
     ...actual,
     useIdentityLinks: () => ({ data: identityLinksData, isLoading: identityLinksLoading, error: null }),
     useStartIdentityLink: () => ({ mutateAsync: startLinkMutateAsync, isPending: false }),
+    useDeliverIdentityLink: () => ({ mutateAsync: deliverLinkMutateAsync, isPending: false }),
+    useLinkMembers: (_provider: string, query: string, enabled: boolean) => ({
+      data: enabled && query !== "" ? linkMembersData : undefined,
+      isLoading: false,
+      isError: false,
+      error: null,
+    }),
     useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false }),
   };
 });
@@ -953,7 +962,14 @@ describe("IntegrationsPage — org-provided pairing", () => {
   }
 
   function slackLink(overrides: Partial<IdentityLinkStatus> = {}): IdentityLinkStatus {
-    return { provider: "slack", linked: false, channelReady: true, ...overrides };
+    return {
+      provider: "slack",
+      linked: false,
+      channelReady: true,
+      codeDelivery: false,
+      memberSearch: false,
+      ...overrides,
+    };
   }
 
   beforeEach(() => {
@@ -961,7 +977,9 @@ describe("IntegrationsPage — org-provided pairing", () => {
     currentOrg = org("member");
     identityLinksData = undefined;
     identityLinksLoading = false;
+    linkMembersData = undefined;
     startLinkMutateAsync.mockReset();
+    deliverLinkMutateAsync.mockReset();
     unlinkIdentityMutate.mockClear();
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
@@ -1017,5 +1035,84 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
     expect(screen.queryByText(/Provided by your organization/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
+  });
+
+  it("offers 'DM me the code' when the provider reports codeDelivery", () => {
+    identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: true })] };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByRole("button", { name: "DM me the Slack link code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Find my Slack account by name" })).toBeTruthy();
+    // The show-code flow is a fallback, never a third button.
+    expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
+  });
+
+  it("DMing the code echoes the exact DM text, the recipient, and the expiry", async () => {
+    identityLinksData = { links: [slackLink({ codeDelivery: true })] };
+    deliverLinkMutateAsync.mockResolvedValue({
+      delivered: true,
+      externalId: "U777",
+      displayName: "conner",
+      messageText: "To link this Slack account to Valet, reply with:\n`link VLT-1234`",
+      code: "VLT-1234",
+      expiresInSeconds: 600,
+    });
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+
+    await waitFor(() => expect(screen.getByText(/We DMed/)).toBeTruthy());
+    expect(deliverLinkMutateAsync).toHaveBeenCalledWith({ provider: "slack", member: undefined });
+    expect(screen.getByText("@conner")).toBeTruthy();
+    expect(screen.getByText(/reply with:/)).toBeTruthy();
+    expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
+  });
+
+  it("falls back to member search on 202, and picking a member DMs that account", async () => {
+    identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: true })] };
+    deliverLinkMutateAsync.mockResolvedValueOnce({ reason: "email_not_in_workspace" });
+    linkMembersData = { members: [{ externalId: "U888", displayName: "Pat", handle: "pat" }] };
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+
+    await waitFor(() => expect(screen.getByText(/Pick yourself from the list/)).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Search Slack members"), { target: { value: "pat" } });
+    fireEvent.submit(screen.getByLabelText("Search Slack members"));
+    await waitFor(() => expect(screen.getByText("Pat")).toBeTruthy());
+
+    deliverLinkMutateAsync.mockResolvedValueOnce({
+      delivered: true,
+      externalId: "U888",
+      displayName: "Pat",
+      messageText: "reply with `link X`",
+      code: "X",
+      expiresInSeconds: 600,
+    });
+    fireEvent.click(screen.getByText("Pat"));
+    await waitFor(() =>
+      expect(deliverLinkMutateAsync).toHaveBeenLastCalledWith({
+        provider: "slack",
+        member: { externalId: "U888", displayName: "Pat" },
+      }),
+    );
+    await waitFor(() => expect(screen.getByText(/We DMed/)).toBeTruthy());
+  });
+
+  it("falls back to the shown code on 202 when the provider has no member directory", async () => {
+    identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: false })] };
+    deliverLinkMutateAsync.mockResolvedValue({ reason: "email_not_in_workspace" });
+    startLinkMutateAsync.mockResolvedValue({
+      code: "VLT-1234",
+      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+      expiresInSeconds: 600,
+    });
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+
+    await waitFor(() => expect(screen.getByText("VLT-1234")).toBeTruthy());
+    expect(screen.getByText(/Use the code below instead/)).toBeTruthy();
+    expect(startLinkMutateAsync).toHaveBeenCalledWith("slack");
   });
 });

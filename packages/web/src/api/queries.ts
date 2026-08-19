@@ -32,6 +32,10 @@ import type {
   SandboxProfile,
   SessionRunState,
   SetNotificationPreferenceRequest,
+  DeliverIdentityLinkFallback,
+  DeliverIdentityLinkRequest,
+  DeliverIdentityLinkResponse,
+  ListLinkMembersResponse,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
 import { useLiveQuery } from "~/lib/use-live-query";
@@ -55,6 +59,7 @@ export const qk = {
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
+  linkMembers: (provider: string, query: string) => ["linkMembers", provider, query] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -421,6 +426,30 @@ export function useStartIdentityLink() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
+  });
+}
+
+export function useDeliverIdentityLink() {
+  const qc = useQueryClient();
+  return useMutation<
+    DeliverIdentityLinkResponse | DeliverIdentityLinkFallback,
+    Error,
+    { provider: string; member?: DeliverIdentityLinkRequest }
+  >({
+    mutationFn: ({ provider, member }) => api.deliverIdentityLink(provider, member),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
+    },
+  });
+}
+
+/** Workspace-member typeahead for the find-me-by-name link fallback. */
+export function useLinkMembers(provider: string, query: string, enabled: boolean) {
+  return useQuery<ListLinkMembersResponse>({
+    queryKey: qk.linkMembers(provider, query),
+    queryFn: () => api.searchLinkMembers(provider, query),
+    enabled,
+    staleTime: 30_000,
   });
 }
 
