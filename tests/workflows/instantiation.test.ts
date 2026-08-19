@@ -26,7 +26,7 @@ import {
 
 const client = new WorkflowClient();
 const TEST_ID = `wf-test-${Date.now()}`;
-const workflows: { [key: string]: { id?: string; slug?: string } } = {};
+const workflows: { [key: string]: { id?: string; slug?: string; executionId?: string } } = {};
 
 // ─── Workflow 1: PR Review Automation ──────────────────────────────────────
 
