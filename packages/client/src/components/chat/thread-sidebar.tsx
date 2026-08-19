@@ -370,13 +370,12 @@ function ThreadItem({
 
   const handleMenuKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Handle 'A' or 'a' key to archive when menu is open
-    if ((e.key === 'A' || e.key === 'a') && menuOpen) {
+    if (e.key === 'A' || e.key === 'a') {
       e.preventDefault();
-      e.stopPropagation();
       onDismiss?.();
       setMenuOpen(false);
     }
-  }, [menuOpen, onDismiss]);
+  }, [onDismiss]);
 
   if (isEditing) {
     return (
@@ -402,7 +401,6 @@ function ThreadItem({
     <button
       type="button"
       onClick={onSelect}
-      onKeyDown={handleMenuKeyDown}
       className={cn(
         'group flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] transition-colors',
         isActive
@@ -439,7 +437,6 @@ function ThreadItem({
           <DropdownMenuTrigger asChild>
             <span
               role="button"
-              tabIndex={-1}
               onClick={(e) => { e.stopPropagation(); }}
               className="shrink-0 rounded p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-neutral-200 hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-300"
               title="Thread options"
@@ -447,7 +444,7 @@ function ThreadItem({
               <EllipsisIcon className="h-2.5 w-2.5" />
             </span>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
+          <DropdownMenuContent align="end" className="w-40" onKeyDown={handleMenuKeyDown}>
             <DropdownMenuItem
               onClick={(e) => {
                 e.stopPropagation();
