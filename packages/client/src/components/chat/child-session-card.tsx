@@ -91,6 +91,7 @@ export function ChildSessionInlineList({ events, children }: ChildSessionInlineL
   }
 
   return (
+    // FIX: Orchestrator Chat Scrolling - Added max-height and scrolling for long child session lists
     <div className="space-y-1">
       {active.map((event) => (
         <ChildSessionCard

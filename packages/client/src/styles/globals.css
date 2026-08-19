@@ -98,6 +98,20 @@
     width: 0;
     height: 0;
   }
+
+  /* FIX: Approval Gate Notifications - Subtle pulse animation for approval alerts */
+  @keyframes pulse-slow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.92;
+    }
+  }
+
+  .animate-pulse-slow {
+    animation: pulse-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
 }
 
 @layer components {
