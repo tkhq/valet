@@ -92,10 +92,39 @@ export function useSlackWorkspaceUsers() {
   });
 }
 
+/** Shape returned by both `/me/slack/link` and `/me/slack/link/quick` when
+ * the code was DMed. The `dmMessageText` echoes the exact bot DM so the card
+ * can show the user what to look for in Slack. `dmDelivered` is `false`
+ * when the DM send failed — the verification row is still minted, so the
+ * user can complete the flow from the echoed preview, but the card should
+ * stop telling them to check Slack. */
+export interface InitiateSlackLinkResult {
+  slackUserId: string;
+  slackDisplayName?: string;
+  expiresAt: string;
+  dmMessageText: string;
+  dmDelivered: boolean;
+}
+
+/** `202` variant of the quick endpoint: the caller's email did not resolve
+ * to a workspace member. Not an error — the client falls back to the manual
+ * user typeahead. */
+export interface QuickSlackLinkFallback {
+  reason: 'email_not_in_workspace';
+}
+
 export function useInitiateSlackLink() {
   return useMutation({
     mutationFn: (data: { slackUserId: string; slackDisplayName?: string }) =>
-      api.post<{ slackUserId: string; expiresAt: string }>('/me/slack/link', data),
+      api.post<InitiateSlackLinkResult>('/me/slack/link', data),
+  });
+}
+
+/** One-click "DM me on Slack" — no body, resolves the caller by email. */
+export function useQuickSlackLink() {
+  return useMutation({
+    mutationFn: () =>
+      api.post<InitiateSlackLinkResult | QuickSlackLinkFallback>('/me/slack/link/quick'),
   });
 }
 
