@@ -135,10 +135,15 @@ export function Composer({
   // Per-browser last-used ranking for the command popup. Loaded once per
   // mount; `submit` records each sent slash command and refreshes it.
   const [commandRecency, setCommandRecency] = useState<CommandRecency>(() => readCommandRecency());
-  const filteredCommands = commandQuery !== null
-    ? allCommands.filter((c) => c.name.startsWith(commandQuery))
-    : [];
-  const argCommand = argMatch ? allCommands.find((c) => c.name === argMatch[1]) : undefined;
+  // COMMAND mode hands the raw registry and the typed token to
+  // `commandsToItems`, the single owner of popup matching and ranking
+  // (case-insensitive substring match, tiered exact > prefix > substring,
+  // then recency) — see command-popup.tsx.
+  // The ARGUMENT-mode lookup is case-insensitive to match the popup and
+  // the engine's case-insensitive dispatch.
+  const argCommand = argMatch
+    ? allCommands.find((c) => c.name.toLowerCase() === argMatch[1].toLowerCase())
+    : undefined;
   const argPrefix = argMatch?.[2] ?? "";
   const argOptions = argCommand?.argOptions ?? [];
   const argPrefixLower = argPrefix.toLowerCase();
@@ -159,7 +164,7 @@ export function Composer({
     : [];
   const popupItems: PopupItem[] =
     commandQuery !== null
-      ? commandsToItems(filteredCommands, commandRecency)
+      ? commandsToItems(allCommands, commandRecency, commandQuery)
       : filteredArgs.map((o) => ({
           id: o.value,
           label: o.value,
@@ -360,10 +365,15 @@ export function Composer({
       if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
       // Recency ranking for the command popup. Recorded only for a name the
       // registry knows, and only after the send succeeded — a typo or a
-      // failed send is not a "use".
-      const commandName = /^\/(\S+)/.exec(t)?.[1];
-      if (commandName && allCommands.some((c) => c.name === commandName)) {
-        setCommandRecency(recordCommandUse(commandName));
+      // failed send is not a "use". Matched case-insensitively (dispatch
+      // is too) and recorded under the canonical name so the recency key
+      // always lines up with the popup's names.
+      const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
+      const canonical = typedName
+        ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
+        : undefined;
+      if (canonical) {
+        setCommandRecency(recordCommandUse(canonical));
       }
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
