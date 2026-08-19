@@ -818,18 +818,25 @@ export class SlackTransport implements ChannelTransport {
    * inbound event mints its own (real) conversationKey with the actual
    * thread ts.
    *
-   * The synthetic ts uses a monotonic counter in its low-order microsecond
-   * digits so that two calls within the same millisecond (e.g. a notification
-   * fan-out) produce distinct keys.
+   * The synthetic ts owns its full 6-digit microsecond field with a
+   * per-instance monotonic counter, so the collision cycle is one million
+   * calls per transport instance regardless of wall-clock resolution. That
+   * is well above any realistic notification fan-out — Slack DM rate limits
+   * hit long before it matters — and eliminates the earlier ms-only
+   * collision window entirely.
+   *
+   * JS is single-threaded, so `syntheticTsCounter++` between the read of
+   * `Date.now()` and the string build is atomic within an event-loop turn.
+   * The function performs no `await` between those two points.
    */
   async openDirectConversation(slackUserId: string): Promise<string> {
     const channelId = await this.api.openConversation(slackUserId);
     // Slack ts format is "seconds.microseconds" (6 fractional digits).
-    // Date.now() gives ms, so widen ms→µs by ×1000. A monotonic counter tail
-    // prevents two calls in the same millisecond from colliding.
-    const nowMs = Date.now();
-    const secs = Math.floor(nowMs / 1000);
-    const micro = (nowMs % 1000) * 1000 + (this.syntheticTsCounter++ % 1000);
+    // The seconds come from wall clock; the microseconds come from a local
+    // counter so distinct calls always mint distinct keys within a 10^6
+    // window. See docstring for the atomicity argument.
+    const secs = Math.floor(Date.now() / 1000);
+    const micro = this.syntheticTsCounter++ % 1_000_000;
     const syntheticTs = `${secs}.${String(micro).padStart(6, "0")}`;
     return conversationKeyFor(this.teamId, channelId, syntheticTs);
   }
