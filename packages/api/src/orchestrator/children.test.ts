@@ -610,6 +610,47 @@ describe("buildChildSpawner", () => {
     expect(result.childSessionId).toBeTruthy();
   });
 
+  it("does not hold org-ceiling slots for hibernated or archived sessions", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-parked", {
+      userId: "local-user",
+      orgId: "org-parked-test",
+      workspace: "/tmp",
+    });
+
+    // Fill the org past the ceiling with parked sessions: hibernated (idle
+    // sweep suspended the sandbox) and archived (user shelved it). Neither
+    // consumes compute, so neither may consume capacity.
+    const now = Date.now();
+    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING + 5; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `s_parked_${i}`,
+        userId: "local-user",
+        orgId: "org-parked-test",
+        workspace: "/tmp",
+        status: i % 2 === 0 ? "hibernated" : "archived",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    const result = await spawner(
+      { prompt: "parked sessions must not count" },
+      {
+        parentSessionId: "parent-parked",
+        parentThreadId: "th-p",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    expect(result.childSessionId).toBeTruthy();
+  });
+
   it("counts a running child once toward the ceiling, not twice", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

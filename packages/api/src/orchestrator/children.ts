@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { and, count, eq, isNull, lte, ne, notExists, sql } from "drizzle-orm";
+import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
   ValidationError as EngineValidationError,
@@ -153,13 +153,19 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
   // child once (unsettled watch), a settled child zero. Their agent_sessions
   // rows outlive settlement, so counting them here would double-count every
   // running child and hold a settled child's slot forever.
+  //
+  // Only `active` rows count. A `hibernated` session is parked (the idle
+  // sweep suspended its sandbox) and an `archived` session is shelved by the
+  // user — neither consumes compute, so neither may consume capacity. The
+  // old `!= deleted` filter made the ceiling a lifetime session counter:
+  // every org eventually hit it through accumulation alone.
   const [{ n: liveSessionsOrgWide }] = await db
     .select({ n: count() })
     .from(agentSessions)
     .where(
       and(
         eq(agentSessions.orgId, orgId),
-        ne(agentSessions.status, "deleted"),
+        eq(agentSessions.status, "active"),
         notExists(
           db
             .select({ one: sql`1` })
@@ -172,7 +178,7 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
     );
   const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
   if (total >= ORG_ACTIVE_SESSION_CEILING) {
-    const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + live sessions), limit ${ORG_ACTIVE_SESSION_CEILING}`;
+    const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + active sessions), limit ${ORG_ACTIVE_SESSION_CEILING}. Archive or delete idle sessions, or raise VALET_ORG_SESSION_CEILING.`;
     await writeDropLog(db, { orgId, reason: "org_ceiling", conversationKey: parentSessionId, detail: message });
     throw new ChildLimitError("org_ceiling", message);
   }

@@ -30,13 +30,17 @@ export function resolveOrgSessionCeiling(env: NodeJS.ProcessEnv): number {
 
 /**
  * Org-wide aggregate cap that workflow-spawned and orchestrator-spawned
- * sessions both count against. Counted (decision 21) as: unsettled
- * `child_watches` rows for the org + non-child `agent_sessions` rows for
- * the org that aren't `deleted`. A child counts through its watch row only
- * — once while running, zero once settled; its `agent_sessions` row
- * outlives settlement and must not hold the slot. Workflow-spawned
- * sessions still bypass this count (no `agent_sessions` row) — closing
- * that is part of the batch-fan-out work.
+ * sessions both count against. Counted (decision 21, amended 2026-08-19)
+ * as: unsettled `child_watches` rows for the org + non-child
+ * `agent_sessions` rows for the org with status `active`. A child counts
+ * through its watch row only — once while running, zero once settled; its
+ * `agent_sessions` row outlives settlement and must not hold the slot.
+ * `hibernated` and `archived` sessions don't count: they consume no
+ * compute, and on backends without hibernation an `active`-forever row is
+ * no worse than the old `!= deleted` filter, which turned the ceiling into
+ * a lifetime session counter. Workflow-spawned sessions still bypass this
+ * count (no `agent_sessions` row) — closing that is part of the
+ * batch-fan-out work.
  *
  * Tunable per instance via `VALET_ORG_SESSION_CEILING` (read once at boot).
  */
