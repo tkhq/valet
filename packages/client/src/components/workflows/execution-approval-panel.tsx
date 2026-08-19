@@ -63,8 +63,8 @@ export function ExecutionApprovalPanel({
   }
 
   return (
-    // FIX: Approval Gate Notifications - Enhanced visual flagging with animated border and more prominent styling
     <div className="rounded-lg border-2 border-amber-400 bg-amber-50/80 p-4 dark:border-amber-600 dark:bg-amber-950/50 animate-pulse-slow">
+      {/* FIX: Approval Gate Notifications - Enhanced visual flagging with animated border and more prominent styling */}
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-100">
           🚨 {resolvedTitle}
@@ -145,7 +145,6 @@ export function ExecutionApprovalCard({ executionId, approval }: { executionId: 
   const { prose, payloads } = splitPromptPayloads(approval.prompt);
 
   return (
-    // FIX: Approval Gate Notifications - Add visual highlight for pending approvals with subtle border
     <div className={`rounded-md border p-3 text-xs transition-colors ${
       isPending 
         ? 'border-amber-300 bg-amber-50/40 dark:border-amber-700/80 dark:bg-amber-950/30 shadow-sm' 
