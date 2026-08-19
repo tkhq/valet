@@ -2162,10 +2162,18 @@ const readRepoFile = action(Type.Object({
     ref: Type.Optional(
       Type.String({ description: "Git ref (branch, tag, or commit SHA)" }),
     ),
+    maxBytes: Type.Optional(
+      Type.Number({
+        description:
+          "Return at most this many bytes of the file. A longer file comes back cut short, with truncated set to true. Omit to read the whole file.",
+      }),
+    ),
   }))({
   id: "github.read_repo_file",
   name: "Read Repository File",
-  description: "Read a file from a GitHub repository without cloning it",
+  description:
+    "Read a file from a GitHub repository without cloning it. Set maxBytes to bound what a caller " +
+    "with a token budget takes from a file whose size it cannot know in advance.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
@@ -2178,12 +2186,20 @@ const readRepoFile = action(Type.Object({
         return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
       const raw = data.content ?? "";
-      const content =
+      // Truncate the BYTES, before decoding. `maxBytes` is a budget a caller
+      // sets to keep a file whose size it cannot know from filling a model's
+      // context, so it has to bound the same unit the budget is written in.
+      // Slicing the decoded string would bound characters instead, and one
+      // multi-byte character is up to four of them — a "20000-byte" read of a
+      // file with CJK text or emoji would return well over 20000 bytes.
+      // TextDecoder resolves a codepoint the cut lands inside to a single
+      // replacement character, which is why the cut can be taken here.
+      const bytes =
         data.encoding === "base64"
-          ? new TextDecoder().decode(
-              Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0)),
-            )
-          : raw;
+          ? Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0))
+          : new TextEncoder().encode(raw);
+      const truncated = args.maxBytes !== undefined && bytes.length > args.maxBytes;
+      const content = new TextDecoder().decode(truncated ? bytes.slice(0, args.maxBytes) : bytes);
       return {
         success: true,
         data: {
@@ -2192,6 +2208,9 @@ const readRepoFile = action(Type.Object({
           ref: args.ref,
           size: data.size,
           content,
+          // Always present, so a caller reads coverage off the result rather
+          // than inferring it from a length it would have to measure itself.
+          truncated,
         },
       };
     } catch (err) {

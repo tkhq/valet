@@ -262,6 +262,53 @@ function reviewOutput(verdict: "COMMENT" | "REQUEST_CHANGES"): Record<string, un
   };
 }
 
+/** The triage llm node's structured output — the unchanged files the review
+ * asked to have fetched. */
+function triageOutput(): Record<string, unknown> {
+  return { paths: ["AGENTS.md", "src/cache-key.ts", "src/missing.ts"] };
+}
+
+/** The read_context foreach aggregate, in the shape `ForeachResult` defines.
+ * One item completed, one came back cut short at the byte budget, and one was
+ * skipped — the three outcomes the review prompt tells the model apart, so a
+ * fixture with only successes would leave the wording for the other two
+ * unexercised. */
+function contextFilesResult(): Record<string, unknown> {
+  return {
+    items: [
+      {
+        status: "completed",
+        data: {
+          path: "AGENTS.md",
+          repo: `${REPO_OWNER}/${REPO_NAME}`,
+          ref: HEAD_SHA,
+          size: 812,
+          content: "# Agent instructions\n\nRun `pnpm test` before opening a pull request.\n",
+          truncated: false,
+        },
+      },
+      {
+        status: "completed",
+        data: {
+          path: "src/cache-key.ts",
+          repo: `${REPO_OWNER}/${REPO_NAME}`,
+          ref: HEAD_SHA,
+          size: 41000,
+          content: "export function cacheKey(tenantId: string, id: string) {",
+          truncated: true,
+        },
+      },
+      { status: "skipped", error: 'Read repo file: no file at "src/missing.ts"' },
+    ],
+    count: 3,
+    inputCount: 3,
+    truncatedCount: 0,
+    completedCount: 2,
+    skippedCount: 1,
+    failedCount: 0,
+  };
+}
+
 /** A context in which every node of the review template has completed. One
  * fixture covers both posting branches: the fallback reads only values the
  * successful branch also produces. */
@@ -275,6 +322,8 @@ function fullContext(
   nodeOverrides: Record<string, { result: unknown }> = {},
 ): TemplateContext {
   const inspect = { result: inspectResult() };
+  const triage = { result: { text: "", output: triageOutput(), usage: {} } };
+  const read_context = { result: contextFilesResult() };
   const review = { result: { text: "", output: reviewOutput(verdict), usage: {} } };
   const recheck = { result: inspectResult() };
   const post = {
@@ -288,8 +337,18 @@ function fullContext(
   };
   return {
     trigger,
+    // The `read_context` foreach body renders against its iteration's
+    // aliases, which the interpreter merges into this same context
+    // (`resolveTemplateContext`, `workflow/src/nodes/index.ts`). A fixture
+    // that models every node as completed has to carry them, or the body's
+    // `{{ item }}` reads as a path nothing resolves — the one hole in this
+    // definition that is not a hole.
+    item: "AGENTS.md",
+    index: 0,
     nodes: {
       inspect,
+      triage,
+      read_context,
       review,
       recheck_head: recheck,
       post_review: post,
@@ -501,7 +560,7 @@ describe(`${REVIEW_ID} — create_review calls`, () => {
   });
 
   it("never asks for an approving verdict", () => {
-    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm");
+    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm" && node.id === "review");
     const schema = review?.outputSchema;
     const properties = isRecord(schema) && isRecord(schema.properties) ? schema.properties : {};
     const verdict = properties.verdict;
@@ -602,7 +661,7 @@ describe(`${REVIEW_ID} — create_review calls`, () => {
     for (const node of reviewNodes()) {
       expect(JSON.stringify(node.params)).not.toContain("unreadFiles");
     }
-    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm");
+    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm" && node.id === "review");
     expect(JSON.stringify(review?.outputSchema)).not.toContain("unreadFiles");
     expect(review?.prompt).not.toContain("unreadFiles");
   });
@@ -787,7 +846,7 @@ describe(`${REVIEW_ID} — findings cap`, () => {
   const definition = definitionOf(REVIEW_ID);
 
   function reviewSchema(): Record<string, unknown> {
-    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm");
+    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm" && node.id === "review");
     const schema = review?.outputSchema;
     if (schema === undefined) throw new Error("the review node has no outputSchema");
     return schema;
@@ -822,8 +881,142 @@ describe(`${REVIEW_ID} — findings cap`, () => {
     const properties = reviewSchema().properties;
     const findings = isRecord(properties) ? properties.findings : undefined;
     expect(isRecord(findings) ? findings.maxItems : undefined).toBe(20);
-    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm");
+    const review = definition.nodes.find((node): node is LlmNode => node.type === "llm" && node.id === "review");
     expect(review?.prompt).toContain("at most 20 findings");
+  });
+});
+
+describe(`${REVIEW_ID} — repository context`, () => {
+  const definition = definitionOf(REVIEW_ID);
+
+  function foreachNode(id: string): ForeachNode {
+    const node = definition.nodes.find((n): n is ForeachNode => n.type === "foreach" && n.id === id);
+    if (!node) throw new Error(`no foreach node "${id}"`);
+    return node;
+  }
+
+  function llmNode(id: string): LlmNode {
+    const node = definition.nodes.find((n): n is LlmNode => n.type === "llm" && n.id === id);
+    if (!node) throw new Error(`no llm node "${id}"`);
+    return node;
+  }
+
+  /** A foreach body is a union of six node types and only some carry
+   * `params`, so narrowing on `type` is what reads them without a cast. */
+  function bodyParams(id: string): Record<string, unknown> {
+    const body = foreachNode(id).body;
+    if (body.type !== "tool") throw new Error(`foreach "${id}" body is a ${body.type} node, not a tool node`);
+    return body.params;
+  }
+
+  it("spends at most one diff budget on the repository, so the ceiling stays readable", () => {
+    // The property the caveats and the coverage block both rest on: reading
+    // unchanged files at most DOUBLES a run's input. A per-file cap raised
+    // without lowering the file count silently breaks that, and this is
+    // where it breaks.
+    const perFile = bodyParams("read_context").maxBytes;
+    const files = foreachNode("read_context").maxItems;
+    expect(typeof perFile).toBe("number");
+    expect(typeof files).toBe("number");
+    expect(Number(perFile) * Number(files)).toBeLessThanOrEqual(120000);
+    // A whole number of bytes. The action slices a byte array with it, and a
+    // fraction would be a budget no read could land on exactly.
+    expect(Number.isInteger(perFile)).toBe(true);
+  });
+
+  it("caps the selection in the schema, not only in the prompt text", () => {
+    // Same reason the findings cap is enforced in `outputSchema`: the
+    // foreach truncates at `maxItems` and REPORTS the truncation, so a
+    // longer list would turn a documented ceiling into a warning on the run
+    // page of every pull request.
+    const schema = llmNode("triage").outputSchema;
+    const properties = isRecord(schema) && isRecord(schema.properties) ? schema.properties : {};
+    const paths = properties.paths;
+    expect(isRecord(paths) ? paths.maxItems : undefined).toBe(foreachNode("read_context").maxItems);
+  });
+
+  it("reads the repository at the commit the diff was read at", () => {
+    // Not the branch tip. A review that quotes the diff of one commit
+    // against the repository as of another reviews a state that never
+    // existed — and the tip moves on a busy pull request while the run is
+    // still going.
+    const params = bodyParams("read_context");
+    expect(params.ref).toBe("{{ nodes.inspect.result.head.sha }}");
+    // And the same commit the review is posted against, so the diff, the
+    // files read beside it, and the lines the comments land on are all one
+    // state of the repository.
+    expect(toolNode(definition, "post_review").params.commitId).toBe(params.ref);
+  });
+
+  it("skips a file it cannot read instead of failing the review", () => {
+    // The triage step derives paths from import lines, which is a guess, and
+    // a fork's head commit may not resolve in the base repository at all.
+    // Under the default policy the first 404 would take down a review that
+    // the diff alone could still have produced.
+    expect(foreachNode("read_context").onItemError).toBe("skip");
+  });
+
+  it("selects with a cheaper model than it reviews with", () => {
+    // Selection reads import lines and names paths; reviewing is the
+    // expensive half. Paying the reviewing model twice for the same diff is
+    // the cost this split exists to avoid, so a change that levels them up
+    // should be a deliberate one.
+    expect(llmNode("triage").model).not.toBe(llmNode("review").model);
+  });
+
+  it("keeps the selector out of the reviewing seat", () => {
+    // Two different jobs, and the cheap one must not start reporting. A
+    // triage step that returns findings would put them beside the review's
+    // own with none of its scrutiny.
+    const triage = llmNode("triage");
+    const schema = triage.outputSchema;
+    const properties = isRecord(schema) && isRecord(schema.properties) ? schema.properties : {};
+    expect(Object.keys(properties)).toEqual(["paths"]);
+    expect(triage.system).toContain("report no findings");
+  });
+
+  it("tells the reviewer the fetched files are context, not a place to anchor a finding", () => {
+    // `github.create_review` rejects the WHOLE review when one comment names
+    // a line outside the diff, so a finding anchored into an unchanged file
+    // costs every other finding on the pull request.
+    const review = llmNode("review");
+    expect(review.prompt).toContain("{{ nodes.read_context.result.items }}");
+    expect(review.prompt).toContain("Never report a finding against a line in one of them");
+    expect(review.prompt).toContain("anchors to a line this pull request added or changed");
+  });
+
+  it("no longer tells a reader it cannot open an unchanged file", () => {
+    // The coverage block's old sentence was true and is now false, and a
+    // review that understates what it read is as misleading as one that
+    // overstates it.
+    const body = String(toolNode(definition, "post_review").params.body);
+    expect(body).not.toContain("does not open an unchanged file");
+    expect(body).toContain("{{ nodes.read_context.result.completedCount }}");
+    expect(body).toContain("{{ nodes.read_context.result.inputCount }}");
+    // A cap that drops a file has to say so. Nothing else in the posted
+    // review would tell a reader the run asked for less than it chose to.
+    expect(body).toContain("{{ nodes.read_context.result.truncatedCount }}");
+  });
+
+  it("counts coverage off the run, never off the model", () => {
+    // Both new numbers come from the foreach aggregate, which the runtime
+    // measures. A count the model wrote could claim files it never opened,
+    // two lines below a sentence that says what it did open.
+    for (const id of ["post_review", "post_review_body_only"]) {
+      const body = String(toolNode(definition, id).params.body);
+      expect(body).not.toContain("nodes.triage.result");
+      expect(body).not.toContain("nodes.review.result.output.filesRead");
+    }
+  });
+
+  it("routes the review through the context stage, with no path around it", () => {
+    // An edge left in place from `within_diff_cap` straight to `review`
+    // would give some runs the context and others not, with nothing in the
+    // posted review to tell a reader which kind they were reading.
+    const into = (id: string) => definition.edges.filter((e) => e.to === id).map((e) => e.from);
+    expect(into("triage")).toEqual(["within_diff_cap"]);
+    expect(into("read_context")).toEqual(["triage"]);
+    expect(into("review")).toEqual(["read_context"]);
   });
 });
 

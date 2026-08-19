@@ -573,11 +573,26 @@ describe("github.search_issues", () => {
 });
 
 describe("github.read_repo_file", () => {
-  async function read(path: string) {
+  async function read(path: string, maxBytes?: number) {
     return findAction("github.read_repo_file").execute(
-      { owner: "acme", repo: "handbook", path },
+      { owner: "acme", repo: "handbook", path, ...(maxBytes === undefined ? {} : { maxBytes }) },
       fakeActionContext("test-token"),
     );
+  }
+
+  /** Serve `text` as the base64 GitHub sends for any path. */
+  function serve(text: string) {
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        body: {
+          type: "file",
+          encoding: "base64",
+          path,
+          size: Buffer.byteLength(text),
+          content: Buffer.from(text).toString("base64"),
+        },
+      }),
+    });
   }
 
   it("decodes the base64 GitHub sends", async () => {
@@ -593,6 +608,66 @@ describe("github.read_repo_file", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(isRecord(result.data) ? result.data.content : undefined).toBe(text);
+  });
+
+  it("reads the whole file when no budget is set", async () => {
+    serve("a".repeat(5000));
+
+    const result = await read("src/big.ts");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = isRecord(result.data) ? result.data : {};
+    expect(typeof data.content === "string" ? data.content.length : -1).toBe(5000);
+    // Present and false, not absent: a caller reads coverage off the field
+    // rather than inferring it from a length it would have to measure.
+    expect(data.truncated).toBe(false);
+  });
+
+  it("cuts a file to the byte budget and says that it did", async () => {
+    serve("a".repeat(5000));
+
+    const result = await read("src/big.ts", 100);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = isRecord(result.data) ? result.data : {};
+    expect(data.content).toBe("a".repeat(100));
+    expect(data.truncated).toBe(true);
+    // `size` stays the file's real size. A caller that reported the returned
+    // length as the file's size would understate every truncated file.
+    expect(data.size).toBe(5000);
+  });
+
+  it("bounds the budget in bytes, not in characters", async () => {
+    // The budget exists to keep a file out of a model's context window, so it
+    // has to bound the unit it is written in. Slicing the decoded string would
+    // bound characters instead, and one emoji is four bytes — a "100-byte"
+    // read of this file would return 400.
+    serve("\u{1F600}".repeat(100));
+
+    const result = await read("docs/emoji.md", 100);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const content = isRecord(result.data) && typeof result.data.content === "string" ? result.data.content : "";
+    expect(Buffer.byteLength(content)).toBeLessThanOrEqual(100);
+    expect(isRecord(result.data) ? result.data.truncated : undefined).toBe(true);
+  });
+
+  it("leaves a file at exactly the budget untouched", async () => {
+    // The boundary decides whether a file that fits reports itself as cut
+    // short, and a false `truncated` tells a reviewer it has not seen a tail
+    // that is in fact right there.
+    serve("a".repeat(100));
+
+    const result = await read("src/exact.ts", 100);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = isRecord(result.data) ? result.data : {};
+    expect(data.content).toBe("a".repeat(100));
+    expect(data.truncated).toBe(false);
   });
 
   it("names both corrections when GitHub answers 404", async () => {
