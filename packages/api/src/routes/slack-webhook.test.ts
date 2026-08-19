@@ -264,14 +264,18 @@ describe("POST /api/channels/slack/webhook", () => {
     await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("unlinked_sender");
   });
 
-  it("routes app_home_opened on the messages tab, the signal that replaced assistant_thread_started", async () => {
+  it("acks app_home_opened but does not route it (no thread_ts under per-thread routing)", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
 
     const body = envelope(homeOpened(), "Ev-home");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
 
-    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("unlinked_sender");
+    // Under per-thread routing, app_home_opened has no thread_ts to anchor a
+    // conversation key, so parseUpdate returns null. The webhook acks (200)
+    // but there's no event to route and no drop reason logged.
+    await new Promise((r) => setTimeout(r, 100)); // let any async work settle
+    expect(await dropReasons(api!)).toEqual([]);
   });
 
   it("persists a subscribed slack.message and skips it when nothing subscribes", async () => {

@@ -187,6 +187,8 @@ export class SlackTransport implements ChannelTransport {
    * inbound turn is the right thread for both.
    */
   private readonly lastTurn = new Map<string, string>();
+  /** Monotonic counter for collision avoidance in synthetic ts generation. */
+  private syntheticTsCounter = 0;
 
   constructor(
     private readonly api: SlackApi,
@@ -250,8 +252,9 @@ export class SlackTransport implements ChannelTransport {
     switch (str(event.type)) {
       case "message":
         return this.parseMessage(event, eventId, teamId, update);
-      case "app_home_opened":
-        return this.parseHomeOpened(event, eventId, teamId, update);
+      // app_home_opened is deliberately ignored under per-thread routing: the
+      // event has no thread_ts to anchor a conversation key, and starter
+      // prompts re-emit on the first real message anyway.
       case "app_context_changed":
         // Consumed on purpose. The app subscribes to this event because the
         // subscription is what makes Slack attach `context` to message.im and
@@ -323,23 +326,6 @@ export class SlackTransport implements ChannelTransport {
     const context = this.contextOf(event);
     if (context) inbound.context = context;
     return inbound;
-  }
-
-  /**
-   * `app_home_opened` on the messages tab fires when someone opens the DM.
-   * Under per-thread routing this event has no natural thread anchor: there
-   * is no `thread_ts` on the payload. Rather than inventing a synthetic key,
-   * drop the event — starter prompts re-emit on the first real message, and
-   * any link-account flow already handles the unlinked-sender case there.
-   */
-  private parseHomeOpened(
-    _event: Record<string, unknown>,
-    _eventId: string,
-    _teamId: string,
-    _update: RawChannelUpdate,
-  ): InboundChannelEvent | null {
-    // No thread_ts available; cannot mint a per-thread conversation key.
-    return null;
   }
 
   /**
@@ -831,11 +817,20 @@ export class SlackTransport implements ChannelTransport {
    * `lastTurn` entry exists for this key; if they reply, that reply's
    * inbound event mints its own (real) conversationKey with the actual
    * thread ts.
+   *
+   * The synthetic ts uses a monotonic counter in its low-order microsecond
+   * digits so that two calls within the same millisecond (e.g. a notification
+   * fan-out) produce distinct keys.
    */
   async openDirectConversation(slackUserId: string): Promise<string> {
     const channelId = await this.api.openConversation(slackUserId);
-    // Synthetic threadTs: Slack ts format is seconds.microseconds from epoch.
-    const syntheticTs = `${Math.floor(Date.now() / 1000)}.${String(Date.now() % 1000).padStart(6, "0")}`;
+    // Slack ts format is "seconds.microseconds" (6 fractional digits).
+    // Date.now() gives ms, so widen ms→µs by ×1000. A monotonic counter tail
+    // prevents two calls in the same millisecond from colliding.
+    const nowMs = Date.now();
+    const secs = Math.floor(nowMs / 1000);
+    const micro = (nowMs % 1000) * 1000 + (this.syntheticTsCounter++ % 1000);
+    const syntheticTs = `${secs}.${String(micro).padStart(6, "0")}`;
     return conversationKeyFor(this.teamId, channelId, syntheticTs);
   }
 
