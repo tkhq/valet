@@ -9,8 +9,9 @@
  * calls the right mutation, not that TanStack Query works.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ApiError } from "~/api/client";
+import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type {
   GetGithubOrgStatusResponse,
   IdentityLinkStatus,
@@ -164,12 +165,18 @@ const githubPluginsData: ListPluginsResponse = {
 let currentPluginsData: ListPluginsResponse = pluginsData;
 let currentOrgStatus: GetGithubOrgStatusResponse | undefined;
 let currentOrg: OrgResponse | undefined;
+/** The search params the page is rendered with, and where it navigates.
+ * The settled query lives here, never in component state. */
+let searchParams: Record<string, string> = {};
+const navigate = vi.fn();
 
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const disconnectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+  useSearch: () => searchParams,
+  useNavigate: () => navigate,
 }));
 
 vi.mock("~/api/settings", () => ({
@@ -228,6 +235,13 @@ vi.mock("~/api/queries", async (importOriginal) => {
 });
 
 import { IntegrationsPage } from "./integrations";
+
+// File-level, so a describe that sets a search query cannot leak it into
+// the suites below it.
+beforeEach(() => {
+  searchParams = {};
+  navigate.mockReset();
+});
 
 function org(callerRole: "admin" | "member", organizations = true): OrgResponse {
   return {
@@ -1157,5 +1171,69 @@ describe("IntegrationsPage — org-provided pairing", () => {
     await waitFor(() => expect(screen.getByText("VLT-1234")).toBeTruthy());
     expect(screen.getByText(/Use the code below instead/)).toBeTruthy();
     expect(startLinkMutateAsync).toHaveBeenCalledWith("slack");
+  });
+});
+
+/**
+ * The search box narrows the tiles in the browser — `usePlugins` holds the
+ * whole set, so a client-side match answers about everything it claims to.
+ * The settled query lives in `?q=`, like the `/skills` catalog search.
+ */
+describe("IntegrationsPage — the search box", () => {
+  beforeEach(() => {
+    currentPluginsData = pluginsData;
+    currentOrgStatus = { configured: true, installationCount: 1, suspendedCount: 0 };
+    currentOrg = org("member");
+    identityLinksData = undefined;
+  });
+
+  it("narrows the tiles to the query in the URL", () => {
+    searchParams = { q: "slack" };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("Slack")).toBeTruthy();
+    expect(screen.queryByText("GitHub")).toBeNull();
+    expect(screen.queryByText("DeepWiki")).toBeNull();
+  });
+
+  it("matches the description, not just the name", () => {
+    // "knowledge base" appears only in deepwiki's description.
+    searchParams = { q: "knowledge base" };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("DeepWiki")).toBeTruthy();
+    expect(screen.queryByText("Slack")).toBeNull();
+  });
+
+  it("sends the search to the URL once typing settles", async () => {
+    // Fake timers drive the debounce by hand; see use-live-query.test.tsx
+    // for why waitFor and vitest's clock do not mix.
+    vi.useFakeTimers();
+    try {
+      render(<IntegrationsPage />);
+      const box = screen.getByLabelText("Search integrations");
+      fireEvent.change(box, { target: { value: "sla" } });
+      fireEvent.change(box, { target: { value: "slack" } });
+      // Sending each keystroke would make every character a history entry.
+      expect(navigate).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+      });
+      expect(navigate).toHaveBeenCalledTimes(1);
+      expect(navigate).toHaveBeenCalledWith({ to: "/integrations", search: { q: "slack" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the box up when nothing matches", () => {
+    searchParams = { q: "no-such-integration" };
+    render(<IntegrationsPage />);
+
+    expect(screen.getByText("No integrations match your search.")).toBeTruthy();
+    // Hiding the box on an empty page would leave no way to clear the search.
+    expect(screen.getByLabelText("Search integrations")).toBeTruthy();
+    expect(screen.queryByText("Services")).toBeNull();
   });
 });

@@ -20,6 +20,7 @@ import {
   popCursor,
   pushCursor,
 } from "~/lib/cursor-stack";
+import { textParam } from "~/lib/search-params";
 
 /**
  * `/skills` — markdown documents the assistant can pull into a turn. One
@@ -64,16 +65,12 @@ interface SkillsSearch {
  * names no filter reads as "all", which shows everything rather than an empty
  * page that gives no reason. */
 function readSkillsSearch(raw: unknown): SkillsSearch {
-  const search: Record<string, unknown> =
-    typeof raw === "object" && raw !== null ? { ...raw } : {};
-  const text = (key: string): string | undefined =>
-    typeof search[key] === "string" ? search[key] : undefined;
   return {
-    filter: text("filter"),
-    scope: text("scope"),
-    q: text("q"),
-    page: text("page"),
-    sourcePage: text("sourcePage"),
+    filter: textParam(raw, "filter"),
+    scope: textParam(raw, "scope"),
+    q: textParam(raw, "q"),
+    page: textParam(raw, "page"),
+    sourcePage: textParam(raw, "sourcePage"),
   };
 }
 

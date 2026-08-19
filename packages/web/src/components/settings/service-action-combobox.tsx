@@ -3,6 +3,7 @@ import { usePlugins } from "~/api/integrations";
 import { Badge, Input, Spinner } from "~/components/primitives";
 import { RiskBadge } from "~/components/workflows/risk-badge";
 import { cn } from "~/lib/cn";
+import { matchesNeedle } from "~/lib/text-match";
 
 /** One row in the combobox listbox. */
 export interface ComboItem {
@@ -93,14 +94,8 @@ export function ServiceActionCombobox({
 
   // Filter on query
   const filtered = useMemo((): ComboItem[] => {
-    const q = query.toLowerCase().trim();
-    if (!q) return catalogItems;
-    return catalogItems.filter(
-      (item) =>
-        item.label.toLowerCase().includes(q) ||
-        item.id.toLowerCase().includes(q) ||
-        (item.sublabel?.toLowerCase().includes(q) ?? false),
-    );
+    if (query.trim().length === 0) return catalogItems;
+    return catalogItems.filter((item) => matchesNeedle(query, [item.label, item.id, item.sublabel]));
   }, [catalogItems, query]);
 
   // Whether query matches a catalog item exactly
