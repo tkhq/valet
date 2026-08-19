@@ -98,11 +98,15 @@ export function MessageList({ messages, isAgentThinking, agentStatus, agentStatu
     });
 
     // Keep pinning to bottom while deferred children (markdown, tool cards) render.
+    const contentEl = el.firstElementChild;
+    if (!contentEl) return;
+
     const observer = new ResizeObserver(() => {
       if (!scrollRef.current) return;
+      if (!isAtBottomRef.current) return;
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     });
-    observer.observe(el);
+    observer.observe(contentEl);
     const timeoutId = window.setTimeout(() => observer.disconnect(), 1000);
     return () => {
       observer.disconnect();
