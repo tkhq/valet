@@ -518,7 +518,22 @@ async function finalizeSettle(
   runId: string,
   outcome: 'completed' | 'failed' | 'cancelled',
 ): Promise<RunParkState> {
-  const { store, onRunSettled } = deps;
+  return settleAndNotify(deps.store, deps.onRunSettled, runId, outcome);
+}
+
+/**
+ * The settle sequence above, exported for the host's poisoned-run cap
+ * (local-host.ts): a run whose drive throws deterministically on every
+ * reclaim must exit through the SAME door as a normal settle — store
+ * commit, parent wake, host report, in that order — or its parent parks
+ * forever and the UI never learns the run died.
+ */
+export async function settleAndNotify(
+  store: WorkflowStore,
+  onRunSettled: OnRunSettled | undefined,
+  runId: string,
+  outcome: 'completed' | 'failed' | 'cancelled',
+): Promise<RunParkState> {
   await store.settleRun(runId, outcome);
 
   const run = await store.getRun(runId);

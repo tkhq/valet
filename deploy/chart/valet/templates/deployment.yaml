@@ -122,6 +122,21 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
+          # Boot time is VARIABLE: boot-restore replays unsettled
+          # submissions and reclaims workflow leases before the port
+          # binds, so a busy database pushes boot past any tight
+          # liveness budget. Without a startupProbe the kubelet killed
+          # mid-boot pods after ~40s and the api crash-looped under
+          # backoff (observed live: 7+ restarts on a boot that
+          # eventually needed >40s; a quiet boot takes ~5s). The
+          # startupProbe owns the boot window (up to 5 minutes);
+          # liveness stays tight for steady-state.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /api/health
@@ -132,7 +147,6 @@ spec:
             httpGet:
               path: /api/health
               port: http
-            initialDelaySeconds: 10
             periodSeconds: 10
       {{- if .Values.api.instanceConfig }}
       volumes:

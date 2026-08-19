@@ -56,10 +56,10 @@
 
 import { detachedFromTrace } from '@valet/engine';
 
-import { driveUntilPark, type OnRunSettled } from './interpreter.js';
+import { driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
-import type { RunParams, RunParkState, RunWaitCondition, WorkflowStore } from './store.js';
+import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowStore } from './store.js';
 
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
 export interface RunHost {
@@ -107,6 +107,17 @@ export interface LocalRunHostDeps {
   heartbeatMs?: number;
   /** Lost-wake sweep interval in ms. Default 15_000; spec bound is ≤60_000. */
   sweepMs?: number;
+  /**
+   * Poisoned-run cap: after this many CONSECUTIVE drive failures for one
+   * run, the host settles it as `failed` instead of abandoning the lease
+   * again. Retry-via-reclaim is the durability posture for crashes, but a
+   * deterministic throw (malformed stored JSON, contract violation)
+   * otherwise reclaims forever — observed live as an api pod pinned by two
+   * unparseable runs re-driven every lease expiry. Consecutive means the
+   * counter clears on any successful drive segment; `WorkflowFenceError`
+   * (a superseded attempt, not a sick run) never counts. Default 5.
+   */
+  maxConsecutiveDriveFailures?: number;
   /** Test-only crash-point hook (decision 20). */
   crashAt?: 'terminalizing';
   /** Test-only injectable process exit; defaults to real `process.exit`. */
@@ -131,6 +142,7 @@ export class LocalRunHost implements RunHost {
   private readonly leaseMs: number;
   private readonly heartbeatMs: number;
   private readonly sweepMs: number;
+  private readonly maxConsecutiveDriveFailures: number;
   private readonly crashAt?: 'terminalizing';
   private readonly exit: (code: number) => never;
 
@@ -143,6 +155,15 @@ export class LocalRunHost implements RunHost {
   private readonly inFlight = new Set<string>();
   /** In-flight drive promises, awaited by `stopHost` for clean shutdown. */
   private readonly activeDrives = new Set<Promise<void>>();
+  /**
+   * Consecutive drive failures per runId (poisoned-run cap). In-memory on
+   * purpose: the run's `attempt` column counts every claim of a HEALTHY
+   * long-lived run too, so it cannot be the failure budget. A process
+   * restart forgets counts — acceptable, because the loop this caps is
+   * in-process reclaim (every `leaseMs`), and a run that fails across
+   * restarts re-earns its strikes in minutes.
+   */
+  private readonly driveFailures = new Map<string, number>();
   /** How many parked runs a single sweep pass enumerates via `store.listParked`. */
   private readonly sweepBatchLimit = 1_000;
 
@@ -166,6 +187,7 @@ export class LocalRunHost implements RunHost {
     this.leaseMs = deps.leaseMs ?? 30_000;
     this.heartbeatMs = deps.heartbeatMs ?? 10_000;
     this.sweepMs = deps.sweepMs ?? 15_000;
+    this.maxConsecutiveDriveFailures = deps.maxConsecutiveDriveFailures ?? 5;
     this.crashAt = deps.crashAt;
     this.exit = deps.exit ?? defaultExit;
   }
@@ -314,17 +336,49 @@ export class LocalRunHost implements RunHost {
             : undefined,
       });
       await this.afterPark(runId, park);
+      this.driveFailures.delete(runId);
     } catch (err) {
-      // Any failure here — a `WorkflowFenceError` from a superseded attempt,
-      // a genuine executor error, or (decision 20) the crash hook's thrown
-      // `exit` — abandons the lease as-is; either the sweep, a future poll's
-      // expired-lease reclaim, or an external wake will pick the run back
-      // up. Retry-via-reclaim is the durability posture, but the error must
-      // NOT be silent: a deterministic throw (bad deps wiring, contract
-      // violation) turns into an invisible infinite retry loop otherwise —
-      // exactly the failure mode that made the orchestrator wake-path bug
-      // cost a debugging session.
-      console.error(`workflow drive failed for ${runId} (lease abandoned; will be reclaimed):`, err);
+      // A `WorkflowFenceError` means a superseded attempt, not a sick run —
+      // abandon the lease exactly as before and never count it toward the
+      // poisoned-run cap.
+      if (err instanceof WorkflowFenceError) {
+        console.error(`workflow drive failed for ${runId} (lease abandoned; will be reclaimed):`, err);
+        return;
+      }
+      // Any other failure — a genuine executor error, or (decision 20) the
+      // crash hook's thrown `exit` — abandons the lease; either the sweep,
+      // a future poll's expired-lease reclaim, or an external wake picks
+      // the run back up. Retry-via-reclaim is the durability posture, but
+      // a deterministic throw (malformed stored JSON, bad deps wiring,
+      // contract violation) fails EVERY reclaim: without a cap that is an
+      // infinite retry loop that pins the host (observed live — two
+      // unparseable runs re-driven every lease expiry). After
+      // `maxConsecutiveDriveFailures` strikes the run settles as `failed`
+      // through the same door as a normal settle (store commit → parent
+      // wake → host report), so a parked parent and the UI both learn it
+      // died.
+      const strikes = (this.driveFailures.get(runId) ?? 0) + 1;
+      if (strikes < this.maxConsecutiveDriveFailures) {
+        this.driveFailures.set(runId, strikes);
+        console.error(
+          `workflow drive failed for ${runId} (lease abandoned; will be reclaimed; consecutive failure ${strikes}/${this.maxConsecutiveDriveFailures}):`,
+          err,
+        );
+        return;
+      }
+      console.error(
+        `workflow drive failed for ${runId} ${strikes} consecutive times — settling the run as failed (poisoned run):`,
+        err,
+      );
+      try {
+        await settleAndNotify(this.store, this.onRunSettled, runId, 'failed');
+        this.driveFailures.delete(runId);
+      } catch (settleErr) {
+        // Keep the strike count: if the settle write itself failed, the
+        // next reclaim lands here again and retries the settle.
+        this.driveFailures.set(runId, strikes);
+        console.error(`settling poisoned run ${runId} failed (lease abandoned; will retry on reclaim):`, settleErr);
+      }
     } finally {
       clearInterval(heartbeat);
     }

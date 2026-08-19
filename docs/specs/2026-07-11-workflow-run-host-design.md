@@ -251,3 +251,20 @@ Executable contract suites, mirroring the engine's conformance approach:
 - **RunHost contract** — start idempotency, spurious-wake safety, timer move-forward semantics, terminate → cancellation reconciliation, lost-wake sweep (wakes parked runs with unconsumed signals, due timers, settled submissions, or consumed-but-uncheckpointed signals within the staleness bound).
 
 A host implementation is supported when the suites pass against it; the in-memory host is the reference implementation used by interpreter unit tests.
+
+## Deviations
+
+**Poisoned-run cap (2026-08-18).** Retry-via-reclaim treats every drive
+failure as a crash to survive. A deterministic throw — malformed stored
+JSON, a contract violation — fails every reclaim, so the run retried
+forever and pinned a live api (two unparseable runs re-driven at each
+lease expiry). `LocalRunHost` now counts CONSECUTIVE drive failures per
+run in memory and, at `maxConsecutiveDriveFailures` (default 5), settles
+the run as `failed` through the interpreter's `settleAndNotify` — store
+commit, parent wake, host report, in the normal order. The run's
+`attempt` column cannot serve as this budget: it increments on every
+claim of a healthy long-lived run too. `WorkflowFenceError` never counts
+(a superseded attempt is not a sick run), and a successful drive segment
+clears the count, so transient failures keep the original posture. The
+counter is process-local by design; a run that keeps failing across
+restarts re-earns its strikes in minutes.
