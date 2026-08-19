@@ -30,6 +30,7 @@ import type {
   MessagePart,
   MessageRole,
   PatchThreadRequest,
+  PromptImageAttachment,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -74,6 +75,10 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // Engine entries have createdAt as `string` (ISO-ish) per BaseEntry. Coerce
   // to number for the wire.
   const created = typeof e.createdAt === "number" ? e.createdAt : Date.parse(e.createdAt as unknown as string);
+  // Project engine image attachments into the wire shape. The engine holds
+  // either a `data:` URL or raw bytes; the wire ships one canonical
+  // `data:` URL string. Skip entries missing both (nothing to render).
+  const wireAttachments = projectAttachments(e.attachments);
   return {
     id: e.id,
     sessionId,
@@ -85,7 +90,43 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,
+    ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of `MessageEntry.attachments`. The engine keeps images as
+ * either `{ url }` (already a `data:` URL — the shape the REST route
+ * accepts today) or `{ data: Uint8Array }` (some day, when a plugin drops a
+ * raw buffer in). The wire ships one canonical string per attachment; if
+ * neither field is set, drop the entry rather than emit an empty img.
+ */
+function projectAttachments(
+  attachments: NonNullable<Extract<SessionEntry, { type: "message" }>["attachments"]> | undefined,
+): PromptImageAttachment[] {
+  if (!attachments || attachments.length === 0) return [];
+  const out: PromptImageAttachment[] = [];
+  for (const att of attachments) {
+    if (att.type !== "image") continue;
+    let url: string | undefined;
+    if (typeof att.url === "string" && att.url.startsWith("data:")) {
+      url = att.url;
+    } else if (att.data) {
+      url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
+    } else if (typeof att.url === "string") {
+      // Non-data URL (e.g. an http url) is passed through as-is; harmless
+      // if the client happens to already resolve it.
+      url = att.url;
+    }
+    if (!url) continue;
+    out.push({
+      kind: "image",
+      url,
+      mimeType: att.mimeType,
+      name: att.name ?? "image",
+    });
+  }
+  return out;
 }
 
 // ── Threads ───────────────────────────────────────────────────────────────

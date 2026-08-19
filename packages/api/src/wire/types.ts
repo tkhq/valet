@@ -440,6 +440,13 @@ export interface Message {
    * not only in the header picker.
    */
   model?: string;
+  /**
+   * Image attachments on a user message. Populated for user entries with
+   * attached images; never on assistant, tool, or system entries. The
+   * engine's `MessageEntry.attachments` is the source of truth; this is
+   * the wire projection.
+   */
+  attachments?: PromptImageAttachment[];
 }
 
 export interface ListMessagesResponse {
