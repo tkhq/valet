@@ -119,7 +119,6 @@ export function MessageList({ messages, isAgentThinking, agentStatus, agentStatu
   return (
     <ToolCardExpandAllContext.Provider value={expandAll}>
     <div className="relative flex-1 overflow-hidden">
-      {/* FIX: Orchestrator Chat Scrolling - Added explicit height constraint and vertical scroll for long chat output */}
       <div ref={scrollRef} className="h-full overflow-y-auto overflow-x-hidden scroll-smooth">
         {isEmpty ? (
           <div className="flex h-full items-center justify-center">
@@ -219,7 +218,6 @@ function AssistantTurn({ message }: { message: Message }) {
           )}
         </div>
 
-        {/* FIX: Orchestrator Chat Scrolling - Ensure parts container allows wrapping and scrolling for long outputs */}
         <div className="space-y-1.5 border-l-[1.5px] border-accent/15 pl-3 dark:border-accent/10 min-w-0">
           {parts.map((part, i) => (
             <V2PartRenderer key={i} part={part} />

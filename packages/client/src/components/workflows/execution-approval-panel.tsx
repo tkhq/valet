@@ -45,7 +45,6 @@ export function ExecutionApprovalPanel({
   const list: ExecutionApproval[] = fetched.data?.approvals ?? [];
   const pending = list.filter((a) => a.status === 'pending');
 
-  // FIX: Approval Gate Notifications - Show notification when new approvals are triggered
   useApprovalNotifications(list);
 
   if (pending.length === 0) return null;
@@ -64,10 +63,9 @@ export function ExecutionApprovalPanel({
 
   return (
     <div className="rounded-lg border-2 border-amber-400 bg-amber-50/80 p-4 dark:border-amber-600 dark:bg-amber-950/50 animate-pulse-slow">
-      {/* FIX: Approval Gate Notifications - Enhanced visual flagging with animated border and more prominent styling */}
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-100">
-          🚨 {resolvedTitle}
+          {resolvedTitle}
         </h3>
         <Badge variant="error" className="font-semibold text-xs">{pending.length} pending</Badge>
       </div>
@@ -93,17 +91,7 @@ export function ExecutionApprovalCard({ executionId, approval }: { executionId: 
     && typeof approval.timeoutAt === 'string'
     && new Date(approval.timeoutAt).getTime() <= Date.now();
   const isPending = approval.status === 'pending' && !isExpired;
-  // iterationIndex is set when the approval was raised inside a foreach
-  // body. The card uses this to offer the scoped "Approve remaining rows"
-  // button — which creates an execution-scoped grant narrowed to this
-  // foreach node, sweeping every pending iteration of the same body to
-  // approved in one click.
   const isForeachIteration = typeof approval.iterationIndex === 'number';
-  // Propagated from a session this execution spawned. The execution
-  // approve/deny routes only resolve workflow-attributed invocations, so
-  // for these rows we surface a deep link to the originating session
-  // (where the existing session approval card can resolve it) instead
-  // of rendering inline buttons.
   const isPropagated = typeof approval.originSessionId === 'string' && approval.originSessionId.length > 0;
 
   const onApprove = async (scope: 'once' | 'workflow_execution' = 'once', narrowToNode = false) => {
@@ -145,23 +133,13 @@ export function ExecutionApprovalCard({ executionId, approval }: { executionId: 
   const { prose, payloads } = splitPromptPayloads(approval.prompt);
 
   return (
-    <div className={`rounded-md border p-3 text-xs transition-colors ${
-      isPending 
-        ? 'border-amber-300 bg-amber-50/40 dark:border-amber-700/80 dark:bg-amber-950/30 shadow-sm' 
-        : 'border-amber-200 bg-white dark:border-amber-900/60 dark:bg-neutral-900'
-    }`}>
+    <div className="rounded-md border border-amber-200 bg-white p-3 text-xs transition-colors dark:border-amber-900/60 dark:bg-neutral-900">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <Badge variant="secondary" className="text-[10px]">{approval.kind === 'tool_policy' ? 'tool' : 'approval'}</Badge>
           {isPropagated && (
             <Badge variant="default" className="text-[10px]" title="Raised in a session this workflow spawned">
               from session
-            </Badge>
-          )}
-          {/* FIX: Approval Gate Notifications - Add urgency indicator for pending approvals */}
-          {isPending && (
-            <Badge variant="error" className="text-[9px] py-0.5 px-1.5">
-              pending
             </Badge>
           )}
           <span className="truncate font-mono text-[10px] text-neutral-500 dark:text-neutral-400">{approval.nodeId}</span>
