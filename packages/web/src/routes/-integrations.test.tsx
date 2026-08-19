@@ -10,6 +10,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { ApiError } from "~/api/client";
 import type {
   GetGithubOrgStatusResponse,
   IdentityLinkStatus,
@@ -1097,6 +1098,26 @@ describe("IntegrationsPage — org-provided pairing", () => {
       }),
     );
     await waitFor(() => expect(screen.getByText(/We DMed/)).toBeTruthy());
+  });
+
+  it("falls back to the shown code when the DM send fails, and says why", async () => {
+    identityLinksData = { links: [slackLink({ codeDelivery: true })] };
+    deliverLinkMutateAsync.mockRejectedValue(
+      new ApiError(502, "POST /me/identity-links/slack/deliver → 502", {
+        error: "Could not send the slack DM: channel_not_found. Use the link code shown on the card instead.",
+      }),
+    );
+    startLinkMutateAsync.mockResolvedValue({
+      code: "VLT-9999",
+      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+      expiresInSeconds: 600,
+    });
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+
+    await waitFor(() => expect(screen.getByText("VLT-9999")).toBeTruthy());
+    expect(screen.getByText(/Could not send the slack DM/)).toBeTruthy();
   });
 
   it("falls back to the shown code on 202 when the provider has no member directory", async () => {

@@ -191,15 +191,20 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
       return c.json({ error: "invalid JSON body" }, 400);
     }
   }
+  // A present-but-wrong-typed field is a caller bug — reject it instead of
+  // silently taking the email path.
+  if (body.externalId !== undefined && (typeof body.externalId !== "string" || body.externalId === "")) {
+    return c.json({ error: "externalId must be a non-empty string" }, 400);
+  }
+  if (body.displayName !== undefined && typeof body.displayName !== "string") {
+    return c.json({ error: "displayName must be a string" }, 400);
+  }
 
   let match: { externalId: string; displayName: string } | null = null;
-  if (typeof body.externalId === "string" && body.externalId !== "") {
+  if (body.externalId !== undefined) {
     match = {
       externalId: body.externalId,
-      displayName:
-        typeof body.displayName === "string" && body.displayName !== ""
-          ? body.displayName
-          : body.externalId,
+      displayName: body.displayName !== undefined && body.displayName !== "" ? body.displayName : body.externalId,
     };
   } else {
     try {
@@ -222,14 +227,21 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
   const code = await mintLinkCode(db, user.id, provider);
   const messageText = deliveryDm({ code });
   try {
+    // Same default key shape as ChannelHost.attentionDeliverer: a transport
+    // without openDirectConversation (Telegram) addresses a user by
+    // `${channelType}:dm:${externalId}` — the sender id IS the address.
     const conversationKey = hasOpenDirect(transport)
       ? await transport.openDirectConversation(match.externalId)
       : `${provider}:dm:${match.externalId}`;
     await transport.send(conversationKey, { markdown: messageText });
   } catch (err) {
+    // The minted code is now unreachable, and that is fine: it is stored as
+    // a hash, expires in ten minutes, and the next mint for this user +
+    // provider replaces it. No rollback needed. The client falls back to
+    // the show-code flow, which mints that replacement.
     return c.json(
       {
-        error: `Could not send the ${provider} DM: ${err instanceof Error ? err.message : "unknown error"}. Use the show-code flow instead.`,
+        error: `Could not send the ${provider} DM: ${err instanceof Error ? err.message : "unknown error"}. Use the link code shown on the card instead.`,
       },
       502,
     );

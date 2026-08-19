@@ -230,6 +230,11 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
       setSearching(false);
       setStartError(null);
     } catch (err) {
+      // The DM did not go out (or the lookup broke). Fall back to a shown
+      // code so the card still offers a way to finish — there is no
+      // show-code button to point the user at — then surface why, after,
+      // because showCode clears the error slot on success.
+      await showCode();
       setStartError(startErrorMessage(err, title));
     }
   }

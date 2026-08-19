@@ -597,6 +597,22 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     expect(res.status).toBe(400);
   });
 
+  it("400s when externalId is present but not a non-empty string", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+
+    for (const externalId of [42, "", null]) {
+      const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ externalId }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "externalId must be a non-empty string" });
+    }
+    expect(booted.transport.sent).toHaveLength(0);
+  });
+
   it("502s and names the fallback when the DM send fails", async () => {
     const booted = await bootWithDeliverySlack();
     api = booted.api;
@@ -606,7 +622,7 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("show-code");
+    expect(body.error).toContain("link code shown on the card");
   });
 });
 
