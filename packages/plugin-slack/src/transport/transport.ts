@@ -7,9 +7,10 @@
  *
  * 1. It routes direct messages only. Channel posts and @mentions belong to
  *    the event pipeline (`../triggers.ts`), not to a conversation.
- * 2. The conversation key holds no thread id. A DM channel is stable per
- *    user, while `thread_ts` changes every turn, so the thread id travels
- *    with each event and each stream instead of being encoded in the key.
+ * 2. Each Slack thread maps to its own Valet thread. The conversation key
+ *    includes the thread root's timestamp (`threadTs = event.thread_ts ??
+ *    event.ts`), so a top-level DM opens a new Valet thread while replies
+ *    inside an existing Slack thread stay in the same Valet thread.
  * 3. Replies stream. `chat.startStream`/`appendStream`/`stopStream` put the
  *    agent's text on screen as it is produced, the way the web UI shows it.
  *    The host drives that lifecycle; this file provides the three calls and
@@ -46,36 +47,41 @@ import { verifySlackSignatureSync } from "./verify.js";
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
 const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
 
-/** Cap the in-memory url_private / gate-text / turn maps. */
-const MAX_TRACKED_ENTRIES = 500;
+/** Cap the in-memory url_private / gate-text / turn maps. Per-thread keys
+ * grow faster than per-DM keys, so allow for more active threads. */
+const MAX_TRACKED_ENTRIES = 2000;
 
 /** Matches a `link <code>` DM that starts the identity-link flow. */
 const LINK_COMMAND_RE = /^\s*link\s+(\S+)\s*$/i;
 
 // ─── Conversation-key codec ─────────────────────────────────────────────────
 //
-// conversationKey: "slack:{teamId}:{channelId}"
-// engine threadKey: "slack:{channelId}"
+// conversationKey: "slack:{teamId}:{channelId}:{threadTs}"
+// engine threadKey: "slack:{channelId}:{threadTs}"
 //
-// The team id stays out of the thread key because the transport already knows
-// it — one credential serves one workspace. It stays IN the conversation key
-// because the host round-trips that value into outbound calls and a bare
-// channel id would not say which workspace it belongs to.
+// Each Slack thread root maps to its own Valet thread: a top-level DM uses its
+// own `ts` as `threadTs`, a reply inside an existing Slack thread uses that
+// thread's root ts. The team id stays out of the thread key because the
+// transport already knows it — one credential serves one workspace. It stays
+// IN the conversation key because the host round-trips that value into
+// outbound calls and a bare channel id would not say which workspace it
+// belongs to.
 
 export interface SlackConversationRef {
   teamId: string;
   channelId: string;
+  threadTs: string;
 }
 
-export function conversationKeyFor(teamId: string, channelId: string): string {
-  return `slack:${teamId}:${channelId}`;
+export function conversationKeyFor(teamId: string, channelId: string, threadTs: string): string {
+  return `slack:${teamId}:${channelId}:${threadTs}`;
 }
 
 export function parseConversationKey(key: string): SlackConversationRef | null {
   if (!key.startsWith("slack:")) return null;
   const parts = key.slice("slack:".length).split(":");
-  if (parts.length !== 2 || parts.some((p) => p === "")) return null;
-  return { teamId: parts[0], channelId: parts[1] };
+  if (parts.length !== 3 || parts.some((p) => p === "")) return null;
+  return { teamId: parts[0], channelId: parts[1], threadTs: parts[2] };
 }
 
 function str(v: unknown): string | undefined {
@@ -181,6 +187,8 @@ export class SlackTransport implements ChannelTransport {
    * inbound turn is the right thread for both.
    */
   private readonly lastTurn = new Map<string, string>();
+  /** Monotonic counter for collision avoidance in synthetic ts generation. */
+  private syntheticTsCounter = 0;
 
   constructor(
     private readonly api: SlackApi,
@@ -244,8 +252,9 @@ export class SlackTransport implements ChannelTransport {
     switch (str(event.type)) {
       case "message":
         return this.parseMessage(event, eventId, teamId, update);
-      case "app_home_opened":
-        return this.parseHomeOpened(event, eventId, teamId, update);
+      // app_home_opened is deliberately ignored under per-thread routing: the
+      // event has no thread_ts to anchor a conversation key, and starter
+      // prompts re-emit on the first real message anyway.
       case "app_context_changed":
         // Consumed on purpose. The app subscribes to this event because the
         // subscription is what makes Slack attach `context` to message.im and
@@ -279,10 +288,11 @@ export class SlackTransport implements ChannelTransport {
     if (!channel || !user || !ts) return null;
     if (this.botUserId !== undefined && user === this.botUserId) return null;
 
-    const conversationKey = conversationKeyFor(teamId, channel);
     // A turn replies under the user's own message. When the user types into
-    // an existing thread, that thread's root wins.
+    // an existing thread, that thread's root wins. Compute this BEFORE the
+    // conversation key since it is now part of the key.
     const threadTs = str(event.thread_ts) ?? ts;
+    const conversationKey = conversationKeyFor(teamId, channel, threadTs);
     this.remember(this.lastTurn, conversationKey, threadTs);
 
     const text = cleanSlackText(str(event.text) ?? "", this.botUserId);
@@ -311,35 +321,6 @@ export class SlackTransport implements ChannelTransport {
       text: text !== "" ? text : undefined,
       media,
       threadTs,
-      raw: update,
-    };
-    const context = this.contextOf(event);
-    if (context) inbound.context = context;
-    return inbound;
-  }
-
-  /**
-   * `app_home_opened` on the messages tab is the current signal that someone
-   * opened the conversation. It replaces the legacy
-   * `assistant_thread_started`. The home tab fires the same event, so the tab
-   * check is what separates the two.
-   */
-  private parseHomeOpened(
-    event: Record<string, unknown>,
-    eventId: string,
-    teamId: string,
-    update: RawChannelUpdate,
-  ): InboundChannelEvent | null {
-    if (str(event.tab) !== "messages") return null;
-    const channel = str(event.channel);
-    const user = str(event.user);
-    if (!channel || !user) return null;
-
-    const inbound: InboundChannelEvent = {
-      dispatchId: `slack:${eventId}`,
-      conversationKey: conversationKeyFor(teamId, channel),
-      sender: { externalId: user },
-      kind: "surface_opened",
       raw: update,
     };
     const context = this.contextOf(event);
@@ -387,14 +368,15 @@ export class SlackTransport implements ChannelTransport {
     if (!messageTs || !channelId || !userId) return null;
 
     const teamId = str(rec(u.team)?.id) ?? this.teamId;
-    const conversationKey = conversationKeyFor(teamId, channelId);
+    const threadTs = str(container?.thread_ts) ?? messageTs;
+    const conversationKey = conversationKeyFor(teamId, channelId, threadTs);
 
     return {
       dispatchId: `slack:ia:${triggerId}`,
       conversationKey,
       sender: { externalId: userId, displayName: str(userRec?.username) ?? str(userRec?.name) },
       kind: "gate_callback",
-      threadTs: str(container?.thread_ts) ?? messageTs,
+      threadTs,
       gateCallback: {
         actionId,
         gateId,
@@ -780,14 +762,17 @@ export class SlackTransport implements ChannelTransport {
   threadKeyFromConversationKey(conversationKey: string): string {
     const target = parseConversationKey(conversationKey);
     if (!target) return conversationKey;
-    return `slack:${target.channelId}`;
+    return `slack:${target.channelId}:${target.threadTs}`;
   }
 
   conversationKeyFromThreadKey(threadKey: string): string | null {
     if (!threadKey.startsWith("slack:")) return null;
-    const channelId = threadKey.slice("slack:".length);
-    if (channelId === "" || channelId.includes(":")) return null;
-    return conversationKeyFor(this.teamId, channelId);
+    const rest = threadKey.slice("slack:".length);
+    const parts = rest.split(":");
+    // Expect exactly 2 segments: channelId and threadTs.
+    if (parts.length !== 2 || parts.some((p) => p === "")) return null;
+    const [channelId, threadTs] = parts;
+    return conversationKeyFor(this.teamId, channelId, threadTs);
   }
 
   // ─── Feature-detected extras (not part of ChannelTransport) ───────────
@@ -824,10 +809,36 @@ export class SlackTransport implements ChannelTransport {
     return out;
   }
 
-  /** Open (or fetch) the app↔user IM and return its conversationKey. */
+  /**
+   * Open (or fetch) the app↔user IM and return a conversationKey for sending.
+   *
+   * Returns a key with a synthetic `threadTs` (current time as a Slack-style
+   * timestamp). The recipient sees the message at the DM root because no
+   * `lastTurn` entry exists for this key; if they reply, that reply's
+   * inbound event mints its own (real) conversationKey with the actual
+   * thread ts.
+   *
+   * The synthetic ts owns its full 6-digit microsecond field with a
+   * per-instance monotonic counter, so the collision cycle is one million
+   * calls per transport instance regardless of wall-clock resolution. That
+   * is well above any realistic notification fan-out — Slack DM rate limits
+   * hit long before it matters — and eliminates the earlier ms-only
+   * collision window entirely.
+   *
+   * JS is single-threaded, so `syntheticTsCounter++` between the read of
+   * `Date.now()` and the string build is atomic within an event-loop turn.
+   * The function performs no `await` between those two points.
+   */
   async openDirectConversation(slackUserId: string): Promise<string> {
     const channelId = await this.api.openConversation(slackUserId);
-    return conversationKeyFor(this.teamId, channelId);
+    // Slack ts format is "seconds.microseconds" (6 fractional digits).
+    // The seconds come from wall clock; the microseconds come from a local
+    // counter so distinct calls always mint distinct keys within a 10^6
+    // window. See docstring for the atomicity argument.
+    const secs = Math.floor(Date.now() / 1000);
+    const micro = this.syntheticTsCounter++ % 1_000_000;
+    const syntheticTs = `${secs}.${String(micro).padStart(6, "0")}`;
+    return conversationKeyFor(this.teamId, channelId, syntheticTs);
   }
 
   /**
@@ -845,7 +856,7 @@ export class SlackTransport implements ChannelTransport {
     const target = parseConversationKey(conversationKey);
     if (!target) {
       throw new Error(
-        `Not a Slack conversation key: "${conversationKey}". Expected "slack:{teamId}:{channelId}".`,
+        `Not a Slack conversation key: "${conversationKey}". Expected "slack:{teamId}:{channelId}:{threadTs}".`,
       );
     }
     if (target.teamId !== this.teamId) {

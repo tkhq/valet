@@ -13,7 +13,8 @@ import {
 
 const TEAM = "T1";
 const CHANNEL = "D100";
-const KEY = conversationKeyFor(TEAM, CHANNEL);
+const THREAD_TS = "1700000000.000100";
+const KEY = conversationKeyFor(TEAM, CHANNEL, THREAD_TS);
 const SIGNING_SECRET = "shh";
 
 let fake: FakeSlackApi;
@@ -67,9 +68,11 @@ function imMessage(over: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-/** Drive one inbound turn so the transport learns the conversation's thread. */
-function primeTurn(transport: SlackTransport, ts = "1700000000.000100"): void {
+/** Drive one inbound turn so the transport learns the conversation's thread.
+ * Returns the conversation key for this turn (which now includes the threadTs). */
+function primeTurn(transport: SlackTransport, ts = "1700000000.000100"): string {
   transport.parseUpdate(envelope(imMessage({ ts }), `Ev-${ts}`));
+  return conversationKeyFor(TEAM, CHANNEL, ts);
 }
 
 function lastCall(method: string): Record<string, unknown> {
@@ -79,24 +82,38 @@ function lastCall(method: string): Record<string, unknown> {
 }
 
 describe("conversation key codec", () => {
-  it("round-trips a three-part key through the engine thread key", () => {
+  it("round-trips a four-part key through the engine thread key", () => {
     const transport = makeTransport();
     const threadKey = transport.threadKeyFromConversationKey(KEY);
-    expect(threadKey).toBe(`slack:${CHANNEL}`);
+    expect(threadKey).toBe(`slack:${CHANNEL}:${THREAD_TS}`);
     expect(transport.conversationKeyFromThreadKey(threadKey)).toBe(KEY);
   });
 
-  it("rejects keys with a thread segment, so a per-turn ts can never enter a key", () => {
-    expect(parseConversationKey(`slack:${TEAM}:${CHANNEL}:1700000000.000100`)).toBeNull();
+  it("rejects keys missing the threadTs segment", () => {
+    // Old 2-segment key shape is now invalid
+    expect(parseConversationKey(`slack:${TEAM}:${CHANNEL}`)).toBeNull();
     expect(parseConversationKey("slack:T1")).toBeNull();
     expect(parseConversationKey("slack::D1")).toBeNull();
     expect(parseConversationKey("telegram:dm:9")).toBeNull();
+  });
+
+  it("parses a valid four-part key", () => {
+    const parsed = parseConversationKey(`slack:${TEAM}:${CHANNEL}:1700000000.000100`);
+    expect(parsed).toEqual({ teamId: TEAM, channelId: CHANNEL, threadTs: "1700000000.000100" });
   });
 
   it("does not claim another transport's thread keys", () => {
     const transport = makeTransport();
     expect(transport.conversationKeyFromThreadKey("telegram:99")).toBeNull();
     expect(transport.conversationKeyFromThreadKey("slack:")).toBeNull();
+    // Single-segment after slack: is now invalid
+    expect(transport.conversationKeyFromThreadKey("slack:C123")).toBeNull();
+  });
+
+  it("rejects thread keys with empty segments", () => {
+    const transport = makeTransport();
+    expect(transport.conversationKeyFromThreadKey("slack:C123:")).toBeNull();
+    expect(transport.conversationKeyFromThreadKey("slack::1700000000.000100")).toBeNull();
   });
 });
 
@@ -120,23 +137,56 @@ describe("parseUpdate — the agent surface events", () => {
       envelope(imMessage({ ts: "1700000000.000200", thread_ts: "1700000000.000100" })),
     );
     expect(event?.threadTs).toBe("1700000000.000100");
+    // The conversationKey includes the parent thread's ts
+    expect(event?.conversationKey).toBe(conversationKeyFor(TEAM, CHANNEL, "1700000000.000100"));
   });
 
-  it("treats app_home_opened on the messages tab as the conversation opening", () => {
+  it("produces different keys for two top-level DMs in the same channel", () => {
     const transport = makeTransport();
-    const event = transport.parseUpdate(
-      envelope({ type: "app_home_opened", user: "U1", channel: CHANNEL, tab: "messages" }, "Ev2"),
+    // First top-level message (no thread_ts)
+    const event1 = transport.parseUpdate(
+      envelope(imMessage({ ts: "1700000000.000100" }), "Ev1"),
     );
-    expect(event).toMatchObject({
-      kind: "surface_opened",
-      conversationKey: KEY,
-      sender: { externalId: "U1" },
-    });
-    expect(event?.text).toBeUndefined();
+    // Second top-level message (no thread_ts, different ts)
+    const event2 = transport.parseUpdate(
+      envelope(imMessage({ ts: "1700000000.000200" }), "Ev2"),
+    );
+    expect(event1?.conversationKey).toBe(conversationKeyFor(TEAM, CHANNEL, "1700000000.000100"));
+    expect(event2?.conversationKey).toBe(conversationKeyFor(TEAM, CHANNEL, "1700000000.000200"));
+    expect(event1?.conversationKey).not.toBe(event2?.conversationKey);
+    // Thread keys are also different
+    expect(transport.threadKeyFromConversationKey(event1!.conversationKey)).not.toBe(
+      transport.threadKeyFromConversationKey(event2!.conversationKey),
+    );
   });
 
-  it("ignores app_home_opened on the home tab", () => {
+  it("produces different keys for replies inside two different Slack threads", () => {
     const transport = makeTransport();
+    // Reply in thread rooted at 1700000000.000100
+    const event1 = transport.parseUpdate(
+      envelope(imMessage({ ts: "1700000000.000300", thread_ts: "1700000000.000100" }), "Ev1"),
+    );
+    // Reply in a different thread rooted at 1700000000.000200
+    const event2 = transport.parseUpdate(
+      envelope(imMessage({ ts: "1700000000.000400", thread_ts: "1700000000.000200" }), "Ev2"),
+    );
+    expect(event1?.conversationKey).toBe(conversationKeyFor(TEAM, CHANNEL, "1700000000.000100"));
+    expect(event2?.conversationKey).toBe(conversationKeyFor(TEAM, CHANNEL, "1700000000.000200"));
+    expect(event1?.conversationKey).not.toBe(event2?.conversationKey);
+    // Thread keys are also different
+    expect(transport.threadKeyFromConversationKey(event1!.conversationKey)).not.toBe(
+      transport.threadKeyFromConversationKey(event2!.conversationKey),
+    );
+  });
+
+  it("drops app_home_opened because it has no thread_ts to anchor a per-thread key", () => {
+    const transport = makeTransport();
+    // Both messages tab and home tab return null under per-thread routing
+    expect(
+      transport.parseUpdate(
+        envelope({ type: "app_home_opened", user: "U1", channel: CHANNEL, tab: "messages" }, "Ev2"),
+      ),
+    ).toBeNull();
     expect(
       transport.parseUpdate(
         envelope({ type: "app_home_opened", user: "U1", channel: CHANNEL, tab: "home" }, "Ev3"),
@@ -477,8 +527,8 @@ describe("assistant thread controls", () => {
 
   it("shows the status shimmer on the most recent turn", async () => {
     const transport = makeTransport();
-    primeTurn(transport, "1700000000.000500");
-    await transport.sendTyping(KEY);
+    const turnKey = primeTurn(transport, "1700000000.000500");
+    await transport.sendTyping(turnKey);
     expect(lastCall("assistant.threads.setStatus").thread_ts).toBe("1700000000.000500");
   });
 
@@ -492,8 +542,8 @@ describe("assistant thread controls", () => {
 describe("gate prompts", () => {
   it("posts the gate under the turn that raised it, with the gate id in the button", async () => {
     const transport = makeTransport();
-    primeTurn(transport, "1700000000.000700");
-    const ref = await transport.sendGatePrompt(KEY, {
+    const turnKey = primeTurn(transport, "1700000000.000700");
+    const ref = await transport.sendGatePrompt(turnKey, {
       gateId: "gate-77",
       title: "Deploy?",
       body: "This ships to production.",
@@ -514,7 +564,7 @@ describe("gate prompts", () => {
         { value: "g|gate-77|deny", style: "danger" },
       ],
     });
-    expect(ref.conversationKey).toBe(KEY);
+    expect(ref.conversationKey).toBe(turnKey);
   });
 
   it("appends the outcome and clears the buttons, pinning parse to none", async () => {
@@ -536,8 +586,8 @@ describe("gate prompts", () => {
 describe("discrete sends", () => {
   it("replies in the turn's thread", async () => {
     const transport = makeTransport();
-    primeTurn(transport, "1700000000.000300");
-    await transport.send(KEY, { markdown: "**done**" });
+    const turnKey = primeTurn(transport, "1700000000.000300");
+    await transport.send(turnKey, { markdown: "**done**" });
     const body = lastCall("chat.postMessage");
     expect(body.thread_ts).toBe("1700000000.000300");
     expect(body.text).toBe("*done*");
@@ -553,8 +603,9 @@ describe("discrete sends", () => {
 
   it("names the expected key shape when handed a key it cannot parse", async () => {
     const transport = makeTransport();
-    await expect(transport.send("slack:T1:D1:9999", { markdown: "hi" })).rejects.toThrow(
-      /Expected "slack:\{teamId\}:\{channelId\}"/,
+    // Old 2-segment key is now invalid
+    await expect(transport.send("slack:T1:D1", { markdown: "hi" })).rejects.toThrow(
+      /Expected "slack:\{teamId\}:\{channelId\}:\{threadTs\}"/,
     );
   });
 
@@ -563,7 +614,7 @@ describe("discrete sends", () => {
     // exactly this: it parses, its channel id is usable, and the reply would
     // land in the DM root with no error. The team check makes it loud.
     const transport = makeTransport();
-    await expect(transport.send(`slack:dm:${CHANNEL}`, { markdown: "hi" })).rejects.toThrow(
+    await expect(transport.send(`slack:dm:${CHANNEL}:${THREAD_TS}`, { markdown: "hi" })).rejects.toThrow(
       /names workspace "dm", but this transport serves "T1"/,
     );
     expect(fake.calls.some((c) => c.method === "chat.postMessage")).toBe(false);
