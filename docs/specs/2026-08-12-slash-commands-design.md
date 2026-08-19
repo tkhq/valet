@@ -101,6 +101,7 @@ Semantics carried over from Pi:
 
 - **Mid-run:** built-ins and plugin commands execute immediately, even while the agent streams or compacts. `/stop` requires this. Skill and template expansions are prompts; they queue under the existing steer/follow-up rules. Expansion happens before queueing.
 - **Unknown `/word`:** passes through as prompt text. Typos are not silently eaten; the `nearMiss` hint surfaces them without blocking the send.
+- **Case:** `registry.resolve` folds case, so `/MODEL` executes `/model`. Exact-case lookups win when two names differ only by case. The `nearMiss` comparison also folds case, and it checks namespace suffixes before edit distance: a bare `/review` hints `skill:review` even though the edit distance exceeds the typo cutoff.
 
 **`CommandContext`** is a capability interface the host assembles at session build: list models, list child sessions, abort, compact, and so on. It follows the existing host-resolver pattern (the API already injects model resolution into the engine). In v1 only built-ins receive it.
 
@@ -112,9 +113,9 @@ Built per session at session build time from four inputs: engine built-ins (stat
 
 Two refresh seams keep a cached session's registry current (`Session.refreshCommandRegistry()`, invoked on every commands read and on each attachment `ready` transition): `workspaceSkillsProvider` re-scans `/workspace/.valet/prompts`, and `skillsProvider` re-reads the stored skills the session's owner can reach. Without the second seam, a long-lived session served the skill set from its first build forever.
 
-The web autocomplete matches the typed token as a case-insensitive substring of the command name, not a prefix. This lets a user reach a namespaced command without its namespace: `/review` surfaces `skill:review`. Prefix matches rank ahead of substring matches.
+The web autocomplete matches the typed token as a case-insensitive substring of the command name, not a prefix. This lets a user reach a namespaced command without its namespace: `/review` surfaces `skill:review`.
 
-The web autocomplete sorts suggestions by recency: the composer records each sent slash command in per-browser `localStorage` (`packages/web/src/lib/command-recency.ts`), and the popup floats the most recently used commands — and their source group — to the top. Never-used commands keep the built-in → skill → plugin order.
+One function owns popup ordering: `commandsToItems` (`packages/web/src/components/session/command-popup.tsx`). It ranks by match tier (exact name, then prefix, then substring), then by recency: the composer records each sent slash command in per-browser `localStorage` (`packages/web/src/lib/command-recency.ts`), and recently used commands float upward. Tier outranks recency, so the command the user is typing never loses to a recently used substring match. Both keys apply at the group level first — source groups render contiguously — and then within each group. Commands that tie keep the built-in → skill → plugin order, registration order within.
 
 ## Command-result entry
 

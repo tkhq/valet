@@ -392,12 +392,38 @@ describe("Composer — slash-command keyboard handling", () => {
     // first in registry order, so only the prefix-first sort puts "top" on top.
     await userEvent.type(textarea, "/top");
     const options = screen.getAllByRole("option");
-    expect(options.map((o) => o.textContent)).toHaveLength(2);
-    expect(options[0]?.textContent).toContain("/top");
-    expect(options[1]?.textContent).toContain("/stop");
+    expect(options.map((o) => o.textContent)).toEqual([
+      expect.stringContaining("/top"),
+      expect.stringContaining("/stop"),
+    ]);
 
     await userEvent.keyboard("{Enter}");
     expect(textarea.value).toBe("/top ");
+  });
+
+  it("an exact-name match outranks a recently used substring match", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    // The user sent /stop recently. Typing the full name "top" must still
+    // put /top first — match tier beats recency in commandsToItems.
+    window.localStorage.setItem(
+      "valet-command-recency",
+      JSON.stringify({ stop: Date.now() }),
+    );
+    try {
+      renderComposer();
+      const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+      await userEvent.type(textarea, "/top");
+      const options = screen.getAllByRole("option");
+      expect(options.map((o) => o.textContent)).toEqual([
+        expect.stringContaining("/top"),
+        expect.stringContaining("/stop"),
+      ]);
+      await userEvent.keyboard("{Enter}");
+      expect(textarea.value).toBe("/top ");
+    } finally {
+      window.localStorage.removeItem("valet-command-recency");
+    }
   });
 
   it("pressing Esc while popup is open closes the popup without modifying text", async () => {
