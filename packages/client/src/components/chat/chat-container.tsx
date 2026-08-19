@@ -632,20 +632,22 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
             const { visible, queuedCount } = selectVisibleInteractivePrompts(interactivePrompts, activeThreadId);
             return (
               <>
-                {visible.map((prompt) => (
-                  <Suspense key={prompt.id} fallback={<InteractivePromptCardFallback />}>
-                    <InteractivePromptCard
-                      prompt={prompt}
-                      onAnswer={answerQuestion}
-                      onDismiss={dismissQuestion}
-	                      onResolveApprovalWs={resolveApprovalWs}
-	                      onApproveWs={approveActionWs}
-	                      onDenyWs={denyActionWs}
-	                      onResolveLocal={resolveApprovalLocally}
-	                      onExpireLocal={expireApprovalLocally}
-	                    />
-                  </Suspense>
-                ))}
+                <div className="flex-shrink-0 max-h-[50vh] overflow-y-auto">
+                  {visible.map((prompt) => (
+                    <Suspense key={prompt.id} fallback={<InteractivePromptCardFallback />}>
+                      <InteractivePromptCard
+                        prompt={prompt}
+                        onAnswer={answerQuestion}
+                        onDismiss={dismissQuestion}
+	                        onResolveApprovalWs={resolveApprovalWs}
+	                        onApproveWs={approveActionWs}
+	                        onDenyWs={denyActionWs}
+	                        onResolveLocal={resolveApprovalLocally}
+	                        onExpireLocal={expireApprovalLocally}
+	                      />
+                    </Suspense>
+                  ))}
+                </div>
                 {queuedCount > 0 && (
                   <div className="text-center text-xs text-neutral-500 py-1">
                     {queuedCount} more prompt{queuedCount > 1 ? 's' : ''} queued
