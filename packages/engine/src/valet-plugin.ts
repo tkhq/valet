@@ -410,14 +410,17 @@ export interface IdentityLinkDeclaration {
    *  null when the transport is not ready. */
   deepLink?: (ctx: { botUsername: string | null; code: string }) => string | null;
   /**
-   * Build the exact DM the bot sends when the host delivers a link code to
-   * the user (the "DM me the code" flow). The web card echoes the returned
-   * string byte-identical, so the user knows what to look for — keep it
-   * deterministic. The code's TTL is ten minutes; say so in the text.
-   * Meaningful only for providers whose transport implements
-   * `lookupUserByEmail`.
+   * The anchor DM the bot sends in the "DM me" flow. It MUST NOT contain
+   * the link code. The code is returned only in the authenticated web
+   * response, and the user carries it into the chat themselves — that trip
+   * IS the ownership proof (web session + provider account). A code in the
+   * DM would collapse it to bot→user→bot, and a DM sent to a picked member
+   * would become a one-reply account takeover. Tell the reader the reply
+   * shape (e.g. `link <code>`), the ten-minute expiry, and to ignore the
+   * message if they did not ask for it. Meaningful only for providers
+   * whose transport implements `lookupUserByEmail`.
    */
-  deliveryDm?: (ctx: { code: string }) => string;
+  deliveryDm?: string;
 }
 
 /**

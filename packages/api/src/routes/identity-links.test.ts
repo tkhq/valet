@@ -461,7 +461,7 @@ function deliverySlackPlugin(): { plugin: ValetPlugin; transport: FakeDeliverySl
     identityLink: {
       provider: "slack",
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-      deliveryDm: ({ code }) => `Reply with:\n\`link ${code}\`\nThe code expires in 10 minutes.`,
+      deliveryDm: "Reply to this message with: `link <code>` — your code is shown in Valet.",
     },
   };
   return { plugin, transport };
@@ -516,7 +516,7 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     expect(booted.transport.sent).toHaveLength(0);
   });
 
-  it("200s, DMs the exact echoed text, and the code inside completes the link", async () => {
+  it("200s, DMs the codeless anchor, and returns the code only in the response", async () => {
     const booted = await bootWithDeliverySlack();
     api = booted.api;
     // The local-auth stub user is local-user <local@dev>.
@@ -529,15 +529,19 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
       delivered: true,
       externalId: "U777",
       displayName: "conner",
+      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
       expiresInSeconds: 600,
     });
-    // The DM and the on-card echo are byte-identical, and carry the code.
+    // The DM is the declared anchor and MUST NOT contain the code — the
+    // code travelling web → user → chat is the ownership proof.
     expect(booted.transport.sent).toHaveLength(1);
-    expect(booted.transport.sent[0]?.message.markdown).toBe(body.messageText);
-    expect(body.messageText).toContain(body.code);
+    expect(booted.transport.sent[0]?.message.markdown).toBe(
+      "Reply to this message with: `link <code>` — your code is shown in Valet.",
+    );
+    expect(booted.transport.sent[0]?.message.markdown).not.toContain(body.code);
     // The DM went to the opened direct conversation, not a guessed key.
     expect(booted.transport.sent[0]?.conversationKey).toBe("slack:T1:D-U777:1700000000.000001");
-    // The code the DM carries is the minted one — consuming it links the user.
+    // The response's code is the minted one — consuming it links the user.
     const consumed = await consumeLinkCode(api.providers.db, "slack", body.code);
     expect(consumed).toMatchObject({ userId: "local-user" });
   });
