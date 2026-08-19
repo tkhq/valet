@@ -37,6 +37,16 @@ export const BASH_DEFAULT_TIMEOUT_S = 120;
  */
 export const JOB_POLL_WARMUP_MS = [100, 250, 500, 1000];
 
+/**
+ * Appended to bash output when the sandbox reports its output cap dropped
+ * bytes. Truncation keeps the head and drops the tail, so the note names
+ * the recovery moves (repo rule: an error message names the corrective
+ * action).
+ */
+export const BASH_TRUNCATION_NOTE =
+  "\n[output truncated: the sandbox capped this command's output and dropped the tail. " +
+  "Narrow the output (grep, tail, --quiet) or redirect it to a file and read the file in slices.]";
+
 function isJobUnsupported(err: unknown): boolean {
   return err instanceof Error && err.message.startsWith("[job_unsupported]");
 }
@@ -105,6 +115,7 @@ async function pollJobToCompletion(
   let offset = 0;
   let output = "";
   let pollCount = 0;
+  let truncated = false;
 
   for (;;) {
     if (ctx.signal.aborted) {
@@ -113,20 +124,24 @@ async function pollJobToCompletion(
     }
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
-      return { text: `${output}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
+      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
+      return { text: `${output}${truncNote}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
     }
 
     const poll = await pollJob(execId, offset);
     pollCount++;
     output += poll.output;
     offset = poll.nextOffset;
+    if (poll.truncated) truncated = true;
 
     if (poll.status === "done") {
       const exitNote = poll.exitCode !== undefined && poll.exitCode !== 0 ? `\n[exit ${poll.exitCode}]` : "";
-      return { text: `${output}${exitNote}` };
+      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
+      return { text: `${output}${truncNote}${exitNote}` };
     }
     if (poll.status === "failed") {
-      return { text: `${output}\n[job failed]` };
+      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
+      return { text: `${output}${truncNote}\n[job failed]` };
     }
 
     // Warm-up ramp: first poll is immediate (no sleep before it, above),
@@ -235,7 +250,8 @@ export const bashTool = defineTool({
 
     const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
     const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
-    return { text: `${result.stdout}${result.stderr}${exitNote}` };
+    const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}` };
   },
 });
 
