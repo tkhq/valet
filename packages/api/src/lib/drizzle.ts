@@ -148,4 +148,9 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // Null on every row written before the column existed, which the sync
   // reads as "no credential" rather than climbing to the org's App.
   await db.query('ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
+
+  // The per-group team-sync allowlist. Null on every row written before the
+  // column existed, which the sync and Settings read as "never set" —
+  // fail-closed, same as an empty list.
+  await db.query('ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb');
 }
