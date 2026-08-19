@@ -411,7 +411,9 @@ export function useSetNotificationPreference() {
 
 // ── Identity links (channel-link Phase 7) — per-user Telegram linking ───
 
-export function useIdentityLinks(opts?: UseQueryOptions<ListIdentityLinksResponse>) {
+export function useIdentityLinks(
+  opts?: Omit<UseQueryOptions<ListIdentityLinksResponse>, "queryKey" | "queryFn">,
+) {
   return useQuery<ListIdentityLinksResponse>({
     queryKey: qk.identityLinks(),
     queryFn: () => api.listIdentityLinks(),

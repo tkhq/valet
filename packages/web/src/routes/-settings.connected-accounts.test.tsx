@@ -105,7 +105,7 @@ describe("ConnectedAccountsPage", () => {
 
   it("shows the unconfigured copy with no buttons when channelReady is false", () => {
     linksData = {
-      links: [{ provider: "telegram", linked: false, channelReady: false }],
+      links: [{ provider: "telegram", linked: false, channelReady: false, codeDelivery: false, memberSearch: false }],
     };
     render(<ConnectedAccountsPage />);
     expect(
@@ -118,7 +118,7 @@ describe("ConnectedAccountsPage", () => {
 
   it("connecting starts the link flow and renders the deep link", async () => {
     linksData = {
-      links: [{ provider: "telegram", linked: false, channelReady: true }],
+      links: [{ provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
     };
     startMutateAsync.mockResolvedValue({
       deepLink: "https://t.me/valet_bot?start=abc123",
@@ -143,7 +143,7 @@ describe("ConnectedAccountsPage", () => {
 
   it("shows an inline error and no deep link when the start mutation fails", async () => {
     linksData = {
-      links: [{ provider: "telegram", linked: false, channelReady: true }],
+      links: [{ provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
     };
     startMutateAsync.mockRejectedValue(
       new ApiError(409, "POST /me/identity-links/telegram/start → 409", {
@@ -165,6 +165,8 @@ describe("ConnectedAccountsPage", () => {
           provider: "telegram",
           linked: true,
           channelReady: true,
+          codeDelivery: false,
+          memberSearch: false,
           externalId: "123456789",
           notifyAttention: true,
           createdAt: Date.parse("2026-01-01T00:00:00Z"),
@@ -350,8 +352,8 @@ describe("ConnectedAccountsPage", () => {
     it("renders one card per entry in the links response (telegram + slack)", () => {
       linksData = {
         links: [
-          { provider: "telegram", linked: false, channelReady: true },
-          { provider: "slack", linked: false, channelReady: true },
+          { provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false },
+          { provider: "slack", linked: false, channelReady: true, codeDelivery: false, memberSearch: false },
         ],
       };
       render(<ConnectedAccountsPage />);
@@ -362,8 +364,8 @@ describe("ConnectedAccountsPage", () => {
     it("one provider's in-flight start does not disable the other card's button", () => {
       linksData = {
         links: [
-          { provider: "telegram", linked: false, channelReady: true },
-          { provider: "slack", linked: false, channelReady: true },
+          { provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false },
+          { provider: "slack", linked: false, channelReady: true, codeDelivery: false, memberSearch: false },
         ],
       };
       startLinkState = { isPending: true, variables: "slack" };
@@ -377,7 +379,7 @@ describe("ConnectedAccountsPage", () => {
 
     it("provider without deepLink shows code + instructions after start, no anchor", async () => {
       linksData = {
-        links: [{ provider: "slack", linked: false, channelReady: true }],
+        links: [{ provider: "slack", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
       };
       startMutateAsync.mockResolvedValue({
         code: "SLACK-CODE-42",
@@ -397,7 +399,7 @@ describe("ConnectedAccountsPage", () => {
 
     it("telegram card (with deepLink) keeps the anchor after start", async () => {
       linksData = {
-        links: [{ provider: "telegram", linked: false, channelReady: true }],
+        links: [{ provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
       };
       startMutateAsync.mockResolvedValue({
         deepLink: "https://t.me/valet_bot?start=xyz",
