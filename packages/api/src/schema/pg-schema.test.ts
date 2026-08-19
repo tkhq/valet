@@ -555,6 +555,39 @@ describe("pg app schema + migrations", () => {
     });
   });
 
+  // The dev/prod failure mode for the pre-1.0 in-place-edit rule: the
+  // database applied `0000_app.sql` before an edit added a column, the
+  // tracker skips the file forever after, and only
+  // `addColumnsMissingFromAppliedMigrations` can repair the gap. Simulate
+  // that database by dropping the columns, then re-run the migrations.
+  describe("column repair for in-place 0000 edits", () => {
+    const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
+      { table: "skill_sources", column: "created_by" },
+      { table: "orgs", column: "sso_team_groups" },
+    ];
+
+    async function columnExists(table: string, column: string): Promise<boolean> {
+      const result = await db.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2",
+        [table, column],
+      );
+      return result.rows.length > 0;
+    }
+
+    it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
+      for (const { table, column } of REPAIRED_COLUMNS) {
+        await db.query(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);
+        expect(await columnExists(table, column), `${table}.${column} dropped`).toBe(false);
+      }
+
+      await applyAppMigrations(db);
+
+      for (const { table, column } of REPAIRED_COLUMNS) {
+        expect(await columnExists(table, column), `${table}.${column} repaired`).toBe(true);
+      }
+    });
+  });
+
   describe("better-auth instance over the regenerated pg block", () => {
     it("a real sign-up creates a user row with a role", async () => {
       const auth = betterAuth({
