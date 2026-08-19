@@ -41,7 +41,7 @@ import type { SourceService } from "../bakes/source-service.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
-import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
+import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
 const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
@@ -67,6 +67,12 @@ export interface ChildrenDeps {
    * `~/.valet/children`; tests point it at a tmp dir.
    */
   workspaceRoot?: string;
+  /**
+   * Org active-session ceiling, resolved at boot via
+   * `resolveOrgSessionCeiling(process.env)` in `buildNodeProviders`.
+   * Absent → `DEFAULT_ORG_ACTIVE_SESSION_CEILING`.
+   */
+  orgSessionCeiling?: number;
   /** Override for `ChildWatcher`'s retryable-failure backoff. Tests only. */
   retryDelayMs?: number;
   /** Override for `ChildWatcher`'s in-process retry budget. Tests only. */
@@ -127,7 +133,12 @@ export function parseTaskRepo(repo: string, branch?: string): RepoBinding | unde
  * Enforces decision-21 limits BEFORE anything is created. Throws
  * `ChildLimitError` (and drop-logs) on violation.
  */
-async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string): Promise<void> {
+async function enforceLimits(
+  db: AppDb,
+  parentSessionId: string,
+  orgId: string,
+  orgSessionCeiling: number = DEFAULT_ORG_ACTIVE_SESSION_CEILING,
+): Promise<void> {
   const runningChildren = await db
     .select({ childSessionId: childWatches.childSessionId })
     .from(childWatches)
@@ -177,8 +188,8 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
       ),
     );
   const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
-  if (total >= ORG_ACTIVE_SESSION_CEILING) {
-    const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + active sessions), limit ${ORG_ACTIVE_SESSION_CEILING}. Archive or delete idle sessions, or raise VALET_ORG_SESSION_CEILING.`;
+  if (total >= orgSessionCeiling) {
+    const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + active sessions), limit ${orgSessionCeiling}. Archive or delete idle sessions, or raise VALET_ORG_SESSION_CEILING.`;
     await writeDropLog(db, { orgId, reason: "org_ceiling", conversationKey: parentSessionId, detail: message });
     throw new ChildLimitError("org_ceiling", message);
   }
@@ -223,7 +234,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       );
     }
 
-    await enforceLimits(deps.db, ctx.parentSessionId, orgId);
+    await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
 
     const childSessionId = newChildSessionId();
     const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
@@ -934,7 +945,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // same caps a spawn pays, BEFORE waking anything. A steer/followup to a
     // still-running child changes no counts and pays nothing.
     if (watchRow.settled) {
-      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId);
+      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId, deps.orgSessionCeiling);
     }
 
     const childData = await deps.engineStore.getSession(req.childSessionId);
