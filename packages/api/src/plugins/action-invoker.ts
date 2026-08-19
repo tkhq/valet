@@ -250,10 +250,34 @@ async function computeResult(
         `Remove the credential field from this tool node.`,
     };
   }
+  // Owner escalation for org-provided services (integration-availability
+  // rule 5). A `requires.orgCredential` service — the Slack bot token an
+  // admin connects once in Settings → Organization — is stored under the
+  // ORG owner and never on a member's own list. A session resolves it by
+  // escalating from the user owner to the org (`engine/host.ts`'s slack
+  // branch); a workflow tool node runs as the workflow's owner (a user), so
+  // without the same escalation every org-provided service reads null here
+  // and the node fails with the plugin's own missing-credential error
+  // ("Missing bot_token"). Only org-provided services escalate — a plain
+  // personal service reading another owner's credential would be a
+  // privilege escalation, so its miss stays a miss.
+  //
+  // Scope: this resolves the TOKEN only. The session path additionally
+  // enriches a Slack credential with the run owner's linked
+  // `owner_slack_user_id` (`engine/host.ts`), which `slack.dm_owner` and the
+  // private-channel guard need. That enrichment is a separate, pre-existing
+  // gap in the workflow path (before this change Slack failed here outright,
+  // masking it); public-channel reads and `list_channels` — the reported
+  // failure — need only the token, so it is deliberately left to a follow-up
+  // rather than threaded through this generic provider.
+  const orgFallback =
+    declared?.requires?.orgCredential === true && ctx.orgId
+      ? { type: "org" as const, id: ctx.orgId }
+      : undefined;
   const credentials =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
-      : buildCredentialProvider(opts.credentials, owner, credentialService);
+      : buildCredentialProvider(opts.credentials, owner, credentialService, orgFallback);
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
@@ -525,10 +549,22 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
   return null;
 }
 
-function buildCredentialProvider(store: CredentialStore, owner: CredentialOwner, defaultService: string): CredentialProvider {
+function buildCredentialProvider(
+  store: CredentialStore,
+  owner: CredentialOwner,
+  defaultService: string,
+  // Org owner to fall back to when `owner`'s own read misses — set only for
+  // an org-provided (`requires.orgCredential`) service, and applied only to
+  // that same service so an incidental read of another service can't reach
+  // the org's credentials. Mirrors `engine/host.ts`'s user→org escalation.
+  orgFallback?: CredentialOwner,
+): CredentialProvider {
   return {
     async get(service?: string): Promise<Credential | null> {
-      const stored = await store.get(owner, service ?? defaultService);
+      const svc = service ?? defaultService;
+      const stored =
+        (await store.get(owner, svc)) ??
+        (orgFallback && svc === defaultService ? await store.get(orgFallback, svc) : null);
       if (!stored) return null;
       const accessToken = stored.accessToken ?? stored.apiKey ?? "";
       if (accessToken === "") return null;
