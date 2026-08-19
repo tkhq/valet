@@ -123,7 +123,8 @@ describe('Workflow 1: Review a pull request when it opens or updates', () => {
     console.log(`Execution ${executionId} final status:`, final.status);
     // Fail on 'failed' status to catch execution errors
     expect(final.status).not.toBe('failed');
-    expect(['completed', 'waiting_approval', 'waiting_time']).toContain(final.status);
+    // Workflow 1 has no approval gates, so it should complete normally
+    expect(final.status).toBe('completed');
   });
 
   it('retrieves execution outputs', async () => {
@@ -221,7 +222,8 @@ describe('Workflow 2: Assign reviewers to a pull request', () => {
     console.log(`Execution ${executionId} final status:`, final.status);
     // Fail on 'failed' status to catch execution errors
     expect(final.status).not.toBe('failed');
-    expect(['completed', 'waiting_approval', 'waiting_time']).toContain(final.status);
+    // Workflow 2 has no approval gates, so it should complete normally
+    expect(final.status).toBe('completed');
   });
 
   it('handles approval gates if execution is waiting', async () => {
