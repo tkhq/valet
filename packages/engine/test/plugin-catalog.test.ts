@@ -130,6 +130,26 @@ describe("pluginCatalogTools: registration", () => {
     });
     expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools"]);
   });
+
+  it("names every service (static and dynamic) in the list_tools description", () => {
+    const a = makeMockPlugin();
+    const dynamic: ActionPlugin = {
+      service: "linear",
+      actions: [],
+      resolveActions: async () => [],
+    };
+    const tools = pluginCatalogTools({
+      plugins: [{ ...a.plugin, service: "github" }, dynamic],
+    });
+    const listTool = tools.find((t) => t.name === "list_tools");
+    expect(listTool?.description).toContain("Available services: github, linear.");
+  });
+
+  it("omits the service line when the catalog is empty", () => {
+    const tools = pluginCatalogTools({ plugins: [] });
+    const listTool = tools.find((t) => t.name === "list_tools");
+    expect(listTool?.description).not.toContain("Available services:");
+  });
 });
 
 describe("pluginCatalogTools: list_tools", () => {
