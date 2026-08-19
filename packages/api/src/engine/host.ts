@@ -12,6 +12,7 @@ import {
   type ChildReader,
   type ChildSender,
   type ChildSpawner,
+  type ChildStatusReader,
   type CredentialStore,
   type EventStream,
   type Principal,
@@ -157,6 +158,13 @@ export interface EngineHostOpts {
    * steers); scoped exactly like the other two — children never get it.
    */
   childSender?: ChildSender;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childStatusReader`,
+   * the backend of the `child_status` built-in. Same authority note as
+   * `childReader`: a session that can spawn children is exactly the
+   * session that may check on them.
+   */
+  childStatusReader?: ChildStatusReader;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -1476,6 +1484,7 @@ export class EngineHost {
         ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
         ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
         ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
+        ...(this.opts.childStatusReader ? { childStatusReader: this.opts.childStatusReader } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
