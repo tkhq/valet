@@ -60,7 +60,7 @@ export function MessageList({ messages, isAgentThinking, agentStatus, agentStatu
   // Scroll tracking — ref for auto-scroll logic, state for button visibility
   const isAtBottomRef = useRef(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
-  const didInitialScrollRef = useRef(false);
+  const initialScrolledForFirstIdRef = useRef<string | null>(null);
 
   // Track scroll position via scroll listener
   useEffect(() => {
@@ -78,21 +78,40 @@ export function MessageList({ messages, isAgentThinking, agentStatus, agentStatu
     return () => el.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Initial load: scroll to bottom when messages first appear
+  // Initial load: scroll to bottom when messages first appear.
+  // Tracks first message id to detect thread switches and reset on new threads.
+  // Uses ResizeObserver to re-pin during deferred child render expansion.
+  const firstMessageId = messages.length > 0 ? messages[0].id : null;
   useEffect(() => {
-    if (didInitialScrollRef.current) return;
-    if (messages.length > 0 && scrollRef.current) {
-      didInitialScrollRef.current = true;
-      // Use requestAnimationFrame to ensure DOM has rendered the messages
-      requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-          isAtBottomRef.current = true;
-          setIsAtBottom(true);
-        }
-      });
-    }
-  }, [messages.length]);
+    if (!firstMessageId) return;
+    if (initialScrolledForFirstIdRef.current === firstMessageId) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    initialScrolledForFirstIdRef.current = firstMessageId;
+
+    requestAnimationFrame(() => {
+      if (!scrollRef.current) return;
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      isAtBottomRef.current = true;
+      setIsAtBottom(true);
+    });
+
+    // Keep pinning to bottom while deferred children (markdown, tool cards) render.
+    const contentEl = el.firstElementChild;
+    if (!contentEl) return;
+
+    const observer = new ResizeObserver(() => {
+      if (!scrollRef.current) return;
+      if (!isAtBottomRef.current) return;
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    });
+    observer.observe(contentEl);
+    const timeoutId = window.setTimeout(() => observer.disconnect(), 1000);
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(timeoutId);
+    };
+  }, [firstMessageId]);
 
   // Streaming updates messages in-place (no length change),
   // so we track the last message's content length to trigger auto-scroll during streaming.
