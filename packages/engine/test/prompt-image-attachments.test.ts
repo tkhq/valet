@@ -181,6 +181,77 @@ describe("Image attachments", () => {
       mimeType: "image/png",
     });
   });
+
+  it("keeps a turn-1 image in LLM context on later turns of a hot session", async () => {
+    // Regression: runAgent used to push a text-only user message into
+    // agent.state.messages even when the prompt carried attachments. On a
+    // session that stays hot (no rehydrate between turns), the model never
+    // saw the image — on the upload turn or any later one.
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const dataUrl = `data:image/png;base64,${pngBase64}`;
+
+    // Capture what the provider actually receives per turn.
+    const received: unknown[] = [];
+    faux.setResponses([
+      (context) => {
+        received.push(structuredClone(context.messages));
+        return fauxAssistantMessage("I see the image");
+      },
+      (context) => {
+        received.push(structuredClone(context.messages));
+        return fauxAssistantMessage("still remembering");
+      },
+    ]);
+
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = await session.ensureDefaultThread();
+
+    // Turn 1: text + image attachment.
+    const r1 = await thread.submitPrompt(
+      {
+        text: "What's in this screenshot?",
+        attachments: [{ type: "image", url: dataUrl, mimeType: "image/png", name: "shot.png" }],
+      },
+      {},
+    );
+    await thread.awaitResult(r1.queueItemId);
+
+    // Turn 2: text only, same hot session (no rehydrate in between).
+    const r2 = await thread.submitPrompt("What did the screenshot show?", {});
+    await thread.awaitResult(r2.queueItemId);
+
+    expect(received).toHaveLength(2);
+
+    const imageBlocksIn = (messages: unknown): number => {
+      let count = 0;
+      const visit = (v: unknown): void => {
+        if (Array.isArray(v)) {
+          for (const el of v) visit(el);
+          return;
+        }
+        if (v && typeof v === "object") {
+          const rec = v as Record<string, unknown>;
+          if (rec.type === "image" && rec.data === pngBase64) count++;
+          for (const val of Object.values(rec)) visit(val);
+        }
+      };
+      visit(messages);
+      return count;
+    };
+
+    // Turn 1's own call must include the image...
+    expect(imageBlocksIn(received[0])).toBeGreaterThanOrEqual(1);
+    // ...and turn 2's call must STILL include the turn-1 image in history.
+    expect(imageBlocksIn(received[1])).toBeGreaterThanOrEqual(1);
+  });
 });
 
 
