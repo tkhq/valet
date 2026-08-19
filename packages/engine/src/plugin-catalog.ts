@@ -640,10 +640,28 @@ const LIST_LIMIT_MAX = 200;
  * differently in two deployments. The row names its direct tool instead.
  */
 function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>): ToolDef {
+  // Name every service in the description. The catalog indirection hides
+  // integration actions from the visible tool list, so this line is the only
+  // zero-cost signal the model gets that a service exists at all — without
+  // it, the model must guess that list_tools is worth calling before it
+  // tells the user a capability is missing.
+  const services = [
+    ...new Set([
+      ...catalog.entries.map((e) => e.service),
+      ...catalog.dynamicPlugins.map((p) => p.service),
+    ]),
+  ].sort();
+  const serviceLine =
+    services.length > 0 ? ` Available services: ${services.join(", ")}.` : "";
   return {
     name: "list_tools",
     description:
-      "List available plugin tools. Filter by service or search by name/description. Returns tool_ids plus their parameter schemas; use call_tool to invoke one.",
+      "List available plugin tools. Filter by service or search by name/description. " +
+      "Returns tool_ids plus their parameter schemas; use call_tool to invoke one." +
+      serviceLine +
+      " If a request could be covered by one of these services, check here before " +
+      "you say it is not possible. A service that is not connected is reported " +
+      "here with the corrective action, so a check is never wasted.",
     parameters: Type.Object({
       service: Type.Optional(
         Type.String({

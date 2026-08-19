@@ -232,3 +232,28 @@ carries the parameters as its own args, alongside the same optional `summary`
 key, and names the action in the tool name.
 The workflow renderer and the editor's canvas-refresh watch both narrow through
 `workflowToolSuffix`/`workflowParams` for that reason.
+
+## Capability discovery (2026-08-18)
+
+The indirection has a second cost, beyond the every-turn action that pins
+solve: the model cannot see that a service exists. Nothing in its tool list
+names github, gmail or slack — only two generic catalog tools. In practice the
+model then answers "I can't do that" without ever calling `list_tools`. Three
+prompt changes close this gap:
+
+- **`list_tools` names every service in its description**
+  (`Available services: github, gmail, ...`), computed per session from the
+  catalog's static entries plus its dynamic (`resolveActions`-backed) plugins.
+  The tool catalog is re-sent on every turn, so the service index is a
+  zero-cost, always-fresh signal. The description also carries the rule: check
+  here before you say a request is not possible.
+- **The session `SYSTEM_PROMPT`** (`packages/api/src/engine/host.ts`) no
+  longer enumerates a closed built-in tool list. It states that the visible
+  tool list is not the full capability set, and that the model must check
+  `list_tools` before it declares something impossible.
+- **The orchestrator persona** (`packages/api/src/orchestrator/persona.ts`)
+  carries the same rule as a `## Capabilities` section for every owner kind.
+
+All three distinguish "not connected" from "not possible": an unconnected
+integration is reported with its corrective action (`list_tools` already emits
+that warning), never presented as a capability the agent lacks.

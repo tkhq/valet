@@ -310,7 +310,13 @@ const SYSTEM_PROMPT =
   "Your workspace is /workspace (the only mounted directory). " +
   "All read/write/edit/bash tools operate against /workspace — use absolute " +
   "paths under /workspace or relative paths (which resolve there). " +
-  "You have built-in tools: read, write, edit, bash, thread_read. Be concise.";
+  "Your visible tool list is not your full capability set: integration " +
+  "actions (code hosting, email, chat, and more) are reachable through " +
+  "list_tools and call_tool, and installed skills through the skill tool " +
+  "when one is listed. Before you tell the user that something is not " +
+  "possible, call list_tools and check for a matching action. If the " +
+  "needed integration is not connected, say so and name the fix — never " +
+  "present a missing connection as a missing capability. Be concise.";
 
 /**
  * Per-process cache of live `Engine`/`Session` pairs keyed by app session id.
