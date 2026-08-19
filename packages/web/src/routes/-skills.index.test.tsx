@@ -10,7 +10,8 @@
  * suite together with the panel they cover.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { SEARCH_DEBOUNCE_MS } from "~/components/skills/skill-grid";
 import type { ReactNode } from "react";
 import type { ListSkillsResponse, ListSkillSourcesResponse } from "@valet/api/wire";
 
@@ -56,7 +57,10 @@ const skillsData: ListSkillsResponse = {
 };
 
 let currentData: ListSkillsResponse = skillsData;
-let currentState = { isLoading: false, error: null as Error | null };
+let currentState: { isLoading: boolean; error: Error | null; isPlaceholderData?: boolean } = {
+  isLoading: false,
+  error: null,
+};
 let sourcesData: ListSkillSourcesResponse = { sources: [], nextCursor: null };
 /** The search params the page is rendered with, and where it navigates. The
  * filters and both cursor stacks live here, never in component state. */
@@ -204,6 +208,21 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
   });
 
+  it("keeps the search box up when the read fails", () => {
+    // A failed SEARCH must keep the box that can change or clear it. The
+    // error used to replace the whole grid, and the only way out of a bad
+    // query was a reload.
+    searchParams = { q: "SLACK" };
+    currentData = { skills: [], nextCursor: null };
+    currentState = { isLoading: false, error: new Error("boom") };
+    render(<SkillsIndexPage />);
+
+    expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
+    expect(screen.getByLabelText("Search skills")).toBeTruthy();
+    // The failure message stands alone — no competing empty-state text.
+    expect(screen.queryByText("No skills match your search.")).toBeNull();
+  });
+
   it("shows a scope badge on every card", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
@@ -261,11 +280,26 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
     expect(screen.getByRole("tab", { name: "Prompts" }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("sends the search box on as a catalog-wide query", () => {
-    render(<SkillsIndexPage />);
-    fireEvent.change(screen.getByLabelText("Search skills"), { target: { value: "SLACK" } });
+  it("sends the search box on as a catalog-wide query, once typing settles", async () => {
+    // Fake timers drive the debounce by hand; see use-live-query.test.tsx for
+    // why waitFor and vitest's clock do not mix.
+    vi.useFakeTimers();
+    try {
+      render(<SkillsIndexPage />);
+      const box = screen.getByLabelText("Search skills");
+      fireEvent.change(box, { target: { value: "SLAC" } });
+      fireEvent.change(box, { target: { value: "SLACK" } });
+      // Sending each keystroke asked the catalog once per character.
+      expect(navigate).not.toHaveBeenCalled();
 
-    expect(lastNavigationSearch()).toMatchObject({ q: "SLACK" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+      });
+      expect(navigate).toHaveBeenCalledTimes(1);
+      expect(lastNavigationSearch()).toMatchObject({ q: "SLACK" });
+    } finally {
+      vi.useRealTimers();
+    }
 
     searchParams = { q: "SLACK" };
     render(<SkillsIndexPage />);
@@ -334,6 +368,33 @@ describe("SkillsIndexPage — paging", () => {
   it("shows no pager while the whole catalog fits on one page", () => {
     render(<SkillsIndexPage />);
     expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
+  });
+
+  it("holds Next while the page on screen is the previous query's placeholder", () => {
+    // A filter changed and the new page is still loading: the grid shows the
+    // OLD query's page, so its nextCursor names a row of the old question.
+    // Pushing it onto the new query's stack would page a different question.
+    searchParams = { page: "cursor_1" };
+    currentData = { ...skillsData, nextCursor: "cursor_2" };
+    currentState = { isLoading: false, error: null, isPlaceholderData: true };
+    render(<SkillsIndexPage />);
+
+    const next = screen.getByRole("button", { name: "Next" });
+    expect(next.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(next);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pager mounted on page one while a search loads", () => {
+    // Held, not hidden: gating hasNext itself unmounted the whole pager on
+    // page one (no Previous either), so every settled search shifted the
+    // layout below the grid.
+    currentData = { ...skillsData, nextCursor: "cursor_2" };
+    currentState = { isLoading: false, error: null, isPlaceholderData: true };
+    render(<SkillsIndexPage />);
+
+    const next = screen.getByRole("button", { name: "Next" });
+    expect(next.hasAttribute("disabled")).toBe(true);
   });
 });
 

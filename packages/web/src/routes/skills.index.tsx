@@ -102,7 +102,7 @@ export function SkillsIndexPage() {
   // owner and would hide every ORG-owned skill, which is most of a catalog
   // built from an org-wide repository. See `useCatalogOwner`.
   const owner = useCatalogOwner();
-  const { data, isLoading, error } = useSkills({
+  const { data, isLoading, error, isPlaceholderData } = useSkills({
     ...skillFilterQuery(filters),
     ...(owner ? { ownerType: owner.ownerType, ownerId: owner.ownerId } : {}),
     ...(cursor === undefined ? {} : { cursor }),
@@ -139,12 +139,7 @@ export function SkillsIndexPage() {
               <Spinner size={14} /> Loading skills…
             </div>
           )}
-          {!isLoading && error && (
-            <div className="text-sm text-danger-500">
-              Could not load skills. Check that the server is running, then reload.
-            </div>
-          )}
-          {!isLoading && !error && (
+          {!isLoading && (
             <>
               <SkillGrid
                 skills={skills}
@@ -160,19 +155,29 @@ export function SkillsIndexPage() {
                   })
                 }
                 emptyLabel="No skills yet. Write one, or ask your assistant to write one for you."
+                // Through the grid, not in its place: a failed SEARCH must
+                // keep the box that can change or clear it.
+                errorLabel={
+                  error
+                    ? "Could not load skills. Check that the server is running, then reload."
+                    : undefined
+                }
               />
-              <Pager
-                label="skills"
-                page={pageNumber(skillCursors)}
-                hasPrevious={skillCursors.length > 0}
-                hasNext={data?.nextCursor != null}
-                onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
-                onNext={() => {
-                  if (data?.nextCursor != null) {
-                    go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
-                  }
-                }}
-              />
+              {!error && (
+                <Pager
+                  label="skills"
+                  page={pageNumber(skillCursors)}
+                  hasPrevious={skillCursors.length > 0}
+                  hasNext={data?.nextCursor != null}
+                  busy={isPlaceholderData}
+                  onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
+                  onNext={() => {
+                    if (data?.nextCursor != null) {
+                      go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
+                    }
+                  }}
+                />
+              )}
             </>
           )}
         </div>

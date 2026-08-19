@@ -19,6 +19,7 @@ export function Pager({
   onPrevious,
   onNext,
   label,
+  busy = false,
 }: {
   /** 1-based number of the page being read. */
   page: number;
@@ -28,6 +29,12 @@ export function Pager({
   onNext: () => void;
   /** Names the list for a screen reader, e.g. "skills". */
   label: string;
+  /** True while the list on screen is a held-over page from a PREVIOUS
+   * query (see `useSkills`'s placeholder). Its `nextCursor` names a row of
+   * that old query, so Next is held — but the pager stays mounted, and
+   * Previous stays live because the cursor stack in the URL is always
+   * about the current query. */
+  busy?: boolean;
 }) {
   // One page and nothing after it needs no controls at all.
   if (!hasPrevious && !hasNext) return null;
@@ -44,7 +51,7 @@ export function Pager({
         Previous
       </Button>
       <span className="text-xs text-muted">Page {page}</span>
-      <Button type="button" variant="ghost" size="sm" disabled={!hasNext} onClick={onNext}>
+      <Button type="button" variant="ghost" size="sm" disabled={busy || !hasNext} onClick={onNext}>
         Next
       </Button>
     </nav>

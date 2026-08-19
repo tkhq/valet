@@ -139,7 +139,7 @@ function OrgSkillsSection({
   // The org id is the pin, so the read waits for it. Without the wait the
   // query would ask for the whole catalog once and show a member's own
   // skills under an "Organization skills" heading.
-  const { data, isLoading, error } = useSkills(
+  const { data, isLoading, error, isPlaceholderData } = useSkills(
     {
       ...skillFilterQuery(filters),
       ...(orgId === undefined ? {} : { ownerType: "org", ownerId: orgId }),
@@ -173,12 +173,7 @@ function OrgSkillsSection({
           <Spinner size={14} /> Loading skills…
         </div>
       )}
-      {!waiting && error && (
-        <div className="text-sm text-danger-500">
-          Could not load skills. Check that the server is running, then reload.
-        </div>
-      )}
-      {!waiting && !error && (
+      {!waiting && (
         <>
           <SkillGrid
             skills={orgSkills}
@@ -192,19 +187,29 @@ function OrgSkillsSection({
             }
             showScopeFilter={false}
             emptyLabel="No org skills yet."
+            // Through the grid, not in its place: a failed SEARCH must keep
+            // the box that can change or clear it (see `/skills`).
+            errorLabel={
+              error
+                ? "Could not load skills. Check that the server is running, then reload."
+                : undefined
+            }
           />
-          <Pager
-            label="organization skills"
-            page={pageNumber(cursors)}
-            hasPrevious={cursors.length > 0}
-            hasNext={data?.nextCursor != null}
-            onPrevious={() => onSearchChange({ page: formatCursorStack(popCursor(cursors)) })}
-            onNext={() => {
-              if (data?.nextCursor != null) {
-                onSearchChange({ page: formatCursorStack(pushCursor(cursors, data.nextCursor)) });
-              }
-            }}
-          />
+          {!error && (
+            <Pager
+              label="organization skills"
+              page={pageNumber(cursors)}
+              hasPrevious={cursors.length > 0}
+              hasNext={data?.nextCursor != null}
+              busy={isPlaceholderData}
+              onPrevious={() => onSearchChange({ page: formatCursorStack(popCursor(cursors)) })}
+              onNext={() => {
+                if (data?.nextCursor != null) {
+                  onSearchChange({ page: formatCursorStack(pushCursor(cursors, data.nextCursor)) });
+                }
+              }}
+            />
+          )}
         </>
       )}
     </section>
