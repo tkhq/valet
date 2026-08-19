@@ -155,6 +155,64 @@ describe("buildTranscript", () => {
     expect(out).toContain("<unserializable:");
   });
 
+  it("summarizes user attachments in the timeline without dumping base64", () => {
+    // 12-byte base64 → a `data:` URL a few dozen chars long. The point is
+    // that the transcript *names* the attachment, reports its size, and
+    // does NOT paste the raw payload into the timeline.
+    const url = "data:image/png;base64,QUFBQUFBQUFB";
+    const withImages: Message = {
+      id: "m_img",
+      sessionId: "sess_1",
+      threadId: "th_1",
+      role: "user",
+      content: "see this",
+      parts: [{ kind: "text", text: "see this" }],
+      createdAt: 1_700_000_004_000,
+      attachments: [
+        { kind: "image", url, mimeType: "image/png", name: "screenshot.png" },
+      ],
+    };
+    const out = buildTranscript({
+      session,
+      threadId: "th_1",
+      messages: [withImages],
+      agentStatus: "idle",
+      conn: "open",
+    });
+    expect(out).toContain("**attachments**");
+    expect(out).toContain("- screenshot.png (image/png, data:URL");
+  });
+
+  it("shortens attachment URLs in the raw JSON appendix", () => {
+    // Long enough to force the 80-char shortener; the appendix must not
+    // contain the full payload.
+    const bigPayload = "A".repeat(2000);
+    const url = `data:image/png;base64,${bigPayload}`;
+    const withImages: Message = {
+      id: "m_img_big",
+      sessionId: "sess_1",
+      threadId: "th_1",
+      role: "user",
+      content: "big one",
+      parts: [{ kind: "text", text: "big one" }],
+      createdAt: 1_700_000_005_000,
+      attachments: [
+        { kind: "image", url, mimeType: "image/png", name: "big.png" },
+      ],
+    };
+    const out = buildTranscript({
+      session,
+      threadId: "th_1",
+      messages: [withImages],
+      agentStatus: "idle",
+      conn: "open",
+    });
+    expect(out).not.toContain(bigPayload);
+    // The appendix records how long the original was so a debugger can
+    // reason about the payload without seeing it.
+    expect(out).toMatch(/\[\d+ chars\]/);
+  });
+
   it("does not throw on a streaming tool_call whose args/result are still undefined", () => {
     const streaming: Message = {
       id: "m_stream",

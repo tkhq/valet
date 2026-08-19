@@ -99,6 +99,7 @@ export interface EntryRow {
   metadata: string | null;
   usage: string | null;
   cost: string | null;
+  attachments: string | null;
   createdAt: number;
 }
 
@@ -133,6 +134,7 @@ export function rawToEntryRow(raw: Record<string, unknown>): EntryRow {
     metadata: asStringOrNull(raw.metadata, "metadata"),
     usage: asStringOrNull(raw.usage, "usage"),
     cost: asStringOrNull(raw.cost, "cost"),
+    attachments: asStringOrNull(raw.attachments, "attachments"),
     createdAt: toNum(raw.created_at, "created_at"),
   };
 }
@@ -166,7 +168,26 @@ export interface EntryInsertRow {
   metadata: string | null;
   usage: string | null;
   cost: string | null;
+  attachments: string | null;
   createdAt: number;
+}
+
+/**
+ * Serializes message attachments for the `attachments` text column.
+ * `data` bytes do not survive JSON.stringify (a Uint8Array becomes an index
+ * map), so byte-backed attachments are normalized to a `data:` URL here and
+ * the raw bytes are dropped.
+ */
+export function attachmentsToJson(attachments: MessageEntry["attachments"]): string | null {
+  if (!attachments || attachments.length === 0) return null;
+  const serializable = attachments.map((att) => {
+    const { data, ...rest } = att;
+    if (data && !rest.url) {
+      return { ...rest, url: `data:${att.mimeType};base64,${Buffer.from(data).toString("base64")}` };
+    }
+    return rest;
+  });
+  return JSON.stringify(serializable);
 }
 
 export function entryToRow(entry: SessionEntry): EntryInsertRow {
@@ -199,6 +220,7 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
     metadata: jsonOrNull(entry.metadata),
     usage: null,
     cost: null,
+    attachments: null,
     createdAt: entry.createdAt,
   };
   switch (entry.type) {
@@ -215,6 +237,7 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
         stopReason: entry.stopReason ?? null,
         usage: jsonOrNull(entry.usage),
         cost: jsonOrNull(entry.cost),
+        attachments: attachmentsToJson(entry.attachments),
       };
     case "compaction":
       return {
@@ -278,6 +301,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         stopReason: (row.stopReason as MessageEntry["stopReason"]) ?? undefined,
         usage: parseJson(row.usage),
         cost: parseJson(row.cost),
+        attachments: parseJson(row.attachments),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
         queueItemId: row.queueItemId ?? undefined,

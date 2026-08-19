@@ -30,6 +30,7 @@ import type {
   MessagePart,
   MessageRole,
   PatchThreadRequest,
+  PromptImageAttachment,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -74,6 +75,10 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // Engine entries have createdAt as `string` (ISO-ish) per BaseEntry. Coerce
   // to number for the wire.
   const created = typeof e.createdAt === "number" ? e.createdAt : Date.parse(e.createdAt as unknown as string);
+  // Project engine image attachments into the wire shape. The engine holds
+  // either a `data:` URL or raw bytes; the wire ships one canonical
+  // `data:` URL string. Skip entries missing both (nothing to render).
+  const wireAttachments = projectAttachments(e.attachments);
   return {
     id: e.id,
     sessionId,
@@ -85,7 +90,43 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,
+    ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of `MessageEntry.attachments`. The engine keeps images as
+ * either `{ url }` (already a `data:` URL — the shape the REST route
+ * accepts today) or `{ data: Uint8Array }` (some day, when a plugin drops a
+ * raw buffer in). The wire ships one canonical string per attachment; if
+ * neither field is set, drop the entry rather than emit an empty img.
+ */
+function projectAttachments(
+  attachments: NonNullable<Extract<SessionEntry, { type: "message" }>["attachments"]> | undefined,
+): PromptImageAttachment[] {
+  if (!attachments || attachments.length === 0) return [];
+  const out: PromptImageAttachment[] = [];
+  for (const att of attachments) {
+    if (att.type !== "image") continue;
+    let url: string | undefined;
+    if (typeof att.url === "string" && att.url.startsWith("data:")) {
+      url = att.url;
+    } else if (att.data) {
+      url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
+    } else if (typeof att.url === "string") {
+      // Non-data URL (e.g. an http url) is passed through as-is; harmless
+      // if the client happens to already resolve it.
+      url = att.url;
+    }
+    if (!url) continue;
+    out.push({
+      kind: "image",
+      url,
+      mimeType: att.mimeType,
+      name: att.name ?? "image",
+    });
+  }
+  return out;
 }
 
 // ── Threads ───────────────────────────────────────────────────────────────
@@ -384,39 +425,25 @@ export async function submitSessionPrompt(
   // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
   //   requested thread, text unchanged.
   const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
-  
-  // Build the prompt content: text alone or text + attachments.
-  const promptContent = attachments && attachments.length > 0
-    ? {
-        text,
-        attachments: attachments.map(att => ({
+
+  // Build the prompt content once per text variant: plain text, or text +
+  // attachments. The expand path swaps only the text; the attachment
+  // mapping must stay identical on both paths.
+  const mappedAttachments =
+    attachments && attachments.length > 0
+      ? attachments.map((att) => ({
           type: "image" as const,
           url: att.url,
           mimeType: att.mimeType,
           name: att.name,
-        })),
-      }
-    : text;
+        }))
+      : undefined;
+  const withAttachments = (t: string) => (mappedAttachments ? { text: t, attachments: mappedAttachments } : t);
 
   const receipt =
     outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(promptContent, { threadId: thread.id })
-      : await thread.submitPrompt(
-          outcome?.kind === "expand"
-            ? attachments && attachments.length > 0
-              ? {
-                  text: outcome.text,
-                  attachments: attachments.map(att => ({
-                    type: "image" as const,
-                    url: att.url,
-                    mimeType: att.mimeType,
-                    name: att.name,
-                  })),
-                }
-              : outcome.text
-            : promptContent,
-          {},
-        );
+      ? await engineSession.prompt(withAttachments(text), { threadId: thread.id })
+      : await thread.submitPrompt(withAttachments(outcome?.kind === "expand" ? outcome.text : text), {});
 
   await db
     .update(agentSessions)
@@ -442,6 +469,19 @@ messagesRouter.post("/:id/messages", async (c) => {
   }
   if (!body.text || typeof body.text !== "string") {
     return c.json({ error: "text is required" }, 400);
+  }
+  if (body.attachments !== undefined) {
+    const valid =
+      Array.isArray(body.attachments) &&
+      body.attachments.every(
+        (a) => a !== null && typeof a === "object" && typeof a.url === "string" && typeof a.mimeType === "string",
+      );
+    if (!valid) {
+      return c.json(
+        { error: "attachments must be an array of { url, mimeType } image objects. Re-attach the images and send again." },
+        400,
+      );
+    }
   }
 
   const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId, body.attachments);

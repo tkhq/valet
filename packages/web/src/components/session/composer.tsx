@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -21,6 +22,7 @@ import {
 } from "~/lib/command-recency";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
+import { useComposerDrop } from "./composer-drop-context";
 import {
   acceptImages,
   filesFromClipboard,
@@ -101,9 +103,21 @@ export function Composer({
   // Images held for the next message. Paste, drop, and the picker all land
   // here; `imageErrors` holds one line for each file the intake refused.
   const [images, setImages] = useState<ComposerImage[]>([]);
+  // Ref mirror of `images` for `addFiles`. The intake callback is
+  // memoized on `intakeBlocked` so its identity stays stable for the drop
+  // context; reading through a ref keeps `acceptImages` seeing the latest
+  // list without churning the callback identity on every image change.
+  const imagesRef = useRef<ComposerImage[]>([]);
+  useEffect(() => {
+    imagesRef.current = images;
+  }, [images]);
   const [imageErrors, setImageErrors] = useState<string[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Form element ref for the page-level drop target — used to skip
+  // double-intake when a drop already landed on the composer's form
+  // (which has its own `onDrop` handler).
+  const formRef = useRef<HTMLFormElement>(null);
   // Drag events fire for every child element the pointer crosses, so a
   // single `dragleave` does not mean the pointer left the composer. Count
   // enter and leave, and clear the highlight only at zero.
@@ -238,28 +252,35 @@ export function Composer({
    * Take files from a paste, a drop, or the picker. Refused files leave a
    * message; accepted files are read into `data:` URLs for the preview and
    * for the request body.
+   *
+   * Wrapped in `useCallback` so the identity survives across renders — the
+   * page-level drop target reads this via the ComposerDropContext, and a
+   * stable callback keeps the intake object it publishes stable too.
    */
-  async function addFiles(files: File[]) {
-    if (intakeBlocked || files.length === 0) return;
-    const { accepted, rejected } = acceptImages(images, files);
-    setImageErrors(rejected);
-    const read: ComposerImage[] = [];
-    const failures: string[] = [];
-    for (const file of accepted) {
-      try {
-        read.push(await readImage(file));
-      } catch (err) {
-        failures.push(err instanceof Error ? err.message : readFailure(file.name));
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      if (intakeBlocked || files.length === 0) return;
+      const { accepted, rejected } = acceptImages(imagesRef.current, files);
+      setImageErrors(rejected);
+      const read: ComposerImage[] = [];
+      const failures: string[] = [];
+      for (const file of accepted) {
+        try {
+          read.push(await readImage(file));
+        } catch (err) {
+          failures.push(err instanceof Error ? err.message : readFailure(file.name));
+        }
       }
-    }
-    if (failures.length > 0) setImageErrors((prev) => [...prev, ...failures]);
-    if (read.length === 0) return;
-    // `acceptImages` ran against the state this call captured. A second
-    // intake that overlaps this one (a drop while a paste still reads)
-    // would push past the cap, so the cap is applied again at the state
-    // edge, where the real list is.
-    setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
-  }
+      if (failures.length > 0) setImageErrors((prev) => [...prev, ...failures]);
+      if (read.length === 0) return;
+      // `acceptImages` ran against the state this call captured. A second
+      // intake that overlaps this one (a drop while a paste still reads)
+      // would push past the cap, so the cap is applied again at the state
+      // edge, where the real list is.
+      setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
+    },
+    [intakeBlocked],
+  );
 
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
     if (intakeBlocked) return;
@@ -316,6 +337,7 @@ export function Composer({
     // Held images go with the message. Convert them to the wire format
     // and pass them in the request body.
     const pendingImages = images;
+    const attachments = pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined;
     setText("");
     setImages([]);
     setImageErrors([]);
@@ -323,12 +345,12 @@ export function Composer({
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
     // the server's persisted copy.
-    const localId = addUserMessage(sessionId, t, threadId);
+    const localId = addUserMessage(sessionId, t, threadId, attachments);
     try {
       const res = await send.mutateAsync({
         text: t,
         threadId,
-        attachments: pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined,
+        attachments,
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
@@ -439,8 +461,24 @@ export function Composer({
     void submit();
   }
 
+  // Publish the intake pipeline to SessionView's ComposerDropContext, so
+  // the page-level drop target can hand off files dropped anywhere on the
+  // chat tab. Republish whenever the callback identity or the blocked flag
+  // changes; clear on unmount so a stale intake is never called.
+  const dropChannel = useComposerDrop();
+  useEffect(() => {
+    if (!dropChannel) return;
+    dropChannel.publish({
+      addFiles: (files) => void addFiles(files),
+      blocked: intakeBlocked,
+      ownedEl: formRef.current,
+    });
+    return () => dropChannel.publish(null);
+  }, [dropChannel, addFiles, intakeBlocked]);
+
   return (
     <form
+      ref={formRef}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();

@@ -50,6 +50,19 @@ describe("engineToWireParts", () => {
     const parts: EngineMessagePart[] = [
       { type: "text", text: "hi" },
       { type: "thinking", text: "let me consider..." },
+      // Attachment as a message *part* stays dropped on the wire — image
+      // attachments live on the Message itself (via `attachments`), not as
+      // a part. The wire type deliberately does not grow an `attachment`
+      // part variant; see wire/types.ts.
+      {
+        type: "attachment",
+        attachment: {
+          type: "image",
+          mimeType: "image/png",
+          name: "shot.png",
+          data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+        },
+      },
       { type: "error", message: "x" },
     ];
     expect(engineToWireParts(parts)).toEqual([

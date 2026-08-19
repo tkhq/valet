@@ -234,6 +234,7 @@ const ENTRY_COLUMNS = [
   "metadata",
   "usage",
   "cost",
+  "attachments",
   "created_at",
 ] as const;
 
@@ -272,6 +273,7 @@ function entryInsertParams(row: EntryInsertRow): unknown[] {
     row.metadata,
     row.usage,
     row.cost,
+    row.attachments,
     row.createdAt,
   ];
 }
@@ -433,8 +435,8 @@ export class PgSessionStore implements SessionStore {
            token_count_before = $14, token_count_after = $15, file_context = $16,
            branch_root_id = $17, branch_leaf_id = $18, gate_id = $19,
            resolved_at = $20, resolution = $21, withdrawn_reason = $22,
-           metadata = $23, usage = $24, cost = $25, created_at = $26
-         WHERE session_id = $27 AND thread_id = $28 AND id = $29`,
+           metadata = $23, usage = $24, cost = $25, attachments = $26, created_at = $27
+         WHERE session_id = $28 AND thread_id = $29 AND id = $30`,
         [
           row.parentId,
           row.entryType,
@@ -461,6 +463,7 @@ export class PgSessionStore implements SessionStore {
           row.metadata,
           row.usage,
           row.cost,
+          row.attachments,
           row.createdAt,
           sessionId,
           threadId,

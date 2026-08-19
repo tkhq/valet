@@ -13,6 +13,7 @@ import type {
   DecisionGate,
   Message,
   MessagePart,
+  PromptImageAttachment,
   WireEvent,
   WireQueueState,
 } from "@valet/api/wire";
@@ -135,7 +136,12 @@ export interface StreamStore {
    * `threadId` is required so the message is correctly scoped: switching
    * threads then back must not show this message in the wrong thread.
    */
-  addUserMessage(sessionId: string, text: string, threadId: string): string;
+  addUserMessage(
+    sessionId: string,
+    text: string,
+    threadId: string,
+    attachments?: PromptImageAttachment[],
+  ): string;
   /**
    * Stamp the queue item id onto an existing message (typically the
    * optimistic user message `addUserMessage` just created) once the
@@ -615,7 +621,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
       return { bySession: { ...state.bySession, [sessionId]: updated } };
     }),
 
-  addUserMessage: (sessionId, text, threadId) => {
+  addUserMessage: (sessionId, text, threadId, attachments) => {
     // Synthetic id; the next WS init replaces this row with the server's
     // persisted message (different id, same content). A short collision
     // window with content-based dedupe is acceptable for v1.
@@ -630,6 +636,9 @@ export const useStreamStore = create<StreamStore>((set) => ({
         content: text,
         parts: [{ kind: "text", text }],
         createdAt: Date.now(),
+        // Optimistic mirror of the wire projection: the REST refetch will
+        // overwrite this row with the server's canonical attachments field.
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       return {
         bySession: {
