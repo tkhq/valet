@@ -26,6 +26,15 @@ import {
 
 const client = new WorkflowClient();
 const TEST_ID = `wf-test-${Date.now()}`;
+
+/**
+ * IMPORTANT: Tests within each describe() block are order-dependent.
+ * Tests must run sequentially because they build on each other:
+ * 1. create → 2. save → 3. validate → 4. publish → 5. execute → 6. poll
+ *
+ * The workflows object accumulates state for cleanup in afterAll.
+ * Do not run individual tests in isolation; run the full describe block.
+ */
 const workflows: { [key: string]: { id?: string; slug?: string; executionId?: string } } = {};
 
 // ─── Workflow 1: PR Review Automation ──────────────────────────────────────
