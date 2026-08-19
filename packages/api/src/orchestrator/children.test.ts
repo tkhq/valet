@@ -25,6 +25,7 @@ import {
   buildChildReader,
   buildChildSender,
   buildChildSpawner,
+  buildChildStatusReader,
   ChildWatcher,
   ChildLimitError,
   classifyWatcherError,
@@ -1486,6 +1487,107 @@ describe("buildChildReader", () => {
     );
     expect(entries).toBeNull();
     expect(await api.providers.engineStore.getSession(spawned.childSessionId)).toBeNull();
+  });
+});
+
+describe("buildChildStatusReader", () => {
+  it("reports settled=false and an activity clock for a freshly spawned child", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const statusReader = buildChildStatusReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-status", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "long analysis" },
+      {
+        parentSessionId: "parent-status",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    const status = await statusReader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-status" },
+    );
+    expect(status).not.toBeNull();
+    expect(status?.settled).toBe(false);
+    // The spawn admitted the prompt to the child's queue, so the activity
+    // clock has a value.
+    expect(typeof status?.lastActivityAt).toBe("number");
+  });
+
+  it("mirrors the watch row's settled flag", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const statusReader = buildChildStatusReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-status-settled", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "quick job" },
+      {
+        parentSessionId: "parent-status-settled",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    await api.providers.db
+      .update(childWatches)
+      .set({ settled: true })
+      .where(eq(childWatches.childSessionId, spawned.childSessionId));
+
+    const status = await statusReader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-status-settled" },
+    );
+    expect(status?.settled).toBe(true);
+  });
+
+  it("returns null for a child the caller did not spawn, and for a missing id", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const statusReader = buildChildStatusReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-status-owner", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "private work" },
+      {
+        parentSessionId: "parent-status-owner",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    expect(
+      await statusReader(
+        { childSessionId: spawned.childSessionId },
+        { parentSessionId: "parent-stranger" },
+      ),
+    ).toBeNull();
+    expect(
+      await statusReader(
+        { childSessionId: "child_does-not-exist" },
+        { parentSessionId: "parent-status-owner" },
+      ),
+    ).toBeNull();
   });
 });
 

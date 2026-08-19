@@ -24,6 +24,7 @@ import {
   type ChildReader,
   type ChildSender,
   type ChildSpawner,
+  type ChildStatusReader,
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
@@ -813,6 +814,45 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
       limit: req.limit ?? CHILD_READ_DEFAULT_LIMIT,
       includeCompacted: true,
     });
+  };
+}
+
+/**
+ * Builds the `ChildStatusReader` injected into every orchestrator's
+ * `toolConfig.childStatusReader` — the backend of the engine's
+ * `child_status` built-in. Authority is the same `child_watches` edge as
+ * `buildChildReader`. The activity clock reads the engine store directly:
+ * a status check must never wake the child (no sandbox token, no
+ * reconcile, no engine rows for a deleted child).
+ */
+export function buildChildStatusReader(deps: ChildrenDeps): ChildStatusReader {
+  return async (req, ctx) => {
+    const rows = await deps.db
+      .select({ settled: childWatches.settled })
+      .from(childWatches)
+      .where(
+        and(
+          eq(childWatches.childSessionId, req.childSessionId),
+          eq(childWatches.parentSessionId, ctx.parentSessionId),
+        ),
+      )
+      .limit(1);
+    // No row means the caller does not own this child, or it does not
+    // exist. Both answer `null`: telling them apart would confirm that
+    // somebody else's session id is real.
+    if (rows.length === 0) return null;
+
+    const childRows = await deps.db
+      .select({ status: agentSessions.status })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, req.childSessionId))
+      .limit(1);
+    const child = childRows[0];
+    // A deleted child answers the same null as a missing one.
+    if (!child || child.status === "deleted") return null;
+
+    const lastActivityAt = await deps.engineStore.latestActivityAt(req.childSessionId);
+    return { settled: rows[0].settled === true, lastActivityAt };
   };
 }
 
