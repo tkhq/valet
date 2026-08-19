@@ -16,6 +16,10 @@
 
 import type { WorkflowDefinition } from '@valet/shared';
 
+// Repository configuration via environment variables for reusability
+const TEST_OWNER = process.env.TEST_OWNER || 'tkhq';
+const TEST_REPO = process.env.TEST_REPO || 'valet';
+
 /**
  * Workflow 1: Review a pull request when it opens or updates
  *
@@ -30,9 +34,9 @@ export const reviewPullRequestWorkflow: WorkflowDefinition = {
       type: 'trigger',
       data: {
         type: 'github-app',
-        description: 'GitHub PR opened/updated event on tkhq/valet',
-        owner: 'tkhq',
-        repo: 'valet',
+        description: `GitHub PR opened/updated event on ${TEST_OWNER}/${TEST_REPO}`,
+        owner: TEST_OWNER,
+        repo: TEST_REPO,
         events: ['pull_request'],
       },
     },
@@ -43,8 +47,8 @@ export const reviewPullRequestWorkflow: WorkflowDefinition = {
         service: 'github',
         action: 'list_commits_on_pull_request',
         inputs: {
-          owner: 'tkhq',
-          repo: 'valet',
+          owner: TEST_OWNER,
+          repo: TEST_REPO,
           pull_number: '{{trigger.data.pull_request.number}}',
         },
       },
@@ -82,8 +86,8 @@ Be constructive and specific. Format as a summary suitable for a GitHub PR revie
         service: 'github',
         action: 'create_pull_request_review',
         inputs: {
-          owner: 'tkhq',
-          repo: 'valet',
+          owner: TEST_OWNER,
+          repo: TEST_REPO,
           pull_number: '{{trigger.data.pull_request.number}}',
           event: 'COMMENT',
           body: '{{nodes["analyze-review"].data.response}}',
@@ -109,8 +113,8 @@ Be constructive and specific. Format as a summary suitable for a GitHub PR revie
         service: 'github',
         action: 'create_issue_comment',
         inputs: {
-          owner: 'tkhq',
-          repo: 'valet',
+          owner: TEST_OWNER,
+          repo: TEST_REPO,
           issue_number: '{{trigger.data.pull_request.number}}',
           body: '**Code Review:**\n\n{{nodes["analyze-review"].data.response}}',
         },
@@ -153,9 +157,9 @@ export const assignReviewersWorkflow: WorkflowDefinition = {
       type: 'trigger',
       data: {
         type: 'github-app',
-        description: 'GitHub PR opened/ready_for_review event on tkhq/valet',
-        owner: 'tkhq',
-        repo: 'valet',
+        description: `GitHub PR opened/ready_for_review event on ${TEST_OWNER}/${TEST_REPO}`,
+        owner: TEST_OWNER,
+        repo: TEST_REPO,
         events: ['pull_request', 'issue_comment'],
       },
     },
@@ -166,8 +170,8 @@ export const assignReviewersWorkflow: WorkflowDefinition = {
         service: 'github',
         action: 'get_file_content',
         inputs: {
-          owner: 'tkhq',
-          repo: 'valet',
+          owner: TEST_OWNER,
+          repo: TEST_REPO,
           path: 'CODEOWNERS',
         },
       },
@@ -229,8 +233,8 @@ Return JSON: { selected: [{ name, slack_id }] }`,
         service: 'github',
         action: 'request_reviewers',
         inputs: {
-          owner: 'tkhq',
-          repo: 'valet',
+          owner: TEST_OWNER,
+          repo: TEST_REPO,
           pull_number: '{{trigger.data.pull_request.number}}',
           reviewers: '{{nodes["select-reviewers"].data.selected[*].name}}',
         },
