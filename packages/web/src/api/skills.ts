@@ -32,6 +32,11 @@ export const qkSkills = {
  * into the query key together, so paging or changing a filter reads a fresh
  * page instead of re-filtering the one already in hand. Every write below
  * invalidates the whole `["skills"]` subtree, which covers every page.
+ *
+ * The placeholder holds the previous page up while the next one loads.
+ * Without it, every keystroke in the search box is a new query key with no
+ * data, the pages unmount the grid behind `isLoading`, and the search box
+ * unmounts with it — dropping focus after each character.
  */
 export function useSkills(
   query: SkillListQuery = {},
@@ -40,6 +45,7 @@ export function useSkills(
   return useQuery<ListSkillsResponse>({
     queryKey: qkSkills.list(query),
     queryFn: () => api.listSkills(query),
+    placeholderData: (prev) => prev,
     ...opts,
   });
 }
