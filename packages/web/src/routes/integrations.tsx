@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner } from "~/components/primitives";
+import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
 import { pluginDisplayName } from "~/components/integrations/display-name";
@@ -15,10 +16,43 @@ import { pluginDisplayName } from "~/components/integrations/display-name";
  * to `/api/credentials/:service/connect` and lands back here with
  * `?connected=` or `?error=`; manual token entry remains the fallback for
  * everything else.
+ *
+ * The search box narrows the tiles IN the browser, unlike the catalog
+ * search on `/skills`: `usePlugins` holds the whole plugin set, so a
+ * client-side match answers about everything it claims to. The settled
+ * query lives in `?q=`, so a search is a link and Back clears it.
  */
+interface IntegrationsSearch {
+  q?: string;
+}
+
+/** Reads the search params, keeping only strings. The OAuth round trip's
+ * `?connected=`/`?error=` stay off this schema: `useConnectResult` reads
+ * and clears them from `window.location` on mount. */
+function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
+  const search: Record<string, unknown> =
+    typeof raw === "object" && raw !== null ? { ...raw } : {};
+  return { q: typeof search.q === "string" ? search.q : undefined };
+}
+
 export const Route = createFileRoute("/integrations")({
   component: IntegrationsPage,
+  validateSearch: readIntegrationsSearch,
 });
+
+/** True when the tile answers the query — by display name, raw plugin
+ * name, or description. Case-insensitive substring. */
+function matchesQuery(
+  plugin: { name: string; displayName?: string; description?: string },
+  needle: string,
+): boolean {
+  if (needle.length === 0) return true;
+  return (
+    pluginDisplayName(plugin).toLowerCase().includes(needle) ||
+    plugin.name.toLowerCase().includes(needle) ||
+    (plugin.description ?? "").toLowerCase().includes(needle)
+  );
+}
 
 type ConnectResult = { kind: "connected" | "error"; value: string; detail?: string } | null;
 
@@ -67,14 +101,25 @@ export function IntegrationsPage() {
   const plugins = data?.plugins ?? [];
   const connectResult = useConnectResult();
 
+  // The top-level hooks, not `Route.useSearch()`: the route suite mocks
+  // this module and never builds a real router context.
+  const search = readIntegrationsSearch(useSearch({ strict: false }));
+  const navigate = useNavigate();
+  const query = search.q ?? "";
+  const needle = query.trim().toLowerCase();
+
   // `hasVisibleSurface` drops plugins whose every service is unconfigured,
   // unconnected, and unfixable by this caller — nothing on such a tile could
   // work, and nothing on it would tell the reader what to do. An org admin
   // keeps the tile, because the API tells them which setting is missing.
-  const services = plugins
-    .filter(isService)
-    .filter(hasVisibleSurface)
+  const reachable = plugins.filter(isService).filter(hasVisibleSurface);
+  const services = reachable
+    .filter((plugin) => matchesQuery(plugin, needle))
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
+  const searching = needle.length > 0;
+  // The box stays up through an empty match — hiding it would leave the
+  // search with no box to clear it in.
+  const showSearch = reachable.length > 0 || searching;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -117,14 +162,36 @@ export function IntegrationsPage() {
             <div className="text-sm text-muted">No plugins installed.</div>
           )}
 
-          {!isLoading && !error && services.length > 0 && (
-            <Section title="Services" description="Most need a key to connect.">
-              <div className="grid gap-3 pt-4 sm:grid-cols-2">
-                {services.map((plugin) => (
-                  <IntegrationRow key={plugin.name} plugin={plugin} />
-                ))}
+          {!isLoading && !error && showSearch && (
+            <div className="space-y-4">
+              <div className="ml-auto w-full sm:w-56">
+                <SearchInput
+                  value={query}
+                  onSettled={(next) =>
+                    void navigate({
+                      to: "/integrations",
+                      search: next.trim().length === 0 ? {} : { q: next },
+                    })
+                  }
+                  placeholder="Search integrations…"
+                  aria-label="Search integrations"
+                />
               </div>
-            </Section>
+
+              {searching && services.length === 0 && (
+                <div className="text-sm text-muted">No integrations match your search.</div>
+              )}
+
+              {services.length > 0 && (
+                <Section title="Services" description="Most need a key to connect.">
+                  <div className="grid gap-3 pt-4 sm:grid-cols-2">
+                    {services.map((plugin) => (
+                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                    ))}
+                  </div>
+                </Section>
+              )}
+            </div>
           )}
         </div>
       </div>
