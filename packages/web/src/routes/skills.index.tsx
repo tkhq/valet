@@ -139,12 +139,7 @@ export function SkillsIndexPage() {
               <Spinner size={14} /> Loading skills…
             </div>
           )}
-          {!isLoading && error && (
-            <div className="text-sm text-danger-500">
-              Could not load skills. Check that the server is running, then reload.
-            </div>
-          )}
-          {!isLoading && !error && (
+          {!isLoading && (
             <>
               <SkillGrid
                 skills={skills}
@@ -160,22 +155,29 @@ export function SkillsIndexPage() {
                   })
                 }
                 emptyLabel="No skills yet. Write one, or ask your assistant to write one for you."
+                // Through the grid, not in its place: a failed SEARCH must
+                // keep the box that can change or clear it.
+                errorLabel={
+                  error
+                    ? "Could not load skills. Check that the server is running, then reload."
+                    : undefined
+                }
               />
-              <Pager
-                label="skills"
-                page={pageNumber(skillCursors)}
-                hasPrevious={skillCursors.length > 0}
-                // While the placeholder shows, `nextCursor` belongs to the
-                // PREVIOUS query. Pushing it onto this query's stack would
-                // page a different question, so Next waits for the fetch.
-                hasNext={!isPlaceholderData && data?.nextCursor != null}
-                onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
-                onNext={() => {
-                  if (!isPlaceholderData && data?.nextCursor != null) {
-                    go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
-                  }
-                }}
-              />
+              {!error && (
+                <Pager
+                  label="skills"
+                  page={pageNumber(skillCursors)}
+                  hasPrevious={skillCursors.length > 0}
+                  hasNext={data?.nextCursor != null}
+                  busy={isPlaceholderData}
+                  onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
+                  onNext={() => {
+                    if (data?.nextCursor != null) {
+                      go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
+                    }
+                  }}
+                />
+              )}
             </>
           )}
         </div>

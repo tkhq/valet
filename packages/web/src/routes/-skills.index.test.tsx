@@ -208,6 +208,21 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
   });
 
+  it("keeps the search box up when the read fails", () => {
+    // A failed SEARCH must keep the box that can change or clear it. The
+    // error used to replace the whole grid, and the only way out of a bad
+    // query was a reload.
+    searchParams = { q: "SLACK" };
+    currentData = { skills: [], nextCursor: null };
+    currentState = { isLoading: false, error: new Error("boom") };
+    render(<SkillsIndexPage />);
+
+    expect(screen.getByText(/Check that the server is running/)).toBeTruthy();
+    expect(screen.getByLabelText("Search skills")).toBeTruthy();
+    // The failure message stands alone — no competing empty-state text.
+    expect(screen.queryByText("No skills match your search.")).toBeNull();
+  });
+
   it("shows a scope badge on every card", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
@@ -368,6 +383,18 @@ describe("SkillsIndexPage — paging", () => {
     expect(next.hasAttribute("disabled")).toBe(true);
     fireEvent.click(next);
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pager mounted on page one while a search loads", () => {
+    // Held, not hidden: gating hasNext itself unmounted the whole pager on
+    // page one (no Previous either), so every settled search shifted the
+    // layout below the grid.
+    currentData = { ...skillsData, nextCursor: "cursor_2" };
+    currentState = { isLoading: false, error: null, isPlaceholderData: true };
+    render(<SkillsIndexPage />);
+
+    const next = screen.getByRole("button", { name: "Next" });
+    expect(next.hasAttribute("disabled")).toBe(true);
   });
 });
 

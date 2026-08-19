@@ -71,6 +71,7 @@ export function SkillGrid({
   onFiltersChange,
   showScopeFilter = true,
   emptyLabel = "No skills yet.",
+  errorLabel,
 }: {
   /** One page of the catalog, already filtered by the server. */
   skills: SkillSummary[];
@@ -80,11 +81,16 @@ export function SkillGrid({
   showScopeFilter?: boolean;
   /** Shown when the library holds nothing at all. */
   emptyLabel?: string;
+  /** Shown in place of the cards when the read failed. The controls stay
+   * up: a failed SEARCH must keep the box that can change or clear it,
+   * or the reader's only way out is a reload. */
+  errorLabel?: string;
 }) {
   const filtering = hasSkillFilters(filters);
-  // The controls stay up through an empty result. Hiding them on an empty
-  // page would leave a search with no box to clear it in.
-  const showControls = skills.length > 0 || filtering;
+  const failed = errorLabel !== undefined;
+  // The controls stay up through an empty result and through a failed read.
+  // Hiding them would leave a search with no box to clear it in.
+  const showControls = skills.length > 0 || filtering || failed;
 
   // The search box types into a local draft, and the draft reaches
   // `onFiltersChange` once it settles (the memory-search period). Sending
@@ -161,7 +167,9 @@ export function SkillGrid({
         </div>
       )}
 
-      {skills.length === 0 && filtering && (
+      {failed && <div className="mt-8 text-sm text-danger-500">{errorLabel}</div>}
+
+      {!failed && skills.length === 0 && filtering && (
         <div className="mt-8 text-sm text-muted">
           {filters.query.trim().length > 0 || filters.scope !== "all"
             ? "No skills match your search."
@@ -171,7 +179,7 @@ export function SkillGrid({
         </div>
       )}
 
-      {skills.length > 0 && (
+      {!failed && skills.length > 0 && (
         <div className="mt-8 grid gap-3 sm:grid-cols-2">
           {skills.map((skill) => (
             <SkillCard
@@ -182,7 +190,9 @@ export function SkillGrid({
         </div>
       )}
 
-      {skills.length === 0 && !filtering && <div className="text-sm text-muted">{emptyLabel}</div>}
+      {!failed && skills.length === 0 && !filtering && (
+        <div className="text-sm text-muted">{emptyLabel}</div>
+      )}
     </div>
   );
 }
