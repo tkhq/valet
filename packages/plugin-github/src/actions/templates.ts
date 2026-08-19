@@ -247,6 +247,24 @@ const codeReviewTemplate: WorkflowTemplate = {
       pullNumber: '$.pull_request.number',
     },
   },
+  events: [
+    {
+      name: 'PR opened, updated, reopened, or ready for review',
+      eventKeys: [
+        'github.pull_request.opened',
+        'github.pull_request.synchronize',
+        'github.pull_request.reopened',
+        'github.pull_request.ready_for_review',
+      ],
+      repoScoped: true,
+      variableMapping: {
+        action: '$.action',
+        owner: '$.repository.owner.login',
+        repo: '$.repository.name',
+        pullNumber: '$.pull_request.number',
+      },
+    },
+  ],
 };
 
 /** Templates the GitHub plugin contributes to the gallery. */

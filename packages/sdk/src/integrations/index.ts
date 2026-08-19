@@ -158,6 +158,25 @@ export interface TemplateWebhookTrigger {
 }
 
 /**
+ * A scheduled trigger to provision when a template is installed.
+ */
+export interface TemplateScheduleTrigger {
+  name: string;
+  cron: string;
+  timezone?: string;
+}
+
+/**
+ * An event trigger to provision when a template is installed.
+ */
+export interface TemplateEventTrigger {
+  name: string;
+  eventKeys: string[];
+  repoScoped?: boolean;
+  variableMapping?: unknown;
+}
+
+/**
  * A pre-built, publishable workflow a plugin contributes to the Templates
  * gallery. Co-located with the plugin whose actions it uses (e.g. the GitHub
  * code-review template ships in the github plugin), so enabling/disabling the
@@ -187,6 +206,8 @@ export interface WorkflowTemplate {
   runForm?: 'github-pr';
   definition: WorkflowDefinition;
   trigger?: TemplateWebhookTrigger;
+  schedule?: TemplateScheduleTrigger;
+  events?: TemplateEventTrigger[];
 }
 
 // ─── Integration Package Manifest ────────────────────────────────────────────

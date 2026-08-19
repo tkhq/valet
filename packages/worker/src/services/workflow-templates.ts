@@ -58,6 +58,8 @@ export interface InstallTemplateResult {
   workflowId: string;
   workflowName: string;
   trigger: { id: string; name: string; path: string; webhookToken: string } | null;
+  schedule: { id: string; name: string } | null;
+  events: Array<{ id: string; name: string }>;
 }
 
 /**
@@ -230,8 +232,63 @@ export async function installWorkflowTemplate(
       trigger = { id, name, path, webhookToken };
     }
 
+    // 5. Optionally provision a schedule trigger.
+    let schedule: InstallTemplateResult['schedule'] = null;
+    if (template.schedule) {
+      const id = crypto.randomUUID();
+      const now = new Date().toISOString();
+      await createTrigger(db, {
+        id,
+        userId,
+        workflowId: workflow.id,
+        name: template.schedule.name,
+        enabled: true,
+        type: 'schedule',
+        config: JSON.stringify({
+          type: 'schedule',
+          cron: template.schedule.cron,
+          timezone: template.schedule.timezone ?? 'UTC',
+        }),
+        variableMapping: null,
+        now,
+      });
+      schedule = { id, name: template.schedule.name };
+    }
+
+    // 6. Optionally provision event triggers.
+    const events: Array<{ id: string; name: string }> = [];
+    if (template.events && template.events.length > 0) {
+      const now = new Date().toISOString();
+      for (const eventEntry of template.events) {
+        if (!eventEntry.eventKeys || eventEntry.eventKeys.length === 0) {
+          continue;
+        }
+        const id = crypto.randomUUID();
+        const repoScope =
+          eventEntry.repoScoped && repoPin
+            ? { github: { owner: repoPin.owner, repo: repoPin.repo } }
+            : {};
+        await createTrigger(db, {
+          id,
+          userId,
+          workflowId: workflow.id,
+          name: eventEntry.name,
+          enabled: true,
+          type: 'github-app',
+          config: JSON.stringify({
+            type: 'github-app',
+            events: eventEntry.eventKeys,
+            ...repoScope,
+          }),
+          variableMapping: eventEntry.variableMapping ? JSON.stringify(eventEntry.variableMapping) : null,
+          now,
+        });
+        events.push({ id, name: eventEntry.name });
+      }
+    }
+
     // workflow.name comes back loosely-typed (unknown); it's exactly template.name.
-    return { workflowId: workflow.id, workflowName: template.name, trigger };
+    return { workflowId: workflow.id, workflowName: template.name, trigger, schedule, events };
   } catch (err) {
     // Roll back the workflow (cascades to its versions) so a failed install
     // leaves nothing behind.
