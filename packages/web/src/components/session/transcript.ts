@@ -7,7 +7,7 @@
  * Kept pure (no React, no clipboard) so it's unit-testable and reusable —
  * the button component wraps `buildTranscript` + a clipboard write.
  */
-import type { Message, SessionDetail } from "@valet/api/wire";
+import type { Message, PromptImageAttachment, SessionDetail } from "@valet/api/wire";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 
 export interface TranscriptContext {
@@ -54,6 +54,29 @@ function formatTimestamp(ms: number): string {
   }
 }
 
+/**
+ * Shallow-copy a message with any attachment `url` fields truncated to the
+ * first 80 chars. A single `data:image/png;base64,…` URL can be a megabyte;
+ * dumping the raw payload turns the appendix into noise for debug-paste
+ * use. `truncate` is a per-value guard on the whole `safeJson` output — it
+ * clips the whole doc, not per-url — so shorten here.
+ */
+function shortenAttachmentUrls(m: Message): Message {
+  if (!m.attachments || m.attachments.length === 0) return m;
+  const short: PromptImageAttachment[] = m.attachments.map((a) => {
+    if (a.url.length <= 80) return a;
+    return { ...a, url: `${a.url.slice(0, 80)}… [${a.url.length} chars]` };
+  });
+  return { ...m, attachments: short };
+}
+
+/** Short byte-size label for the transcript's attachments summary. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} bytes`;
+}
+
 function renderMessage(m: Message, index: number): string {
   const lines: string[] = [];
   lines.push(`### [${index}] ${m.role} · ${formatTimestamp(m.createdAt)} · id=${m.id}`);
@@ -62,6 +85,18 @@ function renderMessage(m: Message, index: number): string {
   lines.push("");
   if (m.content && m.content.trim().length > 0) {
     lines.push(truncate(m.content, 8000));
+    lines.push("");
+  }
+  if (m.attachments && m.attachments.length > 0) {
+    // Name each attachment and report its `data:` URL size — do NOT dump
+    // the base64 payload into the timeline (it blows the debug blob up by
+    // megabytes per image). The Raw JSON appendix shortens `url` fields
+    // via the same guard.
+    lines.push("**attachments**");
+    for (const a of m.attachments) {
+      const kind = a.url.startsWith("data:") ? "data:URL" : "url";
+      lines.push(`- ${a.name} (${a.mimeType}, ${kind} ${formatBytes(a.url.length)})`);
+    }
     lines.push("");
   }
   for (const part of m.parts ?? []) {
@@ -156,7 +191,7 @@ export function buildTranscript(ctx: TranscriptContext): string {
     `as the timeline above). Paste this into a debugger to replay state.`,
     ``,
     "```json",
-    truncate(safeJson(inThread), 64_000),
+    truncate(safeJson(inThread.map(shortenAttachmentUrls)), 64_000),
     "```",
   ];
 
