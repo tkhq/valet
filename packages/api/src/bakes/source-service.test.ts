@@ -1044,6 +1044,26 @@ describe("SourceService", () => {
       const rows = await db.select().from(bakes).where(eq(bakes.sourceId, srcId));
       expect(rows.filter((r) => r.status === "pushed")).toHaveLength(3);
     });
+
+    it("runs retention when a bake FAILS, so a full registry can drain itself", async () => {
+      // Regression: retention used to run only on the pushed transition. A
+      // registry at ENOSPC fails every push, so retention never ran again and
+      // the disk could never self-heal (agents-dev outage, 2026-08-19).
+      const srcId = await seedRepoSource(db);
+      await seedBake(db, srcId, { id: "old-1", imageRef: "ref/old-1", createdAt: NOW - 3000 });
+      await seedBake(db, srcId, { id: "old-2", imageRef: "ref/old-2", createdAt: NOW - 2000 });
+      await seedBake(db, srcId, { id: "old-3", imageRef: "ref/old-3", createdAt: NOW - 1000 });
+
+      const row = await service.startBake(srcId);
+      builder.setState(builder.buildIds[0], { state: "failed", error: "no space left on device" });
+      await service.syncActiveBuilds();
+
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
+      expect(updated.status).toBe("failed");
+      // The oldest pushed bake falls outside the keep-newest-2 window and must
+      // still be deleted from the registry, even though this bake failed.
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).toContain("ref/old-1");
+    });
   });
 
   describe("start() orphan sweep (ported)", () => {

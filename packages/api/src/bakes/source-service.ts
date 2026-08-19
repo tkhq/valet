@@ -844,6 +844,16 @@ export class SourceService {
           .update(bakes)
           .set({ status: "failed", error: status.error ?? null, logTail: status.logTail ?? null, finishedAt: this.now() })
           .where(eq(bakes.id, row.id));
+        // Retention must run on failure too. A registry at ENOSPC fails
+        // every push; when retention only ran on the pushed transition, a
+        // full registry could never drain itself (agents-dev, 2026-08-19).
+        try {
+          await this.applyRetention(row.sourceId, builder.backend);
+          const src = (await this.db.select().from(imageSources).where(eq(imageSources.id, row.sourceId)).limit(1))[0];
+          if (src) await this.enforceCacheCeiling(src.orgId, builder.backend);
+        } catch (err) {
+          console.warn(`bake retention after failed push (source ${row.sourceId}):`, err);
+        }
       }
     }
   }
