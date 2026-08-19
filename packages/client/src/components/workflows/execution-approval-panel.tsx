@@ -69,7 +69,7 @@ export function ExecutionApprovalPanel({
         <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-100">
           🚨 {resolvedTitle}
         </h3>
-        <Badge variant="destructive" className="font-semibold text-xs">{pending.length} pending</Badge>
+        <Badge variant="error" className="font-semibold text-xs">{pending.length} pending</Badge>
       </div>
       <div className="space-y-3">
         {pending.map((approval) => (
@@ -160,7 +160,7 @@ export function ExecutionApprovalCard({ executionId, approval }: { executionId: 
           )}
           {/* FIX: Approval Gate Notifications - Add urgency indicator for pending approvals */}
           {isPending && (
-            <Badge variant="destructive" className="text-[9px] py-0.5 px-1.5">
+            <Badge variant="error" className="text-[9px] py-0.5 px-1.5">
               pending
             </Badge>
           )}
