@@ -21,6 +21,7 @@ import {
 import type { AppEnv } from "../env.js";
 import { hasOpenDirect } from "../channels/host.js";
 import {
+  CODE_TTL_MS,
   identityForUser,
   mintLinkCode,
   setNotifyAttention,
@@ -42,7 +43,9 @@ import type {
 
 export const identityLinksRouter = new Hono<AppEnv>();
 
-const START_LINK_TTL_SECONDS = 600;
+// Derived, not declared: the enforced TTL lives with mint/consume in
+// channels/identity-links.ts, so the advertised expiry cannot drift from it.
+const START_LINK_TTL_SECONDS = CODE_TTL_MS / 1000;
 
 /** Builds a map from provider key to declaration for all declaring plugins. */
 function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDeclaration> {
@@ -53,10 +56,15 @@ function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDecla
   return map;
 }
 
-/** True when `POST .../deliver` can work: the plugin declares the DM text
- * and the running transport can resolve a member by email. */
+/** True when `POST .../deliver` can work: the plugin declares the anchor DM
+ * and the reply builder, and the running transport can resolve a member by
+ * email. */
 function canDeliverCode(decl: IdentityLinkDeclaration, transport: ChannelTransport | null): boolean {
-  return decl.deliveryDm !== undefined && typeof transport?.lookupUserByEmail === "function";
+  return (
+    decl.deliveryDm !== undefined &&
+    decl.deliveryReply !== undefined &&
+    typeof transport?.lookupUserByEmail === "function"
+  );
 }
 
 identityLinksRouter.get("/", async (c) => {
@@ -135,20 +143,25 @@ identityLinksRouter.post("/:provider/start", async (c) => {
 });
 
 /**
- * POST `/:provider/deliver` — the "DM me the code" flow. With no body, it
- * resolves the caller in the provider workspace by their Valet email. With
+ * POST `/:provider/deliver` — the "DM me" flow. With no body, it resolves
+ * the caller in the provider workspace by their Valet email. With
  * `{ externalId }` (the "find me by name" fallback), it DMs the member the
- * caller picked from `GET .../members`. Either way it mints a link code and
- * DMs the provider's `deliveryDm` text. The user completes the link the
- * same way as the show-code flow: they send `link <code>` to the bot — the
- * DM just puts that line one reply away.
+ * caller picked from `GET .../members`. Either way it mints a link code,
+ * returns it in the authenticated response, and DMs the provider's static
+ * `deliveryDm` anchor. The user completes the link the same way as the
+ * show-code flow: they send `link <code>` to the bot — the DM marks the
+ * conversation to reply in.
  *
- * Sending to a picked member is safe because the DM alone links nothing:
- * the link happens only when the recipient replies from their own account,
- * and the `deliveryDm` text tells an unexpecting recipient to ignore it.
+ * The DM must never carry the code. The proof the link flow rests on is
+ * that only the authenticated web session knows the code, so whoever sends
+ * it from a provider account owns both. A code in the DM collapses that to
+ * bot→user→bot, and a DM to a picked member becomes a one-reply takeover:
+ * the replier's account would link to the CALLER's Valet user. With the
+ * anchor-only DM, a picked recipient holds no code, so a bare reply links
+ * nothing, and the text tells an unexpecting recipient to ignore it.
  *
  * Outcomes:
- * - 200 `DeliverIdentityLinkResponse` — DM sent; body echoes the exact text.
+ * - 200 `DeliverIdentityLinkResponse` — DM sent; body carries the code.
  * - 202 `{ reason: "email_not_in_workspace" }` — the email names nobody;
  *   the client falls back to member search or show-code. Not an error.
  * - 400 — bad body, or the bot is missing a lookup scope (an admin can fix it).
@@ -173,8 +186,13 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     );
   }
   const transport = channelHost.transportFor(provider);
-  const deliveryDm = decl.deliveryDm;
-  if (transport === null || deliveryDm === undefined || typeof transport.lookupUserByEmail !== "function") {
+  const { deliveryDm, deliveryReply } = decl;
+  if (
+    transport === null ||
+    deliveryDm === undefined ||
+    deliveryReply === undefined ||
+    typeof transport.lookupUserByEmail !== "function"
+  ) {
     return c.json(
       { error: `${provider} does not support code delivery by DM. Use the show-code flow instead.` },
       404,
@@ -225,7 +243,6 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
   }
 
   const code = await mintLinkCode(db, user.id, provider);
-  const messageText = deliveryDm({ code });
   try {
     // Same default key shape as ChannelHost.attentionDeliverer: a transport
     // without openDirectConversation (Telegram) addresses a user by
@@ -233,7 +250,10 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     const conversationKey = hasOpenDirect(transport)
       ? await transport.openDirectConversation(match.externalId)
       : `${provider}:dm:${match.externalId}`;
-    await transport.send(conversationKey, { markdown: messageText });
+    // The DM is the codeless anchor (see IdentityLinkDeclaration.deliveryDm).
+    // The code goes only into this authenticated response — the user
+    // carrying it into the chat is the ownership proof the link flow rests on.
+    await transport.send(conversationKey, { markdown: deliveryDm });
   } catch (err) {
     // The minted code is now unreachable, and that is fine: it is stored as
     // a hash, expires in ten minutes, and the next mint for this user +
@@ -251,8 +271,8 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     delivered: true,
     externalId: match.externalId,
     displayName: match.displayName,
-    messageText,
     code,
+    replyText: deliveryReply({ code }),
     expiresInSeconds: START_LINK_TTL_SECONDS,
   };
   return c.json(resp);

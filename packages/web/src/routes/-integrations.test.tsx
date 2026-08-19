@@ -1038,35 +1038,56 @@ describe("IntegrationsPage — org-provided pairing", () => {
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
   });
 
-  it("offers 'DM me the code' when the provider reports codeDelivery", () => {
+  it("offers 'DM me on Slack' when the provider reports codeDelivery", () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: true })] };
     render(<IntegrationsPage />);
 
-    expect(screen.getByRole("button", { name: "DM me the Slack link code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "DM me on Slack" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Find my Slack account by name" })).toBeTruthy();
     // The show-code flow is a fallback, never a third button.
     expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
   });
 
-  it("DMing the code echoes the exact DM text, the recipient, and the expiry", async () => {
+  it("after the DM, the card shows the recipient, the exact reply line, and the expiry", async () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true })] };
     deliverLinkMutateAsync.mockResolvedValue({
       delivered: true,
       externalId: "U777",
       displayName: "conner",
-      messageText: "To link this Slack account to Valet, reply with:\n`link VLT-1234`",
       code: "VLT-1234",
+      replyText: "link VLT-1234",
       expiresInSeconds: 600,
     });
     render(<IntegrationsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
     await waitFor(() => expect(screen.getByText(/We DMed/)).toBeTruthy());
     expect(deliverLinkMutateAsync).toHaveBeenCalledWith({ provider: "slack", member: undefined });
     expect(screen.getByText("@conner")).toBeTruthy();
-    expect(screen.getByText(/reply with:/)).toBeTruthy();
+    // The full copyable reply line, not a bare code the transport ignores.
+    expect(screen.getByText("link VLT-1234")).toBeTruthy();
+    expect(screen.getByText(/the DM never contains it/)).toBeTruthy();
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
+  });
+
+  it("clears the reply line and stops waiting once the code expires", async () => {
+    identityLinksData = { links: [slackLink({ codeDelivery: true })] };
+    deliverLinkMutateAsync.mockResolvedValue({
+      delivered: true,
+      externalId: "U777",
+      displayName: "conner",
+      code: "VLT-1234",
+      replyText: "link VLT-1234",
+      expiresInSeconds: 1,
+    });
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
+    await waitFor(() => expect(screen.getByText("link VLT-1234")).toBeTruthy());
+
+    await waitFor(() => expect(screen.queryByText("link VLT-1234")).toBeNull(), { timeout: 3000 });
+    expect(screen.getByText("The code expired. Start again.")).toBeTruthy();
   });
 
   it("falls back to member search on 202, and picking a member DMs that account", async () => {
@@ -1075,7 +1096,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     linkMembersData = { members: [{ externalId: "U888", displayName: "Pat", handle: "pat" }] };
     render(<IntegrationsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
     await waitFor(() => expect(screen.getByText(/Pick yourself from the list/)).toBeTruthy());
     fireEvent.change(screen.getByLabelText("Search Slack members"), { target: { value: "pat" } });
@@ -1086,8 +1107,8 @@ describe("IntegrationsPage — org-provided pairing", () => {
       delivered: true,
       externalId: "U888",
       displayName: "Pat",
-      messageText: "reply with `link X`",
       code: "X",
+      replyText: "link X",
       expiresInSeconds: 600,
     });
     fireEvent.click(screen.getByText("Pat"));
@@ -1114,7 +1135,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     });
     render(<IntegrationsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
     await waitFor(() => expect(screen.getByText("VLT-9999")).toBeTruthy());
     expect(screen.getByText(/Could not send the slack DM/)).toBeTruthy();
@@ -1130,7 +1151,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     });
     render(<IntegrationsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "DM me the Slack link code" }));
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
     await waitFor(() => expect(screen.getByText("VLT-1234")).toBeTruthy());
     expect(screen.getByText(/Use the code below instead/)).toBeTruthy();

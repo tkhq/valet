@@ -2305,18 +2305,20 @@ export interface DeliverIdentityLinkRequest {
 }
 
 /** 200 body of `POST /api/me/identity-links/:provider/deliver`: the bot DMed
- * the caller a link code. `messageText` is the exact DM, byte-identical, so
- * the card can show the user what to look for — and, if the DM never
- * arrives, the flow still completes from `code` via the show-code path. */
+ * the target account an anchor message. The DM carries NO code — `code`
+ * exists only in this authenticated response, and the user carries it into
+ * the chat themselves. That trip is the ownership proof. */
 export interface DeliverIdentityLinkResponse {
   delivered: true;
   /** Provider-side account the DM went to (Slack: the `U…` user id). */
   externalId: string;
   displayName?: string;
-  /** The exact DM the bot sent. */
-  messageText: string;
-  /** The same code the DM carries, for the show-code fallback. */
+  /** The code to send back to the bot. Shown only here, never DMed. */
   code: string;
+  /** The exact reply to send back (Slack: `link <code>` with the real
+   * code). The card renders it verbatim as one copyable line; the
+   * transport's parser accepts it unchanged. */
+  replyText: string;
   expiresInSeconds: number;
 }
 

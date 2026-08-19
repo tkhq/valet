@@ -7,10 +7,13 @@
  * through the identity-link code flow. Two ways in when the provider can
  * DM (`codeDelivery`):
  *
- *   DM me the code   → `POST /api/me/identity-links/:provider/deliver`. The
+ *   DM me on <title> → `POST /api/me/identity-links/:provider/deliver`. The
  *                      server finds the member by their Valet email and DMs
- *                      them the code. The card echoes the exact DM text so
- *                      the user knows what to look for.
+ *                      them a codeless anchor message; the card shows the
+ *                      exact reply line (`replyText`) to send back. The code
+ *                      stays in the authenticated session — carrying it into
+ *                      the chat is the ownership proof, so the DM must never
+ *                      hold it.
  *   Find me by name  → `GET .../members` typeahead; picking a member DMs
  *                      that account. For users whose provider email differs
  *                      from their Valet email. Requires `memberSearch`.
@@ -22,15 +25,15 @@
  * the provider has no member directory.
  *
  * The block renders only for providers `GET /api/me/identity-links` lists,
- * i.e. plugins that declare `identityLink`. Once a code is out (shown or
- * DMed), the block polls the link list so the tile flips to "Linked" the
- * moment the user completes the flow in the provider app.
+ * i.e. plugins that declare `identityLink`. Once a code is out, the block
+ * polls the link list so the tile flips to "Linked" the moment the user
+ * completes the flow in the provider app.
  *
  * The same flow lives on Settings → Connected accounts (`LinkAccountCard`)
  * with notify controls; this block is the tile-sized version so the
  * integrations page offers the pairing where members look for it.
  */
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   DeliverIdentityLinkResponse,
   IdentityLinkStatus,
@@ -77,6 +80,30 @@ function ExpiryLine({ seconds }: { seconds: number }) {
     <p className="text-xs text-muted">
       The code expires in {minutes} {minutes === 1 ? "minute" : "minutes"}.
     </p>
+  );
+}
+
+/** The one panel both waiting states render: the value to send (a code or a
+ * full reply line), an optional note, and the expiry. One component so the
+ * DM path and the show-code path cannot drift apart. */
+function CodePanel({
+  intro,
+  value,
+  note,
+  expiresInSeconds,
+}: {
+  intro?: ReactNode;
+  value: string;
+  note?: string;
+  expiresInSeconds: number;
+}) {
+  return (
+    <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3">
+      {intro}
+      <p className="break-all font-mono text-xs text-ink">{value}</p>
+      {note !== undefined && <p className="text-xs leading-relaxed text-muted">{note}</p>}
+      <ExpiryLine seconds={expiresInSeconds} />
+    </div>
   );
 }
 
@@ -166,6 +193,20 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   // completes the flow in the provider app.
   const awaitingReply = !link.linked && (pendingLink !== null || delivery !== null);
   useIdentityLinks(awaitingReply ? { refetchInterval: 3000 } : undefined);
+
+  // Codes die after expiresInSeconds. Clear the waiting state then: it stops
+  // the poll (an abandoned visible tab would otherwise poll forever) and
+  // removes a code the bot no longer accepts from the screen.
+  const expiresInSeconds = delivery?.expiresInSeconds ?? pendingLink?.expiresInSeconds;
+  useEffect(() => {
+    if (expiresInSeconds === undefined) return;
+    const timer = setTimeout(() => {
+      setDelivery(null);
+      setPendingLink(null);
+      setStartError("The code expired. Start again.");
+    }, expiresInSeconds * 1000);
+    return () => clearTimeout(timer);
+  }, [expiresInSeconds, delivery, pendingLink]);
 
   if (link.linked) {
     return (
@@ -260,11 +301,11 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
             <>
               <Button
                 size="sm"
-                aria-label={`DM me the ${title} link code`}
+                aria-label={`DM me on ${title}`}
                 disabled={busy}
                 onClick={() => void deliverTo()}
               >
-                {deliver.isPending ? "Sending…" : "DM me the code"}
+                {deliver.isPending ? "Sending…" : `DM me on ${title}`}
               </Button>
               {link.memberSearch && (
                 <Button
@@ -293,27 +334,27 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
       {startError && <p className="text-xs text-danger-500">{startError}</p>}
       {fallbackNote && <p className="text-xs leading-relaxed text-muted">{fallbackNote}</p>}
       {delivery && (
-        <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3">
-          <p className="text-xs leading-relaxed text-muted">
-            We DMed{" "}
-            <span className="font-medium text-ink">
-              {delivery.displayName ? `@${delivery.displayName}` : "you"}
-            </span>{" "}
-            on {title}. Reply with the <span className="font-mono">link</span> line to finish.
-            The exact message:
-          </p>
-          <p className="whitespace-pre-wrap break-words font-mono text-xs text-ink">
-            {delivery.messageText}
-          </p>
-          <ExpiryLine seconds={delivery.expiresInSeconds} />
-        </div>
+        <CodePanel
+          intro={
+            <p className="text-xs leading-relaxed text-muted">
+              We DMed{" "}
+              <span className="font-medium text-ink">
+                {delivery.displayName ? `@${delivery.displayName}` : "you"}
+              </span>{" "}
+              on {title}. Reply to that message with exactly this line — the DM never contains
+              it:
+            </p>
+          }
+          value={delivery.replyText}
+          expiresInSeconds={delivery.expiresInSeconds}
+        />
       )}
       {pendingLink && (
-        <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3">
-          <p className="break-all font-mono text-xs text-ink">{pendingLink.code}</p>
-          <p className="text-xs leading-relaxed text-muted">{pendingLink.instructions}</p>
-          <ExpiryLine seconds={pendingLink.expiresInSeconds} />
-        </div>
+        <CodePanel
+          value={pendingLink.code}
+          note={pendingLink.instructions}
+          expiresInSeconds={pendingLink.expiresInSeconds}
+        />
       )}
     </div>
   );
