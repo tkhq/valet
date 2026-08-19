@@ -3,7 +3,10 @@ import { and, eq, lt, or } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { identityLinkCodes, userIdentityLinks } from "../schema/index.js";
 
-const CODE_TTL_MS = 10 * 60_000;
+/** Enforced link-code lifetime. The single source: the routes derive the
+ * advertised `expiresInSeconds` from it, and the Slack plugin's DM copy is
+ * asserted against it in identity-links.test.ts. */
+export const CODE_TTL_MS = 10 * 60_000;
 
 function hashCode(code: string): string {
   return createHash("sha256").update(code).digest("hex");

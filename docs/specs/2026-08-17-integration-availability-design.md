@@ -158,12 +158,16 @@ disconnect), but sessions stop receiving the tools.
   - **DM me on <provider>** (`codeDelivery`) — `POST
     /api/me/identity-links/:provider/deliver` resolves the caller in the
     workspace by their Valet email (Slack: `users.lookupByEmail`, needs the
-    `users:read.email` bot scope), mints the code, returns it in the
-    authenticated response, and DMs the plugin's static `deliveryDm`
-    anchor. The DM never carries the code: only the authenticated session
-    knows it, and the user carrying it into the chat is the ownership
-    proof. A 202 (`email_not_in_workspace`) falls back to member search
-    when available, else to the show-code flow.
+    `users:read.email` bot scope), mints the code, and DMs the plugin's
+    static `deliveryDm` anchor. The DM never carries the code: only the
+    authenticated session knows it, and the user carrying it into the chat
+    is the ownership proof. The response returns `replyText` — the exact
+    reply the plugin's `deliveryReply(code)` builds (Slack: `link <code>`
+    with the real code) — and the card renders it as one copyable line, so
+    the user never has to assemble the command. A 202
+    (`email_not_in_workspace`) falls back to member search when available,
+    else to the show-code flow. When the code's TTL elapses, the card
+    clears the waiting state and stops polling.
   - **Find me by name** (`memberSearch`) — `GET .../members?query=` is a
     workspace typeahead; picking a member POSTs `deliver` with that
     `externalId`. Safe because the anchor DM holds no code: a picked

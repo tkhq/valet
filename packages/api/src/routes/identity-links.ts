@@ -21,6 +21,7 @@ import {
 import type { AppEnv } from "../env.js";
 import { hasOpenDirect } from "../channels/host.js";
 import {
+  CODE_TTL_MS,
   identityForUser,
   mintLinkCode,
   setNotifyAttention,
@@ -42,7 +43,9 @@ import type {
 
 export const identityLinksRouter = new Hono<AppEnv>();
 
-const START_LINK_TTL_SECONDS = 600;
+// Derived, not declared: the enforced TTL lives with mint/consume in
+// channels/identity-links.ts, so the advertised expiry cannot drift from it.
+const START_LINK_TTL_SECONDS = CODE_TTL_MS / 1000;
 
 /** Builds a map from provider key to declaration for all declaring plugins. */
 function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDeclaration> {
@@ -53,10 +56,15 @@ function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDecla
   return map;
 }
 
-/** True when `POST .../deliver` can work: the plugin declares the DM text
- * and the running transport can resolve a member by email. */
+/** True when `POST .../deliver` can work: the plugin declares the anchor DM
+ * and the reply builder, and the running transport can resolve a member by
+ * email. */
 function canDeliverCode(decl: IdentityLinkDeclaration, transport: ChannelTransport | null): boolean {
-  return decl.deliveryDm !== undefined && typeof transport?.lookupUserByEmail === "function";
+  return (
+    decl.deliveryDm !== undefined &&
+    decl.deliveryReply !== undefined &&
+    typeof transport?.lookupUserByEmail === "function"
+  );
 }
 
 identityLinksRouter.get("/", async (c) => {
@@ -178,8 +186,13 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     );
   }
   const transport = channelHost.transportFor(provider);
-  const deliveryDm = decl.deliveryDm;
-  if (transport === null || deliveryDm === undefined || typeof transport.lookupUserByEmail !== "function") {
+  const { deliveryDm, deliveryReply } = decl;
+  if (
+    transport === null ||
+    deliveryDm === undefined ||
+    deliveryReply === undefined ||
+    typeof transport.lookupUserByEmail !== "function"
+  ) {
     return c.json(
       { error: `${provider} does not support code delivery by DM. Use the show-code flow instead.` },
       404,
@@ -230,10 +243,6 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
   }
 
   const code = await mintLinkCode(db, user.id, provider);
-  // The DM is a codeless anchor (see IdentityLinkDeclaration.deliveryDm).
-  // The code goes only into this authenticated response — the user carrying
-  // it into the chat is the ownership proof the link flow rests on.
-  const messageText = deliveryDm;
   try {
     // Same default key shape as ChannelHost.attentionDeliverer: a transport
     // without openDirectConversation (Telegram) addresses a user by
@@ -241,7 +250,10 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     const conversationKey = hasOpenDirect(transport)
       ? await transport.openDirectConversation(match.externalId)
       : `${provider}:dm:${match.externalId}`;
-    await transport.send(conversationKey, { markdown: messageText });
+    // The DM is the codeless anchor (see IdentityLinkDeclaration.deliveryDm).
+    // The code goes only into this authenticated response — the user
+    // carrying it into the chat is the ownership proof the link flow rests on.
+    await transport.send(conversationKey, { markdown: deliveryDm });
   } catch (err) {
     // The minted code is now unreachable, and that is fine: it is stored as
     // a hash, expires in ten minutes, and the next mint for this user +
@@ -260,7 +272,7 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     externalId: match.externalId,
     displayName: match.displayName,
     code,
-    instructions: decl.instructions,
+    replyText: deliveryReply({ code }),
     expiresInSeconds: START_LINK_TTL_SECONDS,
   };
   return c.json(resp);

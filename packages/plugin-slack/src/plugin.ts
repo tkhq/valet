@@ -18,15 +18,24 @@ const plugin: ValetPlugin = {
   identityLink: {
     provider: "slack",
     instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-    // The anchor DM for the "DM me" flow. It carries NO code — the code is
+    // The anchor DM for the "DM me" flow. It carries NO code and no
+    // code-shaped token — the exact reply line (deliveryReply below) is
     // shown only on the authenticated Valet card, and the user carries it
-    // into this DM (`link <code>`, the same command LINK_COMMAND_RE in
-    // transport.ts parses). That trip is the ownership proof; a code in
-    // this message would let a reply link an account the replier never
-    // asked to link. The ignore-notice matters for the same reason: the
-    // deliver endpoint can DM a member the caller picked by name.
+    // into this DM. That trip is the ownership proof; a code in this
+    // message would let a reply link an account the replier never asked to
+    // link. The ignore-notice matters for the same reason: the deliver
+    // endpoint can DM a member the caller picked by name. Plain prose
+    // only: backticks and angle brackets would hit the mrkdwn code-span
+    // path, which restores span content to Slack unescaped.
+    // The "10 minutes" copy must match the api's CODE_TTL_MS
+    // (packages/api/src/channels/identity-links.ts) — asserted in
+    // packages/api/src/routes/identity-links.test.ts.
     deliveryDm:
-      "To link this Slack account to Valet, reply to this message with: `link <code>` — your code is shown in Valet. The code expires in 10 minutes. If you did not ask Valet to link an account, ignore this message.",
+      "To link this Slack account to Valet, reply to this message with the command shown in Valet. The command expires in 10 minutes. If you did not ask Valet to link an account, ignore this message.",
+    // The exact reply the card shows next to the anchor DM note. Never
+    // DMed. Must stay parseable by LINK_COMMAND_RE (transport.ts) —
+    // asserted in plugin.test.ts.
+    deliveryReply: ({ code }) => `link ${code}`,
   },
   credentials: [
     {

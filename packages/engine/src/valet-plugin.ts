@@ -411,16 +411,27 @@ export interface IdentityLinkDeclaration {
   deepLink?: (ctx: { botUsername: string | null; code: string }) => string | null;
   /**
    * The anchor DM the bot sends in the "DM me" flow. It MUST NOT contain
-   * the link code. The code is returned only in the authenticated web
-   * response, and the user carries it into the chat themselves — that trip
-   * IS the ownership proof (web session + provider account). A code in the
-   * DM would collapse it to bot→user→bot, and a DM sent to a picked member
-   * would become a one-reply account takeover. Tell the reader the reply
-   * shape (e.g. `link <code>`), the ten-minute expiry, and to ignore the
-   * message if they did not ask for it. Meaningful only for providers
-   * whose transport implements `lookupUserByEmail`.
+   * the link code or any code-shaped token. The code is returned only in
+   * the authenticated web response, and the user carries it into the chat
+   * themselves — that trip IS the ownership proof (web session + provider
+   * account). A code in the DM would collapse it to bot→user→bot, and a DM
+   * sent to a picked member would become a one-reply account takeover.
+   * Point the reader at the command shown in the web UI, name the expiry
+   * window, and tell an unexpecting recipient to ignore the message. Keep
+   * it plain prose: no backticks or angle brackets — the mrkdwn path
+   * restores code spans unescaped, so a `<` inside one reaches Slack raw.
+   * Meaningful only for providers whose transport implements
+   * `lookupUserByEmail`; the deliver flow also needs `deliveryReply`.
    */
   deliveryDm?: string;
+  /**
+   * Build the exact reply the user sends back after the anchor DM (Slack:
+   * `link ${code}`). Shown ONLY in the authenticated web response — never
+   * sent to the provider — so embedding the code here is safe and is the
+   * point: the card renders one copyable line the transport's parser
+   * accepts verbatim.
+   */
+  deliveryReply?: (ctx: { code: string }) => string;
 }
 
 /**
@@ -768,6 +779,12 @@ export function validateValetPlugin(
       }
       if (link.deepLink !== undefined && typeof link.deepLink !== "function") {
         issues.push({ path: "identityLink.deepLink", message: "must be a function when present" });
+      }
+      if (link.deliveryDm !== undefined && (typeof link.deliveryDm !== "string" || link.deliveryDm === "")) {
+        issues.push({ path: "identityLink.deliveryDm", message: "must be a non-empty string when present" });
+      }
+      if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {
+        issues.push({ path: "identityLink.deliveryReply", message: "must be a function when present" });
       }
     }
   }

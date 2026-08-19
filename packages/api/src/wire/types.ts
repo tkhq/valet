@@ -2315,8 +2315,10 @@ export interface DeliverIdentityLinkResponse {
   displayName?: string;
   /** The code to send back to the bot. Shown only here, never DMed. */
   code: string;
-  /** How to deliver the code — the plugin's identityLink.instructions. */
-  instructions: string;
+  /** The exact reply to send back (Slack: `link <code>` with the real
+   * code). The card renders it verbatim as one copyable line; the
+   * transport's parser accepts it unchanged. */
+  replyText: string;
   expiresInSeconds: number;
 }
 

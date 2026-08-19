@@ -461,7 +461,8 @@ function deliverySlackPlugin(): { plugin: ValetPlugin; transport: FakeDeliverySl
     identityLink: {
       provider: "slack",
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-      deliveryDm: "Reply to this message with: `link <code>` — your code is shown in Valet.",
+      deliveryDm: "Reply to this message with the command shown in Valet.",
+      deliveryReply: ({ code }) => `link ${code}`,
     },
   };
   return { plugin, transport };
@@ -516,7 +517,7 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     expect(booted.transport.sent).toHaveLength(0);
   });
 
-  it("200s, DMs the codeless anchor, and returns the code only in the response", async () => {
+  it("200s, DMs the codeless anchor, and returns the code + reply line only in the response", async () => {
     const booted = await bootWithDeliverySlack();
     api = booted.api;
     // The local-auth stub user is local-user <local@dev>.
@@ -529,14 +530,15 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
       delivered: true,
       externalId: "U777",
       displayName: "conner",
-      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
       expiresInSeconds: 600,
     });
+    // The card's copyable line carries the real code, built by deliveryReply.
+    expect(body.replyText).toBe(`link ${body.code}`);
     // The DM is the declared anchor and MUST NOT contain the code — the
     // code travelling web → user → chat is the ownership proof.
     expect(booted.transport.sent).toHaveLength(1);
     expect(booted.transport.sent[0]?.message.markdown).toBe(
-      "Reply to this message with: `link <code>` — your code is shown in Valet.",
+      "Reply to this message with the command shown in Valet.",
     );
     expect(booted.transport.sent[0]?.message.markdown).not.toContain(body.code);
     // The DM went to the opened direct conversation, not a guessed key.
@@ -544,6 +546,34 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     // The response's code is the minted one — consuming it links the user.
     const consumed = await consumeLinkCode(api.providers.db, "slack", body.code);
     expect(consumed).toMatchObject({ userId: "local-user" });
+  });
+
+  it("advertises codeDelivery:false and 404s deliver when deliveryReply is missing", async () => {
+    const transport = new FakeDeliverySlackTransport();
+    const plugin: ValetPlugin = {
+      name: "slack-user",
+      version: "0",
+      transports: [{ channelType: "slack", create: () => transport }],
+      identityLink: {
+        provider: "slack",
+        instructions: "In Slack, open a DM with the Valet app and send: link <code>",
+        deliveryDm: "Reply with the command shown in Valet.",
+        // deliveryReply deliberately absent — delivery must be off.
+      },
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token",
+      accessToken: "slack-test-token",
+    });
+    await api.providers.channelHost.start();
+
+    const list = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    const listBody = (await list.json()) as ListIdentityLinksResponse;
+    expect(listBody.links.find((l) => l.provider === "slack")).toMatchObject({ codeDelivery: false });
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
+    expect(res.status).toBe(404);
   });
 
   it("400s with the corrective action when the bot lacks the lookup scope", async () => {
@@ -696,5 +726,20 @@ describe("GET /api/me/identity-links/:provider/members", () => {
     const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/members?query=pat`);
     const body = (await res.json()) as { members: Array<{ externalId: string }> };
     expect(body.members.map((m) => m.externalId)).toEqual(["U888"]);
+  });
+});
+
+// ── TTL copy stays honest ────────────────────────────────────────────────────
+
+import { CODE_TTL_MS } from "../channels/identity-links.js";
+import realSlackPlugin from "@valet/plugin-slack/plugin";
+
+describe("link-code TTL copy", () => {
+  it("the slack anchor DM names the same expiry CODE_TTL_MS enforces", () => {
+    // The DM string is static by design (no per-request data may flow into
+    // it), so this assertion is the tripwire that catches a TTL tune the
+    // copy missed.
+    const minutes = CODE_TTL_MS / 60_000;
+    expect(realSlackPlugin.identityLink?.deliveryDm).toContain(`${minutes} minutes`);
   });
 });
