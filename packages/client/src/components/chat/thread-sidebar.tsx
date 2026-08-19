@@ -15,12 +15,6 @@ import { getChannelIcon } from '@valet/sdk/ui';
 import type { SessionThread } from '@/api/types';
 import { cn } from '@/lib/cn';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import {
   backendIgnoredBucketFilter,
   DEFAULT_THREAD_ORIGIN_BUCKET,
   filterThreadsByBucket,
@@ -341,7 +335,6 @@ function ThreadItem({
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
-  const [menuOpen, setMenuOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const savedRef = useRef(false);
   const renameThread = useRenameThread(sessionId);
@@ -367,15 +360,6 @@ function ThreadItem({
     }
     setIsEditing(false);
   }, [editValue, thread.title, thread.id, renameThread]);
-
-  const handleMenuKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // Handle 'A' or 'a' key to archive when menu is open
-    if (e.key === 'A' || e.key === 'a') {
-      e.preventDefault();
-      onDismiss?.();
-      setMenuOpen(false);
-    }
-  }, [onDismiss]);
 
   if (isEditing) {
     return (
@@ -433,30 +417,14 @@ function ThreadItem({
         <PencilIcon className="h-2.5 w-2.5" />
       </span>
       {onDismiss && (
-        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-          <DropdownMenuTrigger asChild>
-            <span
-              role="button"
-              onClick={(e) => { e.stopPropagation(); }}
-              className="shrink-0 rounded p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-neutral-200 hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-300"
-              title="Thread options"
-            >
-              <EllipsisIcon className="h-2.5 w-2.5" />
-            </span>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40" onKeyDown={handleMenuKeyDown}>
-            <DropdownMenuItem
-              onClick={(e) => {
-                e.stopPropagation();
-                onDismiss();
-                setMenuOpen(false);
-              }}
-            >
-              <span className="flex-1">Archive</span>
-              <span className="text-[10px] text-neutral-400 dark:text-neutral-500">A</span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <span
+          role="button"
+          tabIndex={-1}
+          onClick={(e) => { e.stopPropagation(); onDismiss(); }}
+          className="shrink-0 rounded p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-neutral-200 hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-300"
+        >
+          <XIcon className="h-2.5 w-2.5" />
+        </span>
       )}
     </button>
   );
@@ -1085,16 +1053,6 @@ function BellIcon({ className }: { className?: string }) {
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M10.268 21a2 2 0 0 0 3.464 0" />
       <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />
-    </svg>
-  );
-}
-
-function EllipsisIcon({ className }: { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <circle cx="12" cy="12" r="1" />
-      <circle cx="19" cy="12" r="1" />
-      <circle cx="5" cy="12" r="1" />
     </svg>
   );
 }
