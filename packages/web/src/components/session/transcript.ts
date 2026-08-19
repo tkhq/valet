@@ -8,6 +8,7 @@
  * the button component wraps `buildTranscript` + a clipboard write.
  */
 import type { Message, PromptImageAttachment, SessionDetail } from "@valet/api/wire";
+import { formatBytes } from "~/lib/format-bytes";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 
 export interface TranscriptContext {
@@ -68,13 +69,6 @@ function shortenAttachmentUrls(m: Message): Message {
     return { ...a, url: `${a.url.slice(0, 80)}… [${a.url.length} chars]` };
   });
   return { ...m, attachments: short };
-}
-
-/** Short byte-size label for the transcript's attachments summary. */
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
 }
 
 function renderMessage(m: Message, index: number): string {

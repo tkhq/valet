@@ -425,39 +425,25 @@ export async function submitSessionPrompt(
   // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
   //   requested thread, text unchanged.
   const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
-  
-  // Build the prompt content: text alone or text + attachments.
-  const promptContent = attachments && attachments.length > 0
-    ? {
-        text,
-        attachments: attachments.map(att => ({
+
+  // Build the prompt content once per text variant: plain text, or text +
+  // attachments. The expand path swaps only the text; the attachment
+  // mapping must stay identical on both paths.
+  const mappedAttachments =
+    attachments && attachments.length > 0
+      ? attachments.map((att) => ({
           type: "image" as const,
           url: att.url,
           mimeType: att.mimeType,
           name: att.name,
-        })),
-      }
-    : text;
+        }))
+      : undefined;
+  const withAttachments = (t: string) => (mappedAttachments ? { text: t, attachments: mappedAttachments } : t);
 
   const receipt =
     outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(promptContent, { threadId: thread.id })
-      : await thread.submitPrompt(
-          outcome?.kind === "expand"
-            ? attachments && attachments.length > 0
-              ? {
-                  text: outcome.text,
-                  attachments: attachments.map(att => ({
-                    type: "image" as const,
-                    url: att.url,
-                    mimeType: att.mimeType,
-                    name: att.name,
-                  })),
-                }
-              : outcome.text
-            : promptContent,
-          {},
-        );
+      ? await engineSession.prompt(withAttachments(text), { threadId: thread.id })
+      : await thread.submitPrompt(withAttachments(outcome?.kind === "expand" ? outcome.text : text), {});
 
   await db
     .update(agentSessions)
@@ -483,6 +469,19 @@ messagesRouter.post("/:id/messages", async (c) => {
   }
   if (!body.text || typeof body.text !== "string") {
     return c.json({ error: "text is required" }, 400);
+  }
+  if (body.attachments !== undefined) {
+    const valid =
+      Array.isArray(body.attachments) &&
+      body.attachments.every(
+        (a) => a !== null && typeof a === "object" && typeof a.url === "string" && typeof a.mimeType === "string",
+      );
+    if (!valid) {
+      return c.json(
+        { error: "attachments must be an array of { url, mimeType } image objects. Re-attach the images and send again." },
+        400,
+      );
+    }
   }
 
   const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId, body.attachments);

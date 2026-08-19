@@ -62,6 +62,7 @@ CREATE TABLE "engine_entries" (
 	"metadata" text,
 	"usage" text,
 	"cost" text,
+	"attachments" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint

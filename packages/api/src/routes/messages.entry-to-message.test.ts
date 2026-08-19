@@ -13,14 +13,17 @@ import type { MessageEntry } from "@valet/engine";
 import { entryToMessage } from "./messages.js";
 
 function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
-  return {
+  const base: MessageEntry = {
     id: "e_1",
+    sessionId: "sess",
+    threadId: "th",
+    parentId: null,
     type: "message",
     role: "user",
     content: "look at this",
-    createdAt: "2024-01-01T00:00:00.000Z",
-    ...overrides,
-  } as MessageEntry;
+    createdAt: Date.parse("2024-01-01T00:00:00.000Z"),
+  };
+  return { ...base, ...overrides };
 }
 
 describe("entryToMessage — attachments projection", () => {

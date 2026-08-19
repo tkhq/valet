@@ -337,6 +337,7 @@ export function Composer({
     // Held images go with the message. Convert them to the wire format
     // and pass them in the request body.
     const pendingImages = images;
+    const attachments = pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined;
     setText("");
     setImages([]);
     setImageErrors([]);
@@ -344,17 +345,12 @@ export function Composer({
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
     // the server's persisted copy.
-    const localId = addUserMessage(
-      sessionId,
-      t,
-      threadId,
-      pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined,
-    );
+    const localId = addUserMessage(sessionId, t, threadId, attachments);
     try {
       const res = await send.mutateAsync({
         text: t,
         threadId,
-        attachments: pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined,
+        attachments,
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so

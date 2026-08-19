@@ -11,10 +11,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { PromptImageAttachment } from "@valet/api/wire";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
-const addUserMessage = vi.fn(() => "user-opt-1");
+// Typed with the store's real signature so `mock.calls` carries the
+// argument tuple and the assertions below need no casts.
+const addUserMessage = vi.fn(
+  (_sessionId: string, _text: string, _threadId: string, _attachments?: PromptImageAttachment[]) => "user-opt-1",
+);
 const setMessageQueueItemId = vi.fn();
 
 // importOriginal: see composer.test.tsx for why a bare replacement is
@@ -205,12 +210,12 @@ describe("Composer — image intake", () => {
     fireEvent.change(textarea, { target: { value: "look at this" } });
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
     await waitFor(() => expect(addUserMessage).toHaveBeenCalled());
-    const args = addUserMessage.mock.calls[0] as [string, string, string, unknown];
+    const args = addUserMessage.mock.calls[0];
     expect(args[0]).toBe("orchestrator:user-1");
     expect(args[1]).toBe("look at this");
     expect(args[2]).toBe("thread-1");
     expect(args[3]).toHaveLength(1);
-    expect((args[3] as Array<{ kind: string; name: string }>)[0]).toMatchObject({
+    expect(args[3]?.[0]).toMatchObject({
       kind: "image",
       name: "shot.png",
     });

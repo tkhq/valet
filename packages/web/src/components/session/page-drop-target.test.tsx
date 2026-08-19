@@ -4,9 +4,11 @@
  * form-level drop handlers: `pointer-events-none` on the overlay lets
  * drops fall through to the form, and containment against
  * `intake.ownedEl` skips our intake when the form already ate the drop.
+ * Each instance only ingests drops inside its own subtree, so two mounted
+ * SessionViews (main chat + child panel) never double-ingest one drop.
  */
 import { describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 import {
   ComposerDropContext,
@@ -15,18 +17,19 @@ import {
 } from "./composer-drop-context";
 import { PageDropTarget } from "./page-drop-target";
 
-function mountWithIntake(intake: ComposerDropIntake, children: ReactNode = null) {
+function mountWithIntake(intake: ComposerDropIntake, children: ReactNode = <p>drop body</p>) {
   const channel: ComposerDropChannel = {
     intake,
     publish: () => {
       /* not exercised here */
     },
   };
-  return render(
+  const utils = render(
     <ComposerDropContext.Provider value={channel}>
       <PageDropTarget>{children}</PageDropTarget>
     </ComposerDropContext.Provider>,
   );
+  return { ...utils, body: utils.getByText("drop body") };
 }
 
 /**
@@ -34,7 +37,7 @@ function mountWithIntake(intake: ComposerDropIntake, children: ReactNode = null)
  * `dataTransfer` payload, so build the event by hand and dispatch it.
  */
 function dispatchDrag(name: "dragenter" | "dragover" | "dragleave" | "drop", init: {
-  target?: EventTarget;
+  target: EventTarget;
   files?: File[];
   types?: string[];
 }) {
@@ -46,9 +49,7 @@ function dispatchDrag(name: "dragenter" | "dragover" | "dragleave" | "drop", ini
       dropEffect: "none",
     },
   });
-  if (init.target) {
-    Object.defineProperty(event, "target", { value: init.target });
-  }
+  Object.defineProperty(event, "target", { value: init.target });
   document.dispatchEvent(event);
   return event;
 }
@@ -58,15 +59,15 @@ function png(name: string): File {
 }
 
 describe("PageDropTarget", () => {
-  it("hands a whole-page drop to intake.addFiles", () => {
+  it("hands a drop inside its subtree to intake.addFiles", () => {
     const addFiles = vi.fn();
-    mountWithIntake({ addFiles, blocked: false, ownedEl: null });
+    const { body } = mountWithIntake({ addFiles, blocked: false, ownedEl: null });
     const file = png("dropped.png");
 
     act(() => {
-      dispatchDrag("dragenter", { files: [file] });
-      dispatchDrag("dragover", { files: [file] });
-      dispatchDrag("drop", { files: [file] });
+      dispatchDrag("dragenter", { target: body, files: [file] });
+      dispatchDrag("dragover", { target: body, files: [file] });
+      dispatchDrag("drop", { target: body, files: [file] });
     });
 
     expect(addFiles).toHaveBeenCalledTimes(1);
@@ -75,9 +76,9 @@ describe("PageDropTarget", () => {
     expect(files[0].name).toBe("dropped.png");
   });
 
-  it("shows the overlay while a file drag is over the page", () => {
+  it("shows the overlay while a file drag is over its subtree", () => {
     const addFiles = vi.fn();
-    const { getByTestId, queryByTestId } = mountWithIntake({
+    const { body, getByTestId, queryByTestId } = mountWithIntake({
       addFiles,
       blocked: false,
       ownedEl: null,
@@ -85,27 +86,49 @@ describe("PageDropTarget", () => {
 
     expect(queryByTestId("page-drop-overlay")).toBeNull();
     act(() => {
-      dispatchDrag("dragenter", { files: [png("hover.png")] });
+      dispatchDrag("dragenter", { target: body, files: [png("hover.png")] });
     });
     expect(getByTestId("page-drop-overlay")).toBeDefined();
 
     act(() => {
-      dispatchDrag("dragleave", {});
+      dispatchDrag("dragleave", { target: body });
     });
     expect(queryByTestId("page-drop-overlay")).toBeNull();
   });
 
   it("does not activate for non-file drags (text, links)", () => {
     const addFiles = vi.fn();
-    const { queryByTestId } = mountWithIntake({ addFiles, blocked: false, ownedEl: null });
+    const { body, queryByTestId } = mountWithIntake({ addFiles, blocked: false, ownedEl: null });
 
     act(() => {
-      dispatchDrag("dragenter", { types: ["text/plain"] });
-      dispatchDrag("drop", { types: ["text/plain"] });
+      dispatchDrag("dragenter", { target: body, types: ["text/plain"] });
+      dispatchDrag("drop", { target: body, types: ["text/plain"] });
     });
 
     expect(queryByTestId("page-drop-overlay")).toBeNull();
     expect(addFiles).not.toHaveBeenCalled();
+  });
+
+  it("ignores drops outside its own subtree (sibling SessionView's area)", () => {
+    const addFiles = vi.fn();
+    const { queryByTestId } = mountWithIntake({ addFiles, blocked: false, ownedEl: null });
+    // A drop that lands elsewhere in the document — e.g. inside another
+    // mounted SessionView — must not be ingested by this instance.
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+
+    let dropEvent: Event | undefined;
+    act(() => {
+      dispatchDrag("dragenter", { target: elsewhere, files: [png("other.png")] });
+      dropEvent = dispatchDrag("drop", { target: elsewhere, files: [png("other.png")] });
+    });
+
+    expect(queryByTestId("page-drop-overlay")).toBeNull();
+    expect(addFiles).not.toHaveBeenCalled();
+    // But the default action (browser navigating to the file) is still
+    // cancelled — no drop over the app may unload the SPA.
+    expect(dropEvent?.defaultPrevented).toBe(true);
+    document.body.removeChild(elsewhere);
   });
 
   it("skips intake when the drop target is inside intake.ownedEl", () => {
@@ -114,42 +137,44 @@ describe("PageDropTarget", () => {
     const owned = document.createElement("form");
     const inner = document.createElement("textarea");
     owned.appendChild(inner);
-    document.body.appendChild(owned);
 
-    mountWithIntake({ addFiles, blocked: false, ownedEl: owned });
+    const { body } = mountWithIntake({ addFiles, blocked: false, ownedEl: owned });
+    // The form lives inside this instance's subtree, like the real Composer.
+    body.appendChild(owned);
 
     act(() => {
       dispatchDrag("drop", { target: inner, files: [png("on-form.png")] });
     });
 
     expect(addFiles).not.toHaveBeenCalled();
-    document.body.removeChild(owned);
   });
 
-  it("refuses intake while blocked", () => {
+  it("refuses intake while blocked but still cancels the browser default", () => {
     const addFiles = vi.fn();
-    const { queryByTestId } = mountWithIntake({ addFiles, blocked: true, ownedEl: null });
+    const { body, queryByTestId } = mountWithIntake({ addFiles, blocked: true, ownedEl: null });
 
+    let overEvent: Event | undefined;
+    let dropEvent: Event | undefined;
     act(() => {
-      dispatchDrag("dragenter", { files: [png("x.png")] });
-      dispatchDrag("drop", { files: [png("x.png")] });
+      dispatchDrag("dragenter", { target: body, files: [png("x.png")] });
+      overEvent = dispatchDrag("dragover", { target: body, files: [png("x.png")] });
+      dropEvent = dispatchDrag("drop", { target: body, files: [png("x.png")] });
     });
 
-    // Overlay never opens for a blocked intake, and no files get through.
+    // Overlay never opens for a blocked intake, and no files get through —
+    // but the events are still cancelled so the browser doesn't navigate
+    // to the dropped file.
     expect(queryByTestId("page-drop-overlay")).toBeNull();
     expect(addFiles).not.toHaveBeenCalled();
+    expect(overEvent?.defaultPrevented).toBe(true);
+    expect(dropEvent?.defaultPrevented).toBe(true);
   });
 
   it("renders its children", () => {
     const { getByText } = mountWithIntake(
       { addFiles: () => {}, blocked: false, ownedEl: null },
-      <p>child body</p>,
+      <p>drop body</p>,
     );
-    expect(getByText("child body")).toBeDefined();
+    expect(getByText("drop body")).toBeDefined();
   });
 });
-
-// Silence: fireEvent is imported but not used inline (we go through
-// dispatchDrag). Keeping the import listed here signals intent for tests
-// added later that want React-synthetic event helpers.
-void fireEvent;

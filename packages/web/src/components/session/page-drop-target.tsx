@@ -17,6 +17,17 @@ import { cn } from "~/lib/cn";
  *   already handled the drop and we skip our own intake to avoid running
  *   the pipeline twice for the same files.
  *
+ * More than one SessionView can be mounted at once (main chat + child
+ * panel), and each mounts its own PageDropTarget. Every instance therefore
+ * only ingests drops whose target sits inside its own subtree — the
+ * `display: contents` wrapper exists purely for that containment check and
+ * is transparent to layout.
+ *
+ * The listeners still live on `document` (not the wrapper) so that a file
+ * drag ANYWHERE over the app — including blocked intake and areas outside
+ * this subtree — gets `preventDefault`. Without it the browser's default
+ * drop action navigates to the dropped file and unloads the SPA.
+ *
  * `dragenter`/`dragleave` fire for every child element the pointer crosses;
  * a single leave doesn't mean the pointer left the window. Track depth so
  * the overlay hides only when the outermost leave fires (mirrors the same
@@ -27,64 +38,69 @@ export function PageDropTarget({ children }: { children: ReactNode }) {
   const intake = channel?.intake;
   const [active, setActive] = useState(false);
   const depth = useRef(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     // No intake published yet — the effect will re-run once the composer
     // mounts and publishes, at which point the listeners attach.
     if (!intake) return;
+    const it = intake;
 
     function isFileDrag(e: DragEvent): boolean {
       return transferHasFiles(e.dataTransfer?.types);
     }
 
-    function ownedByComposer(target: EventTarget | null): boolean {
-      if (!intake || !intake.ownedEl) return false;
+    function inOwnSubtree(target: EventTarget | null): boolean {
       if (!(target instanceof Node)) return false;
-      return intake.ownedEl.contains(target);
+      return containerRef.current?.contains(target) ?? false;
+    }
+
+    function ownedByComposer(target: EventTarget | null): boolean {
+      if (!it.ownedEl) return false;
+      if (!(target instanceof Node)) return false;
+      return it.ownedEl.contains(target);
     }
 
     function onDragEnter(e: DragEvent) {
       if (!isFileDrag(e)) return;
-      if (intake!.blocked) return;
       e.preventDefault();
+      if (it.blocked || !inOwnSubtree(e.target)) return;
       depth.current += 1;
       setActive(true);
     }
 
     function onDragOver(e: DragEvent) {
       if (!isFileDrag(e)) return;
-      if (intake!.blocked) return;
       // Without preventDefault the browser refuses the drop and opens the
-      // image in a new tab.
+      // image in a new tab. Cancel unconditionally — even while blocked or
+      // over another view's subtree — so a drop never navigates away.
       e.preventDefault();
+      if (it.blocked || !inOwnSubtree(e.target)) return;
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     }
 
     function onDragLeave(e: DragEvent) {
       if (!isFileDrag(e)) return;
+      if (!inOwnSubtree(e.target)) return;
       depth.current = Math.max(0, depth.current - 1);
       if (depth.current === 0) setActive(false);
     }
 
     function onDrop(e: DragEvent) {
       if (!isFileDrag(e)) return;
-      // The composer's form-level `onDrop` handles drops that already
-      // landed on the form. Skip ours to avoid running the same files
-      // through intake twice.
-      if (ownedByComposer(e.target)) {
-        depth.current = 0;
-        setActive(false);
-        return;
-      }
-      if (intake!.blocked) {
-        depth.current = 0;
-        setActive(false);
-        return;
-      }
+      // Cancel the browser default (navigate to the file) for every file
+      // drop, including the paths below that skip intake.
       e.preventDefault();
       depth.current = 0;
       setActive(false);
-      intake!.addFiles(filesFromList(e.dataTransfer?.files));
+      // Another SessionView's subtree (or the header) — not ours to ingest.
+      if (!inOwnSubtree(e.target)) return;
+      // The composer's form-level `onDrop` handles drops that already
+      // landed on the form. Skip ours to avoid running the same files
+      // through intake twice.
+      if (ownedByComposer(e.target)) return;
+      if (it.blocked) return;
+      it.addFiles(filesFromList(e.dataTransfer?.files));
     }
 
     document.addEventListener("dragenter", onDragEnter);
@@ -100,7 +116,7 @@ export function PageDropTarget({ children }: { children: ReactNode }) {
   }, [intake]);
 
   return (
-    <>
+    <div ref={containerRef} className="contents">
       {children}
       {active && (
         <div
@@ -122,6 +138,6 @@ export function PageDropTarget({ children }: { children: ReactNode }) {
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }
