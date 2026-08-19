@@ -140,6 +140,14 @@ const PR_NUMBER_FILTER = {
   description: "Pull request number",
 };
 
+const COMMENT_BODY_FILTER = {
+  field: "comment_body",
+  path: "comment.body",
+  description:
+    'The comment text. Use the contains operator to gate a subscription on a mention, e.g. "@valet". ' +
+    "The match is case-sensitive and matches inside words, so a short value over-matches.",
+};
+
 /**
  * Per-family filters, appended to COMMON_FILTERS. The subscription matcher
  * (`filtersMatch` in packages/api/src/events/match.ts) rejects any filter whose
@@ -161,6 +169,7 @@ const EXTRA_FILTERS: Record<string, EventCatalogEntry["filters"]> = {
   ],
   pull_request_review_comment: [
     PR_NUMBER_FILTER,
+    COMMENT_BODY_FILTER,
     {
       field: "path",
       path: "comment.path",
@@ -168,6 +177,11 @@ const EXTRA_FILTERS: Record<string, EventCatalogEntry["filters"]> = {
     },
   ],
   pull_request_review_thread: [PR_NUMBER_FILTER],
+  // `comment.body` is the only subscription-time handle on an issue_comment:
+  // the payload has no field that says "this issue is a pull request" as a
+  // scalar, so PR-vs-issue stays a workflow gate while a mention gate can
+  // now stop the noise before a run starts at all.
+  issue_comment: [COMMENT_BODY_FILTER],
 };
 
 function filtersForEvent(eventType: string): EventCatalogEntry["filters"] {
