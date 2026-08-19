@@ -149,7 +149,13 @@ export class VirtualSandbox implements Sandbox {
     const execId = `job-${this.nextJobId++}`;
     const result = await this.exec(command, opts);
     const output = result.stdout + result.stderr;
-    this.jobs.set(execId, { status: "done", exitCode: result.exitCode, output, nextOffset: output.length });
+    this.jobs.set(execId, {
+      status: "done",
+      exitCode: result.exitCode,
+      output,
+      nextOffset: output.length,
+      ...(result.truncated ? { truncated: true } : {}),
+    });
     return { execId };
   }
 

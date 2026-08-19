@@ -25,6 +25,8 @@ interface DockerJobState {
   status: "running" | "done" | "failed";
   exitCode?: number;
   output: string;
+  /** Set when the maxOutputBytes cap dropped bytes — pollJob reports it. */
+  truncated?: boolean;
   child: ChildProcess;
   /** Set when the close/error signature indicates a `docker exec` transport
    * failure (dead container) rather than the command's own exit — pollJob
@@ -587,9 +589,15 @@ export class DockerSandbox implements Sandbox {
       if (isStderr) {
         stderrTail = (stderrTail + chunk).slice(-4096);
       }
-      if (limit && state.output.length >= limit) return;
+      if (limit && state.output.length >= limit) {
+        state.truncated = true;
+        return;
+      }
       state.output += chunk;
-      if (limit && state.output.length > limit) state.output = state.output.slice(0, limit);
+      if (limit && state.output.length > limit) {
+        state.output = state.output.slice(0, limit);
+        state.truncated = true;
+      }
     };
     child.stdout?.on("data", (chunk: string) => appendOutput(chunk, false));
     child.stderr?.on("data", (chunk: string) => appendOutput(chunk, true));
@@ -673,6 +681,7 @@ export class DockerSandbox implements Sandbox {
     const nextOffset = state.output.length;
     const result: JobPoll = { status: state.status, output, nextOffset };
     if (state.status === "done") result.exitCode = state.exitCode;
+    if (state.truncated) result.truncated = true;
 
     if (state.status !== "running") {
       if (state.evictTimer) clearTimeout(state.evictTimer);

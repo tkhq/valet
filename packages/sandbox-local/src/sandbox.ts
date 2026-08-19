@@ -22,6 +22,8 @@ interface LocalJobState {
   status: "running" | "done" | "failed";
   exitCode?: number;
   output: string;
+  /** Set when the maxOutputBytes cap dropped bytes — pollJob reports it. */
+  truncated?: boolean;
   child: ChildProcess;
   /** Resolves once the child has actually exited (close/error fired). */
   closed: Promise<void>;
@@ -148,9 +150,15 @@ export class LocalSandbox implements Sandbox {
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     const appendOutput = (chunk: string) => {
-      if (limit && state.output.length >= limit) return;
+      if (limit && state.output.length >= limit) {
+        state.truncated = true;
+        return;
+      }
       state.output += chunk;
-      if (limit && state.output.length > limit) state.output = state.output.slice(0, limit);
+      if (limit && state.output.length > limit) {
+        state.output = state.output.slice(0, limit);
+        state.truncated = true;
+      }
     };
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
@@ -188,6 +196,7 @@ export class LocalSandbox implements Sandbox {
     const nextOffset = state.output.length;
     const result: JobPoll = { status: state.status, output, nextOffset };
     if (state.status === "done") result.exitCode = state.exitCode;
+    if (state.truncated) result.truncated = true;
 
     if (state.status !== "running") {
       // Evict on first poll that observes a terminal status (decision 9);

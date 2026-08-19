@@ -94,4 +94,18 @@ describe("LocalSandbox: job mode", () => {
     expect(poll.status).toBe("failed");
     expect(poll.output).toBe("");
   });
+
+  it("5. reports truncated on the poll once the capped buffer drops bytes", async () => {
+    const sb = new LocalSandbox("test", tmp);
+    const { execId } = await sb.execJob("printf 'abcdefghij'", { maxOutputBytes: 4 });
+    let poll = await sb.pollJob(execId, 0);
+    let offset = poll.nextOffset;
+    while (poll.status === "running") {
+      await new Promise((r) => setTimeout(r, 20));
+      poll = await sb.pollJob(execId, offset);
+      offset = poll.nextOffset;
+    }
+    expect(poll.status).toBe("done");
+    expect(poll.truncated).toBe(true);
+  });
 });
