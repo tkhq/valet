@@ -345,8 +345,12 @@ export class WorkflowClient extends SmokeClient {
       if (node.type !== 'tool') continue;
 
       const data = node.data as any;
-      const service = data.service as string;
-      const action = data.action as string;
+      const service = data.service;
+      const action = data.action;
+
+      // Type guards: skip malformed nodes
+      if (typeof service !== 'string' || typeof action !== 'string') continue;
+
       const inputs = data.inputs as Record<string, any>;
 
       // GitHub destructive patterns
