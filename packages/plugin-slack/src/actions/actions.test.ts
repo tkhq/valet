@@ -429,7 +429,7 @@ describe('slack actions', () => {
     expect(url).toBe('https://slack.com/api/chat.postMessage');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
     expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'hello channel' });
-    expect(result).toEqual({ success: true, data: { ok: true, ts: '123.456', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ts: '123.456', channel: 'C1' } });
   });
 
   it('send_message resolves channel name (#prefix) to channel ID via users.conversations', async () => {
@@ -451,7 +451,7 @@ describe('slack actions', () => {
       pluginCtx(),
     );
 
-    expect(result).toEqual({ success: true, data: { ok: true, ts: '123.456', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ts: '123.456', channel: 'C1' } });
   });
 
   it('send_message returns error when channel name not found', async () => {
@@ -485,7 +485,7 @@ describe('slack actions', () => {
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'reply in thread', thread_ts: '123.456' });
-    expect(result).toEqual({ success: true, data: { ok: true, ts: '124.567', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ts: '124.567', channel: 'C1' } });
   });
 
   it('send_message supports optional blocks for rich formatting', async () => {
@@ -501,7 +501,7 @@ describe('slack actions', () => {
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
     expect(body.blocks).toEqual(JSON.parse(blocks));
-    expect(result).toEqual({ success: true, data: { ok: true, ts: '125.678', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ts: '125.678', channel: 'C1' } });
   });
 
   it('send_message uses actor name as username when provided', async () => {
@@ -515,7 +515,7 @@ describe('slack actions', () => {
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toMatchObject({ username: 'Alice' });
-    expect(result).toEqual({ success: true, data: { ok: true, ts: '126.789', channel: 'C1' } });
+    expect(result).toEqual({ success: true, data: { ts: '126.789', channel: 'C1' } });
   });
 
   it('send_message adds attribution context block for non-DM channels when owner is linked', async () => {
@@ -603,7 +603,10 @@ describe('slack actions', () => {
       pluginCtx(),
     );
 
-    expect(result).toEqual({ success: false, error: 'blocks must be valid JSON' });
+    expect(result).toEqual({
+      success: false,
+      error: 'blocks must be valid JSON array, e.g. [{"type":"section","text":{"type":"mrkdwn","text":"*bold*"}}]',
+    });
   });
 
   it('send_message rejects blocks that are not a JSON array', async () => {

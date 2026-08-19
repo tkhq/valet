@@ -149,12 +149,31 @@ disconnect), but sessions stop receiving the tools.
 - `"org"` → the tile renders with no token entry. When the provider
   declares an `identityLink` and `GET /api/me/identity-links` reports its
   transport ready, the tile carries the member's own step instead: the
-  pairing block (`identity-link-block.tsx`) — "Link account" starts the
-  identity-link code flow and shows the code, the provider's delivery
-  instructions, and the expiry; a linked account reads "Linked as
-  <externalId>" with Unlink. Providers with no identity link get the note
-  "Provided by your organization. An admin manages it in Settings →
+  pairing block (`identity-link-block.tsx`). A linked account reads
+  "Linked as <externalId>" with Unlink. Providers with no identity link get
+  the note "Provided by your organization. An admin manages it in Settings →
   Organization." A leftover user credential keeps its Disconnect.
+- The pairing block's entry points are gated by the `IdentityLinkStatus`
+  flags:
+  - **DM me the code** (`codeDelivery`) — `POST
+    /api/me/identity-links/:provider/deliver` resolves the caller in the
+    workspace by their Valet email (Slack: `users.lookupByEmail`, needs the
+    `users:read.email` bot scope), mints the code, and DMs the plugin's
+    `deliveryDm` text. The card echoes the DM byte-identical so the user
+    knows what to look for. A 202 (`email_not_in_workspace`) falls back to
+    member search when available, else to the show-code flow.
+  - **Find me by name** (`memberSearch`) — `GET .../members?query=` is a
+    workspace typeahead; picking a member POSTs `deliver` with that
+    `externalId`. Safe because the DM alone links nothing: the link happens
+    only when the recipient replies `link <code>` from their own account,
+    and the DM text tells an unexpecting recipient to ignore it.
+  - The show-code flow (`POST .../start`: code + the provider's delivery
+    instructions + expiry) is never a third button. It is the single
+    "Link account" flow for providers without `codeDelivery` (Telegram),
+    and the automatic fallback above.
+  While a code is out, the block polls `GET /api/me/identity-links` (3s) so
+  the tile flips to "Linked" when the user completes the flow in the
+  provider app.
 
 ## Telling the org admin which setting is missing
 

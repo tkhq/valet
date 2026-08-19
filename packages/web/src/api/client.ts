@@ -61,6 +61,10 @@ import type {
   GetWorkflowResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
+  DeliverIdentityLinkFallback,
+  DeliverIdentityLinkRequest,
+  DeliverIdentityLinkResponse,
+  ListLinkMembersResponse,
   ListCredentialsResponse,
   ListActionLogResponse,
   ListDecisionsResponse,
@@ -930,6 +934,19 @@ export const api = {
     request<StartIdentityLinkResponse>(
       "POST",
       `/me/identity-links/${encodeURIComponent(provider)}/start`,
+    ),
+  // 200 = DM sent; 202 = the caller's email names nobody in the workspace.
+  // With body.externalId, DMs that member instead (find-me-by-name).
+  deliverIdentityLink: (provider: string, body?: DeliverIdentityLinkRequest) =>
+    request<DeliverIdentityLinkResponse | DeliverIdentityLinkFallback>(
+      "POST",
+      `/me/identity-links/${encodeURIComponent(provider)}/deliver`,
+      body,
+    ),
+  searchLinkMembers: (provider: string, query: string) =>
+    request<ListLinkMembersResponse>(
+      "GET",
+      `/me/identity-links/${encodeURIComponent(provider)}/members?query=${encodeURIComponent(query)}`,
     ),
   patchIdentityLink: (provider: string, body: PatchIdentityLinkRequest) =>
     request<{ ok: true }>("PATCH", `/me/identity-links/${encodeURIComponent(provider)}`, body),

@@ -20,6 +20,7 @@
  * `assistant_app_thread` subtype. Nothing here keys off that subtype.
  */
 import {
+  ChannelLookupError,
   ChannelStreamError,
   type ChannelGatePrompt,
   type ChannelGateResolution,
@@ -51,8 +52,10 @@ const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
  * grow faster than per-DM keys, so allow for more active threads. */
 const MAX_TRACKED_ENTRIES = 2000;
 
-/** Matches a `link <code>` DM that starts the identity-link flow. */
-const LINK_COMMAND_RE = /^\s*link\s+(\S+)\s*$/i;
+/** Matches a `link <code>` DM that starts the identity-link flow. Exported
+ * so the plugin's `deliveryDm` copy can be tested against the same parser —
+ * the DM tells the user to send exactly what this regex accepts. */
+export const LINK_COMMAND_RE = /^\s*link\s+(\S+)\s*$/i;
 
 // ─── Conversation-key codec ─────────────────────────────────────────────────
 //
@@ -807,6 +810,30 @@ export class SlackTransport implements ChannelTransport {
       if (pages >= MAX_PAGES) break;
     } while (cursor !== undefined);
     return out;
+  }
+
+  /**
+   * Resolve a workspace member by email (users.lookupByEmail; needs the
+   * `users:read.email` bot scope). Powers the "DM me the code" identity-link
+   * delivery. `null` = the email names nobody here — the caller falls back
+   * to the show-code flow.
+   */
+  async lookupUserByEmail(email: string): Promise<{ externalId: string; displayName: string } | null> {
+    try {
+      const match = await this.api.lookupUserByEmail(email);
+      return match ? { externalId: match.id, displayName: match.displayName } : null;
+    } catch (err) {
+      if (err instanceof SlackApiError && err.detail === "missing_scope") {
+        throw new ChannelLookupError(
+          "missing_scope",
+          "The Slack app is missing the users:read.email scope. Reinstall the Slack app to grant it.",
+        );
+      }
+      throw new ChannelLookupError(
+        "transport",
+        `Slack users.lookupByEmail failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      );
+    }
   }
 
   /**

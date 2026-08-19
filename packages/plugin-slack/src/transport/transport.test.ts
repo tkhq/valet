@@ -650,3 +650,46 @@ describe("cleanSlackText", () => {
     expect(cleanSlackText("ping <@U9> in <#C1|general>")).toBe("ping @U9 in #general");
   });
 });
+
+describe("lookupUserByEmail", () => {
+  it("resolves a member by email, preferring the profile display name", async () => {
+    fake.setMembers([
+      {
+        id: "U7",
+        name: "conner",
+        real_name: "Conner Swann",
+        profile: { email: "conner@example.com", display_name: "connerbot" },
+      },
+    ]);
+    const transport = makeTransport();
+    await expect(transport.lookupUserByEmail("conner@example.com")).resolves.toEqual({
+      externalId: "U7",
+      displayName: "connerbot",
+    });
+  });
+
+  it("returns null when the email names nobody in the workspace", async () => {
+    fake.setMembers([]);
+    const transport = makeTransport();
+    await expect(transport.lookupUserByEmail("nobody@example.com")).resolves.toBeNull();
+  });
+
+  it("maps missing_scope to an actionable ChannelLookupError", async () => {
+    fake.failNext("users.lookupByEmail", "missing_scope");
+    const transport = makeTransport();
+    await expect(transport.lookupUserByEmail("x@example.com")).rejects.toMatchObject({
+      name: "ChannelLookupError",
+      kind: "missing_scope",
+      message: expect.stringContaining("users:read.email"),
+    });
+  });
+
+  it("maps other failures to a transport-kind ChannelLookupError", async () => {
+    fake.failNext("users.lookupByEmail", "fatal_error");
+    const transport = makeTransport();
+    await expect(transport.lookupUserByEmail("x@example.com")).rejects.toMatchObject({
+      name: "ChannelLookupError",
+      kind: "transport",
+    });
+  });
+});

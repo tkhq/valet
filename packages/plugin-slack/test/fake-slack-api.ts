@@ -142,6 +142,15 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
         return c.json({ ok: true, team_id: "T1", user_id: "UBOT", bot_id: "B1" });
       case "users.list":
         return c.json({ ok: true, members, response_metadata: { next_cursor: "" } });
+      case "users.lookupByEmail": {
+        const member = members.find((m) => {
+          const profile = m.profile as Record<string, unknown> | undefined;
+          return profile?.email === body.email;
+        });
+        // Slack's "no such member" code is users_not_found (plural).
+        if (!member) return c.json({ ok: false, error: "users_not_found" });
+        return c.json({ ok: true, user: member });
+      }
       case "apps.connections.open":
         return c.json({ ok: true, url: "wss://127.0.0.1:1/link" });
       default:

@@ -280,6 +280,29 @@ export class SlackApi {
     return { members, nextCursor: nextCursor !== undefined && nextCursor !== "" ? nextCursor : undefined };
   }
 
+  /**
+   * users.lookupByEmail → the member, or null when the email names nobody in
+   * the workspace (Slack's `users_not_found`). Needs the `users:read.email`
+   * bot scope; without it Slack answers `missing_scope`, which surfaces as a
+   * SlackApiError for the transport to classify.
+   */
+  async lookupUserByEmail(email: string): Promise<{ id: string; displayName: string } | null> {
+    let res: SlackResponse;
+    try {
+      res = await this.get("users.lookupByEmail", { email });
+    } catch (err) {
+      if (err instanceof SlackApiError && err.detail === "users_not_found") return null;
+      throw err;
+    }
+    const user = rec(res.user);
+    const id = str(user?.id);
+    if (!id) throw new SlackApiError("users.lookupByEmail", "response missing user.id");
+    const profile = rec(user?.profile);
+    const displayName =
+      str(profile?.display_name) || str(profile?.real_name) || str(user?.real_name) || str(user?.name) || id;
+    return { id, displayName };
+  }
+
   async filesInfo(fileId: string): Promise<Record<string, unknown>> {
     const res = await this.get("files.info", { file: fileId });
     return rec(res.file) ?? {};
