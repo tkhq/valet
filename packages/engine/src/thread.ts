@@ -2065,7 +2065,9 @@ export class Thread {
    * credential attempt returns BEFORE appending, so the cap append is the
    * item's first and only one).
    */
-  private async appendUserEntry(item: QueueItem): Promise<string> {
+  private async appendUserEntry(
+    item: QueueItem,
+  ): Promise<{ text: string; attachments: MessageEntry["attachments"] }> {
     // Signal content persists as its raw body + `signal` metadata; the text
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
@@ -2081,20 +2083,7 @@ export class Thread {
       text = promptText(item.content);
       entryContent = text;
     }
-    // IDEMPOTENT: skip when this submission's user entry already exists — a
-    // transient settle throw after the credential-cap append leaves a
-    // `running` item WITH its user entry; the retried attempt (fresh re-run
-    // or a second cap pass) must not duplicate it.
-    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
-    if (
-      existing.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === item.id)
-    ) {
-      return text;
-    }
-    // QueueItem.metadata flows through onto the entry so synthetic flags like
-    // compaction_continue survive into the DAG for client UIs and for later
-    // restoration.
-    
+
     // Extract attachments if the prompt content has them.
     let attachments: MessageEntry["attachments"];
     if (
@@ -2120,7 +2109,25 @@ export class Thread {
       }
       attachments = validated.length > 0 ? validated : undefined;
     }
-    
+
+    // IDEMPOTENT: skip when this submission's user entry already exists — a
+    // transient settle throw after the credential-cap append leaves a
+    // `running` item WITH its user entry; the retried attempt (fresh re-run
+    // or a second cap pass) must not duplicate it. Return the persisted
+    // entry's attachments (the authoritative on-disk shape) so a retried
+    // attempt still feeds the model the same image blocks.
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    const existingUserEntry = existing.find(
+      (e): e is MessageEntry =>
+        e.type === "message" && e.role === "user" && e.queueItemId === item.id,
+    );
+    if (existingUserEntry) {
+      return { text, attachments: existingUserEntry.attachments };
+    }
+    // QueueItem.metadata flows through onto the entry so synthetic flags like
+    // compaction_continue survive into the DAG for client UIs and for later
+    // restoration.
+
     const userEntry: MessageEntry = {
       id: uid("e"),
       sessionId: this.session.id,
@@ -2145,7 +2152,7 @@ export class Thread {
     await this.fencedWrite(() =>
       this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
     );
-    return text;
+    return { text, attachments };
   }
 
   /**
@@ -2237,8 +2244,11 @@ export class Thread {
     }
 
     // Persist the user message entry (shared helper — the claim loop's
-    // credential-cap branch appends the same entry shape).
-    const text = await this.appendUserEntry(item);
+    // credential-cap branch appends the same entry shape). Threading
+    // `attachments` through to `runAgent` is what keeps a turn-1 image in
+    // `agent.state.messages` across subsequent turns: the LLM sees the image
+    // on every downstream call, not just the turn it was uploaded on.
+    const { text, attachments } = await this.appendUserEntry(item);
 
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();
@@ -2267,7 +2277,7 @@ export class Thread {
     const coldHintPrompt = this.applyColdHintForTurn();
     try {
       try {
-        await this.runAgent(text);
+        await this.runAgent(text, attachments);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -2412,11 +2422,29 @@ export class Thread {
     }
   }
 
-  /** Run one prompt cycle. On context-overflow error, compact and retry once. */
-  private async runAgent(text: string): Promise<void> {
+  /**
+   * Run one prompt cycle. On context-overflow error, compact and retry once.
+   *
+   * `attachments` MUST be included on the pushed user message so the current
+   * turn's image content blocks land in `agent.state.messages` — otherwise
+   * they exist only in persisted `MessageEntry.attachments`, which is
+   * consulted (via `entriesToAgentMessages`) only on cold rehydrate, resume,
+   * and compaction. A session that stays hot across turns would otherwise
+   * send `[{type:"text", text}]` on turn 1 (image invisible) and on every
+   * later turn (turn-1 image still invisible) — the "attachments lost after
+   * turn 1" symptom.
+   */
+  private async runAgent(
+    text: string,
+    attachments?: MessageEntry["attachments"],
+  ): Promise<void> {
+    const content = [
+      { type: "text" as const, text },
+      ...attachmentsToImageBlocks(attachments),
+    ];
     await this.agent.prompt({
       role: "user",
-      content: [{ type: "text", text }],
+      content,
       timestamp: Date.now(),
     });
     await this.agent.waitForIdle();
@@ -2436,7 +2464,7 @@ export class Thread {
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
         await this.agent.prompt({
           role: "user",
-          content: [{ type: "text", text }],
+          content,
           timestamp: Date.now(),
         });
         await this.agent.waitForIdle();
@@ -3688,14 +3716,46 @@ function findMostRecentCompaction(
 }
 
 /**
- * Convert engine DAG entries to pi-agent-core AgentMessages, honoring the
- * most recent CompactionEntry (drop covered entries, inject summary as a
- * `<previous-context>` user message) and elided tool results (replace with
- * a placeholder text block on the assistant side).
+ * Convert persisted user-message attachments into the pi-ai `ImageContent`
+ * blocks the model consumes. Single source of truth for base64 / data-URL
+ * decoding; used by BOTH `entriesToAgentMessages` (historical entries on
+ * rehydrate / resume / compaction) AND `Thread.runAgent` (the CURRENT turn's
+ * user message, so its image lands in `agent.state.messages` alongside the
+ * text and survives into every subsequent turn's LLM call).
  *
- * Pure function — kept here rather than inside Thread so it's
- * testable and reusable from places like Engine.restoreSession.
+ * Attachments without usable `data` or `url` are skipped silently; a URL
+ * that is not a base64 `data:` URL is dropped with a warning (the model
+ * cannot fetch remote URLs from here).
  */
+export function attachmentsToImageBlocks(
+  attachments: MessageEntry["attachments"] | undefined,
+): Array<{ type: "image"; data: string; mimeType: string }> {
+  if (!attachments || attachments.length === 0) return [];
+  const blocks: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  for (const att of attachments) {
+    if (att.type !== "image") continue;
+    let imageData: string;
+    // att.data is set when a tool returns binary attachment data (e.g. screenshot utilities)
+    if (att.data instanceof Uint8Array) {
+      imageData = Buffer.from(att.data).toString("base64");
+    } else if (att.url) {
+      // Extract base64 payload from data: URL
+      const match = att.url.match(/^data:([^;]+);base64,([A-Za-z0-9+/]+=*)$/);
+      if (!match) {
+        // Invalid data: URL format — skip this attachment and log a warning
+        console.warn(`[engine] skipping attachment with invalid data: URL format: ${att.url}`);
+        continue;
+      }
+      imageData = match[2];
+    } else {
+      // Skip attachments without data
+      continue;
+    }
+    blocks.push({ type: "image", data: imageData, mimeType: att.mimeType });
+  }
+  return blocks;
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -3732,39 +3792,8 @@ export function entriesToAgentMessages(
       const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
       const contentBlocks: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
         { type: "text", text },
+        ...attachmentsToImageBlocks(e.attachments),
       ];
-      
-      // Add image attachments if present
-      if (e.attachments) {
-        for (const att of e.attachments) {
-          if (att.type === "image") {
-            // If we have binary data, convert to base64; otherwise use the URL directly
-            let imageData: string;
-            // att.data is set when a tool returns binary attachment data (e.g. screenshot utilities)
-            if (att.data instanceof Uint8Array) {
-              imageData = Buffer.from(att.data).toString("base64");
-            } else if (att.url) {
-              // Extract base64 payload from data: URL
-              const match = att.url.match(/^data:([^;]+);base64,([A-Za-z0-9+/]+=*)$/);
-              if (!match) {
-                // Invalid data: URL format — skip this attachment and log a warning
-                console.warn(`[engine] skipping attachment with invalid data: URL format: ${att.url}`);
-                continue;
-              }
-              imageData = match[2];
-            } else {
-              // Skip attachments without data
-              continue;
-            }
-            contentBlocks.push({
-              type: "image",
-              data: imageData,
-              mimeType: att.mimeType,
-            });
-          }
-        }
-      }
-      
       out.push({
         role: "user",
         content: contentBlocks,
