@@ -12,6 +12,7 @@ import {
   isDecisionGateExpired,
   isDecisionGateWithdrawn,
   shouldShortCircuit,
+  shouldTerminalizeOrphanedGateBlock,
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
 import {
@@ -149,6 +150,12 @@ export class Thread {
    * its status view without waiting for the next transition event.
    */
   private lastEmittedStatus: EngineEventStatus = "idle";
+  /**
+   * When the orphan sweep first saw this thread's claimed item durably blocked
+   * with no armed waiter. Cleared as soon as the shape goes away; see
+   * `sweepOrphanedGateBlock`.
+   */
+  private gateBlockOrphanSince: number | undefined;
   /**
    * The submission currently being run by this instance (claimed → settled).
    * Set by the claim loop, held across the whole turn (including a gate block),
@@ -428,6 +435,12 @@ export class Thread {
     }
     if (runningSuperseded) {
       await this.agent.waitForIdle();
+      // Same hole abort has: a gate block with no armed waiter here swallows
+      // the withdrawal above, and `settleUnclaimed` is a no-op on a claimed
+      // item — so the superseded head would stay blocked and the steer message
+      // would queue behind it forever. The durable supersession stamp already
+      // landed, so settlement records `superseded`.
+      await this.freeStrandedGateBlock();
     }
   }
 
@@ -721,6 +734,13 @@ export class Thread {
         await this.emitSettled(it.id, { outcome: "aborted" });
       }
     }
+    // A gate block whose waiter is not armed here ignores everything above: no
+    // withdrawal fires, the agent is not streaming, and `settleTurn` refuses to
+    // settle a blocked item — so abort has to release the block itself. The
+    // durable `abortRequestedAt` stamp written above decides the outcome. Runs
+    // last because freeing the block kicks the claim loop, and the queued items
+    // it would pick up are already settled by then.
+    await this.freeStrandedGateBlock();
     await this.emitQueueState();
   }
 
@@ -764,10 +784,13 @@ export class Thread {
     const tools = this.buildTools();
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
-      this.emitError(
-        "replay_tool_missing",
-        `cannot replay: tool ${suspended.toolName} not registered`,
-      );
+      const message = `cannot replay: tool ${suspended.toolName} not registered`;
+      this.emitError("replay_tool_missing", message);
+      // The decision is already recorded, but this turn can never finish it.
+      // Repair the dangling call to an error and drive the turn to settlement —
+      // returning here would leave the item blocked_on_decision_gate under a
+      // renewed lease, which no abort, steer, or reconciliation can free.
+      await this.driveResumeAfterFailedReplay(message);
       return;
     }
     this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resolution });
@@ -799,10 +822,11 @@ export class Thread {
       );
     } catch (err) {
       this.runningItem = priorActive;
-      this.emitError(
-        "replay_tool_failed",
-        err instanceof Error ? err.message : String(err),
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      this.emitError("replay_tool_failed", message);
+      // Same reasoning as the missing-tool branch above: settle the turn rather
+      // than leaving it blocked with no waiter.
+      await this.driveResumeAfterFailedReplay(`replay failed: ${message}`);
       return;
     }
     this.runningItem = priorActive;
@@ -934,9 +958,16 @@ export class Thread {
           );
           return;
         }
-        this.emitError(
-          "replay_after_pending_gate_failed",
-          err instanceof Error ? err.message : String(err),
+        // Anything else (a store throw inside the wait, a rejection the gate
+        // manager did not classify) must still end the turn: leaving it here
+        // strands the durable block with no waiter, and the thread wedges.
+        const message = err instanceof Error ? err.message : String(err);
+        this.emitError("replay_after_pending_gate_failed", message);
+        this.driveResumeAfterFailedReplay(`decision gate failed: ${message}`).catch((e) =>
+          this.emitError(
+            "free_gate_block_failed",
+            e instanceof Error ? e.message : String(e),
+          ),
         );
       });
   }
@@ -969,6 +1000,163 @@ export class Thread {
       const item = await store.getQueueItem(this.session.id, suspended.queueItemId);
       if (!item) continue;
       await this.reconcileGate(item, suspended, "rearm");
+    }
+  }
+
+  /**
+   * Sweep hook: heal a durable gate block this thread owns but no longer has a
+   * waiter for. See `shouldTerminalizeOrphanedGateBlock` for how a turn reaches
+   * that shape and why nothing else recovers it — the heartbeat keeps renewing
+   * the lease, so reconciliation never reclaims the item, and the thread stays
+   * wedged with every later message queued behind it.
+   *
+   * Two observations are required (`orphanSince` arms on the first), so the
+   * window between `requestDecision`'s durable block write and its waiter
+   * registration never trips this.
+   */
+  async sweepOrphanedGateBlock(): Promise<void> {
+    const item = this.runningItem;
+    if (!item) {
+      this.gateBlockOrphanSince = undefined;
+      return;
+    }
+    const current = await this.session.providers.store.getQueueItem(this.session.id, item.id);
+    const waiterArmed =
+      this.blockedGateId !== undefined && this.gates.isPending(this.blockedGateId);
+    const now = Date.now();
+    const orphanShape =
+      current?.status === "blocked_on_decision_gate" && !waiterArmed && this.fence !== undefined;
+    if (!orphanShape) {
+      this.gateBlockOrphanSince = undefined;
+      return;
+    }
+    const act = shouldTerminalizeOrphanedGateBlock({
+      durableStatus: current.status,
+      ownedByThisThread: true,
+      waiterArmed,
+      orphanSince: this.gateBlockOrphanSince,
+      now,
+      graceMs: this.session.options.gateBlockOrphanGraceMs,
+    });
+    if (!act) {
+      this.gateBlockOrphanSince ??= now;
+      return;
+    }
+    this.gateBlockOrphanSince = undefined;
+    this.emitError(
+      "gate_block_orphaned",
+      `decision gate block on ${item.id} has no waiter in this process; settling the turn so the thread can continue`,
+    );
+    await this.freeGateBlock(current, {
+      error: new Error("decision gate block was lost before the turn could resume"),
+    });
+  }
+
+  /**
+   * Force a durably gate-blocked turn that this thread owns to a terminal
+   * state, without needing an in-process waiter: terminalize any gate rows
+   * still `pending` for the item, clear the suspended-turn checkpoint, flip the
+   * durable block back to running, then settle.
+   *
+   * `settleTurn` picks the outcome from the item's own durable stamps, so an
+   * aborted item settles `aborted`, a superseded one `superseded`, and anything
+   * else takes `failure`. Returns true when the item ended up settled.
+   *
+   * Used by `abort`, steer supersession, and the orphan sweep — the three
+   * places a user (or the engine) needs a blocked turn to let go.
+   */
+  private async freeGateBlock(item: QueueItem, failure?: { error: unknown }): Promise<boolean> {
+    const store = this.session.providers.store;
+    const fence = this.fence;
+    if (!fence || fence.itemId !== item.id) return false;
+    try {
+      await this.withdrawPendingGatesForItem(item.id, "cancel");
+      const suspended = await store.getSuspendedTurn(this.session.id, this.id);
+      if (suspended && suspended.queueItemId === item.id) {
+        await this.fencedWrite(() => store.clearSuspendedTurn(this.session.id, this.id, fence));
+      }
+      const current = await store.getQueueItem(this.session.id, item.id);
+      if (current?.status === "blocked_on_decision_gate") {
+        await this.fencedWrite(() =>
+          store.setSubmissionBlocked(this.session.id, this.id, item.id, false, fence),
+        );
+      }
+      this.blockedGateId = undefined;
+      await this.settleTurn(item, failure);
+    } catch (err) {
+      this.emitError("free_gate_block_failed", err instanceof Error ? err.message : String(err));
+      return false;
+    }
+    this.runningItem = null;
+    this.fence = undefined;
+    await this.emitQueueState();
+    void this.kick();
+    const settled = await store.getQueueItem(this.session.id, item.id);
+    return settled?.status === "settled";
+  }
+
+  /**
+   * A replay that cannot run leaves a resolved decision with no way to deliver
+   * it. Drive the turn to settlement the same way an interrupted turn recovers:
+   * repair the dangling tool call to an error carrying `message`, flip the
+   * durable block, let the model see what happened, and settle.
+   */
+  private async driveResumeAfterFailedReplay(message: string): Promise<void> {
+    const item = this.runningItem;
+    if (!item || !this.fence) return;
+    await this.driveResumeToCompletion(item, message);
+  }
+
+  /**
+   * Release a gate block that the normal termination paths cannot reach —
+   * abort's gate withdrawal and steer's supersession both act on the in-memory
+   * waiter, and neither does anything when that waiter is gone.
+   *
+   * Gives the live path a short window to finish first (a withdrawal fired a
+   * moment ago settles the turn on its own), then forces the release. Returns
+   * true when this call is what freed the item.
+   */
+  private async freeStrandedGateBlock(failure?: { error: unknown }): Promise<boolean> {
+    const item = this.runningItem;
+    if (!item || !this.fence) return false;
+    const store = this.session.providers.store;
+    const deadline = Date.now() + 1500;
+    for (;;) {
+      const current = await store.getQueueItem(this.session.id, item.id);
+      if (!current || current.status !== "blocked_on_decision_gate") return false;
+      if (Date.now() >= deadline) return this.freeGateBlock(current, failure);
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+
+  /**
+   * Mark every gate row still `pending` for `itemId` terminal, so no stale
+   * approval card outlives the turn it belonged to. The in-memory waiter (if
+   * any) is withdrawn first: that path owns its own durable write, and
+   * withdrawing twice would race it.
+   */
+  private async withdrawPendingGatesForItem(
+    itemId: string,
+    reason: DecisionWithdrawReason,
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const gates = await store.listDecisionGates(this.session.id, this.id);
+    for (const gate of gates) {
+      if (gate.status !== "pending" || gate.queueItemId !== itemId) continue;
+      if (this.gates.isPending(gate.id)) {
+        this.withdrawDecision(gate.id, reason);
+        continue;
+      }
+      const terminal: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
+      await store.saveDecisionGate(this.session.id, this.id, terminal);
+      await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
+        gate: terminal,
+        withdrawnReason: reason,
+      });
+      await this.session.emit(
+        { type: "decision_gate_withdrawn", threadId: this.id, gateId: gate.id, reason },
+        { eventKey: `gate:${gate.id}:withdrawn` },
+      );
     }
   }
 
@@ -1990,6 +2178,10 @@ export class Thread {
       if (staleSuspended && staleSuspended.queueItemId === item.id) {
         await store.clearSuspendedTurn(this.session.id, this.id, fence);
       }
+      // Any gate row left `pending` for this item belongs to a waiter that no
+      // longer exists — resolving it would be a silent no-op. Terminalize it so
+      // the UI stops showing a decision nobody can answer.
+      await this.withdrawPendingGatesForItem(item.id, "cancel");
       // Same fall-through: flip the durable block back to running (strict
       // blocked→running toggle, done once) so the resumed turn can settle —
       // settleTurn refuses to settle a blocked item.

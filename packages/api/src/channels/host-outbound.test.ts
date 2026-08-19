@@ -428,8 +428,9 @@ describe("ChannelHost outbound delivery", () => {
     const gateId = mapped?.gateId;
     expect(gateId).toBeTruthy();
 
-    // `pendingDecisionGates` lists every gate row for the session regardless
-    // of status; assert on the gate's own status field, not presence.
+    // `pendingDecisionGates` lists only gates still awaiting an answer, so the
+    // gate is present before the callback and gone after it; the durable row
+    // carries the terminal status.
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     expect((await session.pendingDecisionGates()).find((g) => g.id === gateId)?.status).toBe("pending");
 
@@ -444,11 +445,12 @@ describe("ChannelHost outbound delivery", () => {
 
     await vi.waitFor(
       async () => {
-        const pending = await session.pendingDecisionGates();
-        expect(pending.find((g) => g.id === gateId)?.status).toBe("resolved");
+        const gate = gateId ? await engineStore.getDecisionGate(session.id, gateId) : null;
+        expect(gate?.status).toBe("resolved");
       },
       { timeout: 3000 },
     );
+    expect((await session.pendingDecisionGates()).map((g) => g.id)).not.toContain(gateId);
 
     await vi.waitFor(() => {
       expect(fakeTransport.gateEdits).toHaveLength(1);

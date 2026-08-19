@@ -422,6 +422,11 @@ export class Session {
       // timer was lost (e.g. across restart). Runs before the kick so an
       // expired gate terminalizes and unblocks the thread's queued work.
       await t.sweepExpiredGates();
+      // Heal a gate block whose waiter is gone (see
+      // `Thread.sweepOrphanedGateBlock`): such an item keeps a renewed lease,
+      // so `reconcileItem` above never reclaims it — the thread would stay
+      // blocked forever with its queue stalled behind it.
+      await t.sweepOrphanedGateBlock();
       await t.checkCollectDeadline();
       await t.kick();
     }
@@ -1195,8 +1200,17 @@ export class Session {
     await this.providers.store.deleteSession(this.id);
   }
 
+  /**
+   * Gates this session still awaits an answer for. Filtered to `pending`: the
+   * store keeps resolved/withdrawn/expired rows for history, and callers use
+   * this list to decide whether a decision can still be made (the HTTP resolve
+   * and withdraw routes gate on it). Returning terminal rows here made a stale
+   * approval look answerable — the request passed the check and then resolved
+   * nothing.
+   */
   async pendingDecisionGates(): Promise<DecisionGate[]> {
-    return this.providers.store.listDecisionGates(this.id);
+    const gates = await this.providers.store.listDecisionGates(this.id);
+    return gates.filter((g) => g.status === "pending");
   }
 
   async readEntries(threadKey: string, opts?: MessageQuery): Promise<SessionEntry[]> {

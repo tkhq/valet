@@ -10,7 +10,11 @@ import {
   type DecisionGate,
   type ToolDef,
 } from "../src/index.js";
-import { fromRequest } from "../src/decision-gate.js";
+import {
+  fromRequest,
+  GATE_BLOCK_ORPHAN_GRACE_MS,
+  shouldTerminalizeOrphanedGateBlock,
+} from "../src/decision-gate.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -495,5 +499,46 @@ describe("decision gates: durable expiry sweep", () => {
     expect((await store.getQueueItem(SID, itemId))?.status).toBe("settled");
 
     faux2.unregister();
+  });
+});
+
+describe("shouldTerminalizeOrphanedGateBlock (pure)", () => {
+  const base = {
+    durableStatus: "blocked_on_decision_gate",
+    ownedByThisThread: true,
+    waiterArmed: false,
+    orphanSince: 1_000,
+    now: 1_000 + GATE_BLOCK_ORPHAN_GRACE_MS,
+  };
+
+  it("terminalizes a block this thread owns once the grace period elapses", () => {
+    expect(shouldTerminalizeOrphanedGateBlock(base)).toBe(true);
+  });
+
+  it("waits: the first observation only arms the timer", () => {
+    expect(shouldTerminalizeOrphanedGateBlock({ ...base, orphanSince: undefined })).toBe(false);
+  });
+
+  it("waits while the grace period is still running — the window between the durable block write and waiter registration has this same shape", () => {
+    expect(shouldTerminalizeOrphanedGateBlock({ ...base, now: 1_000 + 1 })).toBe(false);
+  });
+
+  it("never touches a block with a live waiter", () => {
+    expect(shouldTerminalizeOrphanedGateBlock({ ...base, waiterArmed: true })).toBe(false);
+  });
+
+  it("never touches a block another owner holds", () => {
+    expect(shouldTerminalizeOrphanedGateBlock({ ...base, ownedByThisThread: false })).toBe(false);
+  });
+
+  it("ignores items that are not blocked", () => {
+    for (const durableStatus of ["running", "queued", "settled", "terminalizing"]) {
+      expect(shouldTerminalizeOrphanedGateBlock({ ...base, durableStatus })).toBe(false);
+    }
+  });
+
+  it("honors an explicit grace period", () => {
+    expect(shouldTerminalizeOrphanedGateBlock({ ...base, now: 1_050, graceMs: 50 })).toBe(true);
+    expect(shouldTerminalizeOrphanedGateBlock({ ...base, now: 1_049, graceMs: 50 })).toBe(false);
   });
 });

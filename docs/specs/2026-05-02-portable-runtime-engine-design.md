@@ -1150,7 +1150,7 @@ queued → running → terminalizing → settled
 - **collecting** — durably admitted into an open collect window. Not claimable and does not block FIFO head-claim; settles `merged` when the window closes (see Collect under queue modes).
 - **queued** — durably admitted, waiting its turn in the thread's FIFO. Admission is idempotent by `dispatchId` (same id + same payload → original receipt; same id + different payload → conflict).
 - **running** — claimed by exactly one engine instance via a compare-and-set transition, recording an `attemptId`, `ownerId`, and lease. Two concurrent claims for the same submission must never both succeed. Only the oldest non-superseded unsettled submission of a thread is claimable (per-thread FIFO gating); `steer` supersedes the items ahead of it rather than jumping the queue.
-- **blocked_on_decision_gate** — the claimed turn is suspended on a pending gate. The claim is retained; the lease continues to renew while the process holding it is alive.
+- **blocked_on_decision_gate** — the claimed turn is suspended on a pending gate. The claim is retained; the lease continues to renew while the process holding it is alive. The block lives and dies with the in-process waiter that owns it — see *Orphaned gate blocks* below.
 - **terminalizing** — the terminal outcome has been decided and durably reserved, but post-settlement repairs (transcript rest-state, gate withdrawal, event emission) may still be in flight.
 - **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge). The first terminal write wins; later attempts to settle differently are conflicts.
 
@@ -1182,6 +1182,20 @@ On engine startup, and whenever an expired lease is reclaimed, each unsettled su
 `abort()` stamps `abortRequestedAt` on unsettled submissions durably but is **not** itself a terminal transition — settlement always flows through the claim/reconcile path so a canonical terminal record exists even when abort races a crash.
 
 **Steer supersession is transactional.** A `steer` admission durably, in one step: admits the steer item, stamps `supersededByItemId` on the running item *and every queued item admitted before it* on that thread, and withdraws their pending gates (reason `steer`). The steer item is thereby the oldest non-superseded unsettled item and claims under the normal FIFO rule — steer never bypasses head-claim, it *redefines the head*. Superseded items settle `superseded` through the normal settlement path.
+
+#### Orphaned gate blocks
+
+A gate block depends on an in-memory waiter: the tool execution parked on `requestDecision`, or the wait a restart re-armed. That waiter can disappear without terminalizing the block — a replay whose tool is no longer registered, a replayed tool that throws or never returns, a gate error that is neither expiry nor withdrawal.
+
+Nothing else reclaims the submission when that happens. The heartbeat keeps renewing its lease, so the sweep never sees an expired lease. Reconciliation skips an item the thread still owns. Settlement refuses to settle a blocked item. The thread wedges, and every later message queues behind it until the process restarts.
+
+Three rules close the gap:
+
+1. Every path that abandons a gate wait terminalizes the turn. A replay that cannot run repairs its dangling tool call to an error and drives the turn to settlement, the same way an interrupted turn recovers.
+2. `abort` and `steer` release the block themselves. Both already stamp their durable intent (`abortRequestedAt`, `supersededByItemId`). If the head is still `blocked_on_decision_gate` and no waiter is armed in this process, they withdraw its gate rows, clear the checkpoint, flip the block back to running, and settle. The stamps decide the outcome.
+3. The periodic sweep heals what nothing else did. A block this instance owns, with no armed waiter, that survives two sweep observations (a 15-second grace) settles `failed`. The grace is required: `requestDecision` marks the submission blocked before it registers the waiter, and that window has the same shape as an orphan.
+
+A resumed turn also withdraws every gate row left `pending` for its submission, and `pendingDecisionGates` returns pending rows only. A decision that no waiter can receive must not stay on offer to the user.
 
 #### Effect fencing
 

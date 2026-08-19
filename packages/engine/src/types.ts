@@ -1725,6 +1725,12 @@ export interface CreateSessionOptions {
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
+  /**
+   * How long a durable gate block with no armed waiter must persist before the
+   * sweep settles the turn (default 15000). See
+   * `shouldTerminalizeOrphanedGateBlock`.
+   */
+  gateBlockOrphanGraceMs?: number;
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;

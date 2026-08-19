@@ -175,6 +175,53 @@ export function shouldShortCircuit(args: {
   return { match: true, resolution: suspendedDecision.resolution };
 }
 
+/**
+ * Grace period before a gate block with no armed waiter is treated as
+ * orphaned. `requestDecision` marks the submission blocked in the store a few
+ * awaits BEFORE it registers the waiter, so a sweep that lands inside that
+ * window sees the orphan shape on a perfectly healthy gate. Requiring the
+ * condition to hold for longer than one sweep interval (5 s) makes that window
+ * unobservable while still healing a real orphan within seconds.
+ */
+export const GATE_BLOCK_ORPHAN_GRACE_MS = 15_000;
+
+/**
+ * Returns whether a thread's durable `blocked_on_decision_gate` claim has been
+ * orphaned — the store says the turn is blocked, this thread still owns the
+ * claim, and yet no gate waiter is armed in this process, so nothing will ever
+ * resolve it.
+ *
+ * A turn reaches this shape whenever the in-memory waiter disappears without
+ * terminalizing the durable block (a replay that cannot run, a gate error that
+ * is neither expiry nor withdrawal). Before this check existed, such a turn
+ * stayed blocked forever: the heartbeat kept renewing its lease, so the sweep
+ * never reclaimed it; reconciliation skipped it because the thread still owned
+ * the item; and abort/steer only withdrew gates armed in memory. The thread
+ * wedged, and every later message queued behind it.
+ *
+ * Pure — kept testable without Thread/GateManager timing.
+ */
+export function shouldTerminalizeOrphanedGateBlock(args: {
+  /** The submission's status as the STORE currently reports it. */
+  durableStatus: string;
+  /** True when this thread holds the claim for that submission. */
+  ownedByThisThread: boolean;
+  /** True when a waiter for the thread's blocked gate is armed in this process. */
+  waiterArmed: boolean;
+  /** When this thread first observed the orphan shape; undefined on first sight. */
+  orphanSince: number | undefined;
+  now: number;
+  graceMs?: number;
+}): boolean {
+  const { durableStatus, ownedByThisThread, waiterArmed, orphanSince, now } = args;
+  const graceMs = args.graceMs ?? GATE_BLOCK_ORPHAN_GRACE_MS;
+  if (durableStatus !== "blocked_on_decision_gate") return false;
+  if (!ownedByThisThread) return false;
+  if (waiterArmed) return false;
+  if (orphanSince === undefined) return false; // first observation only arms the timer
+  return now - orphanSince >= graceMs;
+}
+
 export function fromRequest(
   req: DecisionGateRequest,
   gateCtx: GateContext & { ordinal: number },
