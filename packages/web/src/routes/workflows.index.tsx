@@ -19,6 +19,7 @@ import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { TriggerList } from "~/components/workflows/trigger-list";
+import { LatestRunLine } from "~/components/workflows/latest-run-line";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
@@ -267,85 +268,97 @@ function DefinitionRow({
     // `relative` anchors the name link's stretched hit area below. The whole
     // row opens the workflow, because a row that looks like one target should
     // be one: clicking the empty space beside the name did nothing before.
-    <li className="group relative flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
-      {/* The owner badge is a link of its own, so it sits beside the name
-          link, not inside it. Anything interactive here must sit ABOVE the
-          stretched area — nesting it inside the anchor would be invalid and
-          would swallow its own click. */}
-      <div className="flex min-w-0 items-center gap-2">
-        <Link
-          to="/workflows/$workflowId"
-          params={{ workflowId: workflow.id }}
-          className="min-w-0 truncate text-sm font-medium text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
-        >
-          {workflow.name}
-        </Link>
-        <span className="relative z-10">
-          <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
-        </span>
-        {countLabel !== undefined && (
-          <span className="shrink-0 text-xs font-normal text-muted">
-            {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
+    <li className="group relative rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
+      <div className="flex items-center justify-between gap-3">
+        {/* The owner badge is a link of its own, so it sits beside the name
+            link, not inside it. Anything interactive here must sit ABOVE the
+            stretched area — nesting it inside the anchor would be invalid and
+            would swallow its own click. */}
+        <div className="flex min-w-0 items-center gap-2">
+          <Link
+            to="/workflows/$workflowId"
+            params={{ workflowId: workflow.id }}
+            className="min-w-0 truncate text-sm font-medium text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
+          >
+            {workflow.name}
+          </Link>
+          <span className="relative z-10">
+            <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
           </span>
+          {countLabel !== undefined && (
+            <span className="shrink-0 text-xs font-normal text-muted">
+              {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
+            </span>
+          )}
+        </div>
+        {hasSchema && (
+          <RunWorkflowDialog
+            workflowId={workflow.id}
+            workflowName={workflow.name}
+            schema={schema}
+            open={runOpen}
+            onOpenChange={setRunOpen}
+            onStarted={goToRun}
+          />
         )}
+        <div className="relative z-10 flex items-center gap-2 shrink-0 flex-wrap">
+          {scheduleCount > 0 && (
+            <span
+              aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}
+              title={nextFireAt ? `next fire ${new Date(nextFireAt).toLocaleString()}` : undefined}
+              className="inline-flex items-center gap-1 rounded-full bg-muted/10 px-2 py-0.5 text-xs text-muted"
+            >
+              <Clock className="h-3 w-3" /> {scheduleCount}
+            </span>
+          )}
+          {eventCount > 0 && (
+            <span
+              aria-label={`${eventCount} event trigger${eventCount === 1 ? "" : "s"}`}
+              className="inline-flex items-center gap-1 rounded-full bg-muted/10 px-2 py-0.5 text-xs text-muted"
+            >
+              <Zap className="h-3 w-3" /> {eventCount}
+            </span>
+          )}
+          <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
+            {startRun.isPending ? "Starting…" : "Run"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setDeleteError(null);
+              setDeleteOpen(true);
+            }}
+            disabled={del.isPending}
+            aria-label={`Delete ${workflow.name}`}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+          <ConfirmDialog
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+            title={`Delete "${workflow.name}"?`}
+            description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
+            confirmLabel="Delete workflow"
+            pendingLabel="Deleting…"
+            pending={del.isPending}
+            error={deleteError}
+            onConfirm={() => void handleDelete()}
+          />
+        </div>
       </div>
-      {hasSchema && (
-        <RunWorkflowDialog
-          workflowId={workflow.id}
-          workflowName={workflow.name}
-          schema={schema}
-          open={runOpen}
-          onOpenChange={setRunOpen}
-          onStarted={goToRun}
-        />
-      )}
-      <div className="relative z-10 flex items-center gap-2 shrink-0 flex-wrap">
-        {scheduleCount > 0 && (
-          <span
-            aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}
-            title={nextFireAt ? `next fire ${new Date(nextFireAt).toLocaleString()}` : undefined}
-            className="inline-flex items-center gap-1 rounded-full bg-muted/10 px-2 py-0.5 text-xs text-muted"
-          >
-            <Clock className="h-3 w-3" /> {scheduleCount}
+      {/* The latest run's answer, brought to the list. It replaces the
+          status chip this row used to carry: the glyph + snippet say
+          strictly more than the chip did. `z-10` lifts the run-detail link
+          above the name link's stretched hit area. */}
+      <div className="relative z-10 mt-1.5">
+        {latestRun ? (
+          <LatestRunLine run={latestRun} />
+        ) : (
+          <span className="text-xs italic text-muted">
+            {runsQ.isLoading ? "\u00A0" : "No runs yet"}
           </span>
         )}
-        {eventCount > 0 && (
-          <span
-            aria-label={`${eventCount} event trigger${eventCount === 1 ? "" : "s"}`}
-            className="inline-flex items-center gap-1 rounded-full bg-muted/10 px-2 py-0.5 text-xs text-muted"
-          >
-            <Zap className="h-3 w-3" /> {eventCount}
-          </span>
-        )}
-        {latestRun && (
-          <RunStatusChip status={latestRun.status} outcome={latestRun.outcome} needsApproval={false} />
-        )}
-        <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
-          {startRun.isPending ? "Starting…" : "Run"}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            setDeleteError(null);
-            setDeleteOpen(true);
-          }}
-          disabled={del.isPending}
-          aria-label={`Delete ${workflow.name}`}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
-        <ConfirmDialog
-          open={deleteOpen}
-          onOpenChange={setDeleteOpen}
-          title={`Delete "${workflow.name}"?`}
-          description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
-          confirmLabel="Delete workflow"
-          pendingLabel="Deleting…"
-          pending={del.isPending}
-          error={deleteError}
-          onConfirm={() => void handleDelete()}
-        />
       </div>
     </li>
   );

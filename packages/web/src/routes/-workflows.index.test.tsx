@@ -84,6 +84,46 @@ const allRunsData = {
   ],
 };
 
+// Every row's latest run is this settled one; `useRunDetail` below carries
+// the stop message the row's result line must surface.
+const perWorkflowRuns = {
+  runs: [
+    {
+      runId: "wfrun_1",
+      workflowId: "wf_1",
+      status: "settled" as const,
+      outcome: "completed" as const,
+      createdAt: Date.now() - 10000,
+      updatedAt: Date.now() - 5000,
+    },
+  ],
+};
+
+const runDetailData = {
+  run: {
+    runId: "wfrun_1",
+    workflowId: "wf_1",
+    status: "settled" as const,
+    outcome: "completed" as const,
+    createdAt: Date.now() - 10000,
+    updatedAt: Date.now() - 5000,
+    waitingOn: [],
+    definition: { version: "dag/v1", nodes: [{ id: "stop", type: "stop" }], edges: [] },
+    params: {},
+  },
+  checkpoints: [
+    {
+      nodeId: "stop",
+      iteration: 0,
+      status: "completed" as const,
+      result: { message: "Digest sent: 4 PRs, 2 incidents" },
+      createdAt: Date.now() - 5000,
+    },
+  ],
+  signals: [],
+  pendingGates: [],
+};
+
 let searchState: Record<string, unknown> = {};
 
 const navigate = vi.fn();
@@ -144,7 +184,8 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 
 vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
-  useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
+  useWorkflowRuns: () => ({ data: perWorkflowRuns, isLoading: false }),
+  useRunDetail: () => ({ data: runDetailData, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
   useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
@@ -289,6 +330,15 @@ describe("WorkflowsIndexPage", () => {
     renderPage();
     expect(screen.getByText("Deploy pipeline")).toBeTruthy();
     expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
+  });
+
+  it("surfaces the latest run's result message on the workflow row", () => {
+    renderPage();
+    // Both fixture workflows share the mocked latest run, so the message
+    // appears once per row.
+    const snippets = screen.getAllByText("Digest sent: 4 PRs, 2 incidents");
+    expect(snippets.length).toBe(2);
+    expect(snippets[0]!.closest("a")?.getAttribute("to")).toBe("/workflows/runs/$runId");
   });
 
   it("renders the Runs tab from the global runs feed", () => {

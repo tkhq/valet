@@ -9,6 +9,7 @@ import {
   jsonPreview,
   readTemplateDiagnostics,
   runNeedsApproval,
+  runResultSnippet,
   statusByNodeId,
 } from "./run-detail-helpers";
 
@@ -368,6 +369,46 @@ describe("formatRunOutput", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(formatRunOutput(cyclic)?.kind).toBe("text");
+  });
+});
+
+describe("runResultSnippet", () => {
+  it("prefers the message and collapses it to one line", () => {
+    expect(
+      runResultSnippet({
+        outcome: "completed",
+        message: "Line one\n  line two\ttab",
+        diagnostics: [],
+      }),
+    ).toBe("Line one line two tab");
+  });
+
+  it("falls back to a plain-string output when there is no message", () => {
+    expect(
+      runResultSnippet({ outcome: "completed", output: "all clear", diagnostics: [] }),
+    ).toBe("all clear");
+  });
+
+  it("does not flatten structured output", () => {
+    expect(
+      runResultSnippet({ outcome: "completed", output: { ok: true }, diagnostics: [] }),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for whitespace-only text", () => {
+    expect(
+      runResultSnippet({ outcome: "completed", message: "  \n ", diagnostics: [] }),
+    ).toBeUndefined();
+  });
+
+  it("caps the snippet with an ellipsis", () => {
+    const snippet = runResultSnippet({
+      outcome: "completed",
+      message: "x".repeat(500),
+      diagnostics: [],
+    });
+    expect(snippet?.length).toBe(281); // 280 chars + ellipsis
+    expect(snippet?.endsWith("…")).toBe(true);
   });
 });
 

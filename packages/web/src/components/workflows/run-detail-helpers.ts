@@ -377,6 +377,32 @@ export function deriveRunResult(
   return { outcome, message, output, nodeId, diagnostics };
 }
 
+/**
+ * List rows show at most one line, and a stop message is prose that may
+ * carry newlines. Collapsing whitespace keeps the line honest; the cap
+ * bounds the DOM node, because CSS truncation hides overflow but still
+ * renders it.
+ */
+const RESULT_SNIPPET_MAX = 280;
+
+/**
+ * One-line preview of a settled run's result for list rows: the stop
+ * node's message, or — when the workflow produced a plain-string output
+ * with no message — that output. Structured output is not flattened here;
+ * JSON squeezed onto one line reads as noise, and the detail page already
+ * renders it properly.
+ */
+export function runResultSnippet(result: RunResult): string | undefined {
+  const text =
+    result.message ?? (typeof result.output === "string" ? result.output : undefined);
+  if (text === undefined) return undefined;
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  if (oneLine === "") return undefined;
+  return oneLine.length <= RESULT_SNIPPET_MAX
+    ? oneLine
+    : `${oneLine.slice(0, RESULT_SNIPPET_MAX)}…`;
+}
+
 /** How a settled run's `output` should be displayed. */
 export interface RunOutputDisplay {
   /** `json` renders through `CodeBlock`; `text` renders as prose. */
