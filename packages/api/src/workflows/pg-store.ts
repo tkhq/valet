@@ -29,9 +29,16 @@
  * `payload`, `consumed_by`) are `jsonb` (schema/index.ts): written as
  * `JSON.stringify`'d text (Postgres coerces a text literal targeting a
  * jsonb column), but read back ALREADY PARSED by the pg/PGlite driver — no
- * `JSON.parse` on read. `fromJsonColumn`/`requiredJsonColumn` below also
- * tolerate a raw string defensively (in case a driver ever returns jsonb as
- * text), so the mapping is correct either way. `undefined` is stored as SQL
+ * `JSON.parse` on read, ever. `fromJsonColumn`/`requiredJsonColumn` below
+ * pass the driver's value through verbatim. They MUST NOT re-parse a string
+ * value: a jsonb column whose top-level value IS a string (e.g. an action
+ * node result that is a plain text blob) arrives as a JS string, and
+ * re-parsing its content throws on non-JSON text — or worse, silently
+ * changes the type when the content happens to be JSON ("123" → 123). A
+ * runtime typeof check cannot tell "unparsed JSON text" apart from "the
+ * JSON value is a string", so no defensive branch is possible here; support
+ * for a non-parsing driver would have to be decided per column at the call
+ * site. `undefined` is stored as SQL
  * `NULL` and read back as `undefined` (not `null`) so the shape matches
  * `InMemoryWorkflowStore`'s observable behavior exactly — the conformance
  * suites assert this (e.g. a `skipped` checkpoint's `result` stays
@@ -138,17 +145,15 @@ function jsonToParam(value: unknown): string | null {
   return value === undefined ? null : JSON.stringify(value);
 }
 
-/** Reads a nullable jsonb column: `null`/`undefined` → `undefined`; an already-parsed JS value passes through; a raw string (defensive) is `JSON.parse`'d. */
+/** Reads a nullable jsonb column: `null`/`undefined` → `undefined`; the driver-parsed value passes through verbatim (see the header comment — never re-parse a string value). */
 function fromJsonColumn<T>(value: unknown): T | undefined {
   if (value === null || value === undefined) return undefined;
-  if (typeof value === 'string') return JSON.parse(value) as T;
   return value as T;
 }
 
 /** Like `fromJsonColumn`, but for NOT NULL jsonb columns where the value is guaranteed present. */
 function requiredJsonColumn<T>(value: unknown, field: string): T {
   if (value === null || value === undefined) throw new Error(`expected jsonb value for ${field}, got ${value}`);
-  if (typeof value === 'string') return JSON.parse(value) as T;
   return value as T;
 }
 

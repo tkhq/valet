@@ -64,10 +64,15 @@ function jsonToParam(value: unknown): string | null {
   return value === undefined ? null : JSON.stringify(value);
 }
 
-/** Reads a nullable jsonb column: `null` → `undefined`; an already-parsed JS value passes through; a raw string (defensive) is `JSON.parse`'d. */
+/**
+ * Reads a nullable jsonb column: `null` → `undefined`; the driver-parsed
+ * value passes through verbatim. Never re-parse a string value: a jsonb
+ * string arrives from the driver as a JS string, and a typeof check cannot
+ * tell it apart from unparsed JSON text — re-parsing throws on non-JSON
+ * content and silently changes the type on JSON-shaped content ("123" → 123).
+ */
 function fromJsonColumn<T>(value: unknown): T | undefined {
   if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") return JSON.parse(value) as T;
   return value as T;
 }
 
