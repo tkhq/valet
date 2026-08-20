@@ -97,9 +97,8 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
     });
 
     it('a top-level string result round-trips verbatim (no read-time re-parse)', async () => {
-      // Regression: action nodes can return a plain text blob. A jsonb-backed
-      // store must not JSON.parse the string's CONTENT on read — that throws
-      // on non-JSON text and poisons every subsequent read of the run.
+      // Regression: a read-time re-parse throws on a non-JSON string result
+      // and poisons every subsequent read of the run.
       const store = await setup();
       const text = 'tasks[10]:\n  - task_id: 2701b936 (not JSON)';
       await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ result: text }));
@@ -108,8 +107,7 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
     });
 
     it('a JSON-shaped string result keeps its string type (no silent double-parse)', async () => {
-      // The silent variant of the same bug: result "123" must read back as
-      // the string "123", not the number 123.
+      // The silent variant: a re-parse turns "123" into the number 123.
       const store = await setup();
       await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ result: '123' }));
       const [cp] = await store.getCheckpoints(RUN_ID);

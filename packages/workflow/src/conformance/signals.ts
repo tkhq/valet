@@ -72,8 +72,7 @@ export function describeSignalContract(makeStore: () => Promise<WorkflowStore> |
     });
 
     it('a top-level string payload round-trips verbatim (no read-time re-parse)', async () => {
-      // Regression: a jsonb-backed store must not JSON.parse a string
-      // payload's CONTENT on read — that throws on non-JSON text.
+      // Regression: a read-time re-parse throws on a non-JSON string payload.
       const store = await setup();
       const text = 'records[50]:\n  - record_id: 04b39761 (not JSON)';
       await store.insertSignal(signal({ payload: text }));

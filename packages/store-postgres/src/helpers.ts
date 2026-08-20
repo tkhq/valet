@@ -13,6 +13,7 @@ export function jsonOrNull<T>(value: T | undefined | null): string | null {
   return value === undefined || value === null ? null : JSON.stringify(value);
 }
 
+/** Reads a `text` column that stores JSON. For `jsonb` columns, use `fromJsonbColumn` instead. */
 export function parseJson<T>(value: string | null | undefined): T | undefined {
   if (value === null || value === undefined) return undefined;
   return JSON.parse(value) as T;
@@ -21,6 +22,37 @@ export function parseJson<T>(value: string | null | undefined): T | undefined {
 /** Like parseJson, but for NOT NULL columns where the value is guaranteed present. */
 export function parseJsonRequired<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+/**
+ * Serializes a JS value into a `jsonb` column parameter. `undefined` becomes
+ * SQL `NULL`. Every other value becomes `JSON.stringify`'d text — Postgres
+ * coerces the text literal into the jsonb column.
+ */
+export function jsonbToParam(value: unknown): string | null {
+  return value === undefined ? null : JSON.stringify(value);
+}
+
+/**
+ * Reads a nullable `jsonb` column. `null`/`undefined` map to `undefined`.
+ * Every other value passes through verbatim.
+ *
+ * The driver (node-postgres and PGlite) returns jsonb already parsed. Never
+ * re-parse a string value. A jsonb string arrives as a JS string, and a
+ * typeof check cannot tell it apart from unparsed JSON text. A re-parse
+ * throws on non-JSON content ("records[50]: ...") and silently changes the
+ * type of JSON-shaped content ("123" → 123). For `text` columns that store
+ * JSON, use `parseJson`/`parseJsonRequired` instead.
+ */
+export function fromJsonbColumn<T>(value: unknown): T | undefined {
+  if (value === null || value === undefined) return undefined;
+  return value as T;
+}
+
+/** Like `fromJsonbColumn`, but for NOT NULL jsonb columns: throws if the driver returned `null`/`undefined`. */
+export function requiredJsonbColumn<T>(value: unknown, field: string): T {
+  if (value === null || value === undefined) throw new Error(`expected jsonb value for ${field}, got ${value}`);
+  return value as T;
 }
 
 /**
