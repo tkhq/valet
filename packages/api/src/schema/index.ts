@@ -26,10 +26,12 @@ import type { ParamMatcher } from "../policies/matchers.js";
 //     which call `.getTime()` / compare against `new Date()`) become
 //     `timestamp` here: `orgs`... no, `invites`, `sandbox_tokens`, and the
 //     entire better-auth block.
-// JSON-as-text becomes `jsonb` only where a reader `JSON.parse`s the column
-// (traced via grep — see the per-column disposition table in the task
+// JSON-as-text becomes `jsonb` only where a reader consumes the column as
+// JSON (traced via grep — see the per-column disposition table in the task
 // report); everything else (e.g. `memory_files.tags`/`.extras`, which Task 9
-// feeds into the tsvector generated column as text) stays `text`.
+// feeds into the tsvector generated column as text) stays `text`. The
+// driver returns jsonb already parsed — readers must NOT `JSON.parse` the
+// value (see `fromJsonbColumn` in `@valet/store-postgres`).
 // Boolean-as-integer (`0`/`1` flags with no arithmetic) becomes `boolean`.
 // `AUTOINCREMENT` becomes `generated always as identity`.
 
@@ -38,8 +40,8 @@ import type { ParamMatcher } from "../policies/matchers.js";
 export const orgs = pgTable("orgs", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
-  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read as
-  // JSON (`services/org.ts`'s `JSON.parse`/`JSON.stringify`) — jsonb.
+  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read
+  // driver-parsed by `services/org.ts` — jsonb.
   features: jsonb("features").notNull().default({}),
   // Ordered list of namespaced model ids (e.g. `"anthropic/claude-opus-4"`)
   // the org has opted into, most-preferred first. Read/written as JSON
@@ -1022,8 +1024,8 @@ export const workflowSignals = pgTable(
 // Durable, encrypted store backing the engine's `CredentialStore` port
 // (`packages/engine/src/types.ts`). Secret columns hold AES-256-GCM
 // ciphertext produced by `src/lib/secret-crypto.ts` — plaintext tokens are
-// never persisted. `scopes`/`metadata` are `JSON.parse`'d by
-// `plugins/credential-store.ts` — jsonb.
+// never persisted. `scopes`/`metadata` are jsonb, read driver-parsed by
+// `plugins/credential-store.ts` (never re-`JSON.parse`'d).
 
 export const credentials = pgTable(
   "credentials",
@@ -1168,9 +1170,9 @@ export const actionPolicyOverrides = pgTable(
 );
 
 // `action_invocations` — durable dedup table for the workflow `tool` node's
-// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is
-// `JSON.stringify`'d by `plugins/action-invoker.ts` and `JSON.parse`'d back
-// — jsonb. A duplicate `invocationId` (crash-and-retry, concurrent
+// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is jsonb:
+// written by `plugins/action-invoker.ts`, read back driver-parsed.
+// A duplicate `invocationId` (crash-and-retry, concurrent
 // dispatch) reads back the original row rather than re-invoking the action.
 //
 // Extended (action-policies plan, Task 2) into a general policy-invocation

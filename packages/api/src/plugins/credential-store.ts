@@ -12,12 +12,12 @@
  * Secret fields (`accessToken`, `refreshToken`, `apiKey`) are encrypted at
  * rest with `src/lib/secret-crypto.ts`'s AES-256-GCM helpers (byte-identical
  * `v1:{iv}:{tag}:{ct}` format) — the row never holds plaintext.
- * `scopes`/`metadata` are `jsonb` columns (schema/index.ts): written as
- * `JSON.stringify`'d text, read back already-parsed by the driver (no
- * `JSON.parse` on read — see `pg-store.ts`'s doc comment for the same
- * jsonb-read-vs-write asymmetry).
+ * `scopes`/`metadata` are `jsonb` columns (schema/index.ts): written via
+ * `jsonbToParam`, read back driver-parsed via `fromJsonbColumn` (both from
+ * `@valet/store-postgres` — see their doc comments for the never-re-parse
+ * rule).
  */
-import type { PgQueryable } from "@valet/store-postgres";
+import { fromJsonbColumn, jsonbToParam, type PgQueryable } from "@valet/store-postgres";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 
@@ -57,18 +57,6 @@ function asString(value: unknown, field: string): string {
 
 function asStringOrNull(value: unknown, field: string): string | null {
   return value === null || value === undefined ? null : asString(value, field);
-}
-
-/** `undefined` in → SQL `NULL` param out; every other value → `JSON.stringify`'d text (Postgres coerces it into the target jsonb column). */
-function jsonToParam(value: unknown): string | null {
-  return value === undefined ? null : JSON.stringify(value);
-}
-
-/** Reads a nullable jsonb column: `null` → `undefined`; an already-parsed JS value passes through; a raw string (defensive) is `JSON.parse`'d. */
-function fromJsonColumn<T>(value: unknown): T | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") return JSON.parse(value) as T;
-  return value as T;
 }
 
 function rawToCredentialRow(raw: Record<string, unknown>): CredentialRow {
@@ -117,8 +105,8 @@ export class PgCredentialStore implements CredentialStore {
       refreshToken: this.decrypt(row.refreshTokenEnc),
       apiKey: this.decrypt(row.apiKeyEnc),
       expiresAt: row.expiresAt ?? undefined,
-      scopes: fromJsonColumn<string[]>(row.scopes),
-      metadata: fromJsonColumn<Record<string, unknown>>(row.metadata),
+      scopes: fromJsonbColumn<string[]>(row.scopes),
+      metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata),
     };
   }
 
@@ -146,8 +134,8 @@ export class PgCredentialStore implements CredentialStore {
         this.encrypt(credential.refreshToken),
         this.encrypt(credential.apiKey),
         credential.expiresAt ?? null,
-        jsonToParam(credential.scopes),
-        jsonToParam(credential.metadata),
+        jsonbToParam(credential.scopes),
+        jsonbToParam(credential.metadata),
         now,
         now,
       ],
@@ -171,7 +159,7 @@ export class PgCredentialStore implements CredentialStore {
       const row = rawToCredentialRow(raw);
       return {
         service: row.service,
-        scopes: fromJsonColumn<string[]>(row.scopes),
+        scopes: fromJsonbColumn<string[]>(row.scopes),
         connectedAt: new Date(row.createdAt).toISOString(),
       };
     });
