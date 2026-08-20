@@ -42,6 +42,7 @@ import {
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
+import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
 import {
@@ -261,23 +262,27 @@ async function computeResult(
   // ("Missing bot_token"). Only org-provided services escalate — a plain
   // personal service reading another owner's credential would be a
   // privilege escalation, so its miss stays a miss.
-  //
-  // Scope: this resolves the TOKEN only. The session path additionally
-  // enriches a Slack credential with the run owner's linked
-  // `owner_slack_user_id` (`engine/host.ts`), which `slack.dm_owner` and the
-  // private-channel guard need. That enrichment is a separate, pre-existing
-  // gap in the workflow path (before this change Slack failed here outright,
-  // masking it); public-channel reads and `list_channels` — the reported
-  // failure — need only the token, so it is deliberately left to a follow-up
-  // rather than threaded through this generic provider.
   const orgFallback =
     declared?.requires?.orgCredential === true && ctx.orgId
       ? { type: "org" as const, id: ctx.orgId }
       : undefined;
-  const credentials =
+  const baseProvider =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
       : buildCredentialProvider(opts.credentials, owner, credentialService, orgFallback);
+  // Identity enrichment, the second half of the session path's slack branch
+  // (`engine/host.ts`): the resolved token alone cannot answer "may the run
+  // owner read this private channel" — `slack.dm_owner` and the private-
+  // channel guard read the owner's linked Slack id off
+  // `metadata.owner_slack_user_id`. Without this a linked user's workflow
+  // still fails with "Owner has not linked their Slack identity". User-owned
+  // runs only: a team/org-owned run has no single person whose channel
+  // membership could authorize the read, so its credential stays bare and
+  // those actions keep failing closed.
+  const credentials =
+    credentialService === "slack" && ctx.owner.type === "user"
+      ? withOwnerSlackIdentity(baseProvider, opts.db, ctx.owner.id)
+      : baseProvider;
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
@@ -578,6 +583,31 @@ function buildCredentialProvider(
     },
     request(): Promise<Credential> {
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
+    },
+  };
+}
+
+/**
+ * Wrap a provider so a resolved `slack` credential carries the run owner's
+ * linked Slack user id as `metadata.owner_slack_user_id` — the same
+ * enrichment `engine/host.ts`'s slack branch performs for a live session
+ * (both call `withSlackOwnerMetadata`). The identity link is the single
+ * source of truth; a credential's own stored metadata never carries this
+ * field. No link → the credential passes through bare, and the plugin's
+ * own guards fail closed exactly as before. An explicit
+ * `.get("<other-service>")` through the wrapped provider is also passed
+ * through bare — the slack identity must not stamp another service's
+ * credential.
+ */
+function withOwnerSlackIdentity(provider: CredentialProvider, db: AppDb, userId: string): CredentialProvider {
+  return {
+    async get(service?: string): Promise<Credential | null> {
+      const cred = await provider.get(service);
+      if (!cred || (service !== undefined && service !== "slack")) return cred;
+      return withSlackOwnerMetadata(db, userId, cred);
+    },
+    request(service: string, reason: string): Promise<Credential> {
+      return provider.request(service, reason);
     },
   };
 }

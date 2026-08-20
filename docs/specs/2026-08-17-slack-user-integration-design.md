@@ -270,6 +270,22 @@ The identity link is the single source of truth, whether it arrived via
 OAuth auto-link or the code flow. The resolver never reads the
 `slack-user` credential for this purpose.
 
+### Workflow tool nodes
+
+The session resolver is not the only credential path. A workflow `tool`
+node resolves credentials in `plugins/action-invoker.ts`, which already
+mirrors the user→org escalation for org-provided services. It must also
+mirror the enrichment: for a user-owned run, a resolved `slack` credential
+carries `owner_slack_user_id` from the run owner's identity link
+(`withSlackOwnerMetadata` in `channels/identity-links.ts`, shared with the
+session resolver). Without it, private-channel reads and `slack.dm_owner`
+fail with "Owner has not linked their Slack identity" even when the owner
+is linked — the failure mode of run `wfrun_mt1kva4i5wqesi`.
+
+Team- and org-owned runs get no enrichment: no single person's channel
+membership can authorize a private-channel read, so those actions keep
+failing closed.
+
 ## 6. Compliance sweep
 
 | Router | Disposition |
