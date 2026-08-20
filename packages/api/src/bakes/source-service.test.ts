@@ -255,6 +255,7 @@ describe("SourceService", () => {
       newId: () => `id${idSeq++}`,
       retention: async (backend, imageRefs) => {
         retentionCalls.push({ backend, imageRefs });
+        return true;
       },
       ...overrides,
     });
@@ -1044,6 +1045,26 @@ describe("SourceService", () => {
       const rows = await db.select().from(bakes).where(eq(bakes.sourceId, srcId));
       expect(rows.filter((r) => r.status === "pushed")).toHaveLength(3);
     });
+
+    it("runs retention when a bake FAILS, so a full registry can drain itself", async () => {
+      // Regression: retention used to run only on the pushed transition. A
+      // registry at ENOSPC fails every push, so retention never ran again and
+      // the disk could never self-heal (agents-dev outage, 2026-08-19).
+      const srcId = await seedRepoSource(db);
+      await seedBake(db, srcId, { id: "old-1", imageRef: "ref/old-1", createdAt: NOW - 3000 });
+      await seedBake(db, srcId, { id: "old-2", imageRef: "ref/old-2", createdAt: NOW - 2000 });
+      await seedBake(db, srcId, { id: "old-3", imageRef: "ref/old-3", createdAt: NOW - 1000 });
+
+      const row = await service.startBake(srcId);
+      builder.setState(builder.buildIds[0], { state: "failed", error: "no space left on device" });
+      await service.syncActiveBuilds();
+
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
+      expect(updated.status).toBe("failed");
+      // The oldest pushed bake falls outside the keep-newest-2 window and must
+      // still be deleted from the registry, even though this bake failed.
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).toContain("ref/old-1");
+    });
   });
 
   describe("start() orphan sweep (ported)", () => {
@@ -1146,6 +1167,32 @@ describe("SourceService", () => {
       // Retention called for exactly the evicted refs, oldest first.
       const evictedRefs = retentionCalls.flatMap((c) => c.imageRefs);
       expect(evictedRefs).toEqual(["ref/old1", "ref/old2"]);
+    });
+
+    it("keeps the victim's bake row when the image delete fails, so its bytes stay counted", async () => {
+      // Regression: eviction deleted the row even when the registry delete
+      // failed (swallowed), erasing the image's bytes from the ceiling's
+      // accounting while the image stayed on disk. An unhealthy registry —
+      // exactly when the failed-push retention path runs — must not corrupt
+      // the accounting.
+      const svc = makeService({
+        env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3" },
+        retention: async (backend, imageRefs) => {
+          retentionCalls.push({ backend, imageRefs });
+          return false; // registry delete failed
+        },
+      });
+      const srcId = await seedRepoSource(db, { id: "src_a" });
+      const otherId = await seedRepoSource(db, { id: "src_b", name: "b", repoFullName: "acme/other" });
+      await seedBake(db, otherId, { id: "old1", imageRef: "ref/old1", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+      await seedBake(db, otherId, { id: "newest_b", imageRef: "ref/newb", sizeBytes: 2 * GB, createdAt: NOW - 1000 });
+      retentionCalls = [];
+
+      await pushBakeWithSize(svc, srcId, "sha-a", 2 * GB);
+
+      // old1 was the eviction victim; its image delete failed → row survives.
+      expect((await idsRemaining()).has("old1")).toBe(true);
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).toContain("ref/old1");
     });
 
     it("a source's NEWEST pushed bake is never evicted even if it's the oldest overall", async () => {
