@@ -39,7 +39,7 @@ import {
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
-import { identityForUser } from "../channels/identity-links.js";
+import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import type { RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
@@ -1045,17 +1045,12 @@ export class EngineHost {
           const stored =
             (await credentials.get(owner, service)) ??
             (await credentials.get({ type: "org", id: orgId }, service));
-          if (stored) {
-            // Activates plugin-slack's dormant private-channel check (its
-            // V2-GAP comment): the identity link is the single source of
-            // truth for the owner's Slack user id, regardless of how the
-            // link was created.
-            const identity = await identityForUser(db, "slack", userId);
-            if (identity) {
-              return { ...stored, metadata: { ...stored.metadata, owner_slack_user_id: identity.externalId } };
-            }
-          }
-          return stored ?? null;
+          // Activates plugin-slack's private-channel check: the identity
+          // link is the single source of truth for the owner's Slack user
+          // id, regardless of how the link was created. Shared with the
+          // workflow action invoker (`plugins/action-invoker.ts`).
+          if (stored) return withSlackOwnerMetadata(db, userId, stored);
+          return null;
         }
         return await credentials.get(owner, service);
       }

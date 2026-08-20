@@ -25,6 +25,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations } from "../schema/index.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import { linkIdentity } from "../channels/identity-links.js";
 import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
@@ -435,6 +436,135 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
     expect(seenToken).toBe("org-tok");
+  });
+
+  it("stamps the run owner's linked Slack id onto a resolved slack credential", async () => {
+    // The token alone cannot answer "may the run owner read this private
+    // channel" — plugin-slack's private-channel guard and `slack.dm_owner`
+    // read `metadata.owner_slack_user_id`, which only the identity link can
+    // supply. Without this stamp a linked user's workflow still fails with
+    // "Owner has not linked their Slack identity" (run wfrun_mt1kva4i5wqesi).
+    let seenOwnerId: unknown;
+    const action: PluginAction = {
+      id: "slack.whoami",
+      name: "whoami",
+      description: "reports the owner id it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        seenOwnerId = cred?.metadata?.["owner_slack_user_id"];
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "slack", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-tok" });
+    const db = await makeDb();
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "slack", action: "whoami", params: {}, invocationId: "workflow:r1:slack-identity" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
+    expect(seenOwnerId).toBe("U123LINKED");
+  });
+
+  it("leaves the slack credential bare when the run owner has no identity link", async () => {
+    // No link → no stamp; the plugin's own guards keep failing closed with
+    // their "link it in Settings" message, which is now accurate.
+    let seenOwnerId: unknown = "sentinel";
+    const action: PluginAction = {
+      id: "slack.whoami",
+      name: "whoami",
+      description: "reports the owner id it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        seenOwnerId = cred?.metadata?.["owner_slack_user_id"];
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "slack", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "slack", action: "whoami", params: {}, invocationId: "workflow:r1:slack-nolink" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
+    expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("does not stamp a Slack identity for an org-owned run", async () => {
+    // An org-owned run has no single person whose channel membership could
+    // authorize a private-channel read — the credential stays bare even
+    // when identity links exist.
+    let seenOwnerId: unknown = "sentinel";
+    const action: PluginAction = {
+      id: "slack.whoami",
+      name: "whoami",
+      description: "reports the owner id it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        seenOwnerId = cred?.metadata?.["owner_slack_user_id"];
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "slack", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-tok" });
+    const db = await makeDb();
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin }]]),
+    });
+
+    const orgOwner: ActionInvocationContext = { userId: "org:org1", orgId: "org1", owner: { type: "org", id: "org1" } };
+    const result = await invoke(
+      { service: "slack", action: "whoami", params: {}, invocationId: "workflow:r1:slack-orgowner" },
+      orgOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
+    expect(seenOwnerId).toBeUndefined();
   });
 
   it("prefers the run owner's OWN credential over the org one", async () => {
