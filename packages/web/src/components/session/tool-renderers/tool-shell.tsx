@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
+import { getToolCardDefault, type ToolCardDefault } from "~/lib/preferences";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { isActiveStatus, type ToolCategory, type ToolStatus } from "./types";
 
@@ -79,6 +80,23 @@ export function statusLabel(status: ToolStatus): string {
   return STATUS_LABEL[status];
 }
 
+/**
+ * Resolve the mount-time expansion for a card, given the user's default
+ * policy and the status the card first observed. Errors always mount
+ * expanded — a user who set `always-collapsed` still needs to read the
+ * message that names the corrective action.
+ */
+function initialExpanded(
+  policy: ToolCardDefault,
+  status: ToolStatus,
+): boolean {
+  if (status === "error") return true;
+  if (policy === "always-expanded") return true;
+  if (policy === "always-collapsed") return false;
+  // `smart`: running expanded, completed collapsed at mount.
+  return status !== "completed";
+}
+
 export function ToolShell({
   toolName,
   category,
@@ -88,10 +106,60 @@ export function ToolShell({
   status,
   children,
 }: ToolShellProps) {
-  // Start collapsed for completed/error to keep the chat dense; start
-  // expanded while running so the user sees progress.
-  const [expanded, setExpanded] = useState(status !== "completed");
+  // The user's default policy is read once at mount. A live preference
+  // change never rewrites an already-mounted card — the toggle in a
+  // future overflow menu will take effect on the next tool call, which
+  // matches how V1's `thread-sidebar-collapsed` behaves and keeps this
+  // effect free of listener plumbing.
+  const [policy] = useState<ToolCardDefault>(() => getToolCardDefault());
+  const [expanded, setExpanded] = useState<boolean>(() =>
+    initialExpanded(policy, status),
+  );
+
+  // Auto-collapse-on-complete respects one explicit user action. Any
+  // header click flips this ref, and the effect below then leaves the
+  // card alone across status transitions. This is the pattern for
+  // "state initialised from props at mount" (CLAUDE.md): pair the
+  // `useState` with a `useEffect` that syncs on the prop and gates the
+  // sync on a `userTouched` ref.
+  const userTouchedRef = useRef(false);
+  const prevStatusRef = useRef<ToolStatus>(status);
+
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = status;
+
+    // `always-expanded` never rewrites the card. The user asked for
+    // everything open; the effect is a no-op under that policy.
+    if (policy === "always-expanded") return;
+
+    // Errors override every other rule: read the message. A card that
+    // arrives at `error` from any prior status opens, and it never
+    // auto-collapses.
+    if (status === "error") {
+      setExpanded(true);
+      return;
+    }
+
+    // Auto-collapse only on the running→completed edge, and only when
+    // the user has not clicked the header. `streaming→completed` is
+    // rare (the engine emits `running` between them) but is treated the
+    // same way — the args are done and the result is in.
+    if (
+      status === "completed" &&
+      (prev === "running" || prev === "streaming") &&
+      !userTouchedRef.current
+    ) {
+      setExpanded(false);
+    }
+  }, [status, policy]);
+
   const isError = status === "error";
+
+  const handleToggle = () => {
+    userTouchedRef.current = true;
+    setExpanded((v) => !v);
+  };
 
   return (
     <section
@@ -113,7 +181,7 @@ export function ToolShell({
             only animates while running, in the category color. */}
         <button
           type="button"
-          onClick={() => setExpanded((v) => !v)}
+          onClick={handleToggle}
           className={cn(
             "relative w-full flex items-center gap-2 px-2.5 py-1.5",
             "text-left text-xs font-mono leading-none",
