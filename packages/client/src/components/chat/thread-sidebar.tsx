@@ -185,7 +185,9 @@ function ThreadItem({
               }}
             >
               <span className="flex-1">Archive</span>
-              <span className="text-[10px] text-neutral-400 dark:text-neutral-500">A</span>
+              <span className="text-[10px] text-neutral-400 dark:text-neutral-500" title="Also ⌘⇧⌫ / Ctrl+Shift+Backspace">
+                A
+              </span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

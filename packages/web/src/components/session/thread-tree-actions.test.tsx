@@ -148,6 +148,16 @@ describe("ThreadTree — thread context menu", () => {
     expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
   });
 
+  it("archives from the menu with the A shortcut", async () => {
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.keyboard("a");
+
+    expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
+  });
+
   it("archiving the ACTIVE thread navigates back to the default thread", async () => {
     // No `thread` search param → the newest thread (thread-1) is active.
     const user = userEvent.setup();
