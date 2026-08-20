@@ -27,6 +27,7 @@ import {
   ChildWatcher,
 } from "../orchestrator/children.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
+import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
@@ -402,6 +403,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
+    orgSessionCeiling: resolveOrgSessionCeiling(process.env),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);

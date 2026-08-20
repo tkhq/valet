@@ -34,7 +34,7 @@ import {
   parseTaskRepo,
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
-import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
+import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
@@ -520,7 +520,7 @@ describe("buildChildSpawner", () => {
     });
 
     const now = Date.now();
-    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+    for (let i = 0; i < DEFAULT_ORG_ACTIVE_SESSION_CEILING; i++) {
       await api.providers.db
         .insert(agentSessions)
         .values({
@@ -574,7 +574,7 @@ describe("buildChildSpawner", () => {
     // keeps its agent_sessions row after settlement (spawn inserts it; nothing
     // deletes it) — finished work must not consume capacity forever.
     const now = Date.now();
-    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+    for (let i = 0; i < DEFAULT_ORG_ACTIVE_SESSION_CEILING; i++) {
       await api.providers.db.insert(agentSessions).values({
         id: `child_done_${i}`,
         userId: "local-user",
@@ -610,6 +610,47 @@ describe("buildChildSpawner", () => {
     expect(result.childSessionId).toBeTruthy();
   });
 
+  it("does not hold org-ceiling slots for hibernated or archived sessions", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+
+    await api.providers.engineHost.sessionFor("parent-parked", {
+      userId: "local-user",
+      orgId: "org-parked-test",
+      workspace: "/tmp",
+    });
+
+    // Fill the org past the ceiling with parked sessions: hibernated (idle
+    // sweep suspended the sandbox) and archived (user shelved it). Neither
+    // consumes compute, so neither may consume capacity.
+    const now = Date.now();
+    for (let i = 0; i < DEFAULT_ORG_ACTIVE_SESSION_CEILING + 5; i++) {
+      await api.providers.db.insert(agentSessions).values({
+        id: `s_parked_${i}`,
+        userId: "local-user",
+        orgId: "org-parked-test",
+        workspace: "/tmp",
+        status: i % 2 === 0 ? "hibernated" : "archived",
+        ownerType: "user",
+        ownerId: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    const result = await spawner(
+      { prompt: "parked sessions must not count" },
+      {
+        parentSessionId: "parent-parked",
+        parentThreadId: "th-p",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+    expect(result.childSessionId).toBeTruthy();
+  });
+
   it("counts a running child once toward the ceiling, not twice", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
@@ -626,7 +667,7 @@ describe("buildChildSpawner", () => {
     // would read this as 2*(ceiling-1) and reject; the true load leaves
     // exactly one free slot.
     const now = Date.now();
-    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING - 1; i++) {
+    for (let i = 0; i < DEFAULT_ORG_ACTIVE_SESSION_CEILING - 1; i++) {
       await api.providers.db.insert(agentSessions).values({
         id: `child_run_${i}`,
         userId: "local-user",
@@ -678,7 +719,7 @@ describe("buildChildSpawner", () => {
     // unique today, but the count must not lean on that: a foreign watch
     // must not release this org's slot.
     const now = Date.now();
-    for (let i = 0; i < ORG_ACTIVE_SESSION_CEILING; i++) {
+    for (let i = 0; i < DEFAULT_ORG_ACTIVE_SESSION_CEILING; i++) {
       await api.providers.db.insert(agentSessions).values({
         id: `s_cross_${i}`,
         userId: "local-user",
