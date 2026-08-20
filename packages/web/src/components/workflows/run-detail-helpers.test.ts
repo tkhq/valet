@@ -401,6 +401,16 @@ describe("runResultSnippet", () => {
     ).toBeUndefined();
   });
 
+  it("strips ANSI escapes and control bytes that bash step output carries", () => {
+    expect(
+      runResultSnippet({
+        outcome: "completed",
+        message: "\u001b[32mok\u001b[0m 3 checks passed\u0007",
+        diagnostics: [],
+      }),
+    ).toBe("ok 3 checks passed");
+  });
+
   it("caps the snippet with an ellipsis", () => {
     const snippet = runResultSnippet({
       outcome: "completed",

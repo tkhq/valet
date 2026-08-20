@@ -396,7 +396,14 @@ export function runResultSnippet(result: RunResult): string | undefined {
   const text =
     result.message ?? (typeof result.output === "string" ? result.output : undefined);
   if (text === undefined) return undefined;
-  const oneLine = text.replace(/\s+/g, " ").trim();
+  const oneLine = text
+    // Bash steps color their output; ANSI escapes and stray control bytes
+    // render as garbage in a one-line snippet. The detail page shows the
+    // text verbatim, so nothing is lost by scrubbing here.
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (oneLine === "") return undefined;
   return oneLine.length <= RESULT_SNIPPET_MAX
     ? oneLine

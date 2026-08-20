@@ -78,6 +78,13 @@ describe("LatestRunLine", () => {
     expect(screen.getByText("Finished without a result message")).toBeTruthy();
   });
 
+  it("says the result is unavailable when the detail fetch fails", () => {
+    useRunDetail.mockReturnValue({ data: undefined, isLoading: false, isError: true });
+    render(<LatestRunLine run={summary()} />);
+
+    expect(screen.getByText("Result unavailable")).toBeTruthy();
+  });
+
   it("links to the run's detail page", () => {
     useRunDetail.mockReturnValue(detailWithMessage("done"));
     render(<LatestRunLine run={summary()} />);

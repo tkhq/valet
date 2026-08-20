@@ -91,6 +91,11 @@ export function LatestRunLine({ run }: { run: WorkflowRunSummary }) {
     const snippet = result ? runResultSnippet(result) : undefined;
     if (snippet !== undefined) {
       body = snippet;
+    } else if (detailQ.isError) {
+      // A failed detail fetch means the result couldn't be read — saying the
+      // run "finished without a result message" would be a lie.
+      body = "Result unavailable";
+      bodyMuted = true;
     } else {
       body = detailQ.isLoading ? "…" : EMPTY_SNIPPET[outcome];
       bodyMuted = true;
