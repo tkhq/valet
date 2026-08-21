@@ -1,25 +1,11 @@
 {{- if .Values.podJanitor.enabled }}
-# Failed-pod janitor CronJob.
-#
-# Nothing else ever deletes Failed pods: Kubernetes' own terminated-pod GC
-# only fires past --terminated-pod-gc-threshold (default 12500 — effectively
-# never on a small cluster), the api's idle sweep suspends sandboxes rather
-# than deleting anything (engine/host.ts), evicted Deployment pods are
-# replaced but the dead pod object stays behind, and the kubernetes sandbox
-# provider's non-terminal release() deliberately leaves the CR/pod standing
-# for re-provision (provider.ts). Every retained Failed pod occupies one of
-# the node's kubelet pod slots (110/node by default), so weeks of quiet
-# accumulation ends in cluster-wide "Too many pods" scheduling failures — at
-# which point new session sandboxes stop scheduling and valet is down
-# (observed on a shared deployment, Aug 2026).
-#
-# Scope: pods in phase=Failed (covers Error, Evicted and
-# ContainerStatusUnknown pods) in the release namespace and the sandbox
-# namespace only — never cluster-wide. Deleting a Failed pod that is owned by
-# a live Sandbox CR is safe: the agent-sandbox controller reconciles a fresh
-# pod, which is that CR's desired state anyway; pods of destroyed sessions
-# cascade-delete with their CR and never reach this janitor. Workspace PVCs
-# are owned by the Sandbox CR, not the pod, so no data is touched.
+# Failed-pod janitor: nothing else deletes Failed pods (kube's terminated-pod
+# GC threshold is 12500 — effectively never on a small cluster), and each
+# retained dead pod occupies a kubelet pod slot (110/node k3s default) until
+# the cluster wedges into "Too many pods". Scoped to phase=Failed in the
+# release and sandbox namespaces only; deleting a Failed pod under a live
+# Sandbox CR is safe (the controller reconciles a fresh one) and workspace
+# PVCs are owned by the CR, not the pod.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -45,12 +31,8 @@ spec:
         spec:
           serviceAccountName: {{ include "valet.fullname" . }}-pod-janitor
           restartPolicy: Never
-          # One container per swept namespace, each invoking kubectl directly:
-          # rancher/kubectl is distroless (no /bin/sh), so a shell script here
-          # produces StartError, not a sweep (found the hard way on a live
-          # cluster). --wait=false: finalization is the kubelet's problem;
-          # holding the janitor pod open for it just risks tripping the Job's
-          # own activeDeadline on a slow node.
+          # One container per namespace, invoking kubectl directly:
+          # rancher/kubectl is distroless (no /bin/sh).
           containers:
             - name: sweep-sandbox-ns
               image: "{{ .Values.podJanitor.image.repository }}:{{ .Values.podJanitor.image.tag }}"
@@ -83,8 +65,7 @@ metadata:
   labels:
     {{- include "valet.labels" . | nindent 4 }}
 ---
-# One Role per swept namespace, both deliberately minimal: list to resolve
-# the field selector, delete to reap. No get/watch, no other resources.
+# One minimal Role per swept namespace: list + delete pods, nothing else.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

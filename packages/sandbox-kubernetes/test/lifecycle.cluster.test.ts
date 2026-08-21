@@ -72,8 +72,7 @@ describe.skipIf(!isClusterReady)("lifecycle (live rancher-desktop cluster)", () 
   let podsApi: ReturnType<typeof podsApiAdapter>;
 
   beforeAll(() => {
-    // Reap namespaces a killed previous run's afterAll never got to delete,
-    // then create this run's own.
+    // Reap namespaces a killed previous run leaked.
     sweepStaleThrowawayNamespaces(kubectl);
     const created = kubectl(["create", "namespace", namespace]);
     if (created.status !== 0) {

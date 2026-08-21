@@ -70,8 +70,7 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
   let nextJobId = 1;
 
   beforeAll(async () => {
-    // Reap namespaces a killed previous run's afterAll never got to delete,
-    // then create this run's own.
+    // Reap namespaces a killed previous run leaked.
     sweepStaleThrowawayNamespaces(kubectl);
     const created = kubectl(["create", "namespace", namespace]);
     if (created.status !== 0) {

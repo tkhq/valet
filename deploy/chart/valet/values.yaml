@@ -245,15 +245,10 @@ externalRegistry:
   pullSecret: ""
 
 podJanitor:
-  # Nightly CronJob that deletes Failed pods (Error / Evicted /
-  # ContainerStatusUnknown) in the release and sandbox namespaces. Nothing
-  # else reaps them, and every retained dead pod permanently occupies one of
-  # the node's kubelet pod slots (110/node k3s default) until the cluster
-  # wedges into "Too many pods" scheduling failures. See
-  # templates/pod-janitor-cronjob.yaml for the full rationale.
+  # Nightly CronJob that deletes Failed pods in the release and sandbox
+  # namespaces — see templates/pod-janitor-cronjob.yaml for the rationale.
   enabled: true
-  # Runs after the registry GC (registry.gcSchedule, 03:00) by default so the
-  # two nightly jobs don't contend on a small node.
+  # After the registry GC (03:00) so the nightly jobs don't contend.
   schedule: "30 3 * * *"
   image:
     repository: rancher/kubectl

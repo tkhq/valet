@@ -29,11 +29,9 @@ export type HibernationHooks = Pick<EngineHostOpts, "onHibernate" | "onWake" | "
  * `POST /:id/pause` route (fires from an explicit user pause) so there is
  * exactly one place that writes this transition.
  *
- * `sandboxId` (when the caller has the attachment's live handle) is recorded
- * as `hibernated_sandbox_id` — the hibernated-sandbox reaper's destroy
- * handle for sessions an api restart has evicted from the host cache.
- * `sandbox_reclaimed_at` is cleared in the same write: every hibernate
- * starts a fresh reclaim cycle.
+ * `sandboxId` is recorded as `hibernated_sandbox_id` — the reaper's destroy
+ * handle for sessions an api restart evicts from the host cache — and
+ * `sandbox_reclaimed_at` is cleared: every hibernate starts a fresh cycle.
  */
 export async function writeHibernated(db: AppDb, sessionId: string, sandboxId?: string): Promise<void> {
   await db
@@ -51,9 +49,8 @@ export function buildHibernationHooks(db: AppDb): HibernationHooks {
   const clearHibernated = async (sessionId: string): Promise<void> => {
     await db
       .update(agentSessions)
-      // The reclaim bookkeeping is cleared alongside the status flip: an
-      // awake session has no hibernated sandbox to reap, and leaving a stale
-      // handle behind would only invite a future misdirected destroy.
+      // An awake session has no hibernated sandbox to reap; a stale handle
+      // would invite a misdirected destroy.
       .set({ status: "active", hibernatedSandboxId: null, sandboxReclaimedAt: null, updatedAt: Date.now() })
       .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "hibernated")));
   };

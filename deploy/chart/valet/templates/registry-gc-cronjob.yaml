@@ -31,20 +31,14 @@ metadata:
 spec:
   schedule: {{ .Values.registry.gcSchedule | quote }}
   concurrencyPolicy: Forbid
-  # Without history limits, every finished (and especially every FAILED) GC
-  # Job leaves its pod behind forever, and each retained pod occupies one of
-  # the node's kubelet pod slots (110/node by default on k3s). One run per
-  # night makes that a slow leak toward "Too many pods" scheduling failures.
+  # Without history limits every finished/failed GC Job pod is retained
+  # forever, each occupying a kubelet pod slot.
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
       backoffLimit: 0
-      # Belt and braces with the history limits above: the TTL controller
-      # reaps the finished Job (and its pod) even if the CronJob controller
-      # is not the thing that eventually deletes it. Mirrors the BuildKit
-      # Jobs (packages/api/src/prebuilds/k8s-builder.ts), which use the same
-      # one-hour TTL.
+      # Same one-hour TTL as the BuildKit Jobs (k8s-builder.ts).
       ttlSecondsAfterFinished: 3600
       template:
         metadata:

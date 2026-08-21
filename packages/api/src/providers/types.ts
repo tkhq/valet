@@ -53,9 +53,7 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
-  /** Destroys sandboxes hibernated past the retention window (default 1h,
-   * VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES); `start()`/`stop()` called
-   * from main.ts next to the child watcher's retention sweep. */
+  /** Destroys sandboxes hibernated past the retention window; `start()`/`stop()` called from main.ts. */
   hibernationReaper: HibernationReaper;
   /** Inbound/outbound channel transport routing (Task 8); `start()`/`stop()` called from main.ts. */
   channelHost: ChannelHost;

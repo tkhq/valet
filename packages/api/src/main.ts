@@ -301,10 +301,8 @@ await providers.childWatcher.rearm().catch((err) => {
 // off; the interval is unref'd so it never holds the process open.
 providers.childWatcher.startRetentionSweep();
 
-// Hibernated-sandbox retention: fully close out sandboxes of sessions
-// hibernated past the retention window (default 1h,
-// VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES). Same lifecycle rules as the
-// child retention sweep above.
+// Destroys sandboxes hibernated past the retention window (default 1h,
+// VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
 providers.hibernationReaper.start();
 
 // Channel ingress (Task 8): resolves credentials into transports, then

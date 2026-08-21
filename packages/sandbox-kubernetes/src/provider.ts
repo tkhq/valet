@@ -655,10 +655,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     };
   }
 
-  /** `SandboxProvider.deriveId`: this provider's sandbox id IS the CR name,
-   * and the CR name is a pure function of the workspace (`create` below names
-   * it `sandboxCrName(opts.workspace)`). Recomputing it here gives late
-   * reapers a destroy handle for sandboxes whose id was never recorded. */
+  /** The sandbox id IS the CR name, a pure function of the workspace
+   * (`create` names it `sandboxCrName(opts.workspace)`). */
   deriveId(sessionKey: string): string {
     return sandboxCrName(sessionKey);
   }

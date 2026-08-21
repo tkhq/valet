@@ -418,11 +418,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
 
-  // Hibernated-sandbox reaper: the close-out the idle sweep deliberately
-  // lacks — destroys sandboxes of sessions hibernated past the retention
-  // window (default 1h, VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
-  // `start()`/`stop()` are called from `main.ts`, next to the child
-  // watcher's retention sweep.
+  // Destroys sandboxes hibernated past the retention window; `start()`/
+  // `stop()` are called from `main.ts`, next to the child retention sweep.
   const hibernationReaper = new HibernationReaper({
     db,
     engineHost,

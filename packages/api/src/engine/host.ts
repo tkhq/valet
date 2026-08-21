@@ -211,10 +211,9 @@ export interface EngineHostOpts {
    * after the idle sweep successfully suspends a session's sandbox. Task 4
    * wires this to stamp `agent_sessions.status = "hibernated"` — this
    * package (Task 3) only exposes the seam. `sandboxId` is the suspended
-   * attachment's provider handle (kept across suspend so `resume` wakes the
-   * same sandbox) — the hibernated-sandbox reaper records it as the destroy
-   * handle for sessions a later api restart evicts from the cache. Errors
-   * are caught and logged, never thrown into the sweep loop.
+   * attachment's provider handle, recorded by the hibernated-sandbox reaper
+   * as its destroy handle. Errors are caught and logged, never thrown into
+   * the sweep loop.
    */
   onHibernate?: (sessionId: string, sandboxId?: string) => Promise<void> | void;
   /**
@@ -1754,10 +1753,8 @@ export class EngineHost {
     await this.opts.sandboxProvider.destroy(sandboxId);
   }
 
-  /** Recompute the sandbox id a session's workspace would provision under,
-   * for providers with deterministic ids (`SandboxProvider.deriveId`). Null
-   * for providers with backend-assigned ids — callers must treat that as
-   * "no handle", not an error. */
+  /** Recompute the sandbox id a workspace would provision under
+   * (`SandboxProvider.deriveId`); null for backend-assigned ids. */
   deriveSandboxId(sessionKey: string): string | null {
     return this.opts.sandboxProvider.deriveId?.(sessionKey) ?? null;
   }

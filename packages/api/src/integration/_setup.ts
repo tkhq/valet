@@ -342,9 +342,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
 
-  // Never started in tests (retentionMs 0 disables the interval outright);
-  // present because the Providers shape requires it. Reaper behavior is
-  // tested directly in engine/hibernation-reaper.test.ts.
+  // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
 
   const channelHost = new ChannelHost({

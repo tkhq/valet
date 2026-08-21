@@ -86,8 +86,7 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
 
   const provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
 
-  // Reap namespaces a killed previous run's afterAll never got to delete,
-  // then create this run's own.
+  // Reap namespaces a killed previous run leaked.
   sweepStaleThrowawayNamespaces(kubectl);
   kubectl(["create", "namespace", namespace]);
 
