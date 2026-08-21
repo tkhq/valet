@@ -1,4 +1,4 @@
-import type { SessionThread } from '@valet/shared';
+import type { SessionThread, OrchestratorIdentity, AgentSession } from '@valet/shared';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
@@ -48,8 +48,15 @@ async function stopOldOrchestratorSession(
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
+const CLAIM_INVALIDATED = 'Orchestrator session claim was invalidated. Retry the request.';
 const TERMINAL_STATUSES = new Set(['terminated', 'archived', 'error']);
 const ORCHESTRATOR_UNAVAILABLE_STATUSES = new Set(['terminated', 'archived', 'error']);
+
+async function currentOrchestratorSessionId(appDb: AppDb, userId: string): Promise<string> {
+  const live = await db.getLiveOrchestratorSession(appDb, userId);
+  if (live) return live.id;
+  throw new Error(CLAIM_INVALIDATED);
+}
 
 // ─── Restart Orchestrator Session ───────────────────────────────────────────
 
@@ -93,7 +100,7 @@ async function startOrchestratorSession(
     // Stop the old orchestrator session (if any) before creating a new one.
     // Without this, the old DO + sandbox + Runner keep running in parallel,
     // causing duplicate steering messages to child sessions.
-    const oldSession = await db.getLiveOrchestratorSession(appDb, userId);
+    const oldSession = await db.getOccupyingOrchestratorSession(appDb, userId);
     if (oldSession) {
       console.log(`[restartOrchestrator] Stopping old session ${oldSession.id} (status=${oldSession.status}) before restart`);
       await stopOldOrchestratorSession(env, appDb, oldSession.id);
@@ -135,7 +142,7 @@ async function startOrchestratorSession(
     }
   }
 
-  const personaFiles = buildOrchestratorPersonaFiles(identity as any);
+  const personaFiles = buildOrchestratorPersonaFiles(identity);
 
   // Ensure today's journal exists and load memory snapshot
   await ensureTodayJournal(env.DB, userId);
@@ -158,8 +165,12 @@ async function startOrchestratorSession(
     personaId: identity.personaId ?? undefined,
   });
   if (!claimed.inserted) {
-    console.log(`[orchestrator] Session claim lost for userId=${userId}, using ${claimed.session.id}`);
-    return { sessionId: claimed.session.id };
+    if (await db.isOrchestratorSpawnClaimHeld(appDb, claimed.session.id)) {
+      console.log(`[orchestrator] Session claim lost for userId=${userId}, using ${claimed.session.id}`);
+      return { sessionId: claimed.session.id };
+    }
+    console.log(`[orchestrator] Occupying session ${claimed.session.id} is generation-stale`);
+    return { sessionId: await currentOrchestratorSessionId(appDb, userId) };
   }
 
   // Migrate channel bindings from ALL previous orchestrator sessions to the new one.
@@ -260,9 +271,8 @@ async function startOrchestratorSession(
   const sessionDO = env.SESSIONS.get(doId);
 
   if (!(await db.isOrchestratorSpawnClaimHeld(appDb, sessionId))) {
-    const live = await db.getLiveOrchestratorSession(appDb, userId);
-    console.log(`[orchestrator] Claim invalidated before /start for ${sessionId}, using ${live?.id ?? 'none'}`);
-    return { sessionId: live?.id ?? sessionId };
+    console.log(`[orchestrator] Claim invalidated before /start for ${sessionId}`);
+    return { sessionId: await currentOrchestratorSessionId(appDb, userId) };
   }
 
   try {
@@ -285,9 +295,8 @@ async function startOrchestratorSession(
       }),
     }));
     if (startRes.status === 409) {
-      const live = await db.getLiveOrchestratorSession(appDb, userId);
-      console.log(`[orchestrator] /start rejected stale claim ${sessionId}, using ${live?.id ?? 'none'}`);
-      return { sessionId: live?.id ?? sessionId };
+      console.log(`[orchestrator] /start rejected stale claim ${sessionId}`);
+      return { sessionId: await currentOrchestratorSessionId(appDb, userId) };
     }
     if (!startRes.ok) {
       throw new Error(`orchestrator /start returned ${startRes.status}`);
@@ -312,7 +321,7 @@ export interface OnboardOrchestratorParams {
 }
 
 export type OnboardOrchestratorResult =
-  | { ok: true; sessionId: string; identity: any; session: any }
+  | { ok: true; sessionId: string; identity: OrchestratorIdentity; session: AgentSession | null }
   | { ok: false; reason: 'already_exists' }
   | { ok: false; reason: 'handle_taken' }
   | { ok: false; reason: 'name_taken' };
@@ -326,10 +335,9 @@ export async function onboardOrchestrator(
 ): Promise<OnboardOrchestratorResult> {
   const appDb = getDb(env.DB);
   let identity = await db.getOrchestratorIdentity(appDb, userId);
-  const existingSession = await db.getOrchestratorSession(env.DB, userId);
+  const liveSession = await db.getLiveOrchestratorSession(appDb, userId);
 
-  // Short-circuit if identity and session both exist and session is healthy
-  if (identity && existingSession && !TERMINAL_STATUSES.has(existingSession.status)) {
+  if (identity && liveSession) {
     return { ok: false, reason: 'already_exists' };
   }
 

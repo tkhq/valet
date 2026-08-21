@@ -9,6 +9,7 @@ import {
   insertLiveOrchestratorSession,
   bumpOrchestratorSessionGeneration,
   isOrchestratorSpawnClaimHeld,
+  getLiveOrchestratorSession,
 } from './orchestrator.js';
 import { orchestratorIdentities, sessions } from '../schema/index.js';
 
@@ -215,5 +216,19 @@ describe('orchestrator spawn claim generation', () => {
     expect(next.inserted).toBe(true);
     expect(await isOrchestratorSpawnClaimHeld(db, 'orchestrator:user-orch-a:one')).toBe(false);
     expect(await isOrchestratorSpawnClaimHeld(db, next.session.id)).toBe(true);
+  });
+
+  it('does not treat a generation-stale occupant as live', async () => {
+    const inserted = await insertLiveOrchestratorSession(db, {
+      id: 'orchestrator:user-orch-a:one',
+      userId: USER_A,
+    });
+    await bumpOrchestratorSessionGeneration(db, USER_A);
+    expect(await getLiveOrchestratorSession(db, USER_A)).toBeNull();
+    expect(await isOrchestratorSpawnClaimHeld(db, inserted.session.id)).toBe(false);
+  });
+
+  it('rejects a missing session as a spawn claim', async () => {
+    expect(await isOrchestratorSpawnClaimHeld(db, 'orchestrator:missing')).toBe(false);
   });
 });

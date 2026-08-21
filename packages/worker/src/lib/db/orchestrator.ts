@@ -188,7 +188,7 @@ export async function getCurrentOrchestratorSession(db: D1Database, userId: stri
   return null;
 }
 
-export async function getLiveOrchestratorSession(db: AppDb, userId: string): Promise<AgentSession | null> {
+export async function getOccupyingOrchestratorSession(db: AppDb, userId: string): Promise<AgentSession | null> {
   const row = await db
     .select()
     .from(sessions)
@@ -199,6 +199,14 @@ export async function getLiveOrchestratorSession(db: AppDb, userId: string): Pro
     ))
     .get();
   return row ? rowToSession(row) : null;
+}
+
+/** Non-terminal orchestrator row whose generation still matches the identity. */
+export async function getLiveOrchestratorSession(db: AppDb, userId: string): Promise<AgentSession | null> {
+  const occupying = await getOccupyingOrchestratorSession(db, userId);
+  if (!occupying) return null;
+  if (!(await isOrchestratorSpawnClaimHeld(db, occupying.id))) return null;
+  return occupying;
 }
 
 /**
@@ -234,16 +242,16 @@ export async function insertLiveOrchestratorSession(
       DO NOTHING
     `);
   } catch (err) {
-    const live = await getLiveOrchestratorSession(db, data.userId);
-    if (live) return { inserted: false, session: live };
+    const occupying = await getOccupyingOrchestratorSession(db, data.userId);
+    if (occupying) return { inserted: false, session: occupying };
     throw err;
   }
 
   const created = await db.select().from(sessions).where(eq(sessions.id, data.id)).get();
   if (created) return { inserted: true, session: rowToSession(created) };
 
-  const live = await getLiveOrchestratorSession(db, data.userId);
-  if (live) return { inserted: false, session: live };
+  const occupying = await getOccupyingOrchestratorSession(db, data.userId);
+  if (occupying) return { inserted: false, session: occupying };
   throw new Error(`insertLiveOrchestratorSession: no row for user ${data.userId}`);
 }
 
@@ -284,7 +292,8 @@ export async function isOrchestratorSpawnClaimHeld(db: AppDb, sessionId: string)
     .from(sessions)
     .where(eq(sessions.id, sessionId))
     .get();
-  if (!session?.isOrchestrator) return true;
+  if (!session) return false;
+  if (!session.isOrchestrator) return true;
   if (TERMINAL_SESSION_STATUSES.has(session.status)) return false;
   const current = await getOrchestratorSessionGeneration(db, session.userId);
   return (session.generation ?? 0) === current;

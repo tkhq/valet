@@ -1,12 +1,10 @@
-import type { OrchestratorIdentity } from '@valet/shared';
-
 /**
  * Build persona files for an orchestrator session.
  * Returns an array of { filename, content, sortOrder } matching the
  * Phase A persona injection pipeline (personaFiles → PERSONA_FILES_JSON → start.sh).
  */
 export function buildOrchestratorPersonaFiles(
-  identity: OrchestratorIdentity
+  identity: { name: string; handle: string; customInstructions?: string | null }
 ): { filename: string; content: string; sortOrder: number }[] {
   const files: { filename: string; content: string; sortOrder: number }[] = [];
 
