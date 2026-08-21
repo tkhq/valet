@@ -85,6 +85,7 @@ export class HibernationReaper {
           if (recheck.length > 0) continue;
           await live.attachment.destroy();
           this.deps.engineHost.evictCache(row.id);
+          console.log(`HibernationReaper: reclaimed cached sandbox for session ${row.id}`);
         } else {
           // Recorded handle first; derived handle (deterministic providers
           // only) covers rows hibernated before the column existed. A name
@@ -92,6 +93,7 @@ export class HibernationReaper {
           const handle = row.hibernatedSandboxId ?? this.deps.engineHost.deriveSandboxId(row.workspace);
           if (handle) {
             await this.deps.engineHost.destroySandbox(handle);
+            console.log(`HibernationReaper: reclaimed sandbox ${handle} for session ${row.id}`);
           } else {
             console.warn(
               `HibernationReaper: session ${row.id} is past retention but has no live session and no derivable sandbox handle; stamping reclaimed without a destroy`,
