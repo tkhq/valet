@@ -297,7 +297,8 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                     <div className="ml-auto flex items-center gap-1.5">
                       {tunnel.url && (
                         <a
-                          href={tunnel.url}
+                          // fix: reject non-http(s) tunnel URLs to prevent javascript: XSS
+                          href={tunnel.url?.match(/^https?:\/\//) ? tunnel.url : undefined}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="rounded-sm border border-border/70 bg-surface-1 px-2 py-[2px] font-mono text-[9px] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"

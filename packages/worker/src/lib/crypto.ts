@@ -7,6 +7,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 async function deriveKey(secret: string): Promise<CryptoKey> {
+  // fix: reject weak encryption keys instead of silently padding
+  if (secret.length < 32) throw new Error("encryption key must be >= 32 chars");
   const keyData = encoder.encode(secret.padEnd(32, '0').slice(0, 32));
   return crypto.subtle.importKey('raw', keyData, { name: 'AES-GCM' }, false, [
     'encrypt',

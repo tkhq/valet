@@ -1951,7 +1951,8 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     const resolved = resolveTunnel(name);
     if (!resolved) return new Response("Tunnel not found", { status: 404 });
 
-    const path = c.req.path.replace(new RegExp(`^/t/${name}`), "") || "/";
+    // fix: avoid regex compiled from user-supplied name
+    const path = c.req.path.slice(("/t/" + name).length) || "/";
     const url = new URL(c.req.url);
     const searchParams = new URLSearchParams(url.search);
     searchParams.delete("token");

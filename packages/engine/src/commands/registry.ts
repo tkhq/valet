@@ -168,6 +168,8 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
       return map.get(name) ?? lowerMap.get(name.toLowerCase());
     },
     nearMiss(name: string): string | undefined {
+      // fix: cap edit-distance input length to prevent DoS
+      if (name.length > 100) return undefined;
       const lower = name.toLowerCase();
       if (map.has(name) || lowerMap.has(lower)) return undefined;
       // A namespaced command reached by its bare suffix is the likeliest

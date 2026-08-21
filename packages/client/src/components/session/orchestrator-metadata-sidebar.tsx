@@ -432,7 +432,8 @@ export function OrchestratorMetadataSidebar({
                       </span>
                       {tunnel.url && (
                         <a
-                          href={tunnel.url}
+                          // fix: reject non-http(s) tunnel URLs to prevent javascript: XSS
+                          href={tunnel.url?.match(/^https?:\/\//) ? tunnel.url : undefined}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="ml-auto rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[8px] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"

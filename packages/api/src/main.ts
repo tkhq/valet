@@ -138,7 +138,8 @@ const blobsRoot = process.env.VALET_BLOBS_DIR ?? resolve(dataDir, "blobs");
 if (!process.env.VALET_ENCRYPTION_KEY) {
   console.warn("VALET_ENCRYPTION_KEY is unset — using an insecure default. Set it before storing real credentials.");
 }
-const encryptionKey = process.env.VALET_ENCRYPTION_KEY ?? "dev-key-not-secure";
+// fix: refuse to boot with hardcoded fallback encryption key
+const encryptionKey = process.env.VALET_ENCRYPTION_KEY ?? (() => { throw new Error("VALET_ENCRYPTION_KEY required") })();
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
 if (!anthropicApiKey) {

@@ -54,6 +54,8 @@ channelsRouter.post('/prompt', zValidator('json', promptSchema), async (c) => {
   if (scopeKey) {
     const binding = await db.getChannelBindingByScopeKey(c.get('db'), scopeKey);
     if (binding) {
+      // fix: enforce binding ownership on prompt route
+      if (binding.userId !== user.id) return c.json({ error: 'forbidden' }, 403);
       // Route directly to bound session's DO
       const doId = c.env.SESSIONS.idFromName(binding.sessionId);
       const sessionDO = c.env.SESSIONS.get(doId);

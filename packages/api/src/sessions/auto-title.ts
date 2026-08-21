@@ -186,7 +186,8 @@ export async function autoTitle(
     const [existing] = await deps.db
       .select({ title: sessionThreads.title })
       .from(sessionThreads)
-      .where(eq(sessionThreads.id, input.threadId))
+      // fix: scope thread lookup to owning session; prevent IDOR title write
+      .where(and(eq(sessionThreads.id, input.threadId), eq(sessionThreads.sessionId, input.sessionId)))
       .limit(1);
     const currentTitle = existing?.title?.trim();
     if (!currentTitle) {

@@ -83,6 +83,8 @@ slackEventsRouter.post('/slack/events', async (c) => {
 
   const signingSecret = install.signingSecret || c.env.SLACK_SIGNING_SECRET;
 
+  // fix: fail closed when signing secret missing instead of skipping verify
+  if (!signingSecret) return c.json({ error: 'signing secret not configured' }, 500);
   if (signingSecret) {
     const valid = await verifySlackSignature(rawHeaders, rawBody, signingSecret);
     if (!valid) {

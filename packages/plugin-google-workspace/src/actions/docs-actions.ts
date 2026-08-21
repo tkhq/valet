@@ -1522,6 +1522,8 @@ const applyTextStyle = action(
           // Find ALL occurrences and batch-style them
           let instance = 1;
           while (true) {
+            // fix: cap iterations to prevent quota exhaustion / unbounded loop
+            if (instance > 1000) break;
             const range = await findTextRange(token, docId, p.target.textToFind, instance, p.tabId);
             if (!range) break;
             ranges.push(range);

@@ -187,7 +187,9 @@ function GatewayPane({
 
   const title = tab === "terminal" ? "Terminal" : "VS Code";
   return (
+    // fix: constrain semi-trusted sandbox content with iframe sandbox
     <iframe
+      sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
       title={title}
       src={src}
       className="flex-1 border-0"

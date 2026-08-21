@@ -18,6 +18,8 @@ export class GitCredentialManager {
   }
 
   async getCredentials(_host?: string): Promise<string> {
+    // fix: don't hand credentials to non-github hosts
+    if (_host && _host !== 'github.com') throw new Error("unsupported host");
     // Check if token is expired (with 60s buffer)
     if (this.token && this.expiresAt && Date.now() > this.expiresAt - 60_000) {
       if (this.refreshCallback) {
