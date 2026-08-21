@@ -149,6 +149,26 @@ export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
   return n * 3_600_000;
 }
 
+/**
+ * How long a session may sit `hibernated` before the hibernated-sandbox
+ * reaper (`engine/hibernation-reaper.ts`) destroys its sandbox — CR, pod
+ * and workspace PVC — for good (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`,
+ * default 60). Suspension scales the pod to zero but retains the CR and
+ * PVC forever; without this reaper a cluster quietly accumulates one
+ * suspended sandbox per session that ever went idle. `0`, a negative
+ * number, or a non-number disables the reaper: hibernated sandboxes are
+ * then retained indefinitely (the pre-reaper behavior). Reopening a
+ * reaped session re-provisions a fresh sandbox from the repo, exactly like
+ * a first open — only uncommitted workspace state is lost.
+ */
+export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES;
+  if (raw === undefined || raw === "") return 60 * 60_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 60_000;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

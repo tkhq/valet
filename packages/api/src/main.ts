@@ -301,6 +301,12 @@ await providers.childWatcher.rearm().catch((err) => {
 // off; the interval is unref'd so it never holds the process open.
 providers.childWatcher.startRetentionSweep();
 
+// Hibernated-sandbox retention: fully close out sandboxes of sessions
+// hibernated past the retention window (default 1h,
+// VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES). Same lifecycle rules as the
+// child retention sweep above.
+providers.hibernationReaper.start();
+
 // Channel ingress (Task 8): resolves credentials into transports, then
 // starts webhook registration or the long-poll loop per transport. A
 // failure here must never block boot — channels are best-effort.
@@ -527,6 +533,11 @@ async function close(): Promise<void> {
     providers.childWatcher.stopRetentionSweep();
   } catch (err) {
     console.error("childWatcher.stopRetentionSweep failed:", err);
+  }
+  try {
+    providers.hibernationReaper.stop();
+  } catch (err) {
+    console.error("hibernationReaper.stop failed:", err);
   }
   try {
     await providers.channelHost.stop();

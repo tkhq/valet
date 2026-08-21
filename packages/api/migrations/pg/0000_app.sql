@@ -223,6 +223,8 @@ CREATE TABLE "agent_sessions" (
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
 	"bake_id" text,
+	"hibernated_sandbox_id" text,
+	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

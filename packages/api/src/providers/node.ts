@@ -26,6 +26,7 @@ import {
   buildChildStatusReader,
   ChildWatcher,
 } from "../orchestrator/children.js";
+import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -53,7 +54,13 @@ import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
-import { buildSandboxProvider, resolveChildRetentionMs, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
+import {
+  buildSandboxProvider,
+  resolveChildRetentionMs,
+  resolveDefaultImage,
+  resolveHibernatedRetentionMs,
+  resolveIdleMinutes,
+} from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
@@ -411,6 +418,18 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
 
+  // Hibernated-sandbox reaper: the close-out the idle sweep deliberately
+  // lacks — destroys sandboxes of sessions hibernated past the retention
+  // window (default 1h, VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
+  // `start()`/`stop()` are called from `main.ts`, next to the child
+  // watcher's retention sweep.
+  const hibernationReaper = new HibernationReaper({
+    db,
+    engineHost,
+    engineStore,
+    retentionMs: resolveHibernatedRetentionMs(process.env),
+  });
+
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
   (async () => {
@@ -610,6 +629,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     engineHost,
     childWatcher,
+    hibernationReaper,
     channelHost,
     workflowStore,
     workflowRunHost,

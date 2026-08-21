@@ -16,6 +16,7 @@ import {
   buildSandboxProvider,
   parseSandboxBackend,
   resolveDefaultImage,
+  resolveHibernatedRetentionMs,
   resolveIdleMinutes,
   resolveKubeConfig,
 } from "./sandbox-backend.js";
@@ -160,6 +161,28 @@ describe("resolveIdleMinutes", () => {
 
   it("treats a non-numeric value as disabled", () => {
     expect(resolveIdleMinutes({ VALET_SANDBOX_IDLE_MINUTES: "bogus" })).toBe(0);
+  });
+});
+
+describe("resolveHibernatedRetentionMs", () => {
+  it("defaults to 1 hour when VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES is unset", () => {
+    expect(resolveHibernatedRetentionMs({})).toBe(60 * 60_000);
+  });
+
+  it("parses a positive minutes value", () => {
+    expect(resolveHibernatedRetentionMs({ VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES: "15" })).toBe(15 * 60_000);
+  });
+
+  it("treats an explicit 0 as disabled", () => {
+    expect(resolveHibernatedRetentionMs({ VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES: "0" })).toBe(0);
+  });
+
+  it("treats a negative value as disabled", () => {
+    expect(resolveHibernatedRetentionMs({ VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES: "-5" })).toBe(0);
+  });
+
+  it("treats a non-numeric value as disabled", () => {
+    expect(resolveHibernatedRetentionMs({ VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES: "bogus" })).toBe(0);
   });
 });
 

@@ -14,6 +14,7 @@ import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
+import type { HibernationReaper } from "../engine/hibernation-reaper.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -52,6 +53,10 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
+  /** Destroys sandboxes hibernated past the retention window (default 1h,
+   * VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES); `start()`/`stop()` called
+   * from main.ts next to the child watcher's retention sweep. */
+  hibernationReaper: HibernationReaper;
   /** Inbound/outbound channel transport routing (Task 8); `start()`/`stop()` called from main.ts. */
   channelHost: ChannelHost;
 

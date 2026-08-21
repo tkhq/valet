@@ -28,11 +28,22 @@ export type HibernationHooks = Pick<EngineHostOpts, "onHibernate" | "onWake" | "
  * `onHibernate` (fires from engine-internal hibernation) and the
  * `POST /:id/pause` route (fires from an explicit user pause) so there is
  * exactly one place that writes this transition.
+ *
+ * `sandboxId` (when the caller has the attachment's live handle) is recorded
+ * as `hibernated_sandbox_id` — the hibernated-sandbox reaper's destroy
+ * handle for sessions an api restart has evicted from the host cache.
+ * `sandbox_reclaimed_at` is cleared in the same write: every hibernate
+ * starts a fresh reclaim cycle.
  */
-export async function writeHibernated(db: AppDb, sessionId: string): Promise<void> {
+export async function writeHibernated(db: AppDb, sessionId: string, sandboxId?: string): Promise<void> {
   await db
     .update(agentSessions)
-    .set({ status: "hibernated", updatedAt: Date.now() })
+    .set({
+      status: "hibernated",
+      hibernatedSandboxId: sandboxId ?? null,
+      sandboxReclaimedAt: null,
+      updatedAt: Date.now(),
+    })
     .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "active")));
 }
 
@@ -40,13 +51,16 @@ export function buildHibernationHooks(db: AppDb): HibernationHooks {
   const clearHibernated = async (sessionId: string): Promise<void> => {
     await db
       .update(agentSessions)
-      .set({ status: "active", updatedAt: Date.now() })
+      // The reclaim bookkeeping is cleared alongside the status flip: an
+      // awake session has no hibernated sandbox to reap, and leaving a stale
+      // handle behind would only invite a future misdirected destroy.
+      .set({ status: "active", hibernatedSandboxId: null, sandboxReclaimedAt: null, updatedAt: Date.now() })
       .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "hibernated")));
   };
 
   return {
-    onHibernate: async (sessionId: string) => {
-      await writeHibernated(db, sessionId);
+    onHibernate: async (sessionId: string, sandboxId?: string) => {
+      await writeHibernated(db, sessionId, sandboxId);
     },
     onWake: clearHibernated,
     onSessionReady: clearHibernated,
