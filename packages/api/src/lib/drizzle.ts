@@ -153,4 +153,10 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // column existed, which the sync and Settings read as "never set" —
   // fail-closed, same as an empty list.
   await db.query('ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb');
+
+  // Hibernated-sandbox reaper bookkeeping. Null on rows hibernated before
+  // the columns existed — the reaper falls back to a derived handle for
+  // those (engine/hibernation-reaper.ts).
+  await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "hibernated_sandbox_id" text');
+  await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint');
 }
