@@ -2,7 +2,7 @@
 
 Date: 2026-08-20
 Status: implemented
-Packages: `web` (`packages/web/src/components/session/tool-renderers/tool-shell.tsx`, `packages/web/src/lib/preferences.ts`)
+Packages: `web` (`packages/web/src/components/session/tool-renderers/tool-shell.tsx`, `packages/web/src/lib/preferences.ts`, `packages/web/src/routes/settings.appearance.tsx`)
 Ticket: [TKAI-199](https://linear.app/turnkey/issue/TKAI-199)
 
 ## Why
@@ -40,6 +40,12 @@ tolerate an unavailable or hostile localStorage: reads fall back to
 `smart`; writes swallow quota and permission errors. This is V2's first
 `packages/web` preference, and it centralises the pattern that V1 kept
 inline in `packages/client/src/components/chat/thread-sidebar.tsx`.
+
+A toggle for the preference lives on `/settings/appearance`
+(`packages/web/src/routes/settings.appearance.tsx`), under a "Chat density"
+subsection alongside the light/dark and color-palette choices. The toggle is
+three `RadioCard`s — one per policy value. It writes through
+`setToolCardDefault`, so no new persistence path is introduced.
 
 ## Contract
 
@@ -79,8 +85,6 @@ error card opens and never auto-collapses.
 
 ## Non-goals
 
-- No UI toggle. This PR ships the key/value contract. A header
-  overflow-menu toggle is a UI-only follow-up.
 - No server sync. The preference is per browser, matching V1's
   `thread-sidebar-collapsed`.
 - No `packages/client` change. Legacy V1 keeps its stricter
@@ -91,8 +95,8 @@ error card opens and never auto-collapses.
 ## Deviations
 
 - Preference reads are lazy `useState` initialisers, not live listeners.
-  A preference change from a future overflow-menu toggle takes effect on
-  the next tool card mount, not on already-mounted cards. This matches
+  A preference change from the Appearance toggle takes effect on the next
+  tool card mount, not on already-mounted cards. This matches
   `thread-sidebar-collapsed` and avoids the storage-event listener a
   live subscription would need.
 - The `streaming→completed` edge is treated the same as

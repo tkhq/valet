@@ -4,6 +4,11 @@ import { Monitor, Sun, Moon } from "lucide-react";
 import { Section } from "~/components/settings/section";
 import { RadioCard } from "~/components/settings/radio-card";
 import {
+  getToolCardDefault,
+  setToolCardDefault,
+  type ToolCardDefault,
+} from "~/lib/preferences";
+import {
   readStoredPalette,
   readStoredTheme,
   setPalette,
@@ -14,13 +19,19 @@ import {
 } from "~/lib/theme";
 
 /**
- * `/settings/appearance` — You · Appearance. Two independent choices, each
- * a row of `RadioCard`s (moss ring when selected): the light/dark polarity,
- * and the color palette. `~/lib/theme.ts` owns both mechanisms.
+ * `/settings/appearance` — You · Appearance. Three independent choices,
+ * each a row of `RadioCard`s (moss ring when selected): the light/dark
+ * polarity, the color palette, and the chat density. `~/lib/theme.ts` owns
+ * the first two mechanisms. `~/lib/preferences.ts` owns the third.
  *
- * The two are deliberately not merged into one list of six or more cards.
- * Every palette has a light and a dark form, so a single list would force
- * the reader to give up their light/dark decision to change color.
+ * The polarity and the palette are deliberately not merged into one list of
+ * six or more cards. Every palette has a light and a dark form, so a single
+ * list would force the reader to give up their light/dark decision to
+ * change color.
+ *
+ * Chat density sits here because it is a per-browser look choice, like the
+ * two above it. It writes through `setToolCardDefault`, so this page adds
+ * no persistence path of its own.
  */
 export const Route = createFileRoute("/settings/appearance")({
   component: AppearancePage,
@@ -41,9 +52,33 @@ const PALETTE_OPTIONS: { value: PaletteChoice; label: string; description: strin
   { value: "orchid", label: "Orchid", description: "Violet on soft lilac." },
 ];
 
+/** One card per policy. The collapse spec dated 2026-08-20 in
+ * `docs/specs/` holds the full interaction matrix. The descriptions name
+ * what a card does at mount and on completion, because those are the two
+ * moments a reader notices. Each one states that errors stay readable, so
+ * nobody reads a collapse setting as a way to lose an error message. */
+const TOOL_CARD_OPTIONS: { value: ToolCardDefault; label: string; description: string }[] = [
+  {
+    value: "smart",
+    label: "Smart",
+    description: "Running expanded, completed cards collapse when they finish. Errors stay expanded.",
+  },
+  {
+    value: "always-collapsed",
+    label: "Always collapsed",
+    description: "Everything collapsed at mount, including running. Errors still open.",
+  },
+  {
+    value: "always-expanded",
+    label: "Always expanded",
+    description: "Everything expanded and stays.",
+  },
+];
+
 export function AppearancePage() {
   const [choice, setChoice] = useState<ThemeChoice>(() => readStoredTheme());
   const [palette, setPaletteChoice] = useState<PaletteChoice>(() => readStoredPalette());
+  const [toolCard, setToolCard] = useState<ToolCardDefault>(() => getToolCardDefault());
 
   function choose(next: ThemeChoice) {
     setChoice(next);
@@ -53,6 +88,11 @@ export function AppearancePage() {
   function choosePalette(next: PaletteChoice) {
     setPaletteChoice(next);
     setPalette(next);
+  }
+
+  function chooseToolCard(next: ToolCardDefault) {
+    setToolCard(next);
+    setToolCardDefault(next);
   }
 
   return (
@@ -84,6 +124,21 @@ export function AppearancePage() {
               selected={palette === opt.value}
               onSelect={() => choosePalette(opt.value)}
               icon={<PaletteSwatch palette={opt.value} choice={choice} />}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-3 py-4">
+        <p className="text-sm font-medium text-ink">Chat density</p>
+        <div role="radiogroup" aria-label="Chat density" className="grid gap-2 sm:grid-cols-3">
+          {TOOL_CARD_OPTIONS.map((opt) => (
+            <RadioCard
+              key={opt.value}
+              title={opt.label}
+              description={opt.description}
+              selected={toolCard === opt.value}
+              onSelect={() => chooseToolCard(opt.value)}
             />
           ))}
         </div>
