@@ -45,18 +45,35 @@ spec:
         spec:
           serviceAccountName: {{ include "valet.fullname" . }}-pod-janitor
           restartPolicy: Never
+          # One container per swept namespace, each invoking kubectl directly:
+          # rancher/kubectl is distroless (no /bin/sh), so a shell script here
+          # produces StartError, not a sweep (found the hard way on a live
+          # cluster). --wait=false: finalization is the kubelet's problem;
+          # holding the janitor pod open for it just risks tripping the Job's
+          # own activeDeadline on a slow node.
           containers:
-            - name: pod-janitor
+            - name: sweep-sandbox-ns
               image: "{{ .Values.podJanitor.image.repository }}:{{ .Values.podJanitor.image.tag }}"
               command:
-                - /bin/sh
-                - -ec
-                # --wait=false: finalization is the kubelet's problem; holding
-                # the janitor pod open for it just risks tripping the Job's
-                # own activeDeadline on a slow node.
-                - |
-                  kubectl delete pods -n {{ .Values.sandbox.namespace }} --field-selector=status.phase=Failed --ignore-not-found --wait=false
-                  kubectl delete pods -n {{ .Release.Namespace }} --field-selector=status.phase=Failed --ignore-not-found --wait=false
+                - kubectl
+                - delete
+                - pods
+                - -n
+                - {{ .Values.sandbox.namespace }}
+                - --field-selector=status.phase=Failed
+                - --ignore-not-found
+                - --wait=false
+            - name: sweep-release-ns
+              image: "{{ .Values.podJanitor.image.repository }}:{{ .Values.podJanitor.image.tag }}"
+              command:
+                - kubectl
+                - delete
+                - pods
+                - -n
+                - {{ .Release.Namespace }}
+                - --field-selector=status.phase=Failed
+                - --ignore-not-found
+                - --wait=false
 ---
 apiVersion: v1
 kind: ServiceAccount
