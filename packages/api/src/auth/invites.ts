@@ -93,7 +93,8 @@ export async function findValidInviteByEmail(db: AppQueryable, email: string): P
 /** Marks an invite accepted — single-use: once set, `findValidInviteBy*`
  * will no longer return it. */
 export async function acceptInvite(db: AppQueryable, inviteId: string, userId: string): Promise<void> {
-  await db.update(invites).set({ acceptedBy: userId, acceptedAt: new Date() }).where(eq(invites.id, inviteId));
+  // fix: atomic single-use invite consumption via acceptedBy predicate
+  await db.update(invites).set({ acceptedBy: userId, acceptedAt: new Date() }).where(and(eq(invites.id, inviteId), isNull(invites.acceptedBy)));
 }
 
 /** Deletes an invite. Returns false if no row matched. */

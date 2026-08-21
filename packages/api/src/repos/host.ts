@@ -77,7 +77,8 @@ export interface RepoHost {
   resolveGitToken(ctx: RepoHostContext, req: GitTokenRequest): Promise<GitTokenResult | null>;
 }
 
-const GITHUB_URL_PATTERN = /github\.com/;
+// fix: anchor GitHub host regex; substring matched look-alike domains
+const GITHUB_URL_PATTERN = /^(?:https?:\/\/|git@)?(?:www\.)?github\.com[/:]/;
 
 /** Looks up the `RepoHost` for a clone URL. Only `github.com` is recognized
  * today (spec decision 8); `null` for anything else (unsupported provider —

@@ -22,7 +22,8 @@ PID=""
 q() { psql "$DATABASE_URL" -tAc "$1" | tr -d '[:space:]'; }
 
 boot() {
-  env VALET_LOCAL_AUTH=1 ANTHROPIC_API_KEY=sk-ant-ci-placeholder \
+  # fix: provide encryption key for CI smoke (api refuses to boot without one)
+  env VALET_LOCAL_AUTH=1 ANTHROPIC_API_KEY=sk-ant-ci-placeholder VALET_ENCRYPTION_KEY=ci-smoke-encryption-key-not-secret \
     "${LAUNCHER[@]}" serve --port "$PORT" --data-dir "$(mktemp -d)" \
     --sandbox local --database-url "$DATABASE_URL" &
   PID=$!

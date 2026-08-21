@@ -13,6 +13,7 @@ import type {
   SendRef,
   TransportContext,
 } from "@valet/engine";
+import { timingSafeEqual } from "node:crypto";
 import { TelegramApi } from "./api.js";
 import { markdownToTelegramHtml } from "./format.js";
 
@@ -90,7 +91,8 @@ export class TelegramTransport implements ChannelTransport {
     secrets: Record<string, string>,
   ): RawChannelUpdate[] | null {
     const token = req.headers["x-telegram-bot-api-secret-token"];
-    if (!secrets.webhookSecret || token !== secrets.webhookSecret) return null;
+    // fix: constant-time compare on webhook secret to prevent timing leak
+    if (!secrets.webhookSecret || !token || token.length !== secrets.webhookSecret.length || !timingSafeEqual(Buffer.from(token), Buffer.from(secrets.webhookSecret))) return null;
     try {
       const parsed: unknown = JSON.parse(new TextDecoder().decode(req.rawBody));
       return [parsed];

@@ -2176,6 +2176,8 @@ export class SessionAgentDO {
         this.notifyEventBus({
           type: 'question.asked',
           sessionId,
+          // fix: address event to owner so private Q isn't broadcast globally
+          userId: this.sessionState.userId,
           data: { questionId: qId, text: msg.text || '' },
           timestamp: new Date().toISOString(),
         });
@@ -5896,6 +5898,8 @@ export class SessionAgentDO {
       this.notifyEventBus({
         type: 'question.answered',
         sessionId,
+        // fix: address event to owner so private answer isn't broadcast globally
+        userId: this.sessionState.userId,
         data: { questionId: promptId, answer: String(answer) },
         timestamp: new Date().toISOString(),
       });

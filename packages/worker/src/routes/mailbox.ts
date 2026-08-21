@@ -83,7 +83,8 @@ notificationQueueRouter.post('/notifications/emit', zValidator('json', emitNotif
 
   const notification = await db.enqueueNotification(c.get('db'), {
     fromSessionId: body.fromSessionId,
-    fromUserId: body.fromUserId,
+    // fix: bind sender to authenticated user; prevent spoofing
+    fromUserId: c.get('user').id,
     toSessionId: body.toSessionId,
     toUserId: resolved.toUserId,
     messageType: body.messageType,

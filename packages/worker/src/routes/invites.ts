@@ -44,6 +44,8 @@ invitesApiRouter.post('/:code/accept', async (c) => {
   if (!invite) {
     throw new NotFoundError('Invite not found or already used');
   }
+  // fix: bind invite to invitee's email; prevent role-grant token abuse
+  if (invite.email && invite.email.toLowerCase() !== user.email.toLowerCase()) return c.json({ error: 'invite not for this account' }, 404);
 
   await markInviteAccepted(c.get('db'), invite.id, user.id);
   await updateUserRole(c.get('db'), user.id, invite.role);

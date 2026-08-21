@@ -54,7 +54,8 @@ export async function evaluateAdmission(
     return { allowed: true, role: "admin" };
   }
 
-  const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
+  // fix: require code invite email to match caller's email
+  const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode).then(i => i && (!i.email || i.email.toLowerCase() === email.toLowerCase()) ? i : null))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
   }
