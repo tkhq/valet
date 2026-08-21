@@ -44,6 +44,7 @@ import {
   podsApiAdapter,
 } from "../src/lifecycle.js";
 import { podExecApiAdapter } from "../src/exec.js";
+import { sweepStaleThrowawayNamespaces } from "./throwaway-namespace.js";
 import {
   KubernetesSandbox,
   KubernetesSandboxProvider,
@@ -85,6 +86,8 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
 
   const provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
 
+  // Reap namespaces a killed previous run leaked.
+  sweepStaleThrowawayNamespaces(kubectl);
   kubectl(["create", "namespace", namespace]);
 
   // finally-safe: runs even if an `it` inside runSandboxContract's nested

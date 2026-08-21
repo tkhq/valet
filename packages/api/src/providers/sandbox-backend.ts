@@ -149,6 +149,23 @@ export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
   return n * 3_600_000;
 }
 
+/**
+ * How long a session may sit `hibernated` before the reaper
+ * (`engine/hibernation-reaper.ts`) destroys its sandbox
+ * (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`, default 72h). The default
+ * outlasts a weekend: reaping only resets the workspace volume (chat
+ * history and memories live in postgres), but a Monday-morning user should
+ * still find Friday's uncommitted work. Zero, negative, or non-numeric
+ * disables the reaper entirely.
+ */
+export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES;
+  if (raw === undefined || raw === "") return 72 * 60 * 60_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 60_000;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

@@ -41,6 +41,7 @@ import {
   writeFileInPod,
 } from "../src/files.js";
 import { cancelJobInPod, execJobInPod, pollJobInPod } from "../src/jobs.js";
+import { sweepStaleThrowawayNamespaces } from "./throwaway-namespace.js";
 
 function kubectl(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("kubectl", ["--context", RANCHER_DESKTOP_CONTEXT, ...args], { encoding: "utf8" });
@@ -69,6 +70,8 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
   let nextJobId = 1;
 
   beforeAll(async () => {
+    // Reap namespaces a killed previous run leaked.
+    sweepStaleThrowawayNamespaces(kubectl);
     const created = kubectl(["create", "namespace", namespace]);
     if (created.status !== 0) {
       throw new Error(`failed to create throwaway namespace "${namespace}": ${created.stderr}`);

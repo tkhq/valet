@@ -823,8 +823,8 @@ sessionsRouter.post("/:id/pause", async (c) => {
   // Status guard #2: conditioned `WHERE status='active'` (shared with the
   // engine's own hibernation hook — see `writeHibernated`) so a concurrent
   // archive/delete between the lookup above and this write still can't be
-  // resurrected.
-  await writeHibernated(db, id);
+  // resurrected. The sandbox handle rides along for the reaper.
+  await writeHibernated(db, id, session.attachment.sandboxId);
 
   const body: PauseSessionResponse = { status: "hibernated" };
   return c.json(body, 200);

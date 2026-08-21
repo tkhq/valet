@@ -1032,6 +1032,14 @@ export interface SandboxProvider {
    */
   release?(id: string): Promise<void>;
   /**
+   * Optional deterministic-id seam. Providers whose sandbox ids are a pure
+   * function of the session key (sandbox-kubernetes: `sandboxCrName`)
+   * implement this so reapers can recompute a destroy handle that was never
+   * recorded. Providers with backend-assigned ids (modal/docker) must NOT
+   * implement this.
+   */
+  deriveId?(sessionKey: string): string;
+  /**
    * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
    * `suspend` scales the sandbox to zero while retaining its workspace; `resume`
    * wakes it under the same id. When both are implemented (and capability true),

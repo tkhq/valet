@@ -1,0 +1,124 @@
+{{- if .Values.podJanitor.enabled }}
+# Failed-pod janitor: nothing else deletes Failed pods (kube's terminated-pod
+# GC threshold is 12500 — effectively never on a small cluster), and each
+# retained dead pod occupies a kubelet pod slot (110/node k3s default) until
+# the cluster wedges into "Too many pods". Scoped to phase=Failed in the
+# release and sandbox namespaces only; deleting a Failed pod under a live
+# Sandbox CR is safe (the controller reconciles a fresh one) and workspace
+# PVCs are owned by the CR, not the pod.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pod-janitor
+spec:
+  schedule: {{ .Values.podJanitor.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "valet.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: pod-janitor
+        spec:
+          serviceAccountName: {{ include "valet.fullname" . }}-pod-janitor
+          restartPolicy: Never
+          # One container per namespace, invoking kubectl directly:
+          # rancher/kubectl is distroless (no /bin/sh).
+          containers:
+            - name: sweep-sandbox-ns
+              image: "{{ .Values.podJanitor.image.repository }}:{{ .Values.podJanitor.image.tag }}"
+              command:
+                - kubectl
+                - delete
+                - pods
+                - -n
+                - {{ .Values.sandbox.namespace }}
+                - --field-selector=status.phase=Failed
+                - --ignore-not-found
+                - --wait=false
+            - name: sweep-release-ns
+              image: "{{ .Values.podJanitor.image.repository }}:{{ .Values.podJanitor.image.tag }}"
+              command:
+                - kubectl
+                - delete
+                - pods
+                - -n
+                - {{ .Release.Namespace }}
+                - --field-selector=status.phase=Failed
+                - --ignore-not-found
+                - --wait=false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+---
+# One minimal Role per swept namespace: list + delete pods, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "valet.fullname" . }}-pod-janitor
+    namespace: {{ .Values.sandbox.namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "valet.fullname" . }}-pod-janitor
+    namespace: {{ .Values.sandbox.namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

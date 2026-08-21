@@ -348,6 +348,13 @@ export const agentSessions = pgTable(
     // matching source/bake, or a `customImage: false` provider). Nullable
     // — the vast majority of sessions never resolve a bake.
     bakeId: text("bake_id"),
+    // Sandbox id recorded at hibernate time — the reaper's destroy handle
+    // for sessions an api restart evicts from the host cache (same rationale
+    // as child_watches.parked_sandbox_id).
+    hibernatedSandboxId: text("hibernated_sandbox_id"),
+    // Stamped once the reaper has destroyed the hibernated sandbox, so the
+    // row stops sweeping. Cleared by the next hibernate write.
+    sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

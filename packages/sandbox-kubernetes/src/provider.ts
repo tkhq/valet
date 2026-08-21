@@ -655,6 +655,12 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     };
   }
 
+  /** The sandbox id IS the CR name, a pure function of the workspace
+   * (`create` names it `sandboxCrName(opts.workspace)`). */
+  deriveId(sessionKey: string): string {
+    return sandboxCrName(sessionKey);
+  }
+
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an
    * existing CR of the same name rather than erroring, so the attachment
    * layer's failure-recovery path (which calls `create()` again with the
