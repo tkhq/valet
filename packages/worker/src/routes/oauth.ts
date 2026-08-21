@@ -1,6 +1,11 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
-import { signJWT, verifyJWT } from '../lib/jwt.js';
+import {
+  isAuthStatePayload,
+  signJWT,
+  verifyJWT,
+  type AuthStatePayload,
+} from '../lib/jwt.js';
 import { identityRegistry } from '../identity/registry.js';
 import { getEnvString } from '../env.js';
 import * as oauthService from '../services/oauth.js';
@@ -30,7 +35,11 @@ function evictExpiredAttempts(): void {
   if (loginAttempts.size > MAX_TRACKED_EMAILS) {
     const excess = loginAttempts.size - MAX_TRACKED_EMAILS;
     const keys = loginAttempts.keys();
-    for (let i = 0; i < excess; i++) keys.next().value && loginAttempts.delete(keys.next().value!);
+    for (let i = 0; i < excess; i++) {
+      const key = keys.next().value;
+      if (key === undefined) break;
+      loginAttempts.delete(key);
+    }
   }
 }
 
@@ -70,25 +79,25 @@ function clearLoginAttempts(email: string): void {
 
 async function createStateJWT(env: Env, provider: string, inviteCode?: string, returnToOrigin?: string): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const payload: any = { sub: provider, sid: crypto.randomUUID(), iat: now, exp: now + 5 * 60 };
-  if (inviteCode) {
-    payload.invite_code = inviteCode;
-  }
-  if (returnToOrigin) {
-    payload.return_to_origin = returnToOrigin;
-  }
+  const payload: AuthStatePayload = {
+    sub: provider,
+    sid: crypto.randomUUID(),
+    iat: now,
+    exp: now + 5 * 60,
+    ...(inviteCode ? { invite_code: inviteCode } : {}),
+    ...(returnToOrigin ? { return_to_origin: returnToOrigin } : {}),
+  };
   return signJWT(payload, env.ENCRYPTION_KEY);
 }
 
 async function parseStateJWT(state: string, env: Env): Promise<{ valid: boolean; inviteCode?: string; provider?: string; returnToOrigin?: string }> {
-  const payload = await verifyJWT(state, env.ENCRYPTION_KEY);
-  if (!payload) return { valid: false };
+  const payload = await verifyJWT<AuthStatePayload>(state, env.ENCRYPTION_KEY);
+  if (!payload || !isAuthStatePayload(payload)) return { valid: false };
   return {
     valid: true,
-    inviteCode: (payload as any).invite_code,
-    provider: (payload as any).sub,
-    returnToOrigin: resolveAuthRedirectOrigin(env, (payload as any).return_to_origin),
+    inviteCode: payload.invite_code,
+    provider: payload.sub,
+    returnToOrigin: resolveAuthRedirectOrigin(env, payload.return_to_origin),
   };
 }
 
@@ -283,7 +292,7 @@ export async function handleLoginOAuthCallback(
       302,
     );
   } catch (err) {
-    console.error(`${providerId} OAuth error:`, err);
+    console.error(`${providerId} OAuth callback failed`);
     return Response.redirect(`${frontendUrl}/login?error=oauth_error`, 302);
   }
 }
@@ -329,7 +338,7 @@ oauthRouter.post('/:provider/callback', async (c) => {
       `${frontendUrl}/auth/callback?token=${encodeURIComponent(result.sessionToken)}&provider=${providerId}`
     );
   } catch (err) {
-    console.error(`${providerId} SAML error:`, err);
+    console.error(`${providerId} SAML callback failed`);
     return c.redirect(`${frontendUrl}/login?error=auth_error`);
   }
 });

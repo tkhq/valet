@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
-import { signJWT } from '../lib/jwt.js';
+import { signJWT, type AuthStatePayload } from '../lib/jwt.js';
 import { getGitHubConfig, getGitHubMetadata } from '../services/github-config.js';
 import { loadGitHubApp } from '../services/github-app.js';
 import { deleteCredential } from '../lib/db/credentials.js';
@@ -62,10 +62,14 @@ githubMeRouter.post('/link', async (c) => {
 
   // Create signed JWT state token (10 min expiry)
   const now = Math.floor(Date.now() / 1000);
-  const state = await signJWT(
-    { sub: user.id, purpose: 'github-link', sid: crypto.randomUUID(), iat: now, exp: now + 10 * 60 } as any,
-    c.env.ENCRYPTION_KEY,
-  );
+  const statePayload: AuthStatePayload = {
+    sub: user.id,
+    purpose: 'github-link',
+    sid: crypto.randomUUID(),
+    iat: now,
+    exp: now + 10 * 60,
+  };
+  const state = await signJWT(statePayload, c.env.ENCRYPTION_KEY);
 
   const workerOrigin = c.env.API_PUBLIC_URL || new URL(c.req.url).origin;
   const { url } = app.oauth.getWebFlowAuthorizationUrl({

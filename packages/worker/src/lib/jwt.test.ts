@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { deriveSandboxJwtSecret, signJWT, verifyJWT } from './jwt.js';
+import { deriveSandboxJwtSecret, signJWT, verifyJWT, type AuthStatePayload } from './jwt.js';
 
 const ENCRYPTION_KEY = 'test-encryption-key-must-not-leak-to-sandbox';
 
@@ -62,5 +62,23 @@ describe('deriveSandboxJwtSecret', () => {
     );
     const payload = await verifyJWT(token, ENCRYPTION_KEY);
     expect(payload).toBeNull();
+  });
+
+  it('preserves typed authentication-state claims', async () => {
+    const secret = 'auth-state-secret';
+    const now = Math.floor(Date.now() / 1000);
+    const state: AuthStatePayload = {
+      sub: 'google',
+      sid: 'state-1',
+      iat: now,
+      exp: now + 60,
+      invite_code: 'invite-1',
+      return_to_origin: 'https://preview.example.com',
+    };
+
+    const token = await signJWT(state, secret);
+    const payload = await verifyJWT<AuthStatePayload>(token, secret);
+
+    expect(payload).toEqual(state);
   });
 });

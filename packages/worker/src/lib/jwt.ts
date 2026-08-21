@@ -44,8 +44,30 @@ export interface SandboxJWTPayload {
   iat: number; // issued at (unix seconds)
 }
 
-/** Sign a sandbox JWT with HMAC-SHA256. */
-export async function signJWT(payload: SandboxJWTPayload, secret: string): Promise<string> {
+/**
+ * Claims used by browser-facing authentication callbacks.
+ *
+ * The base session claims remain mandatory, while the optional fields carry
+ * provider-specific login state without weakening the JWT helper's type safety.
+ */
+export interface AuthStatePayload extends SandboxJWTPayload {
+  invite_code?: string;
+  purpose?: 'github-link';
+  return_to_origin?: string;
+}
+
+/** Validate optional claims used by browser-facing authentication callbacks. */
+export function isAuthStatePayload(payload: SandboxJWTPayload): payload is AuthStatePayload {
+  const state = payload as AuthStatePayload;
+  return (
+    (state.invite_code === undefined || typeof state.invite_code === 'string') &&
+    (state.purpose === undefined || state.purpose === 'github-link') &&
+    (state.return_to_origin === undefined || typeof state.return_to_origin === 'string')
+  );
+}
+
+/** Sign a sandbox or authentication-state JWT with HMAC-SHA256. */
+export async function signJWT<T extends SandboxJWTPayload>(payload: T, secret: string): Promise<string> {
   return signHmacJwt(payload, secret);
 }
 
@@ -53,9 +75,20 @@ export async function signJWT(payload: SandboxJWTPayload, secret: string): Promi
  * Verify and decode a JWT signed with HMAC-SHA256. Returns null if the
  * signature is invalid, the token is malformed, or `exp` has passed.
  */
-export async function verifyJWT(token: string, secret: string): Promise<SandboxJWTPayload | null> {
-  const payload = await verifyHmacJwt<SandboxJWTPayload>(token, secret);
+export async function verifyJWT<T extends SandboxJWTPayload = SandboxJWTPayload>(
+  token: string,
+  secret: string,
+): Promise<T | null> {
+  const payload = await verifyHmacJwt<T>(token, secret);
   if (!payload) return null;
-  if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) return null;
+  if (
+    typeof payload.sub !== 'string' ||
+    typeof payload.sid !== 'string' ||
+    typeof payload.iat !== 'number' ||
+    typeof payload.exp !== 'number'
+  ) {
+    return null;
+  }
+  if (payload.exp < Math.floor(Date.now() / 1000)) return null;
   return payload;
 }

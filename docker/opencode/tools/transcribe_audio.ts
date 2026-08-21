@@ -99,9 +99,19 @@ export default tool({
 
       const transcript = readFileSync(txtPath, "utf-8").trim()
 
-      // Clean up
-      try { unlinkSync(txtPath) } catch {}
-      if (needsConvert) { try { unlinkSync(wavPath) } catch {} }
+      // Clean up generated files without masking the successful transcript.
+      try {
+        unlinkSync(txtPath)
+      } catch {
+        // Cleanup is best-effort because the file may already be absent.
+      }
+      if (needsConvert) {
+        try {
+          unlinkSync(wavPath)
+        } catch {
+          // Cleanup is best-effort because the file may already be absent.
+        }
+      }
 
       if (!transcript) {
         return "Transcription completed but the result was empty (no speech detected)."
@@ -110,8 +120,13 @@ export default tool({
       return transcript
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      // Clean up on error
-      try { const { unlinkSync } = await import("fs"); unlinkSync(wavPath) } catch {}
+      // Clean up on error without replacing the original transcription failure.
+      try {
+        const { unlinkSync } = await import("fs")
+        unlinkSync(wavPath)
+      } catch {
+        // Preserve the original error when cleanup cannot remove the temporary file.
+      }
       return `Transcription failed: ${msg}`
     }
   },

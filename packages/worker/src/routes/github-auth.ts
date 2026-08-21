@@ -1,7 +1,12 @@
 import { Hono } from 'hono';
 import { Octokit } from 'octokit';
 import type { Env, Variables } from '../env.js';
-import { signJWT, verifyJWT } from '../lib/jwt.js';
+import {
+  isAuthStatePayload,
+  signJWT,
+  verifyJWT,
+  type AuthStatePayload,
+} from '../lib/jwt.js';
 import { loadGitHubApp } from '../services/github-app.js';
 import { storeCredential } from '../services/credentials.js';
 import * as oauthService from '../services/oauth.js';
@@ -59,11 +64,11 @@ githubAuthRouter.get('/callback', async (c) => {
   }
 
   // Verify state JWT
-  const payload = await verifyJWT(stateParam, c.env.ENCRYPTION_KEY);
-  if (!payload || !payload.sub) {
+  const payload = await verifyJWT<AuthStatePayload>(stateParam, c.env.ENCRYPTION_KEY);
+  if (!payload || !payload.sub || !isAuthStatePayload(payload)) {
     return c.redirect(`${frontendUrl}/login?error=invalid_state`);
   }
-  frontendUrl = getAuthRedirectOrigin(c.env, (payload as any).return_to_origin);
+  frontendUrl = getAuthRedirectOrigin(c.env, payload.return_to_origin);
 
   const appDb = getDb(c.env.DB);
   const app = await loadGitHubApp(c.env, appDb);
@@ -81,14 +86,14 @@ githubAuthRouter.get('/callback', async (c) => {
   try {
     const result = await app.oauth.createToken({ code });
     authentication = result.authentication;
-  } catch (err) {
-    console.error('[github-auth] Token exchange failed:', err);
+  } catch {
+    // Do not log provider error objects because they may contain token material.
+    console.error('[github-auth] Token exchange failed');
     return c.redirect(`${frontendUrl}/login?error=token_exchange_failed`);
   }
 
-  // Log token type for debugging attribution badge
-  const tokenPrefix = authentication.token.substring(0, 4);
-  console.log(`[github-auth] Token exchanged: prefix=${tokenPrefix}..., hasRefreshToken=${!!authentication.refreshToken}, expiresAt=${authentication.expiresAt || 'none'}`);
+  // Record non-secret token metadata for debugging without exposing token material.
+  console.log(`[github-auth] Token exchanged: hasRefreshToken=${Boolean(authentication.refreshToken)}, expiresAt=${authentication.expiresAt || 'none'}`);
 
   // Fetch user profile
   const userOctokit = new Octokit({ auth: authentication.token });
@@ -96,8 +101,9 @@ githubAuthRouter.get('/callback', async (c) => {
   try {
     const { data } = await userOctokit.rest.users.getAuthenticated();
     profile = data;
-  } catch (err) {
-    console.error('[github-auth] Profile fetch failed:', err);
+  } catch {
+    // Do not log provider error objects because they may contain token material.
+    console.error('[github-auth] Profile fetch failed');
     return c.redirect(`${frontendUrl}/login?error=profile_fetch_failed`);
   }
 
@@ -117,8 +123,8 @@ githubAuthRouter.get('/callback', async (c) => {
 
   // ─── Branch: link flow ──────────────────────────────────────────────────
 
-  if ((payload as any).purpose === 'github-link') {
-    const userId = payload.sub as string;
+  if (payload.purpose === 'github-link') {
+    const userId = payload.sub;
 
     // Upsert identity link — remove any existing link for this GitHub account
     await db.deleteIdentityLinkByExternalId(appDb, 'github', githubId);
@@ -159,8 +165,8 @@ githubAuthRouter.get('/callback', async (c) => {
         name: profile.name ?? undefined,
         avatarUrl: profile.avatar_url,
       });
-    } catch (err: any) {
-      if (err?.message?.includes('UNIQUE constraint failed') || err?.message?.includes('idx_users_github_id')) {
+    } catch (err: unknown) {
+      if (err instanceof Error && (err.message.includes('UNIQUE constraint failed') || err.message.includes('idx_users_github_id'))) {
         return c.redirect(`${frontendUrl}/integrations?github=error&reason=account_already_linked`);
       }
       throw err;
@@ -170,7 +176,7 @@ githubAuthRouter.get('/callback', async (c) => {
     try {
       await reconcileUserInstallations(userOctokit, appDb, userId, githubId);
     } catch (err) {
-      console.warn('[github-auth] Installation reconciliation failed:', err);
+      console.warn('[github-auth] Installation reconciliation failed');
     }
 
     return c.redirect(`${frontendUrl}/integrations?github=linked`);
@@ -182,7 +188,7 @@ githubAuthRouter.get('/callback', async (c) => {
     return c.redirect(`${frontendUrl}/login?error=no_email`);
   }
 
-  const inviteCode = (payload as any).invite_code as string | undefined;
+  const inviteCode = payload.invite_code;
 
   // Finalize login via the standard identity flow
   const loginResult = await oauthService.finalizeIdentityLogin(
@@ -226,7 +232,7 @@ githubAuthRouter.get('/callback', async (c) => {
     try {
       await reconcileUserInstallations(userOctokit, appDb, user.id, githubId);
     } catch (err) {
-      console.warn('[github-auth] Installation reconciliation failed:', err);
+      console.warn('[github-auth] Installation reconciliation failed');
     }
   }
 
