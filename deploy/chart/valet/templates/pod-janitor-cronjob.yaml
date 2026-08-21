@@ -1,0 +1,126 @@
+{{- if .Values.podJanitor.enabled }}
+# Failed-pod janitor CronJob.
+#
+# Nothing else ever deletes Failed pods: Kubernetes' own terminated-pod GC
+# only fires past --terminated-pod-gc-threshold (default 12500 — effectively
+# never on a small cluster), the api's idle sweep suspends sandboxes rather
+# than deleting anything (engine/host.ts), evicted Deployment pods are
+# replaced but the dead pod object stays behind, and the kubernetes sandbox
+# provider's non-terminal release() deliberately leaves the CR/pod standing
+# for re-provision (provider.ts). Every retained Failed pod occupies one of
+# the node's kubelet pod slots (110/node by default), so weeks of quiet
+# accumulation ends in cluster-wide "Too many pods" scheduling failures — at
+# which point new session sandboxes stop scheduling and valet is down
+# (observed on a shared deployment, Aug 2026).
+#
+# Scope: pods in phase=Failed (covers Error, Evicted and
+# ContainerStatusUnknown pods) in the release namespace and the sandbox
+# namespace only — never cluster-wide. Deleting a Failed pod that is owned by
+# a live Sandbox CR is safe: the agent-sandbox controller reconciles a fresh
+# pod, which is that CR's desired state anyway; pods of destroyed sessions
+# cascade-delete with their CR and never reach this janitor. Workspace PVCs
+# are owned by the Sandbox CR, not the pod, so no data is touched.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pod-janitor
+spec:
+  schedule: {{ .Values.podJanitor.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "valet.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: pod-janitor
+        spec:
+          serviceAccountName: {{ include "valet.fullname" . }}-pod-janitor
+          restartPolicy: Never
+          containers:
+            - name: pod-janitor
+              image: "{{ .Values.podJanitor.image.repository }}:{{ .Values.podJanitor.image.tag }}"
+              command:
+                - /bin/sh
+                - -ec
+                # --wait=false: finalization is the kubelet's problem; holding
+                # the janitor pod open for it just risks tripping the Job's
+                # own activeDeadline on a slow node.
+                - |
+                  kubectl delete pods -n {{ .Values.sandbox.namespace }} --field-selector=status.phase=Failed --ignore-not-found --wait=false
+                  kubectl delete pods -n {{ .Release.Namespace }} --field-selector=status.phase=Failed --ignore-not-found --wait=false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+---
+# One Role per swept namespace, both deliberately minimal: list to resolve
+# the field selector, delete to reap. No get/watch, no other resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "valet.fullname" . }}-pod-janitor
+    namespace: {{ .Values.sandbox.namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "valet.fullname" . }}-pod-janitor
+    namespace: {{ .Values.sandbox.namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "valet.fullname" . }}-pod-janitor
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

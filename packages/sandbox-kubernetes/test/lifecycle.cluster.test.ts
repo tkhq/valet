@@ -35,6 +35,7 @@ import {
   resolvePodName,
   sandboxStatus,
 } from "../src/lifecycle.js";
+import { sweepStaleThrowawayNamespaces } from "./throwaway-namespace.js";
 
 function kubectl(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("kubectl", ["--context", RANCHER_DESKTOP_CONTEXT, ...args], { encoding: "utf8" });
@@ -71,6 +72,9 @@ describe.skipIf(!isClusterReady)("lifecycle (live rancher-desktop cluster)", () 
   let podsApi: ReturnType<typeof podsApiAdapter>;
 
   beforeAll(() => {
+    // Reap namespaces a killed previous run's afterAll never got to delete,
+    // then create this run's own.
+    sweepStaleThrowawayNamespaces(kubectl);
     const created = kubectl(["create", "namespace", namespace]);
     if (created.status !== 0) {
       throw new Error(`failed to create throwaway namespace "${namespace}": ${created.stderr}`);

@@ -31,6 +31,7 @@ import {
 import { podExecApiAdapter } from "../src/exec.js";
 import { KubernetesSandbox, KubernetesSandboxProvider, podLivenessApiAdapter } from "../src/provider.js";
 import { SandboxStartupError } from "@valet/engine";
+import { sweepStaleThrowawayNamespaces } from "./throwaway-namespace.js";
 
 function kubectl(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("kubectl", ["--context", RANCHER_DESKTOP_CONTEXT, ...args], { encoding: "utf8" });
@@ -63,6 +64,9 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
   };
 
   beforeAll(() => {
+    // Reap namespaces a killed previous run's afterAll never got to delete,
+    // then create this run's own.
+    sweepStaleThrowawayNamespaces(kubectl);
     const created = kubectl(["create", "namespace", namespace]);
     if (created.status !== 0) {
       throw new Error(`failed to create throwaway namespace "${namespace}": ${created.stderr}`);
