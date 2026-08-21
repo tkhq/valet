@@ -1754,6 +1754,14 @@ export class EngineHost {
     await this.opts.sandboxProvider.destroy(sandboxId);
   }
 
+  /** Recompute the sandbox id a session's workspace would provision under,
+   * for providers with deterministic ids (`SandboxProvider.deriveId`). Null
+   * for providers with backend-assigned ids — callers must treat that as
+   * "no handle", not an error. */
+  deriveSandboxId(sessionKey: string): string | null {
+    return this.opts.sandboxProvider.deriveId?.(sessionKey) ?? null;
+  }
+
   /**
    * The host `resolveModel` seam (engine `ResolvedModel`, Task 1) bound to one
    * org's provider config — passed into every `createSession`/`restoreSession`

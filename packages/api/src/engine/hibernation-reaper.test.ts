@@ -45,6 +45,8 @@ describe("HibernationReaper", () => {
     unsettled?: number;
     activityAt?: number | null;
     retentionMs?: number;
+    /** `deriveSandboxId` result; defaults to null (backend-assigned ids). */
+    derivedId?: string | null;
   } = {}) {
     const destroyedSandboxes: string[] = [];
     const evicted: string[] = [];
@@ -66,6 +68,7 @@ describe("HibernationReaper", () => {
         destroySandbox: async (sandboxId) => {
           destroyedSandboxes.push(sandboxId);
         },
+        deriveSandboxId: () => overrides.derivedId ?? null,
         evictCache: (sessionId) => {
           evicted.push(sessionId);
         },
@@ -170,7 +173,26 @@ describe("HibernationReaper", () => {
     expect((await row(id))?.sandboxReclaimedAt).toBeNull();
   });
 
-  it("stamps a handleless uncached row as reclaimed without a destroy", async () => {
+  it("falls back to the derived handle when no handle was recorded (pre-upgrade rows)", async () => {
+    const id = await seed({ hibernatedSandboxId: null });
+    const { deps, destroyedSandboxes } = fakeDeps({ derivedId: "derived-from-workspace" });
+
+    await new HibernationReaper(deps).sweep(NOW);
+
+    expect(destroyedSandboxes).toEqual(["derived-from-workspace"]);
+    expect((await row(id))?.sandboxReclaimedAt).toBe(NOW);
+  });
+
+  it("the recorded handle wins over the derived one", async () => {
+    await seed();
+    const { deps, destroyedSandboxes } = fakeDeps({ derivedId: "derived-from-workspace" });
+
+    await new HibernationReaper(deps).sweep(NOW);
+
+    expect(destroyedSandboxes).toEqual(["sbx-s1"]);
+  });
+
+  it("stamps a handleless row as reclaimed without a destroy when ids are not derivable", async () => {
     const id = await seed({ hibernatedSandboxId: null });
     const { deps, destroyedSandboxes } = fakeDeps();
 

@@ -18,7 +18,11 @@
  * destroy handle for uncached sessions is `hibernated_sandbox_id`, recorded
  * at hibernate time (same pattern as `child_watches.parked_sandbox_id`, and
  * for the same reason: the engine session row's sandbox_id predates
- * provisioning). Race rules mirror `ChildWatcher.sweepRetention`: unsettled
+ * provisioning). Rows without a recorded handle (hibernated before that
+ * column existed) fall back to `SandboxProvider.deriveId` — for providers
+ * with deterministic ids the recomputed handle is byte-identical to the one
+ * that would have been recorded, so the pre-upgrade backlog reaps without
+ * manual intervention. Race rules mirror `ChildWatcher.sweepRetention`: unsettled
  * submissions and fresh activity always win, and are re-checked immediately
  * before a live destroy.
  */
@@ -45,6 +49,7 @@ export interface HibernationReaperDeps {
   engineHost: {
     liveSession(sessionId: string): ReaperLiveSession | null;
     destroySandbox(sandboxId: string): Promise<void>;
+    deriveSandboxId(sessionKey: string): string | null;
     evictCache(sessionId: string): void;
   };
   engineStore: {
@@ -97,15 +102,25 @@ export class HibernationReaper {
           if (recheck.length > 0) continue;
           await live.attachment.destroy();
           this.deps.engineHost.evictCache(row.id);
-        } else if (row.hibernatedSandboxId) {
-          await this.deps.engineHost.destroySandbox(row.hibernatedSandboxId);
         } else {
-          // Nothing destroyable from here: not cached and no recorded
-          // handle (a session hibernated before this column existed).
-          // Stamp the reclaim so the row stops sweeping, but say so.
-          console.warn(
-            `HibernationReaper: session ${row.id} is past retention but has no live session and no hibernated sandbox id; stamping reclaimed without a destroy`,
-          );
+          // Prefer the handle recorded at hibernate time; fall back to
+          // recomputing it from the workspace for providers with
+          // deterministic ids (sessions hibernated before the column
+          // existed). The derived id is byte-identical to what `create`
+          // named, so this is exactly as targeted as the recorded path —
+          // and a name that matches nothing is a tolerated 404, not a
+          // misdirected destroy.
+          const handle = row.hibernatedSandboxId ?? this.deps.engineHost.deriveSandboxId(row.workspace);
+          if (handle) {
+            await this.deps.engineHost.destroySandbox(handle);
+          } else {
+            // Nothing destroyable from here: not cached, no recorded handle,
+            // and the provider's ids aren't derivable (backend-assigned).
+            // Stamp the reclaim so the row stops sweeping, but say so.
+            console.warn(
+              `HibernationReaper: session ${row.id} is past retention but has no live session and no derivable sandbox handle; stamping reclaimed without a destroy`,
+            );
+          }
         }
         await revokeSandboxTokens(this.deps.db, row.id);
         // Conditioned on the row still being hibernated: a wake that raced
