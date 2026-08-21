@@ -165,8 +165,8 @@ describe("resolveIdleMinutes", () => {
 });
 
 describe("resolveHibernatedRetentionMs", () => {
-  it("defaults to 1 hour when VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES is unset", () => {
-    expect(resolveHibernatedRetentionMs({})).toBe(60 * 60_000);
+  it("defaults to 72 hours when VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES is unset", () => {
+    expect(resolveHibernatedRetentionMs({})).toBe(72 * 60 * 60_000);
   });
 
   it("parses a positive minutes value", () => {

@@ -301,7 +301,7 @@ await providers.childWatcher.rearm().catch((err) => {
 // off; the interval is unref'd so it never holds the process open.
 providers.childWatcher.startRetentionSweep();
 
-// Destroys sandboxes hibernated past the retention window (default 1h,
+// Destroys sandboxes hibernated past the retention window (default 72h,
 // VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
 providers.hibernationReaper.start();
 

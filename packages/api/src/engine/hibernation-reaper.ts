@@ -3,7 +3,7 @@
  * and workspace PVC are retained forever, which accumulates into "Too many
  * pods" scheduling failures on small clusters. This sweep destroys the
  * sandbox of any session hibernated past the retention window
- * (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`, default 60); reopening the
+ * (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`, default 72h); reopening the
  * session afterwards provisions a fresh sandbox like a first open.
  *
  * Driven by `agent_sessions` rather than the host cache so it survives api
