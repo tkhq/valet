@@ -11,6 +11,8 @@
  * a DOM, the same pattern `theme.ts` uses.
  */
 
+import { safeLocalStorage, type StorageReader, type StorageWriter } from "./safe-storage";
+
 export const COMMAND_RECENCY_STORAGE_KEY = "valet-command-recency";
 
 /** Entries kept per browser. Oldest drop first — 50 covers every command a
@@ -19,14 +21,6 @@ export const COMMAND_RECENCY_MAX_ENTRIES = 50;
 
 /** Command name → epoch ms of the most recent use. */
 export type CommandRecency = Record<string, number>;
-
-interface StorageReader {
-  getItem(key: string): string | null;
-}
-
-interface StorageWriter {
-  setItem(key: string, value: string): void;
-}
 
 /** Reads the stored map. Anything unreadable (absent key, bad JSON, wrong
  * shapes) degrades to an empty map — ranking is best-effort by design. */
@@ -76,30 +70,4 @@ export function recordCommandUse(
     // Best-effort persistence; the returned map still serves this page.
   }
   return trimmed;
-}
-
-/** In-memory fallback when real storage is absent or non-functional — same
- * rationale as `theme.ts` (Node ≥22 ships a stub `localStorage` global).
- * Module-level and therefore shared for the process lifetime: tests that
- * call `readCommandRecency`/`recordCommandUse` WITHOUT an explicit
- * `storage` argument share this map and can bleed into each other — pass a
- * per-test storage instead (see `command-recency.test.ts`). */
-const memoryStorage = new Map<string, string>();
-
-function safeLocalStorage(): StorageReader & StorageWriter {
-  const candidate: unknown = typeof window !== "undefined" ? window.localStorage : undefined;
-  if (
-    candidate !== null &&
-    typeof candidate === "object" &&
-    typeof (candidate as Partial<Storage>).getItem === "function" &&
-    typeof (candidate as Partial<Storage>).setItem === "function"
-  ) {
-    return candidate as StorageReader & StorageWriter;
-  }
-  return {
-    getItem: (key) => memoryStorage.get(key) ?? null,
-    setItem: (key, value) => {
-      memoryStorage.set(key, value);
-    },
-  };
 }

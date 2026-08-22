@@ -111,6 +111,10 @@ Regression suites (run before claiming done): `pnpm --filter @valet/engine test 
 
 "(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
 
+### Mount-time state from props (web)
+
+`useState(<expr derived from a prop>)` is correct at mount and silently wrong when the prop changes — and every existing test can pass, because nothing renders the transition. Pair the `useState` with a `useEffect` that syncs on the prop, and gate the sync behind a `userTouched` ref when a manual override must win. If the component holds this kind of state in a mapped list, key it by a stable id, not the array index — an index key hands one item's state to another when the list shifts. Shipped example: `ToolShell`'s collapse policy (`docs/specs/2026-08-20-tool-card-collapse-policy-design.md`).
+
 ### Pre-1.0: edit migrations in place
 
 Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, `rm -rf ~/.valet/pg` is MANDATORY — the migration tracker skips an already-applied `0000` and there is no backfill path. This rule flips to numbered migrations at 1.0.
