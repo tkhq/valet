@@ -135,8 +135,13 @@ function authorizeOwner(db: AppDb, owner: Principal, callerId: string, access: S
  * route that forgets to call `resolveScope` serves nothing, while a route
  * that forgot a separate authorization step would serve another team's
  * memory. One chokepoint cannot be half-applied.
+ *
+ * Exported for `routes/artifacts.ts`: sharing acts on a memory scope, so
+ * the share route resolves its caller (internal tool headers, sandbox
+ * principal, or session user + `?ownerType=&ownerId=`) through this same
+ * chokepoint rather than a second copy of the ladder.
  */
-async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
+export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
   const internalHeader = c.req.header("x-valet-internal");
   if (isValidInternalToken(internalHeader)) {
     const ownerHeader = c.req.header("x-valet-owner");

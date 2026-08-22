@@ -60,6 +60,7 @@ import { slackAppRouter } from "./routes/slack-app.js";
 import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
+import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
@@ -165,6 +166,15 @@ export function createApp(
   // that line.
   app.route("/api/hooks", workflowHooksRouter);
 
+  // PUBLIC artifact read (artifacts design) — `GET /api/artifacts/:token`.
+  // The token in the URL is the capability; the handler resolves the
+  // caller itself (`resolveOptionalUser`) because `org`-visibility
+  // artifacts still serve logged-in members. Mounted BEFORE
+  // `buildAuthMiddleware` like the webhook mounts above — do not move it
+  // below that line. The share/list/manage half of the surface is the
+  // authed `artifactsRouter` mounted at the same prefix below the gate.
+  app.route("/api/artifacts", buildArtifactsPublicRouter(auth ?? null));
+
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
@@ -226,6 +236,9 @@ export function createApp(
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);
+  // Authed artifact surface (share/list/manage). The public `GET /:token`
+  // half is mounted pre-auth above.
+  app.route("/api/artifacts", artifactsRouter);
   app.route("/api/orchestrator", orchestratorRouter);
   app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);

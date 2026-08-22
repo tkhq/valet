@@ -59,6 +59,56 @@ export interface BuildAuthMiddlewareOpts {
 }
 
 /**
+ * Best-effort caller identity for routes mounted BEFORE the auth
+ * middleware that still want to know who is asking (today: the public
+ * artifact read, whose `org` visibility serves logged-in org members and
+ * 401s everyone else). Mirrors rungs 3 (session) and 5 (stub) of the
+ * ladder below, but never writes a response: `undefined` means anonymous,
+ * and the route decides what that means. Deliberately narrower than the
+ * middleware — no internal-token, sandbox, or api-key rungs, because a
+ * public content URL is a browser surface, not a programmatic one.
+ */
+export async function resolveOptionalUser(
+  c: Context<AppEnv>,
+  opts: BuildAuthMiddlewareOpts,
+): Promise<AuthUser | undefined> {
+  const { auth, db } = opts;
+  if (auth) {
+    // Same "don't trust the auth provider not to throw" rule as rung 3.
+    let sessionResult: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
+    try {
+      sessionResult = await auth.api.getSession({ headers: c.req.raw.headers });
+    } catch {
+      sessionResult = null;
+    }
+    if (!sessionResult) return undefined;
+    return {
+      id: sessionResult.user.id,
+      email: sessionResult.user.email,
+      name: sessionResult.user.name,
+      role: normalizeRole(sessionResult.user.role),
+      orgId: await resolveOrgId(db),
+    };
+  }
+
+  // Stub identity — same gate as rung 5: only when NO real auth instance
+  // exists. Anonymous access is untestable through HTTP in stub mode (the
+  // stub answers for everyone); the artifact access matrix covers it in
+  // unit tests instead (`services/artifacts.ts`'s `decideArtifactAccess`).
+  if (process.env.VALET_LOCAL_AUTH === "1") {
+    return {
+      id: LOCAL_USER.id,
+      email: LOCAL_USER.email,
+      name: LOCAL_USER.name,
+      role: LOCAL_USER.role,
+      orgId: LOCAL_ORG.id,
+    };
+  }
+
+  return undefined;
+}
+
+/**
  * Auth middleware ladder (auth-v2 design). First match wins:
  *
  *   1. `x-valet-internal` valid → `next()`, no `c.var.user`/`c.var.sandbox`.

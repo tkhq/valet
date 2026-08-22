@@ -54,7 +54,15 @@ async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): P
   // Never-set (NULL) flattens to `[]` on the wire: both mirror nothing, so
   // the client needs no null case.
   const ssoTeamGroups = (await getSsoTeamGroups(db, orgId)) ?? [];
-  return { id: row.id, name: row.name, createdAt: row.createdAt, features, ssoTeamGroups, callerRole };
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.createdAt,
+    features,
+    ssoTeamGroups,
+    allowPublicArtifacts: row.allowPublicArtifacts,
+    callerRole,
+  };
 }
 
 /** Org-admin gate applied to every route below GET /api/org. */

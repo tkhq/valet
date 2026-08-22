@@ -138,8 +138,9 @@ export async function applyAppMigrations(db: PgDb): Promise<void> {
  *
  * Each statement here is idempotent, so it costs one catalog lookup per
  * boot after the first. Add a line when an in-place edit adds a NULLABLE
- * column; a column that needs a value cannot be repaired this way and does
- * need a real migration.
+ * (or DEFAULT-backfilled) column or a whole new table; a column that needs
+ * a computed value cannot be repaired this way and does need a real
+ * migration.
  *
  * Delete this function at 1.0, when numbered migrations take over.
  */
@@ -153,4 +154,39 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // column existed, which the sync and Settings read as "never set" —
   // fail-closed, same as an empty list.
   await db.query('ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb');
+
+  // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills every
+  // pre-existing org row to `false` — anonymous sharing stays off until an
+  // admin opts in, the same fail-closed answer a fresh database gets.
+  await db.query(
+    'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_public_artifacts" boolean NOT NULL DEFAULT false',
+  );
+
+  // The artifacts table itself (artifacts design) — a whole-table sibling of
+  // the column repairs above, for the same reason: the tracker sees
+  // `0000_app.sql` applied and never replays the in-place edit that added
+  // this table. Keep the definition in lockstep with `0000_app.sql`.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS "artifacts" (
+      "id" text PRIMARY KEY NOT NULL,
+      "token" text NOT NULL,
+      "owner_type" text NOT NULL,
+      "owner_id" text NOT NULL,
+      "org_id" text NOT NULL,
+      "actor_user_id" text NOT NULL,
+      "source_session_id" text DEFAULT '' NOT NULL,
+      "source_memory_path" text NOT NULL,
+      "title" text DEFAULT '' NOT NULL,
+      "content" text NOT NULL,
+      "visibility" text DEFAULT 'org' NOT NULL,
+      "public_by" text,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL,
+      "revoked_at" bigint
+    )
+  `);
+  await db.query('CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_token_unique" ON "artifacts" ("token")');
+  await db.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
+  );
 }

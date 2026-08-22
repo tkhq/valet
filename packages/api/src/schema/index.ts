@@ -57,6 +57,11 @@ export const orgs = pgTable("orgs", {
   // Org-level toggle: present skill names as bare slash-commands instead of
   // prefixed `/skill <name>`. Replaces the deleted per-user `users.bareSkillCommands`.
   bareSkillCommands: boolean("bare_skill_commands").notNull().default(false),
+  // Org-level opt-in for anonymous artifact links (artifacts design). Off =
+  // every artifact link requires a logged-in org member, and the `public`
+  // visibility option is not offered. Live-checked on every artifact read,
+  // so flipping it off immediately re-gates existing `public` artifacts.
+  allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -765,6 +770,44 @@ export const memoryFiles = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
+);
+
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+//
+// Shared snapshots of memory files (2026-08-22 artifacts design). A row is a
+// COPY of one memory file's content at share time, not a live reference —
+// later memory edits never publish until an explicit re-share overwrites
+// `content`. `token` is the unguessable capability in the share URL
+// (`/a/{token}`); `visibility` gates who may open it: `org` (a logged-in
+// member of `org_id`) or `public` (anyone, only while
+// `orgs.allow_public_artifacts` is on). The tool surface can only create
+// `org` rows; widening to `public` is a human UI action recorded in
+// `public_by`. Revoke sets `revoked_at` and keeps the row for audit;
+// re-share after revoke mints a fresh token so a leaked link stays dead.
+export const artifacts = pgTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    token: text("token").notNull(),
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
+    orgId: text("org_id").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    sourceSessionId: text("source_session_id").notNull().default(""),
+    sourceMemoryPath: text("source_memory_path").notNull(),
+    title: text("title").notNull().default(""),
+    content: text("content").notNull(),
+    visibility: text("visibility", { enum: ["org", "public"] }).notNull().default("org"),
+    publicBy: text("public_by"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("artifacts_token_unique").on(t.token),
+    // One artifact per shared file: re-share is an update, never a second row.
+    uniqueIndex("artifacts_owner_path_unique").on(t.ownerType, t.ownerId, t.sourceMemoryPath),
+  ],
 );
 
 // ─── Skills ─────────────────────────────────────────────────────────────────

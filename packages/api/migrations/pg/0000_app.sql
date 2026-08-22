@@ -5,7 +5,8 @@ CREATE TABLE "orgs" (
 	"model_preferences" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"sso_team_groups" jsonb,
 	"created_at" bigint NOT NULL,
-	"bare_skill_commands" boolean NOT NULL DEFAULT false
+	"bare_skill_commands" boolean NOT NULL DEFAULT false,
+	"allow_public_artifacts" boolean NOT NULL DEFAULT false
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -470,6 +471,28 @@ ALTER TABLE "memory_files" ADD COLUMN "search_vector" tsvector GENERATED ALWAYS 
 ) STORED;
 --> statement-breakpoint
 CREATE INDEX "memory_files_search_vector_idx" ON "memory_files" USING gin ("search_vector");
+--> statement-breakpoint
+CREATE TABLE "artifacts" (
+	"id" text PRIMARY KEY NOT NULL,
+	"token" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"org_id" text NOT NULL,
+	"actor_user_id" text NOT NULL,
+	"source_session_id" text DEFAULT '' NOT NULL,
+	"source_memory_path" text NOT NULL,
+	"title" text DEFAULT '' NOT NULL,
+	"content" text NOT NULL,
+	"visibility" text DEFAULT 'org' NOT NULL,
+	"public_by" text,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	"revoked_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "artifacts_token_unique" ON "artifacts" ("token");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path");
 --> statement-breakpoint
 CREATE TABLE "skills" (
 	"id" text PRIMARY KEY NOT NULL,
