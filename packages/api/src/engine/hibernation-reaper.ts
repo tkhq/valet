@@ -13,7 +13,7 @@
  * `ChildWatcher.sweepRetention`.
  */
 import { and, eq, isNull, lte } from "drizzle-orm";
-import type { AttachmentState } from "@valet/engine";
+import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
@@ -26,7 +26,7 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 interface ReaperLiveSession {
   attachment: {
     readonly state: AttachmentState;
-    destroy(): Promise<void>;
+    destroy(reason?: string): Promise<void>;
   };
 }
 
@@ -83,7 +83,7 @@ export class HibernationReaper {
           // since the check above wins.
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.id);
           if (recheck.length > 0) continue;
-          await live.attachment.destroy();
+          await live.attachment.destroy("hibernation_retention");
           this.deps.engineHost.evictCache(row.id);
           console.log(`HibernationReaper: reclaimed cached sandbox for session ${row.id}`);
         } else {
@@ -93,6 +93,7 @@ export class HibernationReaper {
           const handle = row.hibernatedSandboxId ?? this.deps.engineHost.deriveSandboxId(row.workspace);
           if (handle) {
             await this.deps.engineHost.destroySandbox(handle);
+            recordSandboxDestroyed("hibernation_retention");
             console.log(`HibernationReaper: reclaimed sandbox ${handle} for session ${row.id}`);
           } else {
             console.warn(

@@ -65,7 +65,7 @@
  */
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, recordSandboxDestroyed, SandboxStartupError } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -777,9 +777,12 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         // demand against the scheduler (the 2026-08-22 incident held 433
         // Pending pods for 47h), and its PVC holds nothing — the pod never
         // ran. Adopted CRs are never cleaned up here.
-        await this.destroy(name).catch((cleanupErr) => {
-          console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
-        });
+        await this.destroy(name).then(
+          () => recordSandboxDestroyed("failed_create"),
+          (cleanupErr) => {
+            console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
+          },
+        );
       }
       throw err;
     }

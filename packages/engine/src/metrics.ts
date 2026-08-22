@@ -31,6 +31,9 @@ interface Instruments {
   sandboxExecDuration: Histogram;
   provisionDuration: Histogram;
   credentialReads: Counter;
+  sandboxCreated: Counter;
+  sandboxDestroyed: Counter;
+  sandboxFlagged: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -73,6 +76,16 @@ function inst(): Instruments {
     }),
     credentialReads: meter.createCounter("valet.credential.reads", {
       description: "Credential accesses, by service and hit/miss",
+    }),
+    sandboxCreated: meter.createCounter("valet.sandbox.created", {
+      description: "Sandboxes provisioned (provider.create succeeded)",
+    }),
+    sandboxDestroyed: meter.createCounter("valet.sandbox.destroyed", {
+      description: "Sandboxes destroyed, by reason (session_destroy, run_settled, hibernation_retention, child_retention, orphaned, failed_create, ...)",
+    }),
+    sandboxFlagged: meter.createCounter("valet.sandbox.flagged", {
+      description:
+        "Sandboxes flagged by the reconcile sweep without a destroy, by kind (over_age, unowned). A sustained non-zero rate means a lifecycle owner failed to clean up — the alert signal for the alert-don't-auto-repair rule.",
     }),
   };
   return instruments;
@@ -119,4 +132,24 @@ export function recordSandboxProvision(durationMs: number, ok: boolean): void {
 
 export function recordCredentialRead(service: string, hit: boolean): void {
   inst().credentialReads.add(1, { service, hit });
+}
+
+/** A successful `provider.create` — one side of the created−destroyed gap
+ * that IS the sandbox-leak alarm (sandbox-lifecycle spec, 2026-08-22). */
+export function recordSandboxCreated(): void {
+  inst().sandboxCreated.add(1);
+}
+
+/** The other side of the leak-alarm gap. `reason` names the destroying
+ * owner: session_destroy, run_settled, hibernation_retention,
+ * child_retention, orphaned, failed_create. */
+export function recordSandboxDestroyed(reason: string): void {
+  inst().sandboxDestroyed.add(1, { reason });
+}
+
+/** A reconcile-sweep flag that deliberately did NOT destroy (over_age,
+ * unowned) — the "alert, don't auto-repair" signal. Re-emitted every sweep
+ * pass while the condition persists, so `increase(...) > 0` alerts cleanly. */
+export function recordSandboxFlagged(kind: string, count: number): void {
+  if (count > 0) inst().sandboxFlagged.add(count, { kind });
 }

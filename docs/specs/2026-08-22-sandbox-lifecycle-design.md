@@ -93,6 +93,23 @@ hour.
    (decision 5's workspace-survival intent); this is the one documented
    exception to "only the session-deletion path deletes a CR".
 
+## Metrics
+
+All on the `@valet/engine` meter (`packages/engine/src/metrics.ts`; no-op
+until the api registers a MeterProvider):
+
+- `valet.sandbox.created` (counter) — successful provisions, recorded in
+  the attachment. With `valet.sandbox.destroyed{reason}` this forms the
+  created−destroyed gap that IS the leak alarm.
+- `valet.sandbox.destroyed{reason}` (counter) — reasons name the
+  destroying owner: `session_destroy` (attachment default),
+  `run_settled`, `hibernation_retention`, `child_settled`,
+  `child_retention`, `orphaned`, `failed_create`.
+- `valet.sandbox.flagged{kind}` (counter) — reconcile-sweep flags that
+  deliberately did NOT destroy (`over_age`, `unowned`). Re-emitted every
+  sweep pass while the condition persists, so `increase(...) > 0` alerts
+  cleanly. This is the alert half of "alert, don't auto-repair".
+
 ## Deviations & notes
 
 - The TTL destroy rule (recommendation D.3 in the incident doc) was

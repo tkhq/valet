@@ -22,7 +22,7 @@
  * only the sandbox and its tokens go.
  */
 import { and, eq, isNull, lte } from "drizzle-orm";
-import type { AttachmentState } from "@valet/engine";
+import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowRuns } from "../schema/index.js";
@@ -40,7 +40,7 @@ const SWEEP_BATCH_LIMIT = 100;
 interface ReclaimLiveSession {
   attachment: {
     readonly state: AttachmentState;
-    destroy(): Promise<void>;
+    destroy(reason?: string): Promise<void>;
   };
 }
 
@@ -151,7 +151,7 @@ export class WorkflowSandboxReclaimer {
       // rule): a submission admitted since the check above wins.
       const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
       if (recheck.length > 0) return false;
-      await live.attachment.destroy();
+      await live.attachment.destroy("run_settled");
       this.deps.engineHost.evictCache(sessionId);
       console.log(`WorkflowSandboxReclaimer: reclaimed cached sandbox for session ${sessionId}`);
     } else {
@@ -164,6 +164,7 @@ export class WorkflowSandboxReclaimer {
       const handle = this.deps.engineHost.deriveSandboxId(workflowSessionWorkspace(sessionId));
       if (handle) {
         await this.deps.engineHost.destroySandbox(handle);
+        recordSandboxDestroyed("run_settled");
         console.log(`WorkflowSandboxReclaimer: reclaimed sandbox ${handle} for session ${sessionId}`);
       } else {
         console.warn(

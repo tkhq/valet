@@ -24,7 +24,7 @@
  * immediately before the destroy. Providers without `list()` (docker/local
  * — process-local handles) make this sweep a no-op.
  */
-import type { SandboxProvider } from "@valet/engine";
+import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 
@@ -93,6 +93,8 @@ export class SandboxReconcileSweep {
         console.error(`SandboxReconcileSweep: reconcile failed for sandbox ${sb.id}:`, err);
       }
     }
+    recordSandboxFlagged("over_age", report.overAge);
+    recordSandboxFlagged("unowned", report.unowned);
     if (report.overAge > 0) {
       console.warn(
         `SandboxReconcileSweep: ${report.overAge} sandbox(es) older than the report threshold — ` +
@@ -123,6 +125,7 @@ export class SandboxReconcileSweep {
     const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0) return false;
     await this.deps.engineHost.destroySandbox(sandboxId);
+    recordSandboxDestroyed("orphaned");
     await revokeSandboxTokens(this.deps.db, sessionId);
     console.log(
       `SandboxReconcileSweep: destroyed sandbox ${sandboxId} for session ${sessionId} — orphaned (session gone)`,

@@ -6,7 +6,7 @@ import type {
   SpecProvider,
 } from "../types.js";
 import { markSpanError, withSpan } from "../tracing.js";
-import { recordSandboxProvision } from "../metrics.js";
+import { recordSandboxCreated, recordSandboxDestroyed, recordSandboxProvision } from "../metrics.js";
 import {
   SandboxPreparationError,
   SandboxStartupError,
@@ -587,7 +587,11 @@ export class SandboxAttachment {
    * it resolves, the newly-created sandbox is discarded (best-effort
    * destroyed) rather than adopted.
    */
-  async destroy(): Promise<void> {
+  /** `reason` labels the `valet.sandbox.destroyed` counter — pass the
+   * destroying owner's name (run_settled, hibernation_retention,
+   * child_retention, ...) from sweeps; the default names the ordinary
+   * session-deletion path. */
+  async destroy(reason = "session_destroy"): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
 
@@ -604,8 +608,10 @@ export class SandboxAttachment {
 
     if (sandbox?.destroy) {
       await sandbox.destroy().catch(() => {});
+      recordSandboxDestroyed(reason);
     } else if (sandbox && this.provider) {
       await this.provider.destroy(sandbox.id).catch(() => {});
+      recordSandboxDestroyed(reason);
     }
   }
 
@@ -778,6 +784,9 @@ export class SandboxAttachment {
         // report ok by whether a live handle came out of the provision.
         const ok = this._state === "ready";
         recordSandboxProvision(Date.now() - startedAt, ok);
+        // One side of the created−destroyed gap, the sandbox-leak alarm
+        // (sandbox-lifecycle spec, 2026-08-22).
+        if (ok) recordSandboxCreated();
         span.setAttribute("valet.sandbox.result_state", this._state);
         if (this._sandbox) span.setAttribute("valet.sandbox.id", this._sandbox.id);
         if (!ok) markSpanError(span, `provision ended in state ${this._state}`);
