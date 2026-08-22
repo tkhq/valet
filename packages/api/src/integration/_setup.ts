@@ -29,6 +29,7 @@ import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
+import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -346,6 +347,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
 
+  // Never started on its timer in tests; behavior is tested in
+  // engine/sandbox-reconcile-sweep.test.ts. ageReportMs 0 keeps the
+  // over-age report quiet even if a test drives sweep() by hand.
+  const sandboxReconcileSweep = new SandboxReconcileSweep({
+    db,
+    provider: sandboxProvider,
+    engineHost,
+    engineStore,
+    ageReportMs: 0,
+  });
+
   const channelHost = new ChannelHost({
     db,
     engineHost,
@@ -468,6 +480,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     childWatcher,
     hibernationReaper,
     workflowSandboxReclaimer,
+    sandboxReconcileSweep,
     channelHost,
     workflowStore,
     workflowRunHost,

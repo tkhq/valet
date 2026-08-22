@@ -310,6 +310,11 @@ providers.hibernationReaper.start();
 // itself runs from the `onRunSettled` hook, not this interval.
 providers.workflowSandboxReclaimer.start();
 
+// Provider-side reconciler: destroys orphaned sandboxes (owning session
+// gone) and any sandbox past VALET_SANDBOX_MAX_LIFETIME_HOURS. No-op on
+// providers without a list() seam (docker/local).
+providers.sandboxReconcileSweep.start();
+
 // Channel ingress (Task 8): resolves credentials into transports, then
 // starts webhook registration or the long-poll loop per transport. A
 // failure here must never block boot — channels are best-effort.
@@ -546,6 +551,11 @@ async function close(): Promise<void> {
     providers.workflowSandboxReclaimer.stop();
   } catch (err) {
     console.error("workflowSandboxReclaimer.stop failed:", err);
+  }
+  try {
+    providers.sandboxReconcileSweep.stop();
+  } catch (err) {
+    console.error("sandboxReconcileSweep.stop failed:", err);
   }
   try {
     await providers.channelHost.stop();

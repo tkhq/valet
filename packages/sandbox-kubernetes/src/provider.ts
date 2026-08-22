@@ -75,6 +75,7 @@ import type {
   Sandbox,
   SandboxCapabilities,
   SandboxCreateOpts,
+  SandboxListing,
   SandboxProvider,
   SandboxStatus,
 } from "@valet/engine";
@@ -95,6 +96,7 @@ import {
   applySandbox,
   deleteSandbox,
   getSandbox,
+  listSandboxes,
   livePodImageDiffers,
   podDeleteApiAdapter,
   resolvePodName,
@@ -112,6 +114,7 @@ import {
   DOCKER_LABEL_KEY,
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
+  SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
 
@@ -659,6 +662,23 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * (`create` names it `sandboxCrName(opts.workspace)`). */
   deriveId(sessionKey: string): string {
     return sandboxCrName(sessionKey);
+  }
+
+  /** Every Sandbox CR in the namespace, for the reconcile sweep. The
+   * owning session comes from the create-time annotation
+   * (`SESSION_ANNOTATION_KEY`); null for CRs created before the annotation
+   * existed — the sweep falls back to age-based rules for those. */
+  async list(): Promise<SandboxListing[]> {
+    const crs = await listSandboxes(this.deps.objectsApi, this.cfg);
+    return crs.map((cr) => {
+      const stamp = cr.metadata.creationTimestamp;
+      const createdAtMs = stamp ? Date.parse(stamp) : Number.NaN;
+      return {
+        id: cr.metadata.name,
+        sessionId: cr.metadata.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
+        createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+      };
+    });
   }
 
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an

@@ -57,7 +57,31 @@ hour.
    than re-sweeping forever.
 4. **Race rules mirror `ChildWatcher.sweepRetention`.** Unsettled
    submissions always win, re-checked immediately before the destroy.
+5. **Provider-side reconcile sweep — orphan rule only.**
+   `SandboxProvider.list()` (optional; kubernetes implements it) enumerates
+   what actually exists. The engine stamps the owning session id on every
+   create (`SandboxCreateOpts.sessionId` → a CR annotation,
+   `valet.dev/session` — an annotation because session ids contain colons
+   that label values reject). `SandboxReconcileSweep`
+   (`packages/api/src/engine/sandbox-reconcile-sweep.ts`, 30-minute
+   interval) destroys a sandbox only when its owning session is gone from
+   both the engine store and the host cache — the one case with no owner
+   left to delete it through any other path.
+6. **No max-lifetime kill — alert, don't auto-repair.** The incident doc
+   proposed a TTL cap. Rejected during implementation (and written into
+   CLAUDE.md as a repo-wide rule): an age-based destroy masks whichever
+   owner failed to clean up, flattens the created−deleted leak signal the
+   metrics exist to expose, and wipes legitimately long-lived active
+   workspaces (an orchestrator's) on a timer. Instead the sweep REPORTS
+   over-age sandboxes (`VALET_SANDBOX_AGE_REPORT_HOURS`, default 168) and
+   sandboxes with no session annotation, in logs and in its `SweepReport`
+   return, so a lifecycle bug pages a human. Known residual: a sandbox
+   whose session was cache-evicted while running and never hibernated has
+   no owner sweep; it now surfaces through the over-age report rather than
+   being silently killed.
 
 ## Deviations & notes
 
-- (filled in as the implementation lands)
+- The TTL destroy rule (recommendation D.3 in the incident doc) was
+  implemented and then removed in favor of decision 6 — see the CLAUDE.md
+  section "Invariants: alert, don't auto-repair".

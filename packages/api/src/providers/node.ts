@@ -27,6 +27,7 @@ import {
   ChildWatcher,
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
+import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -60,6 +61,7 @@ import {
   resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
+  resolveSandboxAgeReportMs,
   resolveIdleMinutes,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
@@ -428,6 +430,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     retentionMs: resolveHibernatedRetentionMs(process.env),
   });
 
+  // Provider-side reconciler — the backstop under the DB-driven sweeps.
+  // Destroys orphans (owning session gone); reports over-age and unowned
+  // sandboxes without destroying them (CLAUDE.md: "Invariants: alert,
+  // don't auto-repair"). No-op on providers without `list()`
+  // (docker/local). `start()`/`stop()` are called from `main.ts`.
+  const sandboxReconcileSweep = new SandboxReconcileSweep({
+    db,
+    provider: sandboxProvider,
+    engineHost,
+    engineStore,
+    ageReportMs: resolveSandboxAgeReportMs(process.env),
+  });
+
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
   (async () => {
@@ -645,6 +660,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     childWatcher,
     hibernationReaper,
     workflowSandboxReclaimer,
+    sandboxReconcileSweep,
     channelHost,
     workflowStore,
     workflowRunHost,

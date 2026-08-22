@@ -365,6 +365,9 @@ export function parseSandboxCRRead(value: unknown): SandboxCRRead {
     }
     metadata.annotations = annotations;
   }
+  if (typeof metadataValue.creationTimestamp === "string") {
+    metadata.creationTimestamp = metadataValue.creationTimestamp;
+  }
 
   // spec.podTemplate/volumeClaimTemplates are intentionally typed `unknown`
   // on SandboxCRReadSpec (see types.ts) — we only validate their presence
