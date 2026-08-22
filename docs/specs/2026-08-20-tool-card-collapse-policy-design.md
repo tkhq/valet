@@ -31,15 +31,26 @@ explicit user toggle.
 
 `ToolShell` now reads a per-browser preference at mount and applies one
 of three policies. It also runs an effect on `[status]` that
-auto-collapses a `running→completed` transition unless the user clicked
-the header while the card was running.
+auto-collapses a `running→completed` transition unless the user touched
+the card (header click or body pointer-down) while it was running.
 
 The preference module `packages/web/src/lib/preferences.ts` exposes
-`getToolCardDefault()` and `setToolCardDefault()`. Both accessors
-tolerate an unavailable or hostile localStorage: reads fall back to
-`smart`; writes swallow quota and permission errors. This is V2's first
-`packages/web` preference, and it centralises the pattern that V1 kept
-inline in `packages/client/src/components/chat/thread-sidebar.tsx`.
+`getToolCardDefault()` and `setToolCardDefault()`. Both accessors take an
+injectable `storage` that defaults to the shared `safeLocalStorage()` shim
+(`packages/web/src/lib/safe-storage.ts`, extracted from `theme.ts` and
+`command-recency.ts`). The shim tolerates an unavailable or hostile
+localStorage: it degrades to an in-memory Map, reads fall back to `smart`,
+and writes swallow quota and permission errors.
+
+Two supporting fixes keep the per-card state trustworthy:
+
+- `message-item.tsx` keys tool_call parts by their stable `callId`. An
+  index key hands one call's expansion and user-touch state to a
+  different call whenever the parts array shifts (streaming sweep,
+  `message_update` replacement).
+- Each card derives its body element id from `useId()`. `toolName`
+  repeats across calls in a thread, so a name-derived id duplicated, and
+  `aria-controls` is set only while the body is mounted.
 
 A toggle for the preference lives on `/settings/appearance`
 (`packages/web/src/routes/settings.appearance.tsx`), under a "Chat density"
@@ -69,19 +80,25 @@ effect at mount. The cells report the mount-time `aria-expanded` value.
 | error       | true     | true (override)  | true            |
 
 After mount, one effect runs on every `status` change. It respects a
-`userTouched` ref that flips true on the first header click.
+`userTouched` ref that flips true on the first pointer interaction with
+the card — a header click or a pointer-down inside the body. Body
+interactions count because a user expanding truncated output or
+selecting text mid-run must not lose the body to the auto-collapse.
 
 | Transition            | userTouched | smart action        | always-collapsed action | always-expanded action |
 | --------------------- | ----------- | ------------------- | ----------------------- | ---------------------- |
 | running → completed   | false       | collapse            | leave (already closed)  | no-op                  |
 | running → completed   | true        | leave (user choice) | leave (user choice)     | no-op                  |
 | streaming → completed | false       | collapse            | leave                   | no-op                  |
-| any → error           | any         | force expand        | force expand            | no-op                  |
+| any → error           | any         | force expand        | force expand            | force expand           |
 | completed → running   | any         | leave               | leave                   | no-op                  |
 
-Errors are the only override. A user who set `always-collapsed` still
-needs to read the message that names the corrective action, so an
-error card opens and never auto-collapses.
+Errors are the only override, and they override every policy and every
+prior toggle. A user who set `always-collapsed` — or who manually
+collapsed a card under `always-expanded` — still needs to read the
+message that names the corrective action, so an error card opens and
+never auto-collapses. In the effect, the error branch therefore runs
+before the `always-expanded` no-op.
 
 ## Non-goals
 
@@ -91,6 +108,10 @@ error card opens and never auto-collapses.
   `ToolCardExpansionIntentContext` policy.
 - No new animation. `prefers-reduced-motion` users see no visual
   change from this fix; the shell only reads and writes state.
+- No cross-mount memory of a card's expansion. State lives in the
+  mounted card, so a thread switch remounts every card under the
+  mount-time policy. The `callId` key keeps state with the right call
+  while the list is mounted; it does not survive an unmount.
 
 ## Deviations
 

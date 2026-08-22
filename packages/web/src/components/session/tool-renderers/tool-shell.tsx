@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
@@ -107,57 +107,59 @@ export function ToolShell({
   children,
 }: ToolShellProps) {
   // The user's default policy is read once at mount. A live preference
-  // change never rewrites an already-mounted card — the toggle in a
-  // future overflow menu will take effect on the next tool call, which
-  // matches how V1's `thread-sidebar-collapsed` behaves and keeps this
-  // effect free of listener plumbing.
+  // change never rewrites an already-mounted card — the Chat density
+  // toggle on /settings/appearance takes effect on the next tool card
+  // mount, which matches how V1's `thread-sidebar-collapsed` behaves and
+  // keeps this effect free of listener plumbing.
   const [policy] = useState<ToolCardDefault>(() => getToolCardDefault());
   const [expanded, setExpanded] = useState<boolean>(() =>
     initialExpanded(policy, status),
   );
 
-  // Auto-collapse-on-complete respects one explicit user action. Any
-  // header click flips this ref, and the effect below then leaves the
-  // card alone across status transitions. This is the pattern for
-  // "state initialised from props at mount" (CLAUDE.md): pair the
-  // `useState` with a `useEffect` that syncs on the prop and gates the
-  // sync on a `userTouched` ref.
+  // Auto-collapse-on-complete respects one explicit user action. A
+  // header click or a pointer-down inside the body flips this ref, and
+  // the effect below then leaves the card alone on completion. This is
+  // the "mount-time state from props" pattern (CLAUDE.md, Rules learned
+  // the hard way): pair the `useState` with a `useEffect` that syncs on
+  // the prop, gated on a `userTouched` ref.
   const userTouchedRef = useRef(false);
-  const prevStatusRef = useRef<ToolStatus>(status);
 
   useEffect(() => {
-    const prev = prevStatusRef.current;
-    prevStatusRef.current = status;
-
-    // `always-expanded` never rewrites the card. The user asked for
-    // everything open; the effect is a no-op under that policy.
-    if (policy === "always-expanded") return;
-
-    // Errors override every other rule: read the message. A card that
-    // arrives at `error` from any prior status opens, and it never
-    // auto-collapses.
+    // Errors override every policy and every prior toggle: the body
+    // holds the message that names the corrective action, so a card
+    // that arrives at `error` opens. It never auto-collapses afterwards
+    // (`error` is terminal, so this effect does not run again; a manual
+    // collapse of an error card therefore also sticks).
     if (status === "error") {
       setExpanded(true);
       return;
     }
 
-    // Auto-collapse only on the running→completed edge, and only when
-    // the user has not clicked the header. `streaming→completed` is
-    // rare (the engine emits `running` between them) but is treated the
-    // same way — the args are done and the result is in.
-    if (
-      status === "completed" &&
-      (prev === "running" || prev === "streaming") &&
-      !userTouchedRef.current
-    ) {
+    // `always-expanded` never collapses a card. The user asked for
+    // everything open; short of an error the effect leaves them alone.
+    if (policy === "always-expanded") return;
+
+    // Auto-collapse when the call completes, unless the user touched
+    // the card. `completed` is terminal in the stream store, so this
+    // fires once — on the streaming/running→completed edge, or at
+    // mount, where it matches `initialExpanded` and is a no-op.
+    if (status === "completed" && !userTouchedRef.current) {
       setExpanded(false);
     }
   }, [status, policy]);
 
   const isError = status === "error";
 
-  const handleToggle = () => {
+  // Each card needs its own body id: `toolName` repeats across calls in
+  // a thread, and `aria-controls` must reference exactly one element.
+  const bodyId = useId();
+
+  const markTouched = () => {
     userTouchedRef.current = true;
+  };
+
+  const handleToggle = () => {
+    markTouched();
     setExpanded((v) => !v);
   };
 
@@ -190,7 +192,9 @@ export function ToolShell({
             "transition-colors",
           )}
           aria-expanded={expanded}
-          aria-controls={`tool-body-${toolName}`}
+          // The body unmounts while collapsed, so only reference it when
+          // it exists — a dangling aria-controls id is invalid.
+          aria-controls={expanded ? bodyId : undefined}
         >
           <ChevronRight
             className={cn(
@@ -248,10 +252,13 @@ export function ToolShell({
           )}
         </button>
 
-        {/* Body */}
+        {/* Body. A pointer-down here counts as a user touch: someone
+            expanding truncated output or selecting text mid-run must not
+            lose it to the auto-collapse when the call completes. */}
         {expanded && (
           <div
-            id={`tool-body-${toolName}`}
+            id={bodyId}
+            onPointerDown={markTouched}
             className={cn(
               "border-t border-[--border]",
               isError && "border-t-danger-500/30",

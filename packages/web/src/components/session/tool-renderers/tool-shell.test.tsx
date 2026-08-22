@@ -3,7 +3,9 @@
  * ToolShell owns the collapse policy for every tool renderer. The tests
  * mirror the acceptance-to-test mapping on TKAI-199: mount-time policy
  * per preference, running→completed auto-collapse, respect for a manual
- * toggle, and the error override.
+ * toggle, and the error override — including the transitions that START
+ * from a collapsed card, which are the only runs where the effect's
+ * error branch does observable work.
  *
  * `prettyToolName` cases stay untouched — the pure-string helper is
  * exercised alongside the rendering tests so a regression here still
@@ -16,11 +18,13 @@ import { ToolShell, prettyToolName } from "./tool-shell";
 import type { ToolStatus } from "./types";
 
 /**
- * Render helper. Every card shares the same category/icon; only status
- * varies across cases, so the noise stays in one place.
+ * Element helper. Every card shares the same category/icon; only status
+ * varies across cases, so the noise stays in one place. Use the same
+ * element for `render` and `rerender` so a transition is a prop change
+ * on one mounted instance — exactly what the stream store produces.
  */
-function renderShell(status: ToolStatus) {
-  return render(
+function shell(status: ToolStatus) {
+  return (
     <ToolShell
       toolName="bash"
       category="shell"
@@ -28,8 +32,12 @@ function renderShell(status: ToolStatus) {
       status={status}
     >
       <div>body</div>
-    </ToolShell>,
+    </ToolShell>
   );
+}
+
+function renderShell(status: ToolStatus) {
+  return render(shell(status));
 }
 
 function header(): HTMLElement {
@@ -51,16 +59,7 @@ describe("ToolShell — smart policy (default)", () => {
     const { rerender } = renderShell("running");
     expect(isExpanded()).toBe(true);
 
-    rerender(
-      <ToolShell
-        toolName="bash"
-        category="shell"
-        Icon={Terminal}
-        status="completed"
-      >
-        <div>body</div>
-      </ToolShell>,
-    );
+    rerender(shell("completed"));
     expect(isExpanded()).toBe(false);
   });
 
@@ -73,16 +72,7 @@ describe("ToolShell — smart policy (default)", () => {
     fireEvent.click(header());
     expect(isExpanded()).toBe(true);
 
-    rerender(
-      <ToolShell
-        toolName="bash"
-        category="shell"
-        Icon={Terminal}
-        status="completed"
-      >
-        <div>body</div>
-      </ToolShell>,
-    );
+    rerender(shell("completed"));
     expect(isExpanded()).toBe(true);
   });
 
@@ -91,31 +81,34 @@ describe("ToolShell — smart policy (default)", () => {
     fireEvent.click(header());
     expect(isExpanded()).toBe(false);
 
-    rerender(
-      <ToolShell
-        toolName="bash"
-        category="shell"
-        Icon={Terminal}
-        status="completed"
-      >
-        <div>body</div>
-      </ToolShell>,
-    );
+    rerender(shell("completed"));
     expect(isExpanded()).toBe(false);
+  });
+
+  it("A2c: a pointer-down inside the body counts as a user touch", () => {
+    // Someone expanding truncated output or selecting text mid-run must
+    // not lose the body to the auto-collapse when the call completes.
+    const { rerender } = renderShell("running");
+    fireEvent.pointerDown(screen.getByText("body"));
+
+    rerender(shell("completed"));
+    expect(isExpanded()).toBe(true);
   });
 
   it("A3a: never auto-collapses when the status flips to error", () => {
     const { rerender } = renderShell("running");
-    rerender(
-      <ToolShell
-        toolName="bash"
-        category="shell"
-        Icon={Terminal}
-        status="error"
-      >
-        <div>body</div>
-      </ToolShell>,
-    );
+    rerender(shell("error"));
+    expect(isExpanded()).toBe(true);
+  });
+
+  it("A3c: force-expands a user-collapsed card when it errors", () => {
+    // The collapsed→error edge is the only one where the effect's error
+    // branch does observable work — without it this test ships red.
+    const { rerender } = renderShell("running");
+    fireEvent.click(header());
+    expect(isExpanded()).toBe(false);
+
+    rerender(shell("error"));
     expect(isExpanded()).toBe(true);
   });
 
@@ -149,6 +142,14 @@ describe("ToolShell — always-collapsed policy", () => {
     renderShell("error");
     expect(isExpanded()).toBe(true);
   });
+
+  it("A3d: force-expands a collapsed running card when it errors", () => {
+    const { rerender } = renderShell("running");
+    expect(isExpanded()).toBe(false);
+
+    rerender(shell("error"));
+    expect(isExpanded()).toBe(true);
+  });
 });
 
 describe("ToolShell — always-expanded policy", () => {
@@ -161,16 +162,7 @@ describe("ToolShell — always-expanded policy", () => {
     const { rerender } = renderShell("completed");
     expect(isExpanded()).toBe(true);
 
-    rerender(
-      <ToolShell
-        toolName="bash"
-        category="shell"
-        Icon={Terminal}
-        status="error"
-      >
-        <div>body</div>
-      </ToolShell>,
-    );
+    rerender(shell("error"));
     expect(isExpanded()).toBe(true);
   });
 
@@ -178,17 +170,49 @@ describe("ToolShell — always-expanded policy", () => {
     const { rerender } = renderShell("running");
     expect(isExpanded()).toBe(true);
 
-    rerender(
-      <ToolShell
-        toolName="bash"
-        category="shell"
-        Icon={Terminal}
-        status="completed"
-      >
-        <div>body</div>
-      </ToolShell>,
-    );
+    rerender(shell("completed"));
     expect(isExpanded()).toBe(true);
+  });
+
+  it("A3e: force-expands a user-collapsed card when it errors", () => {
+    // Errors override the policy no-op too: the user asked for
+    // everything open, and the error message must be readable even
+    // after a manual collapse.
+    const { rerender } = renderShell("running");
+    fireEvent.click(header());
+    expect(isExpanded()).toBe(false);
+
+    rerender(shell("error"));
+    expect(isExpanded()).toBe(true);
+  });
+});
+
+describe("ToolShell — accessibility wiring", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("gives repeated tool names distinct body ids", () => {
+    // Two bash cards in one thread must not share a body id —
+    // aria-controls has to reference exactly one element.
+    render(
+      <>
+        {shell("running")}
+        {shell("running")}
+      </>,
+    );
+    const ids = screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-controls"));
+    expect(ids[0]).toBeTruthy();
+    expect(ids[1]).toBeTruthy();
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it("drops aria-controls while the body is unmounted", () => {
+    renderShell("completed");
+    expect(isExpanded()).toBe(false);
+    expect(header().getAttribute("aria-controls")).toBeNull();
   });
 });
 
