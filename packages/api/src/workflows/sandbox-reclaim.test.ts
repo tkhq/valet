@@ -59,8 +59,9 @@ describe("WorkflowSandboxReclaimer", () => {
     checkpoints?: NodeCheckpoint[];
     /** Per-run checkpoints; wins over `checkpoints` when set. */
     checkpointsFor?: (runId: string) => NodeCheckpoint[];
-    /** Cached sessions by id. */
-    live?: Map<string, { state: AttachmentState; destroyed: string[] }>;
+    /** Cached sessions by id. `destroyOk: false` models a provider destroy
+     * failure (attachment.destroy resolves false). */
+    live?: Map<string, { state: AttachmentState; destroyed: string[]; destroyOk?: boolean }>;
     /** Consumed per `listUnsettledSubmissions` call; empty → always settled. */
     unsettledQueue?: number[];
     /** null models a backend-assigned-id provider (docker/local). */
@@ -82,6 +83,7 @@ describe("WorkflowSandboxReclaimer", () => {
               state: live.state,
               destroy: async () => {
                 live.destroyed.push(sessionId);
+                return live.destroyOk ?? true;
               },
             },
           };
@@ -187,15 +189,14 @@ describe("WorkflowSandboxReclaimer", () => {
     expect((await row(runId))?.sandboxReclaimedAt).toBe(NOW);
   });
 
-  it("a submission admitted between check and destroy wins (re-check race rule)", async () => {
+  it("unsettled submissions spare a cached session's sandbox too", async () => {
     const runId = await seedRun();
     const s1 = `wf:${runId}:step_a`;
     const live = new Map([[s1, { state: "ready" as const, destroyed: [] as string[] }]]);
     const { deps } = fakeDeps({
       checkpoints: [checkpoint(runId, "step_a", s1)],
       live,
-      // First check passes, the re-check immediately before destroy fails.
-      unsettledQueue: [0, 1],
+      unsettledQueue: [1],
     });
 
     await new WorkflowSandboxReclaimer(deps).reclaimRun(runId, NOW);
@@ -215,6 +216,21 @@ describe("WorkflowSandboxReclaimer", () => {
 
     expect(destroyedSandboxes).toEqual([]);
     expect((await row(runId))?.sandboxReclaimedAt).toBe(NOW);
+  });
+
+  it("a failed cached destroy (attachment resolves false) evicts but leaves the stamp NULL", async () => {
+    const runId = await seedRun();
+    const s1 = `wf:${runId}:step_a`;
+    const live = new Map([[s1, { state: "ready" as const, destroyed: [] as string[], destroyOk: false }]]);
+    const { deps, evicted } = fakeDeps({
+      checkpoints: [checkpoint(runId, "step_a", s1)],
+      live,
+    });
+
+    await new WorkflowSandboxReclaimer(deps).reclaimRun(runId, NOW);
+
+    expect(evicted).toEqual([s1]);
+    expect((await row(runId))?.sandboxReclaimedAt).toBeNull();
   });
 
   it("a failed destroy leaves the stamp NULL so the sweep retries", async () => {
@@ -261,6 +277,23 @@ describe("WorkflowSandboxReclaimer", () => {
     await new WorkflowSandboxReclaimer(deps).sweep(NOW);
 
     expect(destroyedSandboxes).toEqual([]);
+  });
+
+  it("a failed reclaim rotates the run to the back of the sweep queue (no starvation)", async () => {
+    const runId = await seedRun();
+    const { deps } = fakeDeps({
+      checkpoints: [checkpoint(runId, "step_a", `wf:${runId}:step_a`)],
+      unsettledQueue: [1],
+    });
+
+    await new WorkflowSandboxReclaimer(deps).sweep(NOW);
+
+    const after = await row(runId);
+    expect(after?.sandboxReclaimedAt).toBeNull();
+    // updated_at bumped to the sweep's `now`: the row leaves the oldest-100
+    // window head and re-enters behind the settle grace, so newer leaked
+    // runs get their turn on the next pass.
+    expect(after?.updatedAt).toBe(NOW);
   });
 
   it("a stamped run stops sweeping: the second pass destroys nothing", async () => {

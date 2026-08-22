@@ -482,7 +482,8 @@ describe("applySandbox", () => {
     const api = new FakeCustomObjectsApi();
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     const result = await applySandbox(api, cfg, manifest);
-    expect(result.metadata.name).toBe("sess-1");
+    expect(result.cr.metadata.name).toBe("sess-1");
+    expect(result.adopted).toBe(false);
     expect(api.createCalls).toBe(1);
     expect(api.replaceCalls).toBe(0);
   });
@@ -494,11 +495,12 @@ describe("applySandbox", () => {
 
     const result = await applySandbox(api, cfg, manifest);
 
-    expect(result.metadata.name).toBe("sess-1");
+    expect(result.cr.metadata.name).toBe("sess-1");
+    expect(result.adopted).toBe(true);
     // The fake bumps resourceVersion on a successful replace — proves the
     // replace call actually carried the existing resourceVersion (7),
     // since a mismatched version would have thrown 409 from the fake too.
-    expect(result.metadata.resourceVersion).toBe("8");
+    expect(result.cr.metadata.resourceVersion).toBe("8");
     expect(api.createCalls).toBe(1);
     expect(api.replaceCalls).toBe(1);
   });
@@ -513,7 +515,7 @@ describe("applySandbox", () => {
 
     const result = await applySandbox(api, cfg, manifest);
 
-    expect(result.spec.operatingMode).toBe("Running");
+    expect(result.cr.spec.operatingMode).toBe("Running");
   });
 
   it("adopting a Running/unset CR does not introduce an operatingMode key (byte-identical spec otherwise)", async () => {
@@ -523,8 +525,8 @@ describe("applySandbox", () => {
 
     const result = await applySandbox(api, cfg, manifest);
 
-    expect(result.spec).toEqual(manifest.spec);
-    expect(Object.prototype.hasOwnProperty.call(result.spec, "operatingMode")).toBe(false);
+    expect(result.cr.spec).toEqual(manifest.spec);
+    expect(Object.prototype.hasOwnProperty.call(result.cr.spec, "operatingMode")).toBe(false);
   });
 
   it("is idempotent — applying the same manifest twice in a row does not error and keeps the same name/uid", async () => {
@@ -532,8 +534,9 @@ describe("applySandbox", () => {
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     const first = await applySandbox(api, cfg, manifest);
     const second = await applySandbox(api, cfg, manifest);
-    expect(second.metadata.name).toBe(first.metadata.name);
-    expect(second.metadata.uid).toBe(first.metadata.uid);
+    expect(second.adopted).toBe(true);
+    expect(second.cr.metadata.name).toBe(first.cr.metadata.name);
+    expect(second.cr.metadata.uid).toBe(first.cr.metadata.uid);
   });
 
   it("propagates non-409 errors from create without attempting to adopt", async () => {

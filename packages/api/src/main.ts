@@ -311,8 +311,9 @@ providers.hibernationReaper.start();
 providers.workflowSandboxReclaimer.start();
 
 // Provider-side reconciler: destroys orphaned sandboxes (owning session
-// gone) and any sandbox past VALET_SANDBOX_MAX_LIFETIME_HOURS. No-op on
-// providers without a list() seam (docker/local).
+// gone). Sandboxes past VALET_SANDBOX_AGE_REPORT_HOURS are REPORTED, not
+// destroyed (CLAUDE.md: alert, don't auto-repair). No-op on providers
+// without a list() seam (docker/local).
 providers.sandboxReconcileSweep.start();
 
 // Channel ingress (Task 8): resolves credentials into transports, then

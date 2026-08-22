@@ -926,10 +926,12 @@ export interface SandboxCreateOpts {
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
-   * every attachment-built sandbox automatically; hosts never need to set
-   * it. Providers that implement `list()` record it on the backing
-   * resource (sandbox-kubernetes: a CR annotation) so a reconcile sweep
-   * can map a listed sandbox back to its session.
+   * every attachment-built sandbox, and its stamp always wins — a value a
+   * host sets here is overwritten, so an opts object cloned from another
+   * session can never mis-attribute ownership. Providers that implement
+   * `list()` record it on the backing resource (sandbox-kubernetes: a CR
+   * annotation) so a reconcile sweep can map a listed sandbox back to its
+   * session.
    */
   sessionId?: string;
   /** Interactive-service profile. Default "headless" (agent-only). "full"

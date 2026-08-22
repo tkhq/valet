@@ -40,7 +40,8 @@ const SWEEP_BATCH_LIMIT = 100;
 interface ReclaimLiveSession {
   attachment: {
     readonly state: AttachmentState;
-    destroy(reason?: string): Promise<void>;
+    /** Resolves false when the provider destroy failed (sandbox leaked). */
+    destroy(reason?: string): Promise<boolean>;
   };
 }
 
@@ -82,7 +83,20 @@ export class WorkflowSandboxReclaimer {
         });
         if (!ok) allReclaimed = false;
       }
-      if (!allReclaimed) return; // stamp stays NULL; the sweep retries
+      if (!allReclaimed) {
+        // Stamp stays NULL; the sweep retries. Bump updated_at so the row
+        // rotates to the BACK of the sweep's oldest-first queue (and back
+        // behind the settle grace window): without this, 100 permanently
+        // failing rows would occupy the whole LIMIT batch every pass and
+        // newer leaked runs would never be reached. Safe to touch on a
+        // settled run — the run schedulers' updated_at queries all filter
+        // on non-settled statuses, and the UI lists runs by created_at.
+        await this.deps.db
+          .update(workflowRuns)
+          .set({ updatedAt: now })
+          .where(and(eq(workflowRuns.id, runId), eq(workflowRuns.status, "settled")));
+        return;
+      }
       await this.deps.db
         .update(workflowRuns)
         .set({ sandboxReclaimedAt: now })
@@ -140,19 +154,21 @@ export class WorkflowSandboxReclaimer {
 
   /** True when the session's sandbox is gone (or was never destroyable). */
   private async reclaimSession(sessionId: string): Promise<boolean> {
+    const live = this.deps.engineHost.liveSession(sessionId);
     // The run is settled, but an in-flight submission (a node aborted
-    // mid-turn, a repair prompt) must never lose its sandbox mid-turn.
+    // mid-turn, a repair prompt) must never lose its sandbox mid-turn —
+    // checked once, immediately before the destroy (the idle sweep's race
+    // rule; nothing awaits between this check and the destroy call).
     const unsettled = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return false;
 
-    const live = this.deps.engineHost.liveSession(sessionId);
     if (live) {
-      // Re-check immediately before the destroy (the idle sweep's race
-      // rule): a submission admitted since the check above wins.
-      const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
-      if (recheck.length > 0) return false;
-      await live.attachment.destroy("run_settled");
+      const destroyed = await live.attachment.destroy("run_settled");
+      // Evict either way — the attachment is torn down. A failed provider
+      // destroy leaves the stamp NULL; the next sweep pass finds the
+      // session uncached and retries through the derived handle.
       this.deps.engineHost.evictCache(sessionId);
+      if (!destroyed) return false;
       console.log(`WorkflowSandboxReclaimer: reclaimed cached sandbox for session ${sessionId}`);
     } else {
       // Uncached (an api restart evicted it, or the sweep found an old

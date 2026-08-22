@@ -100,11 +100,11 @@ This section governs new and edited prose. Do not rewrite existing documents who
 
 ### Invariants: alert, don't auto-repair
 
-When code depends on an invariant (every sandbox has an owner that deletes it, every submission settles, created − deleted trends to zero), do not add a timer or guard that silently repairs violations — TTL kills, blanket re-syncs, catch-all cleanups. A silent repair masks the bug that broke the invariant and converts it into a permanent, unmeasured cost. Instead:
+Do not add a timer or guard that silently repairs invariant violations. Examples of such guards: TTL kills, blanket re-syncs, catch-all cleanups. Invariants here means properties the code depends on — every sandbox has an owner that deletes it, every submission settles, created − deleted trends to zero. A silent repair masks the bug that broke the invariant and converts it into a permanent, unmeasured cost. Instead:
 
 1. Give the invariant one owner: a single code path responsible for holding it.
 2. Emit a metric and an alert that make a violation visible (a created/deleted counter gap, an over-age gauge). A violation should page a human, not disappear.
-3. Add an auto-repair only when violations are expected in normal operation (crash windows, external actors deleting things) — and name that reason in a comment where the repair lives.
+3. Add an auto-repair only when violations are expected in normal operation (crash windows, external deletes). If you add one, name that reason in a comment where the repair lives.
 
 Precedent (2026-08-22, sandbox lifecycle): the reconcile sweep destroys sandboxes whose owning session is gone — a real ownership rule — but deliberately has no max-lifetime kill. Over-age sandboxes are reported, not reaped.
 

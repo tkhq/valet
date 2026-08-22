@@ -22,6 +22,8 @@ describe("SandboxReconcileSweep", () => {
 
   function fakeDeps(overrides: {
     listed?: SandboxListing[];
+    /** Result of the confirm-phase re-list; defaults to `listed`. */
+    listedSecond?: SandboxListing[];
     /** Provider without a list() seam (docker/local). */
     noList?: boolean;
     /** Session ids with an engine-store row. */
@@ -40,10 +42,17 @@ describe("SandboxReconcileSweep", () => {
       db,
       provider: overrides.noList
         ? { backend: "fake" }
-        : {
-            backend: "fake",
-            list: async () => overrides.listed ?? [],
-          },
+        : (() => {
+            let calls = 0;
+            return {
+              backend: "fake",
+              list: async () => {
+                calls += 1;
+                if (calls > 1 && overrides.listedSecond) return overrides.listedSecond;
+                return overrides.listed ?? [];
+              },
+            };
+          })(),
       engineHost: {
         liveSession: (sessionId) => (cached.has(sessionId) ? {} : null),
         destroySandbox: async (sandboxId) => {
@@ -113,10 +122,23 @@ describe("SandboxReconcileSweep", () => {
     expect(destroyedSandboxes).toEqual([]);
   });
 
-  it("a submission admitted between check and destroy wins (re-check race rule)", async () => {
+  it("a sandbox re-adopted by a new session between the pass and the destroy is spared", async () => {
     const { deps, destroyedSandboxes } = fakeDeps({
       listed: [listing("sbx-1", "sess-gone", FRESH)],
-      unsettledQueue: [0, 1],
+      // The confirm-phase re-list shows a NEW owner annotation: a live
+      // session adopted the deterministic CR name while the pass crawled.
+      listedSecond: [listing("sbx-1", "sess-new", FRESH)],
+    });
+
+    await new SandboxReconcileSweep(deps).sweep(NOW);
+
+    expect(destroyedSandboxes).toEqual([]);
+  });
+
+  it("a sandbox already deleted by the confirm-phase re-list is skipped", async () => {
+    const { deps, destroyedSandboxes } = fakeDeps({
+      listed: [listing("sbx-1", "sess-gone", FRESH)],
+      listedSecond: [],
     });
 
     await new SandboxReconcileSweep(deps).sweep(NOW);

@@ -53,6 +53,7 @@ export {
   deleteSandbox,
   getSandbox,
   listSandboxes,
+  listSandboxMetadata,
   loadRancherDesktopKubeConfig,
   mapConditionsToStatus,
   parseSandboxCRRead,

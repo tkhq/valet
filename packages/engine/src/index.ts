@@ -76,6 +76,8 @@ export {
   recordSettlement,
   recordToolExecution,
   recordTurn,
+  type SandboxDestroyReason,
+  type SandboxFlagKind,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";

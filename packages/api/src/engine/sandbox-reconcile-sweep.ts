@@ -75,6 +75,7 @@ export class SandboxReconcileSweep {
     if (!list) return report;
     const listed = await list.call(this.deps.provider);
     const overAgeIds: string[] = [];
+    const orphanCandidates: Array<{ id: string; sessionId: string }> = [];
     for (const sb of listed) {
       try {
         const ageMs = this.deps.ageReportMs;
@@ -86,12 +87,15 @@ export class SandboxReconcileSweep {
           report.unowned += 1;
           continue;
         }
-        if (await this.destroyIfOrphaned(sb.id, sb.sessionId)) {
-          report.orphansDestroyed += 1;
+        if (await this.isOrphaned(sb.sessionId)) {
+          orphanCandidates.push({ id: sb.id, sessionId: sb.sessionId });
         }
       } catch (err) {
         console.error(`SandboxReconcileSweep: reconcile failed for sandbox ${sb.id}:`, err);
       }
+    }
+    if (orphanCandidates.length > 0) {
+      report.orphansDestroyed = await this.destroyConfirmedOrphans(orphanCandidates, list);
     }
     recordSandboxFlagged("over_age", report.overAge);
     recordSandboxFlagged("unowned", report.unowned);
@@ -111,26 +115,51 @@ export class SandboxReconcileSweep {
     return report;
   }
 
-  /** The orphan rule: destroy when the owning session is gone from both
-   * the store and the cache. True when a destroy happened. */
-  private async destroyIfOrphaned(sandboxId: string, sessionId: string): Promise<boolean> {
-    const live = this.deps.engineHost.liveSession(sessionId);
+  /** The orphan rule's judgment: the owning session is gone from both the
+   * store and the cache. */
+  private async isOrphaned(sessionId: string): Promise<boolean> {
+    if (this.deps.engineHost.liveSession(sessionId) != null) return false;
     const sessionRow = await this.deps.engineStore.getSession(sessionId);
-    if (sessionRow != null || live != null) return false;
+    return sessionRow == null;
+  }
 
-    const unsettled = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
-    if (unsettled.length > 0) return false;
-    // Re-check immediately before the destroy (the idle sweep's race
-    // rule): a submission admitted since the check above wins.
-    const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
-    if (recheck.length > 0) return false;
-    await this.deps.engineHost.destroySandbox(sandboxId);
-    recordSandboxDestroyed("orphaned");
-    await revokeSandboxTokens(this.deps.db, sessionId);
-    console.log(
-      `SandboxReconcileSweep: destroyed sandbox ${sandboxId} for session ${sessionId} — orphaned (session gone)`,
-    );
-    return true;
+  /**
+   * Destroy the candidates a fresh listing still confirms. Sandbox names
+   * are deterministic (same workspace → same name), so a sandbox judged
+   * orphaned early in a long pass can be ADOPTED by a new session before
+   * the pass reaches it — `applySandbox` rewrites the owner annotation on
+   * adoption. Destroying from the stale snapshot would take the new
+   * session's sandbox down mid-provision. The re-list narrows the window
+   * from "whole pass" to the milliseconds between the fresh read and the
+   * destroy: only a candidate whose CURRENT annotation still names the
+   * same, still-gone session is destroyed.
+   */
+  private async destroyConfirmedOrphans(
+    candidates: Array<{ id: string; sessionId: string }>,
+    list: NonNullable<SandboxProvider["list"]>,
+  ): Promise<number> {
+    let destroyed = 0;
+    const fresh = new Map((await list.call(this.deps.provider)).map((sb) => [sb.id, sb.sessionId]));
+    for (const cand of candidates) {
+      try {
+        if (fresh.get(cand.id) !== cand.sessionId) continue; // re-owned, or already gone
+        if (!(await this.isOrphaned(cand.sessionId))) continue; // owner re-appeared
+        // Unsettled work always wins, checked immediately before the
+        // destroy (the idle sweep's race rule).
+        const unsettled = await this.deps.engineStore.listUnsettledSubmissions(cand.sessionId);
+        if (unsettled.length > 0) continue;
+        await this.deps.engineHost.destroySandbox(cand.id);
+        recordSandboxDestroyed("orphaned");
+        await revokeSandboxTokens(this.deps.db, cand.sessionId);
+        destroyed += 1;
+        console.log(
+          `SandboxReconcileSweep: destroyed sandbox ${cand.id} for session ${cand.sessionId} — orphaned (session gone)`,
+        );
+      } catch (err) {
+        console.error(`SandboxReconcileSweep: orphan destroy failed for sandbox ${cand.id}:`, err);
+      }
+    }
+    return destroyed;
   }
 
   /** Start the sweep interval (no-op when the provider cannot list).

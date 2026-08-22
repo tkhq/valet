@@ -99,8 +99,11 @@ export class Engine {
       const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
       // Stamp the owning session on the create opts so providers with a
       // `list()` seam can map the backing resource to its session — the
-      // reconcile sweep's orphan detection depends on it.
-      const createOpts: SandboxCreateOpts = { sessionId, ...((arg ?? {}) as SandboxCreateOpts) };
+      // reconcile sweep's orphan detection depends on it. The stamp is
+      // applied AFTER the spread and unconditionally: an opts object cloned
+      // from another session (or carrying an explicit `sessionId: undefined`
+      // key) must never annotate the sandbox with the wrong owner.
+      const createOpts: SandboxCreateOpts = { ...((arg ?? {}) as SandboxCreateOpts), sessionId };
       attachment = new SandboxAttachment(provider, createOpts, specProvider);
     }
     const policySandbox = new PolicySandbox(attachment, { readyTimeoutMs });

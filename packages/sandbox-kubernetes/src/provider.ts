@@ -65,7 +65,7 @@
  */
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, recordSandboxDestroyed, SandboxStartupError } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -97,7 +97,7 @@ import {
   classifyPodPending,
   deleteSandbox,
   getSandbox,
-  listSandboxes,
+  listSandboxMetadata,
   livePodImageDiffers,
   podDeleteApiAdapter,
   resolvePodName,
@@ -127,6 +127,17 @@ import type { K8sProviderConfig } from "./types.js";
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
+
+/** How old the Sandbox CR must be before an unscheduled Pending pod is a
+ * TERMINAL capacity verdict rather than a retryable timeout. A cluster
+ * autoscaler provisions a node in 2–5 minutes, and the retryable timeout
+ * RETAINS the CR — whose Pending pod is the autoscaler's scale-up signal.
+ * Failing terminally (and, for a fresh CR, deleting it) inside that window
+ * would remove the signal and hard-fail sessions a later retry would have
+ * served. Past this age, unscheduled means capacity is genuinely absent —
+ * fail with the cause instead of re-queueing forever (the 2026-08-22
+ * incident's sessions waited 47h behind retryable timeouts). */
+const PENDING_TERMINAL_GRACE_MS = 5 * 60_000;
 
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
@@ -668,15 +679,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   /** Every Sandbox CR in the namespace, for the reconcile sweep. The
    * owning session comes from the create-time annotation
    * (`SESSION_ANNOTATION_KEY`); null for CRs created before the annotation
-   * existed — the sweep falls back to age-based rules for those. */
+   * existed — the sweep falls back to age-based rules for those. Uses the
+   * LENIENT metadata lister: a malformed or foreign CR is skipped, never
+   * allowed to fail the whole listing (one bad CR must not disable the
+   * sweep). */
   async list(): Promise<SandboxListing[]> {
-    const crs = await listSandboxes(this.deps.objectsApi, this.cfg);
-    return crs.map((cr) => {
-      const stamp = cr.metadata.creationTimestamp;
-      const createdAtMs = stamp ? Date.parse(stamp) : Number.NaN;
+    const items = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
+    return items.map((item) => {
+      const createdAtMs = item.creationTimestamp ? Date.parse(item.creationTimestamp) : Number.NaN;
       return {
-        id: cr.metadata.name,
-        sessionId: cr.metadata.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
+        id: item.name,
+        sessionId: item.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
         createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
       };
     });
@@ -704,12 +717,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const name = sandboxCrName(opts.workspace);
     const manifest = buildSandboxManifest(this.cfg, name, opts);
 
-    // Whether this call CREATES the CR or adopts an existing one decides
-    // cleanup on startup failure below: a fresh CR (and its empty PVC) is
-    // ours to delete; an adopted CR may hold a prior workspace and must
-    // stand (decision 5's workspace-survival intent).
-    const preExisting = (await getSandbox(this.deps.objectsApi, this.cfg, name)) !== null;
-
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0 && !this.deps.secretsApi) {
@@ -721,7 +728,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
     }
 
-    const applied = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+    // `adopted` decides cleanup on startup failure below: a CR this call
+    // CREATED (and its empty PVC) is ours to delete; an adopted CR may
+    // hold a prior workspace and must stand (decision 5's
+    // workspace-survival intent). The flag comes from applySandbox's own
+    // create/409 branch, so it cannot race the way an existence pre-GET
+    // would.
+    const { cr: applied, adopted } = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
 
     // Best-effort: adopt the creds Secret under the Sandbox CR so an external CR
     // delete garbage-collects the Secret. Never fatal — the terminal
@@ -770,19 +783,20 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     try {
       await this.waitReady(name);
     } catch (err) {
-      if (!preExisting && err instanceof SandboxStartupError) {
+      if (!adopted && err instanceof SandboxStartupError) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
         // pod terminally failed to start. Left standing it queues phantom
         // demand against the scheduler (the 2026-08-22 incident held 433
         // Pending pods for 47h), and its PVC holds nothing — the pod never
         // ran. Adopted CRs are never cleaned up here.
-        await this.destroy(name).then(
-          () => recordSandboxDestroyed("failed_create"),
-          (cleanupErr) => {
-            console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
-          },
-        );
+        // No destroyed-counter record here: the created counter only fires
+        // on a READY provision, so counting this cleanup would add a
+        // destroy with no matching create and drive the created−destroyed
+        // leak alarm negative during create-failure storms.
+        await this.destroy(name).catch((cleanupErr) => {
+          console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
+        });
       }
       throw err;
     }
@@ -976,16 +990,19 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         throw new SandboxStartupError(name, status.error ?? "unknown");
       }
       if (Date.now() >= deadline) {
-        // A pod still Pending after the whole readiness window will not
-        // resolve on this timescale — capacity, quota, or scheduling
-        // gates. Fail terminally (SandboxStartupError) so waiters get the
-        // cause now instead of re-queueing behind a generic retryable
-        // timeout — the 2026-08-22 incident's sessions waited 47h that way.
+        // A pod still unscheduled once the CR is past the pending grace
+        // window will not resolve on this timescale — capacity, quota, or
+        // scheduling gates. Fail terminally (SandboxStartupError) so
+        // waiters get the cause now instead of re-queueing behind a
+        // generic retryable timeout — the 2026-08-22 incident's sessions
+        // waited 47h that way. Inside the grace window the generic
+        // retryable timeout below applies and the CR is retained, so an
+        // autoscaler scale-up (2–5 min) still gets its Pending-pod signal.
         const pending = await this.podPendingReason(name);
         if (pending !== null) {
           throw new SandboxStartupError(
             name,
-            `pod is still Pending after ${READY_TIMEOUT_MS}ms (${pending}). ` +
+            `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes (${pending}). ` +
               "The cluster has no schedulable capacity for this sandbox. Free or add node capacity, then retry.",
           );
         }
@@ -996,10 +1013,15 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   }
 
   /** The backing pod's Pending diagnosis at readiness timeout, or null
-   * when the pod is absent, past Pending, or unresolvable — transient API
-   * errors keep the generic retryable timeout, never a terminal verdict. */
+   * when the pod is absent, past Pending, unresolvable, or the CR is
+   * younger than `PENDING_TERMINAL_GRACE_MS` — transient API errors and
+   * autoscaler-scale-up windows keep the generic retryable timeout (which
+   * retains the CR), never a terminal verdict. */
   private async podPendingReason(name: string): Promise<string | null> {
     if (!this.deps.podStatusApi) return null;
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
+    const bornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    if (Number.isNaN(bornAtMs) || Date.now() - bornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
     if (!podName) return null;
     const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);

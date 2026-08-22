@@ -26,7 +26,10 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 interface ReaperLiveSession {
   attachment: {
     readonly state: AttachmentState;
-    destroy(reason?: string): Promise<void>;
+    /** Resolves false when the provider destroy failed (see
+     * `SandboxAttachment.destroy`); the reaper stamps regardless — the
+     * reconcile sweep's over-age report is the backstop for that case. */
+    destroy(reason?: string): Promise<boolean>;
   };
 }
 

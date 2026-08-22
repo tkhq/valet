@@ -407,6 +407,17 @@ function parseApiVersion(apiVersion: K8sProviderConfig["apiVersion"]): { group: 
 
 // ── Lifecycle operations ────────────────────────────────────────────
 
+/** `applySandbox`'s result: the read-back CR plus whether this call
+ * CREATED it (vs. adopted an existing CR of the same name). `create()`
+ * uses `adopted` to decide failed-create cleanup — a fresh CR is the
+ * caller's to delete on terminal startup failure; an adopted one never is.
+ * Derived from the create/409 branch itself, so it cannot race the way a
+ * separate existence pre-GET would. */
+export interface ApplySandboxResult {
+  cr: SandboxCRRead;
+  adopted: boolean;
+}
+
 /**
  * Create-or-adopt (decision 5, NON-NEGOTIABLE): if the CR already exists
  * (409 on create), GET the existing object and replace it, preserving
@@ -418,7 +429,7 @@ export async function applySandbox(
   api: SandboxCustomObjectsApi,
   cfg: K8sProviderConfig,
   manifest: SandboxCR,
-): Promise<SandboxCRRead> {
+): Promise<ApplySandboxResult> {
   const { group, version } = parseApiVersion(cfg.apiVersion);
   try {
     const created = await api.createNamespacedCustomObject({
@@ -428,7 +439,7 @@ export async function applySandbox(
       plural: SANDBOX_PLURAL,
       body: manifest,
     });
-    return parseSandboxCRRead(created);
+    return { cr: parseSandboxCRRead(created), adopted: false };
   } catch (err) {
     if (!isApiError(err) || err.code !== 409) throw err;
   }
@@ -478,7 +489,7 @@ export async function applySandbox(
       spec,
     },
   });
-  return parseSandboxCRRead(replaced);
+  return { cr: parseSandboxCRRead(replaced), adopted: true };
 }
 
 /** Returns `null` when the CR does not exist (404) — never throws for the
@@ -564,6 +575,60 @@ export async function listSandboxes(
     throw new Error("Sandbox CR list response is missing items[]");
   }
   return result.items.map(parseSandboxCRRead);
+}
+
+/** One item of `listSandboxMetadata` — just the metadata the reconcile
+ * sweep needs. */
+export interface SandboxMetadataListing {
+  name: string;
+  annotations?: Record<string, string>;
+  creationTimestamp?: string;
+}
+
+/**
+ * Metadata-only, LENIENT list for the reconcile sweep. `listSandboxes`
+ * validates each item with `parseSandboxCRRead`, which throws on shapes
+ * the CRD schema itself allows (upstream sample CRs omit
+ * `volumeClaimTemplates`) — one hand-applied CR would then poison every
+ * pass of the sweep. This variant reads only `metadata` per item and
+ * SKIPS (with a warning) anything without a string name, so a foreign or
+ * malformed CR never disables the backstop.
+ */
+export async function listSandboxMetadata(
+  api: SandboxCustomObjectsApi,
+  cfg: K8sProviderConfig,
+): Promise<SandboxMetadataListing[]> {
+  const { group, version } = parseApiVersion(cfg.apiVersion);
+  const result = await api.listNamespacedCustomObject({
+    group,
+    version,
+    namespace: cfg.namespace,
+    plural: SANDBOX_PLURAL,
+  });
+  if (!isRecord(result) || !Array.isArray(result.items)) {
+    throw new Error("Sandbox CR list response is missing items[]");
+  }
+  const listings: SandboxMetadataListing[] = [];
+  for (const item of result.items) {
+    const metadata = isRecord(item) ? item.metadata : undefined;
+    if (!isRecord(metadata) || typeof metadata.name !== "string") {
+      console.warn("listSandboxMetadata: skipping a Sandbox CR without metadata.name");
+      continue;
+    }
+    const listing: SandboxMetadataListing = { name: metadata.name };
+    if (isRecord(metadata.annotations)) {
+      const annotations: Record<string, string> = {};
+      for (const [k, v] of Object.entries(metadata.annotations)) {
+        if (typeof v === "string") annotations[k] = v;
+      }
+      listing.annotations = annotations;
+    }
+    if (typeof metadata.creationTimestamp === "string") {
+      listing.creationTimestamp = metadata.creationTimestamp;
+    }
+    listings.push(listing);
+  }
+  return listings;
 }
 
 /**

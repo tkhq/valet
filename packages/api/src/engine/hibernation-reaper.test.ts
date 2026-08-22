@@ -61,6 +61,7 @@ describe("HibernationReaper", () => {
                   state: live.state,
                   destroy: async () => {
                     live.destroyed.push("destroyed");
+                    return true;
                   },
                 },
               }
