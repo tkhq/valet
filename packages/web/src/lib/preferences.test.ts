@@ -39,4 +39,19 @@ describe("preferences: tool-card default", () => {
     setToolCardDefault("always-expanded");
     expect(localStorage.getItem("tool-card-default")).toBe("always-expanded");
   });
+
+  it("falls back to 'smart' when the store itself throws (C4)", () => {
+    // Injectable storage, same pattern as theme.ts: a hostile store
+    // (blocked cookies, quota) must not escape as an exception.
+    const hostile = {
+      getItem(): string | null {
+        throw new Error("storage blocked");
+      },
+      setItem(): void {
+        throw new Error("storage blocked");
+      },
+    };
+    expect(getToolCardDefault(hostile)).toBe("smart");
+    expect(() => setToolCardDefault("always-expanded", hostile)).not.toThrow();
+  });
 });

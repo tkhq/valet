@@ -1,28 +1,27 @@
 /**
  * Per-browser UI preferences persisted in localStorage.
  *
- * This module is the first `packages/web` preference. Legacy V1 stored
- * `thread-sidebar-collapsed` inline in `packages/client`; V2 centralises
- * the same pattern here so the next preference has a natural home.
- *
- * Every accessor tolerates a hostile localStorage: throwing setters (a
- * private-mode Safari quirk), absent globals (SSR), and stored strings
- * that no longer match the current schema. When the store rejects a
- * write, the getter returns the schema default on the next read; no
- * exception escapes.
+ * Accessors take an injectable `storage` defaulting to `safeLocalStorage()`
+ * (`./safe-storage.ts`) — the same pattern `theme.ts` and
+ * `command-recency.ts` use. The shared shim degrades to an in-memory Map
+ * when real storage is absent or non-functional, so a write still
+ * round-trips on the next read within the page's lifetime. Reads that fail
+ * outright fall back to the schema default; no exception escapes.
  */
+import { safeLocalStorage, type StorageReader, type StorageWriter } from "./safe-storage";
 
 /**
  * Default policy applied to a tool card at mount and across status
  * transitions. See `docs/specs/2026-08-20-tool-card-collapse-policy-design.md`
- * for the full interaction matrix. Consumed by
+ * for the full interaction matrix; the policy itself is implemented by
  * `packages/web/src/components/session/tool-renderers/tool-shell.tsx`.
  *
- * - `smart` — running expanded, completed collapsed at mount; a card that
- *   flips running→completed auto-collapses unless the user toggled the
- *   header while it was running. Errors always stay expanded.
- * - `always-collapsed` — every card mounts collapsed. Errors override.
- * - `always-expanded` — every card mounts expanded and stays that way.
+ * - `smart` — running expanded, completed collapsed at mount; auto-collapse
+ *   on completion unless the user touched the card.
+ * - `always-collapsed` — every card mounts collapsed.
+ * - `always-expanded` — every card mounts expanded and stays open.
+ *
+ * Errors override every policy: an error card always opens.
  */
 export type ToolCardDefault = "smart" | "always-collapsed" | "always-expanded";
 
@@ -43,33 +42,34 @@ function isToolCardDefault(value: string): value is ToolCardDefault {
  * Read the tool-card default policy.
  *
  * Returns `smart` when the key is absent, when the stored value is not one
- * of the known policies, or when localStorage is unavailable. The caller
- * never sees a thrown error, so a corrupted value silently self-heals to
- * the schema default on the next write.
+ * of the known policies, or when the read throws. A corrupted value
+ * self-heals to the schema default on the next write.
  */
-export function getToolCardDefault(): ToolCardDefault {
+export function getToolCardDefault(
+  storage: StorageReader = safeLocalStorage(),
+): ToolCardDefault {
+  let raw: string | null;
   try {
-    const raw = globalThis.localStorage?.getItem(TOOL_CARD_DEFAULT_KEY);
-    if (raw !== null && raw !== undefined && isToolCardDefault(raw)) {
-      return raw;
-    }
-    return TOOL_CARD_DEFAULT_FALLBACK;
+    raw = storage.getItem(TOOL_CARD_DEFAULT_KEY);
   } catch {
     return TOOL_CARD_DEFAULT_FALLBACK;
   }
+  return raw !== null && isToolCardDefault(raw) ? raw : TOOL_CARD_DEFAULT_FALLBACK;
 }
 
 /**
  * Persist the tool-card default policy.
  *
- * A failed write is swallowed. The next `getToolCardDefault()` call
- * returns whatever the store now reports, which is the previous value
- * when the write failed or the fallback when the store is unavailable.
+ * A throwing write (quota, private mode) is swallowed: the next
+ * `getToolCardDefault()` call returns whatever the store still reports.
  */
-export function setToolCardDefault(value: ToolCardDefault): void {
+export function setToolCardDefault(
+  value: ToolCardDefault,
+  storage: StorageWriter = safeLocalStorage(),
+): void {
   try {
-    globalThis.localStorage?.setItem(TOOL_CARD_DEFAULT_KEY, value);
+    storage.setItem(TOOL_CARD_DEFAULT_KEY, value);
   } catch {
-    /* localStorage unavailable or quota exceeded — silent no-op. */
+    /* Best-effort persistence; the caller's UI state stands. */
   }
 }

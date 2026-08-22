@@ -26,6 +26,8 @@
  * downloaded — long enough to paint one frame of the wrong appearance.
  */
 
+import { safeLocalStorage, type StorageReader, type StorageWriter } from "./safe-storage";
+
 export type ThemeChoice = "system" | "light" | "dark";
 
 /** Named color sets from `theme.css`. `default` is the brand palette. */
@@ -38,14 +40,6 @@ export const PALETTE_STORAGE_KEY = "valet-palette";
 /** Every palette, in picker order. `theme.tokens.test.ts` reads this list
  * and fails if `theme.css` is missing a block for any entry. */
 export const PALETTE_CHOICES: readonly PaletteChoice[] = ["default", "ember", "tide", "orchid"];
-
-interface StorageReader {
-  getItem(key: string): string | null;
-}
-
-interface StorageWriter {
-  setItem(key: string, value: string): void;
-}
 
 interface ThemeRoot {
   setAttribute(name: string, value: string): void;
@@ -123,27 +117,4 @@ export function applyStoredPalette(opts: { root?: ThemeRoot; storage?: StorageRe
 
 function documentRoot(): ThemeRoot {
   return document.documentElement;
-}
-
-/** In-memory fallback when real storage is absent or non-functional —
- * Node ≥22 ships a stub `localStorage` global whose methods are undefined
- * without --localstorage-file, and it can shadow jsdom's in tests. */
-const memoryStorage = new Map<string, string>();
-
-function safeLocalStorage(): StorageReader & StorageWriter {
-  const candidate: unknown = typeof window !== "undefined" ? window.localStorage : undefined;
-  if (
-    candidate !== null &&
-    typeof candidate === "object" &&
-    typeof (candidate as Partial<Storage>).getItem === "function" &&
-    typeof (candidate as Partial<Storage>).setItem === "function"
-  ) {
-    return candidate as StorageReader & StorageWriter;
-  }
-  return {
-    getItem: (key) => memoryStorage.get(key) ?? null,
-    setItem: (key, value) => {
-      memoryStorage.set(key, value);
-    },
-  };
 }
