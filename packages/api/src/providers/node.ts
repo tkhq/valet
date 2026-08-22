@@ -45,6 +45,7 @@ import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { buildRunSettledAttention } from "../workflows/run-attention.js";
+import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -562,6 +563,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     }
   };
 
+  // Settled-run sandbox reclaim: destroys the sandboxes a run's `session`
+  // nodes provisioned, immediately on settle and via a retry sweep
+  // (`start()`/`stop()` from main.ts, next to the other sweeps).
+  const workflowSandboxReclaimer = new WorkflowSandboxReclaimer({
+    db,
+    engineHost,
+    engineStore,
+    store: workflowStore,
+  });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
@@ -572,7 +584,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // Settle attention (batch-fanout design decision 4): a failed top-level
     // run raises a notification through the same router the approval park
     // above uses. See `run-attention.ts` for why child runs stay silent.
-    onRunSettled: buildRunSettledAttention({ db, store: workflowStore }),
+    // Then the sandbox reclaim — both are contained by contract, so a
+    // failure in either never abandons the drive lease.
+    onRunSettled: async (info) => {
+      await runSettledAttention(info);
+      await workflowSandboxReclaimer.reclaimRun(info.runId);
+    },
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };
@@ -627,6 +644,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     childWatcher,
     hibernationReaper,
+    workflowSandboxReclaimer,
     channelHost,
     workflowStore,
     workflowRunHost,

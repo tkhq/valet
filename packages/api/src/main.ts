@@ -305,6 +305,11 @@ providers.childWatcher.startRetentionSweep();
 // VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
 providers.hibernationReaper.start();
 
+// Settled-run sandbox reclaim retry sweep: picks up runs settled while the
+// api was down and on-settle reclaims that failed. The on-settle path
+// itself runs from the `onRunSettled` hook, not this interval.
+providers.workflowSandboxReclaimer.start();
+
 // Channel ingress (Task 8): resolves credentials into transports, then
 // starts webhook registration or the long-poll loop per transport. A
 // failure here must never block boot — channels are best-effort.
@@ -536,6 +541,11 @@ async function close(): Promise<void> {
     providers.hibernationReaper.stop();
   } catch (err) {
     console.error("hibernationReaper.stop failed:", err);
+  }
+  try {
+    providers.workflowSandboxReclaimer.stop();
+  } catch (err) {
+    console.error("workflowSandboxReclaimer.stop failed:", err);
   }
   try {
     await providers.channelHost.stop();

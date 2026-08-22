@@ -46,6 +46,7 @@ import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -360,6 +361,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   }
 
   const workflowStore = new PgWorkflowStore(pgdb);
+
+  // Never started on its timer in tests (matches the dispatcher/scheduler
+  // convention) — drive `reclaimRun`/`sweep` manually; behavior is tested
+  // in workflows/sandbox-reclaim.test.ts.
+  const workflowSandboxReclaimer = new WorkflowSandboxReclaimer({
+    db,
+    engineHost,
+    engineStore,
+    store: workflowStore,
+  });
+
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
@@ -455,6 +467,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineHost,
     childWatcher,
     hibernationReaper,
+    workflowSandboxReclaimer,
     channelHost,
     workflowStore,
     workflowRunHost,

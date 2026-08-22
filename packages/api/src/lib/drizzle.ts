@@ -159,4 +159,9 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // those (engine/hibernation-reaper.ts).
   await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "hibernated_sandbox_id" text');
   await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint');
+
+  // Settled-run sandbox reclaim bookkeeping (workflows/sandbox-reclaim.ts).
+  // Null on every run settled before the column existed — exactly the rows
+  // the reclaim sweep must pick up.
+  await db.query('ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint');
 }
