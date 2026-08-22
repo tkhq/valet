@@ -27,6 +27,7 @@ import {
   ChildWatcher,
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
+import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -45,6 +46,7 @@ import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { buildRunSettledAttention } from "../workflows/run-attention.js";
+import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -59,6 +61,7 @@ import {
   resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
+  resolveSandboxAgeReportMs,
   resolveIdleMinutes,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
@@ -427,6 +430,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     retentionMs: resolveHibernatedRetentionMs(process.env),
   });
 
+  // Provider-side reconciler — the backstop under the DB-driven sweeps.
+  // Destroys orphans (owning session gone); reports over-age and unowned
+  // sandboxes without destroying them (CLAUDE.md: "Invariants: alert,
+  // don't auto-repair"). No-op on providers without `list()`
+  // (docker/local). `start()`/`stop()` are called from `main.ts`.
+  const sandboxReconcileSweep = new SandboxReconcileSweep({
+    db,
+    provider: sandboxProvider,
+    engineHost,
+    engineStore,
+    ageReportMs: resolveSandboxAgeReportMs(process.env),
+  });
+
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
   (async () => {
@@ -562,6 +578,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     }
   };
 
+  // Settled-run sandbox reclaim: destroys the sandboxes a run's `session`
+  // nodes provisioned, immediately on settle and via a retry sweep
+  // (`start()`/`stop()` from main.ts, next to the other sweeps).
+  const workflowSandboxReclaimer = new WorkflowSandboxReclaimer({
+    db,
+    engineHost,
+    engineStore,
+    store: workflowStore,
+  });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
@@ -572,7 +599,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // Settle attention (batch-fanout design decision 4): a failed top-level
     // run raises a notification through the same router the approval park
     // above uses. See `run-attention.ts` for why child runs stay silent.
-    onRunSettled: buildRunSettledAttention({ db, store: workflowStore }),
+    // Then the sandbox reclaim — both are contained by contract, so a
+    // failure in either never abandons the drive lease.
+    onRunSettled: async (info) => {
+      await runSettledAttention(info);
+      await workflowSandboxReclaimer.reclaimRun(info.runId);
+    },
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };
@@ -627,6 +659,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     childWatcher,
     hibernationReaper,
+    workflowSandboxReclaimer,
+    sandboxReconcileSweep,
     channelHost,
     workflowStore,
     workflowRunHost,

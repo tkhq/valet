@@ -561,6 +561,7 @@ CREATE TABLE "workflow_runs" (
 	"attempt" integer DEFAULT 0 NOT NULL,
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
+	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

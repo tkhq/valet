@@ -102,7 +102,8 @@ describe.skipIf(!isClusterReady)("lifecycle (live rancher-desktop cluster)", () 
       const manifest = buildSandboxManifest(cfg, name, { image: "busybox:stable" });
 
       // ── create -> Ready ──────────────────────────────────────────
-      const created = await applySandbox(objectsApi, cfg, manifest);
+      const { cr: created, adopted } = await applySandbox(objectsApi, cfg, manifest);
+      expect(adopted).toBe(false);
       expect(created.metadata.name).toBe(name);
       expect(created.metadata.uid).toBeTruthy();
 
@@ -125,8 +126,9 @@ describe.skipIf(!isClusterReady)("lifecycle (live rancher-desktop cluster)", () 
 
       // ── adopt-idempotence: re-apply the identical manifest ──────
       const reapplied = await applySandbox(objectsApi, cfg, manifest);
-      expect(reapplied.metadata.name).toBe(name);
-      expect(reapplied.metadata.uid).toBe(created.metadata.uid); // same CR, not recreated
+      expect(reapplied.adopted).toBe(true);
+      expect(reapplied.cr.metadata.name).toBe(name);
+      expect(reapplied.cr.metadata.uid).toBe(created.metadata.uid); // same CR, not recreated
       // Pod itself must be untouched by a same-spec re-apply.
       expect(podUid(cfg.namespace, name)).toBe(originalUid);
 

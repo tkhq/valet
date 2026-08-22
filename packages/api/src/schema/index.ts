@@ -978,6 +978,10 @@ export const workflowRuns = pgTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
+    // When the settled-run sandbox reclaim destroyed this run's session
+    // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
+    // AND every session sandbox is gone — the sweep retries NULL rows.
+    sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

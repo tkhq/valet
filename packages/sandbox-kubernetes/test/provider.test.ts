@@ -467,3 +467,103 @@ describe("exec identity threading (docker flag → exec layer)", () => {
     expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi")]);
   });
 });
+
+// ── Failed-create CR cleanup (sandbox-lifecycle spec decision, 2026-08-22) ──
+
+/** Minimal ApiException-shaped error (`code: number`), matching
+ * client-node's real class without depending on it. */
+class FakeApiError extends Error {
+  code: number;
+  constructor(code: number, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+/** Stateful objects api: 404 until created, CR carries an error-shaped
+ * condition so `waitReady` fails terminally on its first poll. Exercises
+ * `create()`'s fresh-vs-adopted cleanup decision. */
+class ErrorStatefulObjectsApi implements SandboxCustomObjectsApi {
+  present: boolean;
+  deleteCalls = 0;
+  constructor(preExisting: boolean) {
+    this.present = preExisting;
+  }
+
+  private cr(name: string): unknown {
+    return {
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      metadata: { name, uid: "cr-uid-err", resourceVersion: "1" },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+      status: { conditions: [{ type: "Error", status: "True", message: "image pull failed" }] },
+    };
+  }
+
+  async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
+    if (this.present) {
+      throw new FakeApiError(409, "already exists");
+    }
+    this.present = true;
+    return this.cr(params.body.metadata.name);
+  }
+
+  async getNamespacedCustomObject(params: GetSandboxParams): Promise<unknown> {
+    if (!this.present) {
+      throw new FakeApiError(404, "not found");
+    }
+    return this.cr(params.name);
+  }
+
+  async replaceNamespacedCustomObject(params: ReplaceSandboxParams): Promise<unknown> {
+    return this.cr(params.name);
+  }
+
+  async deleteNamespacedCustomObject(_params: DeleteSandboxParams): Promise<unknown> {
+    this.deleteCalls++;
+    this.present = false;
+    return {};
+  }
+
+  async listNamespacedCustomObject(_params: ListSandboxParams): Promise<unknown> {
+    return { items: [] };
+  }
+
+  async patchNamespacedCustomObject(_params: PatchSandboxParams): Promise<unknown> {
+    return {};
+  }
+}
+
+describe("create() cleanup after terminal startup failure", () => {
+  function makeFailingProvider(preExisting: boolean) {
+    const objectsApi = new ErrorStatefulObjectsApi(preExisting);
+    const provider = new KubernetesSandboxProvider(
+      {
+        objectsApi,
+        podsApi: new FakePodsApi(),
+        execApi: fakePodExecApi,
+        livenessApi: new FakeLivenessApi(),
+      },
+      providerCfg,
+    );
+    return { provider, objectsApi };
+  }
+
+  it("deletes the CR it created fresh when the pod terminally fails to start", async () => {
+    const { provider, objectsApi } = makeFailingProvider(false);
+
+    await expect(provider.create({ workspace: "/ws/fresh" })).rejects.toThrow(/image pull failed/);
+
+    expect(objectsApi.deleteCalls).toBe(1);
+    expect(objectsApi.present).toBe(false);
+  });
+
+  it("leaves an ADOPTED CR standing on the same failure (workspace survival)", async () => {
+    const { provider, objectsApi } = makeFailingProvider(true);
+
+    await expect(provider.create({ workspace: "/ws/adopted" })).rejects.toThrow(/image pull failed/);
+
+    expect(objectsApi.deleteCalls).toBe(0);
+    expect(objectsApi.present).toBe(true);
+  });
+});

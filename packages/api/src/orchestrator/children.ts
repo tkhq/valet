@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
+  recordSandboxDestroyed,
   ValidationError as EngineValidationError,
   type ChildReader,
   type ChildSender,
@@ -667,7 +668,7 @@ export class ChildWatcher {
         return;
       }
 
-      await live.attachment.destroy();
+      await live.attachment.destroy("child_settled");
       this.deps.engineHost.evictCache(childSessionId);
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
@@ -726,10 +727,11 @@ export class ChildWatcher {
           // the check above wins and the reclaim waits for the next pass.
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
           if (recheck.length > 0) continue;
-          await live.attachment.destroy();
+          await live.attachment.destroy("child_retention");
           this.deps.engineHost.evictCache(row.childSessionId);
         } else if (row.parkedSandboxId) {
           await this.deps.engineHost.destroySandbox(row.parkedSandboxId);
+          recordSandboxDestroyed("child_retention");
         } else {
           // Nothing destroyable from here: no cached session and no
           // recorded handle. Stamp the reclaim so the row stops sweeping,

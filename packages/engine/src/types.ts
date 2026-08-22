@@ -924,6 +924,16 @@ export interface SandboxCreateOpts {
   timeout?: number;
   resources?: { cpu?: number; memory?: string };
   metadata?: Record<string, unknown>;
+  /**
+   * The owning session's id. `Engine.materializeSandbox` stamps this on
+   * every attachment-built sandbox, and its stamp always wins — a value a
+   * host sets here is overwritten, so an opts object cloned from another
+   * session can never mis-attribute ownership. Providers that implement
+   * `list()` record it on the backing resource (sandbox-kubernetes: a CR
+   * annotation) so a reconcile sweep can map a listed sandbox back to its
+   * session.
+   */
+  sessionId?: string;
   /** Interactive-service profile. Default "headless" (agent-only). "full"
    * additionally runs ttyd + code-server + the auth gateway. */
   profile?: "headless" | "full";
@@ -1011,6 +1021,19 @@ export interface SandboxStatus {
   error?: string;
 }
 
+/** One provider-side sandbox, as reported by `SandboxProvider.list` — the
+ * reconcile sweep's raw material. */
+export interface SandboxListing {
+  id: string;
+  /** The owning session recorded at create time (`SandboxCreateOpts.sessionId`).
+   * Null for sandboxes created before session stamping existed. */
+  sessionId: string | null;
+  /** Backend creation time (ms since epoch); null when the backend does not
+   * report one. The reconcile sweep's over-age report skips sandboxes
+   * without it. */
+  createdAtMs: number | null;
+}
+
 export interface SandboxProvider {
   readonly backend: string;
   capabilities(): SandboxCapabilities;
@@ -1039,6 +1062,16 @@ export interface SandboxProvider {
    * implement this.
    */
   deriveId?(sessionKey: string): string;
+  /**
+   * Optional enumeration seam for reconcile sweeps: every sandbox this
+   * provider currently backs, with the owning session recorded at create
+   * time. Providers whose sandboxes durably outlive the api process
+   * (sandbox-kubernetes: the CR is the record) implement this so an
+   * orphan/TTL sweep can find leaked sandboxes no DB row points at.
+   * Providers whose handles are process-local (docker/local) omit it — a
+   * sweep treats an absent `list` as "nothing to reconcile".
+   */
+  list?(): Promise<SandboxListing[]>;
   /**
    * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
    * `suspend` scales the sandbox to zero while retaining its workspace; `resume`
