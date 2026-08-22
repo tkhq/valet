@@ -6,6 +6,7 @@ import {
   SANDBOX_PLURAL,
   applySandbox,
   classifyPodFailure,
+  classifyPodPending,
   deleteSandbox,
   getSandbox,
   listSandboxes,
@@ -338,6 +339,50 @@ describe("classifyPodFailure (pure)", () => {
       ],
     };
     expect(classifyPodFailure(pod)).toMatch(/image pull failed/);
+  });
+});
+
+describe("classifyPodPending (pure)", () => {
+  it("returns null when the pod is absent", () => {
+    expect(classifyPodPending(null)).toBeNull();
+  });
+
+  it("returns null for a pod past Pending", () => {
+    expect(classifyPodPending({ phase: "Running" })).toBeNull();
+    expect(classifyPodPending({ phase: "Failed" })).toBeNull();
+  });
+
+  it("diagnoses a Pending pod the scheduler has not judged", () => {
+    expect(classifyPodPending({ phase: "Pending" })).toBe("not yet judged by the scheduler");
+  });
+
+  it("carries the scheduler's message for a PodScheduled=False pod, whatever the reason", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "False", reason: "SchedulingGated", message: "waiting on gate" }],
+    };
+    expect(classifyPodPending(pod)).toBe("waiting on gate");
+  });
+
+  it("falls back to the reason, then a generic verdict, when the condition has no message", () => {
+    const withReason: PodStatusInfo = {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable" }],
+    };
+    expect(classifyPodPending(withReason)).toBe("Unschedulable");
+    const bare: PodStatusInfo = {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "False" }],
+    };
+    expect(classifyPodPending(bare)).toBe("not scheduled");
+  });
+
+  it("returns null for a Pending pod the scheduler has accepted (image still pulling)", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "True" }],
+    };
+    expect(classifyPodPending(pod)).toBeNull();
   });
 });
 

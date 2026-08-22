@@ -801,6 +801,31 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 }
 
 /**
+ * Whether a pod is stuck in phase `Pending` at the end of a readiness
+ * window, and why. `classifyPodFailure` only treats `Unschedulable` as
+ * terminal because the scheduler already stamped that verdict; a pod the
+ * scheduler has not judged (quota webhooks, scheduling gates, a saturated
+ * queue) stays `Pending` with no condition and previously read as ordinary
+ * in-progress provisioning forever — the 2026-08-22 saturation incident
+ * held 433 such pods for 47 hours. Pure classification (unit-testable);
+ * `waitReady` in provider.ts does the plumbing and applies it only once
+ * the full readiness timeout has elapsed.
+ */
+export function classifyPodPending(pod: PodStatusInfo | null): string | null {
+  if (!pod || pod.phase !== "Pending") return null;
+  const scheduled = pod.conditions?.find((c) => c.type === "PodScheduled");
+  // Scheduled onto a node: the pod is placed and making progress
+  // (container creating, image pulling — legitimately slower than the
+  // readiness window for large images). Not a capacity verdict — null
+  // keeps the caller's retryable timeout.
+  if (scheduled?.status === "True") return null;
+  if (scheduled?.status === "False") {
+    return scheduled.message ?? scheduled.reason ?? "not scheduled";
+  }
+  return "not yet judged by the scheduler";
+}
+
+/**
  * Absent CR → "released" (per the brief); otherwise delegates to
  * `mapConditionsToStatus`, UNLESS `podsApi`/`podStatusApi` are supplied and
  * the backing pod is in a terminal-failure state (`classifyPodFailure`), in

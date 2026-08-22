@@ -80,6 +80,19 @@ hour.
    no owner sweep; it now surfaces through the over-age report rather than
    being silently killed.
 
+7. **Pending timeout fails terminally, and a failed fresh create cleans up
+   its CR.** `waitReady` previously threw a retryable timeout for a pod
+   stuck `Pending` without an `Unschedulable` verdict, so callers re-queued
+   forever (the incident's assistants waited 47h). At readiness timeout it
+   now diagnoses the pod (`classifyPodPending`): unscheduled → terminal
+   `SandboxStartupError` naming the capacity cause; scheduled-but-pulling →
+   still the retryable timeout (large images legitimately exceed the
+   window). On a terminal startup failure, `create()` deletes the CR it
+   created **fresh in that call** — leaving it queues phantom scheduler
+   demand and its PVC holds nothing. An adopted CR is never deleted
+   (decision 5's workspace-survival intent); this is the one documented
+   exception to "only the session-deletion path deletes a CR".
+
 ## Deviations & notes
 
 - The TTL destroy rule (recommendation D.3 in the incident doc) was

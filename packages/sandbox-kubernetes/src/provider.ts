@@ -94,6 +94,7 @@ import {
 import { cancelJobInPod, execJobInPod, pollJobInPod } from "./jobs.js";
 import {
   applySandbox,
+  classifyPodPending,
   deleteSandbox,
   getSandbox,
   listSandboxes,
@@ -703,6 +704,12 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const name = sandboxCrName(opts.workspace);
     const manifest = buildSandboxManifest(this.cfg, name, opts);
 
+    // Whether this call CREATES the CR or adopts an existing one decides
+    // cleanup on startup failure below: a fresh CR (and its empty PVC) is
+    // ours to delete; an adopted CR may hold a prior workspace and must
+    // stand (decision 5's workspace-survival intent).
+    const preExisting = (await getSandbox(this.deps.objectsApi, this.cfg, name)) !== null;
+
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0 && !this.deps.secretsApi) {
@@ -760,7 +767,22 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
     }
 
-    await this.waitReady(name);
+    try {
+      await this.waitReady(name);
+    } catch (err) {
+      if (!preExisting && err instanceof SandboxStartupError) {
+        // Narrow, documented exception to decision 5 ("only the session-
+        // deletion path deletes a CR"): a CR this very call created, whose
+        // pod terminally failed to start. Left standing it queues phantom
+        // demand against the scheduler (the 2026-08-22 incident held 433
+        // Pending pods for 47h), and its PVC holds nothing — the pod never
+        // ran. Adopted CRs are never cleaned up here.
+        await this.destroy(name).catch((cleanupErr) => {
+          console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
+        });
+      }
+      throw err;
+    }
     return this.makeSandbox(name, Boolean(opts.docker));
   }
 
@@ -781,8 +803,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
    * pod + PVC via the controller's owner references. Only the
-   * session-deletion path may call this. Also deletes the creds Secret
-   * best-effort — a missing Secret (sandbox never had one) is not an error.
+   * session-deletion path may call this — with one documented exception:
+   * `create()` cleans up a CR it created fresh in the same call whose pod
+   * terminally failed to start (see the failed-create catch there). Also
+   * deletes the creds Secret best-effort — a missing Secret (sandbox never
+   * had one) is not an error.
    *
    * `id` must be the Sandbox CR name (i.e. `sandbox.id` / the value returned
    * by `create()`), not the raw workspace key. */
@@ -948,9 +973,33 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         throw new SandboxStartupError(name, status.error ?? "unknown");
       }
       if (Date.now() >= deadline) {
+        // A pod still Pending after the whole readiness window will not
+        // resolve on this timescale — capacity, quota, or scheduling
+        // gates. Fail terminally (SandboxStartupError) so waiters get the
+        // cause now instead of re-queueing behind a generic retryable
+        // timeout — the 2026-08-22 incident's sessions waited 47h that way.
+        const pending = await this.podPendingReason(name);
+        if (pending !== null) {
+          throw new SandboxStartupError(
+            name,
+            `pod is still Pending after ${READY_TIMEOUT_MS}ms (${pending}). ` +
+              "The cluster has no schedulable capacity for this sandbox. Free or add node capacity, then retry.",
+          );
+        }
         throw new Error(`Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${status.state})`);
       }
       await sleep(READY_POLL_INTERVAL_MS);
     }
+  }
+
+  /** The backing pod's Pending diagnosis at readiness timeout, or null
+   * when the pod is absent, past Pending, or unresolvable — transient API
+   * errors keep the generic retryable timeout, never a terminal verdict. */
+  private async podPendingReason(name: string): Promise<string | null> {
+    if (!this.deps.podStatusApi) return null;
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
+    if (!podName) return null;
+    const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);
+    return classifyPodPending(pod);
   }
 }
