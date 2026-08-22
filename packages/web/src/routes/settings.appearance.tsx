@@ -71,7 +71,7 @@ const TOOL_CARD_OPTIONS: { value: ToolCardDefault; label: string; description: s
   {
     value: "always-expanded",
     label: "Always expanded",
-    description: "Everything expanded and stays.",
+    description: "Everything expanded and stays. Errors reopen if collapsed.",
   },
 ];
 

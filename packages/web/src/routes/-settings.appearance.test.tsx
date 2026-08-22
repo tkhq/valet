@@ -12,7 +12,7 @@
  *
  * Theme and palette are covered elsewhere. Nothing here asserts on them.
  *
- * The assertions read `aria-checked` directly. This workspace has no
+ * The assertions read `aria-checked` directly. This repo has no
  * `@testing-library/jest-dom`, so the DOM matchers it adds are unavailable.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
