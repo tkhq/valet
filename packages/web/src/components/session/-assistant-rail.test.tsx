@@ -148,6 +148,7 @@ function org(organizations: boolean): OrgResponse {
     name: "Acme",
     createdAt: 0,
     ssoTeamGroups: [],
+    allowPublicArtifacts: false,
     callerRole: "member",
     features: { organizations, ssoTeamSync: false },
   };

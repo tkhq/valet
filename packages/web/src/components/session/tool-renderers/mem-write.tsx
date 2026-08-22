@@ -1,5 +1,6 @@
 import { BookPlus } from "lucide-react";
 import { MarkdownBody } from "./markdown-view";
+import { useMemoryViewer } from "./memory-viewer";
 import { PathLabel, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
@@ -58,13 +59,19 @@ export const memWriteRenderer: ToolRenderer = {
     const path = getStr(args, "path");
     const content = getStr(args, "content");
     const failed = status === "error";
+    const viewer = useMemoryViewer(path);
 
     return (
       <ToolBody className="px-0 py-0">
         {status === "running" ? (
           <div className="px-3 py-2 text-[11px] text-muted italic font-mono">writing…</div>
         ) : content ? (
-          <MarkdownBody text={content} left={path ? <PathLabel path={path} /> : undefined} />
+          <MarkdownBody
+            text={content}
+            left={path ? <PathLabel path={path} /> : undefined}
+            actions={viewer.expandButton}
+            memoryLinks={viewer.memoryLinks}
+          />
         ) : (
           <div className="px-3 py-2 font-mono text-[11px]">
             {path && (
@@ -87,6 +94,7 @@ export const memWriteRenderer: ToolRenderer = {
             {error || resultText(result)}
           </div>
         )}
+        {viewer.dialog}
       </ToolBody>
     );
   },
