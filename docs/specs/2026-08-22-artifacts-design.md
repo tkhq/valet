@@ -1,7 +1,7 @@
 # Artifacts and memory viewer design
 
 Date: 2026-08-22
-Status: proposed
+Status: implemented
 
 ## Problem
 
@@ -304,11 +304,22 @@ Two call sites stay opted out, on purpose:
   `packages/api/src/wire/types.ts`; web hooks follow the `qkMemory` query
   key factory pattern.
 
-## Open questions
+## Resolved questions
 
-1. Should team-owned memory files be shareable by team members, or only by
-   team admins? v1 proposal: any team member, since they can already read
-   and copy the content.
-2. Should the artifact page show the sharer's name to org viewers? Useful
-   context, small privacy cost. v1 proposal: yes for `org` visibility, no
-   for `public`.
+1. Team-owned memory files: shareable by any team member (share authorizes
+   at READ level through the memory routes' `resolveScope`), since a
+   reader can already copy the content anywhere.
+2. The artifact page shows the sharer's display name to `org` viewers and
+   nothing to anonymous readers.
+
+## Deviations from this spec
+
+- The 401 → login redirect on `/a/$token` uses the api client's central
+  handler, which goes to plain `/login` without a return-to parameter. The
+  login page has no return-to support today; adding it is a separate,
+  small change.
+- The memory viewer dialog reads the caller's OWN memory scope
+  (`useMemoryDoc` with no owner filter). In a team assistant's session,
+  expanding a team-scoped file shows the viewer's empty state instead of
+  the team file. Threading the session owner into the tool renderers is
+  future work; the renderers do not know it today.
