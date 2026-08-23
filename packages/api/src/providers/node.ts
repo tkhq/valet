@@ -28,6 +28,7 @@ import {
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
+import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -443,6 +444,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     ageReportMs: resolveSandboxAgeReportMs(process.env),
   });
 
+  // Hibernates idle ACTIVE sessions an api restart evicted from the host
+  // cache — the in-memory idle sweep cannot see them, and the reaper only
+  // reaps `hibernated` rows. Same idle window as the cache sweep.
+  // `start()`/`stop()` are called from `main.ts`.
+  const idleHibernationSweep = new IdleHibernationSweep({
+    db,
+    engineHost,
+    engineStore,
+    idleMs: resolveIdleMinutes(process.env) * 60_000,
+  });
+
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
   (async () => {
@@ -661,6 +673,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
+    idleHibernationSweep,
     channelHost,
     workflowStore,
     workflowRunHost,

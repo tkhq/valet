@@ -30,6 +30,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
+import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -358,6 +359,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     ageReportMs: 0,
   });
 
+  // idleMs 0 disables the sweep; behavior is tested in
+  // engine/idle-hibernation-sweep.test.ts.
+  const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
+
   const channelHost = new ChannelHost({
     db,
     engineHost,
@@ -481,6 +486,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
+    idleHibernationSweep,
     channelHost,
     workflowStore,
     workflowRunHost,
