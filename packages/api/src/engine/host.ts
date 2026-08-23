@@ -36,6 +36,7 @@ import {
   type PluginCatalog,
   type RepoInstructions,
   type Sandbox,
+  type SandboxStatus,
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
@@ -1753,6 +1754,31 @@ export class EngineHost {
     await this.opts.sandboxProvider.destroy(sandboxId);
   }
 
+  /**
+   * Suspend one sandbox by its provider id, without touching any session
+   * state. The stranded-session sweep (`idle-hibernation-sweep.ts`) uses
+   * this for an idle ACTIVE session an api restart evicted from the cache
+   * — there is no live attachment to call `suspend()` on. Throws when the
+   * backend has no hibernation seam; callers gate on
+   * `sandboxHibernationCapable()` first.
+   */
+  async suspendSandbox(sandboxId: string): Promise<void> {
+    const suspend = this.opts.sandboxProvider.suspend;
+    if (!suspend) {
+      throw new Error(
+        `EngineHost.suspendSandbox: the ${this.opts.sandboxProvider.backend} backend has no suspend seam. ` +
+          "Gate callers on sandboxHibernationCapable().",
+      );
+    }
+    await suspend.call(this.opts.sandboxProvider, sandboxId);
+  }
+
+  /** The provider's view of one sandbox — `state: "released"` means the
+   * backing resource does not exist. */
+  async sandboxStatus(sandboxId: string): Promise<SandboxStatus> {
+    return this.opts.sandboxProvider.status(sandboxId);
+  }
+
   /** Recompute the sandbox id a workspace would provision under
    * (`SandboxProvider.deriveId`); null for backend-assigned ids. */
   deriveSandboxId(sessionKey: string): string | null {
@@ -2131,6 +2157,15 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       owner: opts.owner,
+      // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
+      // sandbox-less by default, like orchestrators. A session-node turn
+      // that only calls the LLM and api-side plugin actions never
+      // provisions a pod; the lazy PolicySandbox attachment provisions on
+      // the first tool that actually touches the filesystem. The
+      // saturation incident's triage workflow (slack read + LLM, 11-way
+      // foreach, every 10 minutes) would have provisioned ZERO sandboxes
+      // under this flag.
+      warmSandboxOnClaim: false,
       sandbox: {
         workspace: opts.workspace,
         image: this.opts.defaultImage,
