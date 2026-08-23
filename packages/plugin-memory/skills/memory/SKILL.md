@@ -83,3 +83,11 @@ Append to today's journal with `mem_patch`: `oldString: ''` against a non-existe
 - Pinned files and recent journal entries load into every orchestrator wake — each pin is a permanent context tax. Reserve pins for standing preferences and core identity notes.
 - Keep pinned files short and high-signal. When a pinned file grows, split the durable kernel (stays pinned) from the reference detail (unpinned spoke, linked from the kernel).
 - If something must be findable but not always-loaded, don't pin it — give it a good description and link it from a hub.
+
+## Sharing documents (artifacts)
+
+- Documents written for humans (reports, plans, summaries) live under `artifacts/`.
+- Writing a file never publishes it. Only `mem_share` creates a link, and the link serves a snapshot — edit then `mem_share` again to publish an update (the URL stays stable).
+- Share only when the user asks for a link or clearly wants to hand the document to someone. Never share proactively.
+- Relay the audience line from the tool result verbatim. By default a link requires a logged-in member of the user's org; only a human can widen it from the web UI.
+- `mem_share` with `revoke: true` kills the link. Re-sharing after a revoke mints a new URL and resets the audience to org members.

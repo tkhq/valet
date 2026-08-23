@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
+  recordSandboxDestroyed,
   ValidationError as EngineValidationError,
   type ChildReader,
   type ChildSender,
@@ -40,6 +41,7 @@ import type { RepoBinding } from "../wire/types.js";
 import type { SourceService } from "../bakes/source-service.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
+import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
 
@@ -404,7 +406,7 @@ export function classifyWatcherError(err: unknown): WatcherErrorClassification {
 export class ChildWatcher {
   private readonly retryDelayMs: number;
   private readonly maxAttempts: number;
-  private retentionTimer: NodeJS.Timeout | undefined;
+  private retentionTimer: SweepTimer | undefined;
 
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
@@ -667,7 +669,7 @@ export class ChildWatcher {
         return;
       }
 
-      await live.attachment.destroy();
+      await live.attachment.destroy("child_settled");
       this.deps.engineHost.evictCache(childSessionId);
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
@@ -726,10 +728,11 @@ export class ChildWatcher {
           // the check above wins and the reclaim waits for the next pass.
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
           if (recheck.length > 0) continue;
-          await live.attachment.destroy();
+          await live.attachment.destroy("child_retention");
           this.deps.engineHost.evictCache(row.childSessionId);
         } else if (row.parkedSandboxId) {
           await this.deps.engineHost.destroySandbox(row.parkedSandboxId);
+          recordSandboxDestroyed("child_retention");
         } else {
           // Nothing destroyable from here: no cached session and no
           // recorded handle. Stamp the reclaim so the row stops sweeping,
@@ -748,19 +751,15 @@ export class ChildWatcher {
     }
   }
 
-  /** Start the retention interval (no-op when retention is off). Unref'd — never holds the process open. */
+  /** Start the retention interval (no-op when retention is off). */
   startRetentionSweep(): void {
     if (this.retentionTimer || (this.deps.retentionMs ?? 0) <= 0) return;
     const intervalMs = this.deps.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;
-    const timer = setInterval(() => {
-      void this.sweepRetention().catch((err) => console.error("ChildWatcher: retention sweep failed:", err));
-    }, intervalMs);
-    timer.unref();
-    this.retentionTimer = timer;
+    this.retentionTimer = startSweepTimer("ChildWatcher retention", intervalMs, () => this.sweepRetention());
   }
 
   stopRetentionSweep(): void {
-    if (this.retentionTimer) clearInterval(this.retentionTimer);
+    this.retentionTimer?.stop();
     this.retentionTimer = undefined;
   }
 
@@ -958,6 +957,9 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       req.childSessionId,
       await loadSessionMeta(deps.db, child),
     );
+    // A child_send is USE: a parked (hibernated) child's row heals to
+    // active even when the revived turn never touches the sandbox.
+    await deps.engineHost.markSessionUsed(req.childSessionId);
 
     const receipt = await childSession.prompt(req.message, {
       author: { id: ctx.actorUserId },

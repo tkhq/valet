@@ -28,6 +28,7 @@
 
 import type { SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
+import { startSweepTimer } from "../lib/sweep-timer.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 
 const DEFAULT_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 h
@@ -70,20 +71,12 @@ export interface RotateSweepHandle {
  */
 export function startRotateSweep(deps: RotateSweepDeps): RotateSweepHandle {
   const { host, provider, db, intervalMs = DEFAULT_INTERVAL_MS, maxAgeMs = DEFAULT_MAX_AGE_MS } = deps;
-
-  const handle = setInterval(() => {
-    runRotateSweep({ host, provider, db, maxAgeMs }).catch((err) =>
-      console.error("RotateSweep: sweep tick failed:", err),
-    );
-  }, intervalMs);
-  // Do not prevent the process from exiting if this is the only active handle.
-  handle.unref?.();
-
-  return {
-    stop() {
-      clearInterval(handle);
-    },
-  };
+  // Shared shell: unref'd, error-logged, and overlap-guarded — a slow pass
+  // (many cached sessions after a restart) must not stack a concurrent
+  // pass that re-mints tokens the first pass just pushed (each mint
+  // revokes the prior token, so interleaved passes would push
+  // dead-on-arrival tokens).
+  return startSweepTimer("RotateSweep", intervalMs, () => runRotateSweep({ host, provider, db, maxAgeMs }));
 }
 
 /** One sweep pass — exported for testability. */

@@ -26,18 +26,22 @@
  * explicit `id` ever appears in an insert.
  *
  * JSON columns (`definition`, `params`, `waiting_on`, `result`, `effects`,
- * `payload`, `consumed_by`) are `jsonb` (schema/index.ts): written as
- * `JSON.stringify`'d text (Postgres coerces a text literal targeting a
- * jsonb column), but read back ALREADY PARSED by the pg/PGlite driver — no
- * `JSON.parse` on read. `fromJsonColumn`/`requiredJsonColumn` below also
- * tolerate a raw string defensively (in case a driver ever returns jsonb as
- * text), so the mapping is correct either way. `undefined` is stored as SQL
- * `NULL` and read back as `undefined` (not `null`) so the shape matches
- * `InMemoryWorkflowStore`'s observable behavior exactly — the conformance
- * suites assert this (e.g. a `skipped` checkpoint's `result` stays
- * `undefined`, not `null`).
+ * `payload`, `consumed_by`) are `jsonb` (schema/index.ts). Writes go
+ * through `jsonbToParam`; reads go through `fromJsonbColumn`/
+ * `requiredJsonbColumn` (all from `@valet/store-postgres`). The driver
+ * returns jsonb already parsed, and the read helpers never re-parse — see
+ * their doc comments for why a "defensive" re-parse corrupts top-level
+ * string values.
+ *
+ * `undefined` is stored as SQL `NULL` and read back as `undefined` (not
+ * `null`) so the shape matches `InMemoryWorkflowStore`'s observable
+ * behavior — the conformance suites assert this (e.g. a `skipped`
+ * checkpoint's `result` stays `undefined`, not `null`). Known parity gap: a
+ * top-level JSON `null` (e.g. `result: null`) is indistinguishable from SQL
+ * `NULL` at the driver, so this store reads it back as `undefined` where
+ * the in-memory store returns `null`.
  */
-import type { PgDb, PgQueryable } from '@valet/store-postgres';
+import { fromJsonbColumn, jsonbToParam, requiredJsonbColumn, type PgDb, type PgQueryable } from '@valet/store-postgres';
 import {
   WorkflowFenceError,
   decodeRunCursor,
@@ -133,25 +137,6 @@ function asBoolean(value: unknown, field: string): boolean {
   throw new Error(`expected boolean for ${field}, got ${typeof value}`);
 }
 
-/** `undefined` in → SQL `NULL` param out; every other value → `JSON.stringify`'d text (Postgres coerces it into the target jsonb column). */
-function jsonToParam(value: unknown): string | null {
-  return value === undefined ? null : JSON.stringify(value);
-}
-
-/** Reads a nullable jsonb column: `null`/`undefined` → `undefined`; an already-parsed JS value passes through; a raw string (defensive) is `JSON.parse`'d. */
-function fromJsonColumn<T>(value: unknown): T | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === 'string') return JSON.parse(value) as T;
-  return value as T;
-}
-
-/** Like `fromJsonColumn`, but for NOT NULL jsonb columns where the value is guaranteed present. */
-function requiredJsonColumn<T>(value: unknown, field: string): T {
-  if (value === null || value === undefined) throw new Error(`expected jsonb value for ${field}, got ${value}`);
-  if (typeof value === 'string') return JSON.parse(value) as T;
-  return value as T;
-}
-
 function rawToRunRow(raw: Record<string, unknown>): WorkflowRunRow {
   return {
     id: asString(raw.id, 'id'),
@@ -205,12 +190,12 @@ function rowToRun(row: WorkflowRunRow): WorkflowRun {
     runId: row.id,
     status: row.status,
     outcome: row.outcome ?? undefined,
-    waitingOn: requiredJsonColumn<RunWaitCondition[]>(row.waitingOn, 'waiting_on'),
+    waitingOn: requiredJsonbColumn<RunWaitCondition[]>(row.waitingOn, 'waiting_on'),
     ownerId: row.leaseOwnerId ?? undefined,
     leaseExpiresAt: row.leaseExpiresAt ?? undefined,
     updatedAt: row.updatedAt,
-    params: requiredJsonColumn<RunParams>(row.params, 'params'),
-    definition: requiredJsonColumn<unknown>(row.definition, 'definition'),
+    params: requiredJsonbColumn<RunParams>(row.params, 'params'),
+    definition: requiredJsonbColumn<unknown>(row.definition, 'definition'),
     definitionVersionId: row.definitionVersionId,
     attempt: row.attempt,
     wakeAt: row.wakeAt ?? undefined,
@@ -240,7 +225,7 @@ function rawToRunListItem(raw: Record<string, unknown>): WorkflowRunListItem {
     createdAt: toNum(raw.created_at, 'created_at'),
     updatedAt: toNum(raw.updated_at, 'updated_at'),
     owner: ownerId === '' ? undefined : { ownerType: asString(raw.owner_type, 'owner_type'), ownerId },
-    waitingOn: requiredJsonColumn<RunWaitCondition[]>(raw.waiting_on, 'waiting_on'),
+    waitingOn: requiredJsonbColumn<RunWaitCondition[]>(raw.waiting_on, 'waiting_on'),
     parentRunId: asStringOrNull(raw.parent_run_id, 'parent_run_id') ?? undefined,
     parentNodeId: asStringOrNull(raw.parent_node_id, 'parent_node_id') ?? undefined,
     parentIteration: parentIteration ?? undefined,
@@ -253,9 +238,9 @@ function rowToCheckpoint(row: WorkflowCheckpointRow): NodeCheckpoint {
     nodeId: row.nodeId,
     iteration: row.iteration,
     status: row.status,
-    result: fromJsonColumn(row.result),
+    result: fromJsonbColumn(row.result),
     error: row.error ?? undefined,
-    effects: fromJsonColumn<Record<string, unknown>>(row.effects),
+    effects: fromJsonbColumn<Record<string, unknown>>(row.effects),
     attempt: row.attempt,
     createdAt: row.createdAt,
   };
@@ -266,10 +251,10 @@ function rowToSignal(row: WorkflowSignalRow): RunSignal {
     runId: row.runId,
     signalId: row.signalId,
     signalType: row.signalType,
-    payload: fromJsonColumn(row.payload),
+    payload: fromJsonbColumn(row.payload),
     createdAt: row.createdAt,
     consumedAt: row.consumedAt ?? undefined,
-    consumedBy: fromJsonColumn<RunSignal['consumedBy']>(row.consumedBy),
+    consumedBy: fromJsonbColumn<RunSignal['consumedBy']>(row.consumedBy),
   };
 }
 
@@ -549,7 +534,7 @@ export class PgWorkflowStore implements WorkflowStore {
            effects = EXCLUDED.effects,
            error = EXCLUDED.error,
            created_at = EXCLUDED.created_at`,
-        [cp.runId, cp.nodeId, cp.iteration, cp.attempt, jsonToParam(cp.result), jsonToParam(cp.effects), cp.error ?? null, cp.createdAt],
+        [cp.runId, cp.nodeId, cp.iteration, cp.attempt, jsonbToParam(cp.result), jsonbToParam(cp.effects), cp.error ?? null, cp.createdAt],
       );
     });
   }
@@ -595,8 +580,8 @@ export class PgWorkflowStore implements WorkflowStore {
         terminal.iteration,
         terminal.attempt,
         terminal.status,
-        jsonToParam(terminal.result),
-        jsonToParam(terminal.effects),
+        jsonbToParam(terminal.result),
+        jsonbToParam(terminal.effects),
         terminal.error ?? null,
         terminal.createdAt,
       ],
@@ -626,10 +611,10 @@ export class PgWorkflowStore implements WorkflowStore {
         signal.runId,
         signal.signalId,
         signal.signalType,
-        jsonToParam(signal.payload),
+        jsonbToParam(signal.payload),
         signal.createdAt,
         signal.consumedAt ?? null,
-        jsonToParam(signal.consumedBy),
+        jsonbToParam(signal.consumedBy),
       ],
     );
     const row = await this.getSignalRow(this.db, signal.runId, signal.signalId);
@@ -647,7 +632,7 @@ export class PgWorkflowStore implements WorkflowStore {
       if (!signalRow) throw new Error(`signal not found: ${signalId}`);
 
       if (signalRow.consumedAt !== null) {
-        const consumedByExisting = fromJsonColumn<typeof consumedBy>(signalRow.consumedBy);
+        const consumedByExisting = fromJsonbColumn<typeof consumedBy>(signalRow.consumedBy);
         const same =
           consumedByExisting?.nodeId === consumedBy.nodeId &&
           consumedByExisting?.iteration === consumedBy.iteration &&

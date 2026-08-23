@@ -217,6 +217,8 @@ export interface SandboxCR {
   metadata: {
     name: string;
     labels: Record<string, string>;
+    /** Owning-session annotation (`SESSION_ANNOTATION_KEY`) — see manifest.ts. */
+    annotations?: Record<string, string>;
   };
   spec: SandboxCRSpec;
 }
@@ -278,6 +280,8 @@ export interface SandboxCRMetadata {
   annotations?: Record<string, string>;
   resourceVersion?: string;
   uid?: string;
+  /** Server-populated creation time (RFC3339). Read back for the TTL sweep. */
+  creationTimestamp?: string;
 }
 
 /** `spec` subset of the read-back Sandbox CR. `podTemplate` and

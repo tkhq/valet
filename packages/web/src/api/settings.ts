@@ -31,6 +31,7 @@ import type {
   OpenrouterRegistryResponse,
   OrgMembersResponse,
   OrgResponse,
+  OrgSettingsResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
   PatchMeRequest,
@@ -39,6 +40,7 @@ import type {
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
+  PatchOrgSettingsRequest,
   PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
@@ -269,6 +271,18 @@ export function usePatchOrg() {
   const qc = useQueryClient();
   return useMutation<PatchOrgResponse, Error, PatchOrgRequest>({
     mutationFn: (body) => api.patchOrg(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.org() });
+    },
+  });
+}
+
+/** Org-level toggles (`PATCH /api/org/settings`) — invalidates the org
+ * read, which is where `allowPublicArtifacts` is surfaced to members. */
+export function usePatchOrgSettings() {
+  const qc = useQueryClient();
+  return useMutation<OrgSettingsResponse, Error, PatchOrgSettingsRequest>({
+    mutationFn: (body) => api.patchOrgSettings(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.org() });
     },

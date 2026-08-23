@@ -98,6 +98,16 @@ This section governs new and edited prose. Do not rewrite existing documents who
 
 ## Rules learned the hard way
 
+### Invariants: alert, don't auto-repair
+
+Do not add a timer or guard that silently repairs invariant violations. Examples of such guards: TTL kills, blanket re-syncs, catch-all cleanups. Invariants here means properties the code depends on — every sandbox has an owner that deletes it, every submission settles, created − deleted trends to zero. A silent repair masks the bug that broke the invariant and converts it into a permanent, unmeasured cost. Instead:
+
+1. Give the invariant one owner: a single code path responsible for holding it.
+2. Emit a metric and an alert that make a violation visible (a created/deleted counter gap, an over-age gauge). A violation should page a human, not disappear.
+3. Add an auto-repair only when violations are expected in normal operation (crash windows, external deletes). If you add one, name that reason in a comment where the repair lives.
+
+Precedent (2026-08-22, sandbox lifecycle): the reconcile sweep destroys sandboxes whose owning session is gone — a real ownership rule — but deliberately has no max-lifetime kill. Over-age sandboxes are reported, not reaped.
+
 ### Tool-call persistence round trip
 
 We've broken tool-call rendering on reload three times; the root cause is always shape drift between what the engine writes, the wire ships, and the frontend renders. When touching any hop, verify all four end to end:
@@ -110,6 +120,10 @@ We've broken tool-call rendering on reload three times; the root cause is always
 Regression suites (run before claiming done): `pnpm --filter @valet/engine test happy-path`, `pnpm --filter @valet/engine test in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
 
 "(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
+
+### Mount-time state from props (web)
+
+`useState(<expr derived from a prop>)` is correct at mount and silently wrong when the prop changes — and every existing test can pass, because nothing renders the transition. Pair the `useState` with a `useEffect` that syncs on the prop, and gate the sync behind a `userTouched` ref when a manual override must win. If the component holds this kind of state in a mapped list, key it by a stable id, not the array index — an index key hands one item's state to another when the list shifts. Shipped example: `ToolShell`'s collapse policy (`docs/specs/2026-08-20-tool-card-collapse-policy-design.md`).
 
 ### Pre-1.0: edit migrations in place
 

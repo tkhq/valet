@@ -224,6 +224,18 @@ function workspaceFor(parts: WorkflowSessionIdParts): string {
 }
 
 /**
+ * The workspace path a workflow session's sandbox was provisioned under —
+ * the same string `ensureSession` hands `workflowSessionFor`, and therefore
+ * the same key `SandboxProvider.deriveId` names the sandbox from. Exported
+ * for the settled-run sandbox reclaim (`sandbox-reclaim.ts`), which must
+ * destroy sandboxes of sessions that are no longer cached and have no
+ * recorded handle. Throws on a non-workflow session id.
+ */
+export function workflowSessionWorkspace(sessionId: string): string {
+  return workspaceFor(parseWorkflowSessionId(sessionId));
+}
+
+/**
  * Materialize a workflow session so the engine's claim loop can resume any
  * unsettled submission it holds. Exported for `main.ts`'s boot-time
  * `restoreUnsettledSessions`: workflow sessions have no `agent_sessions`

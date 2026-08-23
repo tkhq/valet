@@ -244,6 +244,16 @@ externalRegistry:
   # registry. Ignored when `url` is unset.
   pullSecret: ""
 
+podJanitor:
+  # Nightly CronJob that deletes Failed pods in the release and sandbox
+  # namespaces — see templates/pod-janitor-cronjob.yaml for the rationale.
+  enabled: true
+  # After the registry GC (03:00) so the nightly jobs don't contend.
+  schedule: "30 3 * * *"
+  image:
+    repository: rancher/kubectl
+    tag: v1.31.0
+
 build:
   # BuildKit Job resource requests/limits (moby/buildkit:rootless container).
   resources:

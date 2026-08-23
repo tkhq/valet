@@ -301,6 +301,26 @@ await providers.childWatcher.rearm().catch((err) => {
 // off; the interval is unref'd so it never holds the process open.
 providers.childWatcher.startRetentionSweep();
 
+// Destroys sandboxes hibernated past the retention window (default 72h,
+// VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
+providers.hibernationReaper.start();
+
+// Settled-run sandbox reclaim retry sweep: picks up runs settled while the
+// api was down and on-settle reclaims that failed. The on-settle path
+// itself runs from the `onRunSettled` hook, not this interval.
+providers.workflowSandboxReclaimer.start();
+
+// Provider-side reconciler: destroys orphaned sandboxes (owning session
+// gone). Sandboxes past VALET_SANDBOX_AGE_REPORT_HOURS are REPORTED, not
+// destroyed (CLAUDE.md: alert, don't auto-repair). No-op on providers
+// without a list() seam (docker/local).
+providers.sandboxReconcileSweep.start();
+
+// Hibernates idle ACTIVE sessions an api restart evicted from the host
+// cache — the in-memory idle sweep only walks the cache, and the reaper
+// only reaps hibernated rows, so these were stranded with running pods.
+providers.idleHibernationSweep.start();
+
 // Channel ingress (Task 8): resolves credentials into transports, then
 // starts webhook registration or the long-poll loop per transport. A
 // failure here must never block boot — channels are best-effort.
@@ -527,6 +547,26 @@ async function close(): Promise<void> {
     providers.childWatcher.stopRetentionSweep();
   } catch (err) {
     console.error("childWatcher.stopRetentionSweep failed:", err);
+  }
+  try {
+    providers.hibernationReaper.stop();
+  } catch (err) {
+    console.error("hibernationReaper.stop failed:", err);
+  }
+  try {
+    providers.workflowSandboxReclaimer.stop();
+  } catch (err) {
+    console.error("workflowSandboxReclaimer.stop failed:", err);
+  }
+  try {
+    providers.sandboxReconcileSweep.stop();
+  } catch (err) {
+    console.error("sandboxReconcileSweep.stop failed:", err);
+  }
+  try {
+    providers.idleHibernationSweep.stop();
+  } catch (err) {
+    console.error("idleHibernationSweep.stop failed:", err);
   }
   try {
     await providers.channelHost.stop();

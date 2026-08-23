@@ -371,6 +371,8 @@ describe("EngineHost idle sweep", () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(session.attachment.state).toBe("suspended");
     expect(hibernated).toEqual([sessionId]);
+    // onWake fires only on a genuine suspended→ready wake; intent-driven
+    // row heals ride EngineHost.markSessionUsed, not a build-time fire.
     expect(woke).toEqual([]);
 
     await session.attachment.ensureReady({ timeoutMs: 5_000 });

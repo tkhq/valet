@@ -96,6 +96,24 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
       expect(cp).toMatchObject({ status: 'completed', result: { value: 42 } });
     });
 
+    it('a top-level string result round-trips verbatim (no read-time re-parse)', async () => {
+      // Regression: a read-time re-parse throws on a non-JSON string result
+      // and poisons every subsequent read of the run.
+      const store = await setup();
+      const text = 'tasks[10]:\n  - task_id: 2701b936 (not JSON)';
+      await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ result: text }));
+      const [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.result).toBe(text);
+    });
+
+    it('a JSON-shaped string result keeps its string type (no silent double-parse)', async () => {
+      // The silent variant: a re-parse turns "123" into the number 123.
+      const store = await setup();
+      await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ result: '123' }));
+      const [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.result).toBe('123');
+    });
+
     it('effects round-trip through putIntent and completeCheckpoint', async () => {
       const store = await setup();
       const effects = { wakeAt: 12345, generatedId: 'abc-123', nested: { count: 3 } };

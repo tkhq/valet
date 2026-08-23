@@ -48,8 +48,10 @@ export interface MemoryLinkHandling {
 }
 
 /** In-app path for a memory file. Segments are encoded one at a time so the
- * separators survive — the router's splat param holds the whole path. */
-function memoryHref(path: string): string {
+ * separators survive — the router's splat param holds the whole path.
+ * Exported so other memory-link builders (the viewer dialog's "Open in
+ * Memory") can't drift from the cross-reference links rendered here. */
+export function memoryHref(path: string): string {
   return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 

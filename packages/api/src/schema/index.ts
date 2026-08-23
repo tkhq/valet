@@ -26,10 +26,12 @@ import type { ParamMatcher } from "../policies/matchers.js";
 //     which call `.getTime()` / compare against `new Date()`) become
 //     `timestamp` here: `orgs`... no, `invites`, `sandbox_tokens`, and the
 //     entire better-auth block.
-// JSON-as-text becomes `jsonb` only where a reader `JSON.parse`s the column
-// (traced via grep — see the per-column disposition table in the task
+// JSON-as-text becomes `jsonb` only where a reader consumes the column as
+// JSON (traced via grep — see the per-column disposition table in the task
 // report); everything else (e.g. `memory_files.tags`/`.extras`, which Task 9
-// feeds into the tsvector generated column as text) stays `text`.
+// feeds into the tsvector generated column as text) stays `text`. The
+// driver returns jsonb already parsed — readers must NOT `JSON.parse` the
+// value (see `fromJsonbColumn` in `@valet/store-postgres`).
 // Boolean-as-integer (`0`/`1` flags with no arithmetic) becomes `boolean`.
 // `AUTOINCREMENT` becomes `generated always as identity`.
 
@@ -38,8 +40,8 @@ import type { ParamMatcher } from "../policies/matchers.js";
 export const orgs = pgTable("orgs", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
-  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read as
-  // JSON (`services/org.ts`'s `JSON.parse`/`JSON.stringify`) — jsonb.
+  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read
+  // driver-parsed by `services/org.ts` — jsonb.
   features: jsonb("features").notNull().default({}),
   // Ordered list of namespaced model ids (e.g. `"anthropic/claude-opus-4"`)
   // the org has opted into, most-preferred first. Read/written as JSON
@@ -57,6 +59,11 @@ export const orgs = pgTable("orgs", {
   // Org-level toggle: present skill names as bare slash-commands instead of
   // prefixed `/skill <name>`. Replaces the deleted per-user `users.bareSkillCommands`.
   bareSkillCommands: boolean("bare_skill_commands").notNull().default(false),
+  // Org-level opt-in for anonymous artifact links (artifacts design). Off =
+  // every artifact link requires a logged-in org member, and the `public`
+  // visibility option is not offered. Live-checked on every artifact read,
+  // so flipping it off immediately re-gates existing `public` artifacts.
+  allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -354,6 +361,13 @@ export const agentSessions = pgTable(
     // matching source/bake, or a `customImage: false` provider). Nullable
     // — the vast majority of sessions never resolve a bake.
     bakeId: text("bake_id"),
+    // Sandbox id recorded at hibernate time — the reaper's destroy handle
+    // for sessions an api restart evicts from the host cache (same rationale
+    // as child_watches.parked_sandbox_id).
+    hibernatedSandboxId: text("hibernated_sandbox_id"),
+    // Stamped once the reaper has destroyed the hibernated sandbox, so the
+    // row stops sweeping. Cleared by the next hibernate write.
+    sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -775,6 +789,47 @@ export const memoryFiles = pgTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
 );
 
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+//
+// Shared snapshots of memory files (2026-08-22 artifacts design). A row is a
+// COPY of one memory file's content at share time, not a live reference —
+// later memory edits never publish until an explicit re-share overwrites
+// `content`. `token` is the unguessable capability in the share URL
+// (`/a/{token}`); `visibility` gates who may open it: `org` (a logged-in
+// member of `org_id`) or `public` (anyone, only while
+// `orgs.allow_public_artifacts` is on). The tool surface can only create
+// `org` rows; widening to `public` is a human UI action recorded in
+// `public_by`. Revoke sets `revoked_at` and keeps the row for audit;
+// re-share after revoke mints a fresh token (a leaked link stays dead)
+// AND resets visibility to `org` — revoke ends the audience decision
+// along with the link, so the tool surface can never restore anonymous
+// access.
+export const artifacts = pgTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    token: text("token").notNull(),
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
+    orgId: text("org_id").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    sourceSessionId: text("source_session_id").notNull().default(""),
+    sourceMemoryPath: text("source_memory_path").notNull(),
+    title: text("title").notNull().default(""),
+    content: text("content").notNull(),
+    visibility: text("visibility", { enum: ["org", "public"] }).notNull().default("org"),
+    publicBy: text("public_by"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("artifacts_token_unique").on(t.token),
+    // One artifact per shared file: re-share is an update, never a second row.
+    uniqueIndex("artifacts_owner_path_unique").on(t.ownerType, t.ownerId, t.sourceMemoryPath),
+  ],
+);
+
 // ─── Skills ─────────────────────────────────────────────────────────────────
 //
 // Stored skills — the markdown playbooks a person writes in the product, and
@@ -977,6 +1032,10 @@ export const workflowRuns = pgTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
+    // When the settled-run sandbox reclaim destroyed this run's session
+    // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
+    // AND every session sandbox is gone — the sweep retries NULL rows.
+    sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1030,8 +1089,8 @@ export const workflowSignals = pgTable(
 // Durable, encrypted store backing the engine's `CredentialStore` port
 // (`packages/engine/src/types.ts`). Secret columns hold AES-256-GCM
 // ciphertext produced by `src/lib/secret-crypto.ts` — plaintext tokens are
-// never persisted. `scopes`/`metadata` are `JSON.parse`'d by
-// `plugins/credential-store.ts` — jsonb.
+// never persisted. `scopes`/`metadata` are jsonb, read driver-parsed by
+// `plugins/credential-store.ts` (never re-`JSON.parse`'d).
 
 export const credentials = pgTable(
   "credentials",
@@ -1176,9 +1235,9 @@ export const actionPolicyOverrides = pgTable(
 );
 
 // `action_invocations` — durable dedup table for the workflow `tool` node's
-// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is
-// `JSON.stringify`'d by `plugins/action-invoker.ts` and `JSON.parse`'d back
-// — jsonb. A duplicate `invocationId` (crash-and-retry, concurrent
+// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is jsonb:
+// written by `plugins/action-invoker.ts`, read back driver-parsed.
+// A duplicate `invocationId` (crash-and-retry, concurrent
 // dispatch) reads back the original row rather than re-invoking the action.
 //
 // Extended (action-policies plan, Task 2) into a general policy-invocation

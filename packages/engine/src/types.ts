@@ -924,6 +924,16 @@ export interface SandboxCreateOpts {
   timeout?: number;
   resources?: { cpu?: number; memory?: string };
   metadata?: Record<string, unknown>;
+  /**
+   * The owning session's id. `Engine.materializeSandbox` stamps this on
+   * every attachment-built sandbox, and its stamp always wins — a value a
+   * host sets here is overwritten, so an opts object cloned from another
+   * session can never mis-attribute ownership. Providers that implement
+   * `list()` record it on the backing resource (sandbox-kubernetes: a CR
+   * annotation) so a reconcile sweep can map a listed sandbox back to its
+   * session.
+   */
+  sessionId?: string;
   /** Interactive-service profile. Default "headless" (agent-only). "full"
    * additionally runs ttyd + code-server + the auth gateway. */
   profile?: "headless" | "full";
@@ -1006,9 +1016,35 @@ export interface SandboxCapabilities {
 
 export interface SandboxStatus {
   id: string;
+  /**
+   * `released` is load-bearing for lifecycle sweeps: it means "the
+   * backing resource does not exist" — the workflow reclaimer permanently
+   * skips its destroy on it, and the stranded-idle sweep stamps rows
+   * hibernated without a suspend. Providers MUST throw on transient
+   * backend errors rather than report `released` (kubernetes does).
+   * Caveat: sandbox-docker reports `released` for any id its in-process
+   * map has forgotten (every sandbox after an api restart, even with the
+   * container still running) — today only capability gates
+   * (`deriveId`/`hibernation`, both absent on docker) keep the sweeps off
+   * that path; fix the map-miss conflation before pointing a
+   * released-trusting consumer at docker.
+   */
   state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
   startedAt?: number;
   error?: string;
+}
+
+/** One provider-side sandbox, as reported by `SandboxProvider.list` — the
+ * reconcile sweep's raw material. */
+export interface SandboxListing {
+  id: string;
+  /** The owning session recorded at create time (`SandboxCreateOpts.sessionId`).
+   * Null for sandboxes created before session stamping existed. */
+  sessionId: string | null;
+  /** Backend creation time (ms since epoch); null when the backend does not
+   * report one. The reconcile sweep's over-age report skips sandboxes
+   * without it. */
+  createdAtMs: number | null;
 }
 
 export interface SandboxProvider {
@@ -1031,6 +1067,24 @@ export interface SandboxProvider {
    * falls back to `destroy`.
    */
   release?(id: string): Promise<void>;
+  /**
+   * Optional deterministic-id seam. Providers whose sandbox ids are a pure
+   * function of the session key (sandbox-kubernetes: `sandboxCrName`)
+   * implement this so reapers can recompute a destroy handle that was never
+   * recorded. Providers with backend-assigned ids (modal/docker) must NOT
+   * implement this.
+   */
+  deriveId?(sessionKey: string): string;
+  /**
+   * Optional enumeration seam for reconcile sweeps: every sandbox this
+   * provider currently backs, with the owning session recorded at create
+   * time. Providers whose sandboxes durably outlive the api process
+   * (sandbox-kubernetes: the CR is the record) implement this so an
+   * orphan/TTL sweep can find leaked sandboxes no DB row points at.
+   * Providers whose handles are process-local (docker/local) omit it — a
+   * sweep treats an absent `list` as "nothing to reconcile".
+   */
+  list?(): Promise<SandboxListing[]>;
   /**
    * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
    * `suspend` scales the sandbox to zero while retaining its workspace; `resume`

@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
+import { getToolCardDefault, type ToolCardDefault } from "~/lib/preferences";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { isActiveStatus, type ToolCategory, type ToolStatus } from "./types";
 
@@ -79,6 +80,23 @@ export function statusLabel(status: ToolStatus): string {
   return STATUS_LABEL[status];
 }
 
+/**
+ * Resolve the mount-time expansion for a card, given the user's default
+ * policy and the status the card first observed. Errors always mount
+ * expanded — a user who set `always-collapsed` still needs to read the
+ * message that names the corrective action.
+ */
+function initialExpanded(
+  policy: ToolCardDefault,
+  status: ToolStatus,
+): boolean {
+  if (status === "error") return true;
+  if (policy === "always-expanded") return true;
+  if (policy === "always-collapsed") return false;
+  // `smart`: running expanded, completed collapsed at mount.
+  return status !== "completed";
+}
+
 export function ToolShell({
   toolName,
   category,
@@ -88,10 +106,62 @@ export function ToolShell({
   status,
   children,
 }: ToolShellProps) {
-  // Start collapsed for completed/error to keep the chat dense; start
-  // expanded while running so the user sees progress.
-  const [expanded, setExpanded] = useState(status !== "completed");
+  // The user's default policy is read once at mount. A live preference
+  // change never rewrites an already-mounted card — the Chat density
+  // toggle on /settings/appearance takes effect on the next tool card
+  // mount, which matches how V1's `thread-sidebar-collapsed` behaves and
+  // keeps this effect free of listener plumbing.
+  const [policy] = useState<ToolCardDefault>(() => getToolCardDefault());
+  const [expanded, setExpanded] = useState<boolean>(() =>
+    initialExpanded(policy, status),
+  );
+
+  // Auto-collapse-on-complete respects one explicit user action. A
+  // header click or a pointer-down inside the body flips this ref, and
+  // the effect below then leaves the card alone on completion. This is
+  // the "mount-time state from props" pattern (CLAUDE.md, Rules learned
+  // the hard way): pair the `useState` with a `useEffect` that syncs on
+  // the prop, gated on a `userTouched` ref.
+  const userTouchedRef = useRef(false);
+
+  useEffect(() => {
+    // Errors override every policy and every prior toggle: the body
+    // holds the message that names the corrective action, so a card
+    // that arrives at `error` opens. It never auto-collapses afterwards
+    // (`error` is terminal, so this effect does not run again; a manual
+    // collapse of an error card therefore also sticks).
+    if (status === "error") {
+      setExpanded(true);
+      return;
+    }
+
+    // `always-expanded` never collapses a card. The user asked for
+    // everything open; short of an error the effect leaves them alone.
+    if (policy === "always-expanded") return;
+
+    // Auto-collapse when the call completes, unless the user touched
+    // the card. `completed` is terminal in the stream store, so this
+    // fires once — on the streaming/running→completed edge, or at
+    // mount, where it matches `initialExpanded` and is a no-op.
+    if (status === "completed" && !userTouchedRef.current) {
+      setExpanded(false);
+    }
+  }, [status, policy]);
+
   const isError = status === "error";
+
+  // Each card needs its own body id: `toolName` repeats across calls in
+  // a thread, and `aria-controls` must reference exactly one element.
+  const bodyId = useId();
+
+  const markTouched = () => {
+    userTouchedRef.current = true;
+  };
+
+  const handleToggle = () => {
+    markTouched();
+    setExpanded((v) => !v);
+  };
 
   return (
     <section
@@ -113,7 +183,7 @@ export function ToolShell({
             only animates while running, in the category color. */}
         <button
           type="button"
-          onClick={() => setExpanded((v) => !v)}
+          onClick={handleToggle}
           className={cn(
             "relative w-full flex items-center gap-2 px-2.5 py-1.5",
             "text-left text-xs font-mono leading-none",
@@ -122,7 +192,9 @@ export function ToolShell({
             "transition-colors",
           )}
           aria-expanded={expanded}
-          aria-controls={`tool-body-${toolName}`}
+          // The body unmounts while collapsed, so only reference it when
+          // it exists — a dangling aria-controls id is invalid.
+          aria-controls={expanded ? bodyId : undefined}
         >
           <ChevronRight
             className={cn(
@@ -180,10 +252,13 @@ export function ToolShell({
           )}
         </button>
 
-        {/* Body */}
+        {/* Body. A pointer-down here counts as a user touch: someone
+            expanding truncated output or selecting text mid-run must not
+            lose it to the auto-collapse when the call completes. */}
         {expanded && (
           <div
-            id={`tool-body-${toolName}`}
+            id={bodyId}
+            onPointerDown={markTouched}
             className={cn(
               "border-t border-[--border]",
               isError && "border-t-danger-500/30",
