@@ -1,7 +1,8 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import type { ModelInfo } from "@valet/api/wire";
 import { Badge, Button, Input } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { matchesNeedle } from "~/lib/text-match";
 
 /**
@@ -125,9 +126,52 @@ function AddModelTypeahead({
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const listboxRef = useRef<HTMLDivElement>(null);
 
   const listboxId = useId();
   const matches = options.filter((m) => matchesNeedle(query, [m.id, m.name, m.providerName]));
+  const visible = matches.slice(0, 30);
+  const optionId = (index: number) => `${listboxId}-opt-${index}`;
+  const activeDescendant =
+    open && visible.length > 0 ? optionId(highlightedIndex) : undefined;
+
+  useEffect(() => {
+    setHighlightedIndex(0);
+  }, [query, options]);
+
+  useEffect(() => {
+    if (!open || !listboxRef.current) return;
+    const el = listboxRef.current.children[highlightedIndex] as HTMLElement | undefined;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  }, [highlightedIndex, open]);
+
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setQuery("");
+      setOpen(false);
+      return;
+    }
+    if (!open || visible.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightedIndex((i) => Math.min(i + 1, visible.length - 1));
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightedIndex((i) => Math.max(i - 1, 0));
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const picked = visible[highlightedIndex];
+      if (picked) onAdd(picked.id);
+    }
+  }
 
   return (
     <div className="space-y-1">
@@ -139,34 +183,37 @@ function AddModelTypeahead({
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") {
-            setQuery("");
-            setOpen(false);
-          }
-        }}
+        onKeyDown={handleKeyDown}
         placeholder={`Search ${options.length} models — name, id, or provider…`}
         aria-label="Search models to add"
         role="combobox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={activeDescendant}
         aria-autocomplete="list"
+        autoComplete="off"
       />
       {open && (
         <div
+          ref={listboxRef}
           id={listboxId}
           role="listbox"
           aria-label="Model results"
           className="max-h-56 overflow-y-auto rounded border border-line"
         >
-          {matches.slice(0, 30).map((m) => (
+          {visible.map((m, i) => (
             <button
               key={m.id}
+              id={optionId(i)}
               type="button"
               role="option"
-              aria-selected={false}
+              aria-selected={i === highlightedIndex}
+              onMouseEnter={() => setHighlightedIndex(i)}
               onClick={() => onAdd(m.id)}
-              className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-sm text-ink hover:bg-ink-wash"
+              className={cn(
+                "flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-sm text-ink",
+                i === highlightedIndex ? "bg-ink-wash" : "hover:bg-ink-wash",
+              )}
             >
               <span className="truncate">{m.name}</span>
               <span className="ml-2 shrink-0 text-xs text-muted">{m.providerName}</span>
