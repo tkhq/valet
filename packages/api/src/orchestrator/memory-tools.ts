@@ -11,7 +11,9 @@
  * Originally right-sized per decision 12 to mem_write / mem_patch /
  * mem_read / mem_search / mem_rm; mem_move and mem_links joined later,
  * built on the derived link graph (`../lib/memory-graph.ts` — still no
- * stored links table).
+ * stored links table), and mem_share after that (2026-08-22 artifacts
+ * design — snapshots a file into a share link via
+ * `POST /api/artifacts/share`).
  *
  * Metadata-setting guidance (when to set `resource`, `sensitivity`,
  * `origin`, `expires`, `pinned`) lives in the TypeBox param descriptions
@@ -442,6 +444,66 @@ export const memLinksTool = defineTool({
   },
 });
 
+// ─── mem_share ─────────────────────────────────────────────────────────
+
+interface ShareResultBody {
+  url?: string;
+  visibility?: string;
+}
+
+function asShareResultBody(body: unknown): ShareResultBody | null {
+  if (!isRecord(body)) return null;
+  return {
+    url: typeof body.url === "string" ? body.url : undefined,
+    visibility: typeof body.visibility === "string" ? body.visibility : undefined,
+  };
+}
+
+export const memShareTool = defineTool({
+  name: "mem_share",
+  description:
+    "Share a memory file as a link, or revoke an existing share. The link serves a snapshot of the file at share time — call mem_share again after editing the file to publish the update (the URL stays the same). Links require a logged-in member of the user's org; only a human can widen one further from the web UI. Share only when the user asks for a link or clearly wants to hand the document to someone — never proactively.",
+  parameters: Type.Object({
+    path: Type.String({
+      description:
+        "Memory path of the file to share, e.g. 'artifacts/report.md'. Documents written for sharing belong under 'artifacts/'.",
+    }),
+    revoke: Type.Optional(Type.Boolean({ description: "Revoke the share for `path` instead of creating/refreshing it." })),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const owner = resolveOwner(ctx);
+    const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
+    const headers = memoryHeaders(cfg, owner, ctx.userId, true);
+    // Audit column: which session ran the share.
+    headers["x-valet-session-id"] = ctx.sessionId;
+    return memoryRequest(
+      url,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ path: args.path, revoke: args.revoke }),
+      },
+      async (res) => {
+        if (args.revoke === true) return { text: `revoked share for ${args.path}` };
+        const body = asShareResultBody(await parseJsonBody(res));
+        if (!body?.url) return { text: `[memory_error] share succeeded but returned no URL` };
+        // State the audience so the agent relays it accurately (spec, Tool
+        // surface) — from the response's ACTUAL visibility, not an
+        // assumption: refreshing a document a human already widened keeps
+        // it public, and telling the user "login required" for an
+        // anonymous link is exactly the misreport this line must prevent.
+        const audience =
+          body.visibility === "public"
+            ? "Anyone with the link — no login required (a human widened this link earlier)."
+            : "Logged-in members of the user's org. The user can widen or revoke this link from the memory page.";
+        return { text: `shared ${args.path} → ${body.url}\nAudience: ${audience}` };
+      },
+    );
+  },
+});
+
 // ─── mem_rm ────────────────────────────────────────────────────────────
 
 export const memRmTool = defineTool({
@@ -460,7 +522,7 @@ export const memRmTool = defineTool({
   },
 });
 
-/** All seven `mem_*` ToolDefs, in the order they should be registered. */
+/** All eight `mem_*` ToolDefs, in the order they should be registered. */
 export function buildMemoryTools(): ToolDef[] {
-  return [memWriteTool, memPatchTool, memReadTool, memSearchTool, memMoveTool, memLinksTool, memRmTool];
+  return [memWriteTool, memPatchTool, memReadTool, memSearchTool, memMoveTool, memLinksTool, memShareTool, memRmTool];
 }

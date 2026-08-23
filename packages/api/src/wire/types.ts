@@ -2082,12 +2082,68 @@ export type PatchMeResponse = MeResponse;
 /** Org-level settings response for `PATCH /api/org/settings`. */
 export interface OrgSettingsResponse {
   bareSkillCommands: boolean;
+  allowPublicArtifacts: boolean;
 }
 
 /** Org-level settings request for `PATCH /api/org/settings`. */
 export interface PatchOrgSettingsRequest {
   bareSkillCommands?: boolean;
+  allowPublicArtifacts?: boolean;
 }
+
+// ─── Artifacts (2026-08-22 artifacts design) ────────────────────────────
+
+export type ArtifactVisibility = "org" | "public";
+
+/** `POST /api/artifacts/share` — snapshot a memory file into a share link
+ * (or revoke the existing one). */
+export interface ShareArtifactRequest {
+  path: string;
+  revoke?: boolean;
+}
+
+export interface ShareArtifactResponse {
+  id: string;
+  path: string;
+  url: string;
+  visibility: ArtifactVisibility;
+  updatedAt: number;
+}
+
+/** `GET /api/artifacts/:token` — the public read. Content is the snapshot
+ * taken at share time, never the live memory file. */
+export interface GetArtifactResponse {
+  title: string;
+  content: string;
+  visibility: ArtifactVisibility;
+  updatedAt: number;
+  /** Sharer's display name — only present for `org` visibility, where the
+   * viewer is a logged-in teammate. Anonymous readers never see it. */
+  sharedBy?: string;
+}
+
+export interface ArtifactListItem {
+  id: string;
+  path: string;
+  title: string;
+  url: string;
+  visibility: ArtifactVisibility;
+  revoked: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListArtifactsResponse {
+  artifacts: ArtifactListItem[];
+}
+
+/** `PATCH /api/artifacts/:id` — widen or narrow one artifact. Widening to
+ * `public` requires the org's `allowPublicArtifacts` opt-in. */
+export interface PatchArtifactRequest {
+  visibility: ArtifactVisibility;
+}
+
+export type PatchArtifactResponse = ArtifactListItem;
 
 /** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
  * back-compat) — see `services/model-catalog.ts`. `active: false` marks a
@@ -2178,6 +2234,10 @@ export interface OrgResponse {
    * `auth.sso.teams.groups`, the file overwrites this list at every boot.
    */
   ssoTeamGroups: string[];
+  /** Whether this org allows widening an artifact to anonymous access —
+   * readable by every member (the share UI needs it to know whether to
+   * offer the `public` option), writable only via `PATCH /api/org/settings`. */
+  allowPublicArtifacts: boolean;
   callerRole: "admin" | "member";
 }
 

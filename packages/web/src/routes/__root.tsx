@@ -61,14 +61,19 @@ function sidebarForPath(pathname: string) {
   return null;
 }
 
-/** `/login`, `/signup` — public, unauthenticated. They render standalone
- * (no `TopNav`/`AppShell` chrome, which assumes a signed-in session) so an
- * unauthenticated visitor never sees app nav before they can sign in. */
+/** `/login`, `/signup`, and the shared-artifact reader `/a/$token` —
+ * public, unauthenticated. They render standalone (no `TopNav`/`AppShell`
+ * chrome, which assumes a signed-in session) so an unauthenticated visitor
+ * never sees app nav before they can sign in. */
 const PUBLIC_ROUTES = new Set(["/login", "/signup"]);
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_ROUTES.has(pathname) || pathname.startsWith("/a/");
+}
 
 function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const isPublic = PUBLIC_ROUTES.has(pathname);
+  const isPublic = isPublicPath(pathname);
 
   if (isPublic) {
     return (

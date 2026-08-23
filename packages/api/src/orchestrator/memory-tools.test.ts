@@ -25,6 +25,7 @@ import {
   memSearchTool,
   memMoveTool,
   memLinksTool,
+  memShareTool,
   memRmTool,
   buildMemoryTools,
 } from "./memory-tools.js";
@@ -63,9 +64,18 @@ afterEach(async () => {
 });
 
 describe("buildMemoryTools", () => {
-  it("returns exactly the seven mem_* tools", () => {
+  it("returns exactly the eight mem_* tools", () => {
     const names = buildMemoryTools().map((t) => t.name);
-    expect(names).toEqual(["mem_write", "mem_patch", "mem_read", "mem_search", "mem_move", "mem_links", "mem_rm"]);
+    expect(names).toEqual([
+      "mem_write",
+      "mem_patch",
+      "mem_read",
+      "mem_search",
+      "mem_move",
+      "mem_links",
+      "mem_share",
+      "mem_rm",
+    ]);
   });
 });
 
@@ -307,5 +317,29 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
     const readResult = await memReadTool.execute({ path: "notes/team.md" }, otherUserCtx);
     expect(readResult.text).toMatch(/^\[memory_error\]/);
+  });
+
+  it("mem_share round-trips: share returns a URL + audience line, revoke confirms", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+
+    await memWriteTool.execute({ path: "artifacts/report.md", content: "# Report\n\nBody.\n" }, ctx);
+
+    const shared = await memShareTool.execute({ path: "artifacts/report.md" }, ctx);
+    expect(shared.text).toContain("shared artifacts/report.md → ");
+    expect(shared.text).toContain("/a/");
+    // The audience line is what the agent relays — it must state the login
+    // requirement, not imply a public link.
+    expect(shared.text).toContain("Logged-in members");
+
+    const revoked = await memShareTool.execute({ path: "artifacts/report.md", revoke: true }, ctx);
+    expect(revoked.text).toBe("revoked share for artifacts/report.md");
+
+    const reRevoke = await memShareTool.execute({ path: "artifacts/report.md", revoke: true }, ctx);
+    expect(reRevoke.text).toMatch(/^\[memory_error\]/);
   });
 });

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Markdown } from "~/components/markdown";
+import { Markdown, type MemoryLinkHandling } from "~/components/markdown";
 import { cn } from "~/lib/cn";
 import { DiffView } from "./diff-view";
 import { TruncatedText } from "./tool-shell";
@@ -9,6 +9,13 @@ import { TruncatedText } from "./tool-shell";
  * mem_read/mem_write show a rendered document by default with a toggle
  * back to source; diff-producing tools (mem_patch, edit on *.md paths)
  * offer a rendered preview of the new content next to the diff.
+ *
+ * `memoryLinks` (optional, mem_* renderers only) makes cross-references
+ * between memory files resolve against the rendered file's own path and
+ * navigate via the caller's handler — without it, a relative target like
+ * `../people/alice.md` renders as an external link to a dead tab. The
+ * sandbox file tools (`edit`/`write` on *.md paths) must NOT pass it:
+ * those render workspace files, not memory files.
  */
 
 export function isMarkdownPath(path: string): boolean {
@@ -54,13 +61,13 @@ function ViewTabs<T extends string>({
   );
 }
 
-function ClampedMarkdown({ text }: { text: string }) {
+function ClampedMarkdown({ text, memoryLinks }: { text: string; memoryLinks?: MemoryLinkHandling }) {
   const [expanded, setExpanded] = useState(false);
   const clampable = text.split("\n").length > CLAMP_LINES;
   return (
     <div className="px-3 py-2">
       <div className={cn("relative", clampable && !expanded && "max-h-80 overflow-hidden")}>
-        <Markdown>{text}</Markdown>
+        <Markdown memoryLinks={memoryLinks}>{text}</Markdown>
         {clampable && !expanded && (
           <div
             aria-hidden
@@ -99,17 +106,30 @@ export function ViewTabsBar({
 
 /**
  * Markdown document body: rendered by default, toggleable to raw source.
- * `left` lands in the header strip next to the tabs (usually a PathLabel).
+ * `left` lands in the header strip next to the tabs (usually a PathLabel);
+ * `actions` lands after the tabs (the mem_* renderers put their
+ * open-in-viewer button there).
  */
-export function MarkdownBody({ text, left }: { text: string; left?: React.ReactNode }) {
+export function MarkdownBody({
+  text,
+  left,
+  actions,
+  memoryLinks,
+}: {
+  text: string;
+  left?: React.ReactNode;
+  actions?: React.ReactNode;
+  memoryLinks?: MemoryLinkHandling;
+}) {
   const [view, setView] = useState<"rendered" | "source">("rendered");
   return (
     <>
       <ViewTabsBar left={left}>
         <ViewTabs value={view} options={["rendered", "source"] as const} onChange={setView} />
+        {actions}
       </ViewTabsBar>
       {view === "rendered" ? (
-        <ClampedMarkdown text={text} />
+        <ClampedMarkdown text={text} memoryLinks={memoryLinks} />
       ) : (
         <TruncatedText text={text} className="px-3 py-2" />
       )}
@@ -126,18 +146,27 @@ export function MarkdownDiffBody({
   before,
   after,
   left,
+  actions,
+  memoryLinks,
 }: {
   before: string;
   after: string;
   left?: React.ReactNode;
+  actions?: React.ReactNode;
+  memoryLinks?: MemoryLinkHandling;
 }) {
   const [view, setView] = useState<"diff" | "preview">("diff");
   return (
     <>
       <ViewTabsBar left={left}>
         <ViewTabs value={view} options={["diff", "preview"] as const} onChange={setView} />
+        {actions}
       </ViewTabsBar>
-      {view === "diff" ? <DiffView before={before} after={after} /> : <ClampedMarkdown text={after} />}
+      {view === "diff" ? (
+        <DiffView before={before} after={after} />
+      ) : (
+        <ClampedMarkdown text={after} memoryLinks={memoryLinks} />
+      )}
     </>
   );
 }
