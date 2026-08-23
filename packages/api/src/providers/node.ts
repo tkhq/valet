@@ -28,6 +28,8 @@ import {
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
+import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -63,6 +65,8 @@ import {
   resolveHibernatedRetentionMs,
   resolveSandboxAgeReportMs,
   resolveIdleMinutes,
+  resolveOrgSandboxCeiling,
+  resolveSandboxCapacityWaitMs,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -264,7 +268,24 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Backend selection (kubernetes-deployment plan Task 6, spec decision 7):
   // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the
   // pre-Task-6 unconditional `new DockerSandboxProvider()` behavior.
-  const sandboxProvider = buildSandboxProvider(process.env);
+  //
+  // Wrapped in the per-org capacity gate (D.5): a create beyond the org's
+  // sandbox ceiling waits for capacity instead of saturating the cluster.
+  // The gate reads the EngineHost cache through a late-bound ref (the host
+  // is constructed further down, with this provider as a dep). Only
+  // slot-FREEING backends are gated: without hibernation (docker/local) a
+  // ready attachment never releases its slot short of session deletion,
+  // so a long-lived dev stack would wedge every new create at the
+  // ceiling — and those backends have no bounded pod budget to protect.
+  const gateHostRef: { current: EngineHost | null } = { current: null };
+  const rawSandboxProvider = buildSandboxProvider(process.env);
+  const sandboxProvider = rawSandboxProvider.capabilities().hibernation
+    ? withSandboxCapacityGate(rawSandboxProvider, {
+        ceiling: resolveOrgSandboxCeiling(process.env),
+        waitMs: resolveSandboxCapacityWaitMs(process.env),
+        host: () => gateHostRef.current,
+      })
+    : rawSandboxProvider;
   const imageBuilder = resolveImageBuilder(process.env);
   const eventStream = new PgEventStream(pgdb);
   const baseCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
@@ -395,6 +416,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       return statusRef(req, ctx);
     },
   });
+  // Arm the capacity gate now that the host exists — creates admitted
+  // before this line (none happen during construction) pass ungated.
+  gateHostRef.current = engineHost;
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
@@ -441,6 +465,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     engineStore,
     ageReportMs: resolveSandboxAgeReportMs(process.env),
+  });
+
+  // Hibernates idle ACTIVE sessions an api restart evicted from the host
+  // cache — the in-memory idle sweep cannot see them, and the reaper only
+  // reaps `hibernated` rows. Same idle window as the cache sweep.
+  // `start()`/`stop()` are called from `main.ts`.
+  const idleHibernationSweep = new IdleHibernationSweep({
+    db,
+    engineHost,
+    engineStore,
+    idleMs: resolveIdleMinutes(process.env) * 60_000,
   });
 
   // Backfill default bases for existing orgs (idempotent). Fires once at
@@ -661,6 +696,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
+    idleHibernationSweep,
     channelHost,
     workflowStore,
     workflowRunHost,

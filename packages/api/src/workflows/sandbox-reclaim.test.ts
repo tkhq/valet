@@ -66,6 +66,8 @@ describe("WorkflowSandboxReclaimer", () => {
     unsettledQueue?: number[];
     /** null models a backend-assigned-id provider (docker/local). */
     deriveHandles?: boolean;
+    /** Provider state for derived handles; default "ready" (a sandbox exists). */
+    sandboxState?: "ready" | "released";
     destroyError?: Error;
   } = {}) {
     const destroyedSandboxes: string[] = [];
@@ -92,6 +94,10 @@ describe("WorkflowSandboxReclaimer", () => {
           if (overrides.destroyError) throw overrides.destroyError;
           destroyedSandboxes.push(sandboxId);
         },
+        sandboxStatus: async (sandboxId) => ({
+          id: sandboxId,
+          state: overrides.sandboxState ?? ("ready" as const),
+        }),
         deriveSandboxId: (sessionKey) => {
           deriveKeys.push(sessionKey);
           return overrides.deriveHandles === false ? null : `sbx:${sessionKey}`;
@@ -231,6 +237,19 @@ describe("WorkflowSandboxReclaimer", () => {
 
     expect(evicted).toEqual([s1]);
     expect((await row(runId))?.sandboxReclaimedAt).toBeNull();
+  });
+
+  it("a never-provisioned session (Tier 0) stamps without a destroy or a metric count", async () => {
+    const runId = await seedRun();
+    const { deps, destroyedSandboxes } = fakeDeps({
+      checkpoints: [checkpoint(runId, "step_a", `wf:${runId}:step_a`)],
+      sandboxState: "released",
+    });
+
+    await new WorkflowSandboxReclaimer(deps).reclaimRun(runId, NOW);
+
+    expect(destroyedSandboxes).toEqual([]);
+    expect((await row(runId))?.sandboxReclaimedAt).toBe(NOW);
   });
 
   it("a failed destroy leaves the stamp NULL so the sweep retries", async () => {

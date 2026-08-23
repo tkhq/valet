@@ -68,6 +68,7 @@ export {
 } from "./tracing.js";
 export {
   recordCredentialRead,
+  recordSandboxCapacityWait,
   recordSandboxCreated,
   recordSandboxDestroyed,
   recordSandboxExec,

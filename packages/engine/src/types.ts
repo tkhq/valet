@@ -1016,6 +1016,19 @@ export interface SandboxCapabilities {
 
 export interface SandboxStatus {
   id: string;
+  /**
+   * `released` is load-bearing for lifecycle sweeps: it means "the
+   * backing resource does not exist" — the workflow reclaimer permanently
+   * skips its destroy on it, and the stranded-idle sweep stamps rows
+   * hibernated without a suspend. Providers MUST throw on transient
+   * backend errors rather than report `released` (kubernetes does).
+   * Caveat: sandbox-docker reports `released` for any id its in-process
+   * map has forgotten (every sandbox after an api restart, even with the
+   * container still running) — today only capability gates
+   * (`deriveId`/`hibernation`, both absent on docker) keep the sweeps off
+   * that path; fix the map-miss conflation before pointing a
+   * released-trusting consumer at docker.
+   */
   state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
   startedAt?: number;
   error?: string;

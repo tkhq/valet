@@ -27,6 +27,7 @@
 import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
+import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 60_000;
 
@@ -65,7 +66,7 @@ export interface SandboxReconcileSweepDeps {
 }
 
 export class SandboxReconcileSweep {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: SweepTimer | null = null;
 
   constructor(private readonly deps: SandboxReconcileSweepDeps) {}
 
@@ -162,21 +163,15 @@ export class SandboxReconcileSweep {
     return destroyed;
   }
 
-  /** Start the sweep interval (no-op when the provider cannot list).
-   * Unref'd — never holds the process open. */
+  /** Start the sweep interval (no-op when the provider cannot list). */
   start(): void {
     if (this.timer || !this.deps.provider.list) return;
     const intervalMs = this.deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
-    const timer = setInterval(() => {
-      void this.sweep().catch((err) => console.error("SandboxReconcileSweep: sweep failed:", err));
-    }, intervalMs);
-    timer.unref();
-    this.timer = timer;
+    this.timer = startSweepTimer("SandboxReconcileSweep", intervalMs, () => this.sweep());
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
+    this.timer?.stop();
     this.timer = null;
   }
 }

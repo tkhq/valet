@@ -411,6 +411,10 @@ export async function submitSessionPrompt(
 ): Promise<SendPromptResponse | null> {
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+  // A prompt is USE: a hibernated row flips back to active here even when
+  // the turn never touches the sandbox (chat-only — no ready transition
+  // ever fires the attachment-side hooks).
+  await engineHost.markSessionUsed(row.id);
 
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
