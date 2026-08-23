@@ -17,6 +17,7 @@ import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
+import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 
@@ -52,7 +53,7 @@ export interface HibernationReaperDeps {
 }
 
 export class HibernationReaper {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: SweepTimer | null = null;
 
   constructor(private readonly deps: HibernationReaperDeps) {}
 
@@ -117,20 +118,15 @@ export class HibernationReaper {
     }
   }
 
-  /** Start the sweep interval (no-op when retention is off). Unref'd — never holds the process open. */
+  /** Start the sweep interval (no-op when retention is off). */
   start(): void {
     if (this.timer || this.deps.retentionMs <= 0) return;
     const intervalMs = this.deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
-    const timer = setInterval(() => {
-      void this.sweep().catch((err) => console.error("HibernationReaper: sweep failed:", err));
-    }, intervalMs);
-    timer.unref();
-    this.timer = timer;
+    this.timer = startSweepTimer("HibernationReaper", intervalMs, () => this.sweep());
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
+    this.timer?.stop();
     this.timer = null;
   }
 }

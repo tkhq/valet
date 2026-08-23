@@ -22,12 +22,13 @@
  * only the sandbox and its tokens go.
  */
 import { and, eq, isNull, lte } from "drizzle-orm";
-import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
+import { recordSandboxDestroyed, type AttachmentState, type SandboxStatus } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowRuns } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { workflowSessionWorkspace } from "./engine-deps.js";
+import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 15 * 60_000;
 /** A run settled less than this long ago is left to the on-settle path. */
@@ -50,6 +51,7 @@ export interface WorkflowSandboxReclaimerDeps {
   engineHost: {
     liveSession(sessionId: string): ReclaimLiveSession | null;
     destroySandbox(sandboxId: string): Promise<void>;
+    sandboxStatus(sandboxId: string): Promise<SandboxStatus>;
     deriveSandboxId(sessionKey: string): string | null;
     evictCache(sessionId: string): void;
   };
@@ -62,7 +64,7 @@ export interface WorkflowSandboxReclaimerDeps {
 }
 
 export class WorkflowSandboxReclaimer {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: SweepTimer | null = null;
 
   constructor(private readonly deps: WorkflowSandboxReclaimerDeps) {}
 
@@ -179,9 +181,20 @@ export class WorkflowSandboxReclaimer {
       // here; say so and stop re-sweeping the run.
       const handle = this.deps.engineHost.deriveSandboxId(workflowSessionWorkspace(sessionId));
       if (handle) {
-        await this.deps.engineHost.destroySandbox(handle);
-        recordSandboxDestroyed("run_settled");
-        console.log(`WorkflowSandboxReclaimer: reclaimed sandbox ${handle} for session ${sessionId}`);
+        // Tier 0 makes never-provisioned workflow sessions the COMMON
+        // case — destroying (and counting) a sandbox that never existed
+        // would drive the created−destroyed leak alarm negative by one
+        // per settled run. Check first; "released" means nothing to do.
+        const status = await this.deps.engineHost.sandboxStatus(handle);
+        if (status.state === "released") {
+          console.log(
+            `WorkflowSandboxReclaimer: session ${sessionId} never provisioned a sandbox; nothing to reclaim`,
+          );
+        } else {
+          await this.deps.engineHost.destroySandbox(handle);
+          recordSandboxDestroyed("run_settled");
+          console.log(`WorkflowSandboxReclaimer: reclaimed sandbox ${handle} for session ${sessionId}`);
+        }
       } else {
         console.warn(
           `WorkflowSandboxReclaimer: session ${sessionId} is not cached and has no derivable sandbox handle; stamping reclaimed without a destroy`,
@@ -192,20 +205,15 @@ export class WorkflowSandboxReclaimer {
     return true;
   }
 
-  /** Start the sweep interval. Unref'd — never holds the process open. */
+  /** Start the sweep interval. */
   start(): void {
     if (this.timer) return;
     const intervalMs = this.deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
-    const timer = setInterval(() => {
-      void this.sweep().catch((err) => console.error("WorkflowSandboxReclaimer: sweep failed:", err));
-    }, intervalMs);
-    timer.unref();
-    this.timer = timer;
+    this.timer = startSweepTimer("WorkflowSandboxReclaimer", intervalMs, () => this.sweep());
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
+    this.timer?.stop();
     this.timer = null;
   }
 }

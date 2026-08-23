@@ -38,7 +38,7 @@ describe("IdleHibernationSweep", () => {
   }
 
   function fakeDeps(overrides: {
-    /** Session ids cached in the host. */
+    /** Session ids cached (or mid-build) in the host. */
     cachedSessions?: string[];
     /** Consumed per `listUnsettledSubmissions` call; empty → always settled. */
     unsettledQueue?: number[];
@@ -57,7 +57,7 @@ describe("IdleHibernationSweep", () => {
     const deps: IdleHibernationSweepDeps = {
       db,
       engineHost: {
-        liveSession: (sessionId) => (cached.has(sessionId) ? {} : null),
+        sessionLiveOrBuilding: (sessionId) => cached.has(sessionId),
         suspendSandbox: async (sandboxId) => {
           if (overrides.suspendError) throw overrides.suspendError;
           suspended.push(sandboxId);
@@ -108,7 +108,7 @@ describe("IdleHibernationSweep", () => {
     expect(suspended).toHaveLength(1);
   });
 
-  it("leaves cached sessions to the in-memory idle sweep", async () => {
+  it("leaves cached or mid-build sessions to the in-memory idle sweep", async () => {
     const id = await seed();
     const { deps, suspended } = fakeDeps({ cachedSessions: [id] });
 
@@ -134,6 +134,25 @@ describe("IdleHibernationSweep", () => {
     await new IdleHibernationSweep(deps).sweep(NOW);
 
     expect(suspended).toEqual([]);
+  });
+
+  it("null activity falls back to createdAt — a fresh never-used session is protected", async () => {
+    const id = "s-fresh";
+    await db.insert(agentSessions).values({
+      id,
+      userId: "u1",
+      orgId: "org1",
+      workspace: `/ws/${id}`,
+      status: "active",
+      createdAt: NOW - 60_000, // young session; updated_at seeded stale below
+      updatedAt: STALE,
+    });
+    const { deps, suspended } = fakeDeps({ activityAt: null });
+
+    await new IdleHibernationSweep(deps).sweep(NOW);
+
+    expect(suspended).toEqual([]);
+    expect((await row(id))?.status).toBe("active");
   });
 
   it("unsettled submissions win", async () => {

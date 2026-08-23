@@ -5,19 +5,29 @@
  * 11-way foreach demanded ~66 slots/hour of a cluster with ~28 free, and
  * nothing noticed until the scheduler saturated.
  *
- * `withSandboxCapacityGate` wraps the built `SandboxProvider`: `create()`
- * admits only while the org's live-sandbox count (ready attachments in
- * the host cache + this gate's admitted-but-not-yet-ready creates) is
- * under the ceiling. Over the ceiling, the create WAITS — the owning
- * attachment shows `provisioning`, and the wait is logged and measured —
- * up to the configured window, then fails terminally with the cause and
- * the corrective action.
+ * `withSandboxCapacityGate` wraps the built `SandboxProvider`. `create()`
+ * admits only while the org's occupied-slot count is under the ceiling.
+ * Over the ceiling, the create WAITS — the owning attachment shows
+ * `provisioning`, and the wait is logged and measured — up to the
+ * configured window, then fails terminally with the cause and the
+ * corrective action.
+ *
+ * ## Counting
+ *
+ * A slot is occupied by every cached session of the org whose attachment
+ * is `provisioning` or `ready`, MINUS the sessions currently parked at
+ * this gate (their attachments already read `provisioning`, but they hold
+ * no pod yet — counting them would deadlock a burst against itself). An
+ * admitted create leaves the waiting set and stays counted through
+ * `provider.create` AND the post-create prep window (clone, steps) until
+ * the attachment leaves `ready` — there is no moment where a live pod is
+ * invisible to the count. A failed provision drops the attachment to
+ * `error`, freeing the slot.
  *
  * Scope and known limits (spec "Deviations"):
- *   - The count is this process's view (host cache + local in-flight
- *     set). Sandboxes surviving a restart are re-counted only once their
- *     sessions re-cache; the fan-out bursts this gate exists to stop are
- *     in-process phenomena, so the window is acceptable.
+ *   - The count is this process's cache view. Sandboxes surviving a
+ *     restart re-count once their sessions re-cache; fan-out bursts are
+ *     in-process, so the window is acceptable.
  *   - `resume()` (hibernation wake) is not gated — a wake re-occupies a
  *     slot the org already consumed once. Deferred.
  *   - Admission order among waiters is poll-based, not FIFO.
@@ -30,7 +40,7 @@ const DEFAULT_POLL_INTERVAL_MS = 2_000;
  * constructed before the host); a null host admits without gating. */
 export interface CapacityGateHost {
   sessionOrgId(sessionId: string): string | null;
-  countReadySandboxSessions(orgId: string): number;
+  countLiveSandboxSessions(orgId: string): number;
 }
 
 export interface SandboxCapacityGateOpts {
@@ -51,53 +61,64 @@ export function withSandboxCapacityGate(
 ): SandboxProvider {
   if (opts.ceiling <= 0) return inner;
   const pollMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  /** Admitted creates not yet visible as `ready` in the host cache, by org. */
-  const inFlight = new Map<string, number>();
+  /** Sessions currently parked in `admit`'s poll loop, by org — subtracted
+   * from the cache count (see the counting doc above). */
+  const waitingByOrg = new Map<string, Set<string>>();
 
-  const admitted = (orgId: string): number => inFlight.get(orgId) ?? 0;
-  const bump = (orgId: string, delta: number): void => {
-    const next = admitted(orgId) + delta;
-    if (next <= 0) inFlight.delete(orgId);
-    else inFlight.set(orgId, next);
+  const waitingSet = (orgId: string): Set<string> => {
+    let set = waitingByOrg.get(orgId);
+    if (!set) {
+      set = new Set();
+      waitingByOrg.set(orgId, set);
+    }
+    return set;
   };
 
-  async function admit(sessionId: string | undefined): Promise<string | null> {
+  async function admit(sessionId: string | undefined): Promise<void> {
     const host = opts.host();
-    if (!host) return null; // pre-boot create: nothing to count against yet
-    const orgId = sessionId ? host.sessionOrgId(sessionId) : null;
-    if (!orgId) {
-      // Not a session-owned create (conformance tests, ad-hoc tooling) —
-      // there is no org to bill the slot to. Admit; the reconcile sweep's
-      // unowned report covers anything that leaks from here.
-      return null;
-    }
+    if (!host) return; // pre-boot create: nothing to count against yet
+    if (!sessionId) return; // not a session-owned create (conformance tests, tooling)
+    const orgId = host.sessionOrgId(sessionId);
+    if (!orgId) return; // uncached: not billable to an org from here
     const startedAt = Date.now();
     const deadline = startedAt + opts.waitMs;
-    let waiting = false;
-    for (;;) {
-      const live = host.countReadySandboxSessions(orgId) + admitted(orgId);
-      if (live < opts.ceiling) {
-        bump(orgId, 1);
-        if (waiting) recordSandboxCapacityWait(Date.now() - startedAt, "admitted");
-        return orgId;
+    const waiting = waitingSet(orgId);
+    waiting.add(sessionId);
+    try {
+      let waited = false;
+      for (;;) {
+        const occupied = host.countLiveSandboxSessions(orgId) - waiting.size;
+        if (occupied < opts.ceiling) {
+          if (waited) recordSandboxCapacityWait(Date.now() - startedAt, "admitted");
+          return;
+        }
+        if (Date.now() >= deadline) {
+          recordSandboxCapacityWait(Date.now() - startedAt, "timeout");
+          throw new SandboxStartupError(
+            sessionId,
+            `org sandbox ceiling reached (${opts.ceiling} concurrent). ` +
+              `Waited ${Math.round((Date.now() - startedAt) / 1000)}s for capacity. ` +
+              "Finish or pause other sessions, or raise VALET_ORG_SANDBOX_CEILING.",
+          );
+        }
+        if (!waited) {
+          waited = true;
+          console.log(
+            `SandboxCapacityGate: org ${orgId} is at its sandbox ceiling (${opts.ceiling}); ` +
+              `session ${sessionId} is waiting for capacity`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        // A session destroyed while waiting must not consume the next
+        // freed slot for a pod nobody will use — its cache entry (and so
+        // its org resolution) is gone the moment it is evicted.
+        if (host.sessionOrgId(sessionId) === null) {
+          throw new Error(`sandbox create abandoned: session ${sessionId} was destroyed while waiting for capacity`);
+        }
       }
-      if (Date.now() >= deadline) {
-        recordSandboxCapacityWait(Date.now() - startedAt, "timeout");
-        throw new SandboxStartupError(
-          sessionId ?? "sandbox",
-          `org sandbox ceiling reached (${opts.ceiling} concurrent). ` +
-            `Waited ${Math.round((Date.now() - startedAt) / 1000)}s for capacity. ` +
-            "Finish or pause other sessions, or raise VALET_ORG_SANDBOX_CEILING.",
-        );
-      }
-      if (!waiting) {
-        waiting = true;
-        console.log(
-          `SandboxCapacityGate: org ${orgId} is at its sandbox ceiling (${opts.ceiling}); ` +
-            `session ${sessionId} is waiting for capacity`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    } finally {
+      waiting.delete(sessionId);
+      if (waiting.size === 0) waitingByOrg.delete(orgId);
     }
   }
 
@@ -108,15 +129,8 @@ export function withSandboxCapacityGate(
     backend: inner.backend,
     capabilities: () => inner.capabilities(),
     create: async (createOpts) => {
-      const orgId = await admit(createOpts.sessionId);
-      try {
-        return await inner.create(createOpts);
-      } finally {
-        // The slot handed to this create is now either visible as a
-        // `ready` attachment (success, moments after create resolves) or
-        // free again (failure). Either way the in-flight hold ends.
-        if (orgId) bump(orgId, -1);
-      }
+      await admit(createOpts.sessionId);
+      return inner.create(createOpts);
     },
     restore: (id) => inner.restore(id),
     destroy: (id) => inner.destroy(id),

@@ -404,13 +404,14 @@ export class EngineHost {
 
   /**
    * Idle sweep tick (sandbox hibernation plan, Task 3, decision 3/6):
-   * iterates the host's in-memory session cache ONLY — a session evicted
-   * from cache, or never restored after an api restart, keeps a running
-   * pod/sandbox that this sweep cannot see or suspend. Boot-restore only
-   * rehydrates sessions with unsettled submissions, so an idle-but-running
-   * sandbox from before a restart hibernates only when the session is next
-   * touched (accepted Stage 1 limitation — decision 6 rejected a second,
-   * cluster-side expiry authority).
+   * iterates the host's in-memory session cache ONLY. Sessions an api
+   * restart evicted (boot-restore only rehydrates unsettled work) are the
+   * `IdleHibernationSweep`'s jurisdiction — a DB-driven complement added
+   * after 32 stranded active-but-idle assistant pods saturated a node
+   * (2026-08-22; the original "hibernates only when next touched" Stage 1
+   * limitation proved too expensive). Jurisdiction rule: cached or
+   * mid-build sessions belong HERE (this sweep reads the gateway-touch
+   * activity signal the DB sweep cannot); everything else belongs there.
    */
   private async runIdleSweep(): Promise<void> {
     const idleMs = (this.opts.idleMinutes ?? 0) * 60_000;
@@ -489,6 +490,19 @@ export class EngineHost {
    * lives as long as that `Session`'s attachment instance does.
    */
   private trackHibernationWake(sessionId: string, session: Session): void {
+    // Building INTO the cache is itself a wake in the row-status sense: a
+    // `hibernated` row whose session is being rebuilt (a prompt, a channel
+    // message, boot restore) must flip back to `active` even if the
+    // session never touches its sandbox again — a chat-only assistant
+    // makes no `ready` attachment transition, so the listener below would
+    // never fire and the row would read hibernated while the session
+    // chats. `onWake`'s write is guarded on status='hibernated', so this
+    // is a no-op for every ordinary build.
+    if (this.opts.onWake) {
+      Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
+        console.error(`EngineHost: onWake (build) failed for session ${sessionId}:`, err),
+      );
+    }
     let wasSuspended = false;
     session.attachment.onStatus((status) => {
       if (status.state === "suspended") {
@@ -1655,6 +1669,17 @@ export class EngineHost {
   }
 
   /**
+   * Cached OR currently mid-build (`inflight`). The stranded-session
+   * sweep's jurisdiction test: a session being restored right now is not
+   * yet in the cache, but suspending its sandbox out from under the build
+   * would hand the new attachment a scaled-down pod — mid-build counts as
+   * live.
+   */
+  sessionLiveOrBuilding(sessionId: string): boolean {
+    return this.cache.has(sessionId) || this.inflight.has(sessionId);
+  }
+
+  /**
    * Narrow accessor for the rotate sweep (sandbox-reconciliation plan, Task
    * 12). Returns a snapshot of every cached session whose attachment is in a
    * state the sweep can act on (`ready` or `suspended`). Exposes only the
@@ -1714,18 +1739,20 @@ export class EngineHost {
   }
 
   /**
-   * How many cached sessions of this org hold a LIVE sandbox (`ready`
-   * attachment). Deliberately excludes `provisioning`: the capacity gate
-   * counts its own admitted-but-not-yet-ready creates separately —
-   * counting `provisioning` here would deadlock a burst (every waiter
-   * would count every other waiter). `suspended` is excluded because a
-   * suspended sandbox holds no pod.
+   * How many cached sessions of this org hold (or are building) a live
+   * sandbox: attachment `provisioning` or `ready`. The capacity gate
+   * subtracts its own waiters from this count — their attachments already
+   * read `provisioning` while they hold no pod — so an admitted create
+   * stays counted through provider.create AND the post-create prep window
+   * (a live pod is never invisible to the gate). `suspended` is excluded
+   * because a suspended sandbox holds no pod; `error` frees the slot.
    */
-  countReadySandboxSessions(orgId: string): number {
+  countLiveSandboxSessions(orgId: string): number {
     let count = 0;
     for (const entry of this.cache.values()) {
       if (entry.session.options.orgId !== orgId) continue;
-      if (entry.session.attachment.state === "ready") count += 1;
+      const state = entry.session.attachment.state;
+      if (state === "provisioning" || state === "ready") count += 1;
     }
     return count;
   }

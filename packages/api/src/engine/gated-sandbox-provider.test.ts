@@ -43,18 +43,47 @@ function fakeInner(overrides: Partial<SandboxProvider> = {}): SandboxProvider & 
   };
 }
 
-function fakeHost(overrides: { orgOf?: Record<string, string>; ready?: Record<string, number> } = {}): {
-  host: CapacityGateHost;
-  setReady: (orgId: string, n: number) => void;
-} {
-  const ready = new Map(Object.entries(overrides.ready ?? {}));
-  return {
-    host: {
-      sessionOrgId: (sessionId) => overrides.orgOf?.[sessionId] ?? "org1",
-      countReadySandboxSessions: (orgId) => ready.get(orgId) ?? 0,
-    },
-    setReady: (orgId, n) => ready.set(orgId, n),
+/**
+ * Fake gate host. `countLive` mirrors the real semantics: cached sessions
+ * with a `provisioning` or `ready` attachment — which INCLUDES every
+ * session currently inside `gated.create()` (its attachment went
+ * `provisioning` before the provider was called). Tests set `others` (the
+ * org's ready pods outside the gate) and the fake adds the in-gate count
+ * the test tracks via enter/leave.
+ */
+function fakeHost(overrides: { orgOf?: Record<string, string | null> } = {}) {
+  const others = new Map<string, number>();
+  const inGate = new Map<string, number>();
+  const host: CapacityGateHost = {
+    sessionOrgId: (sessionId) =>
+      overrides.orgOf && sessionId in overrides.orgOf ? overrides.orgOf[sessionId] : "org1",
+    countLiveSandboxSessions: (orgId) => (others.get(orgId) ?? 0) + (inGate.get(orgId) ?? 0),
   };
+  return {
+    host,
+    setOthers: (orgId: string, n: number) => others.set(orgId, n),
+    /** Track one session entering/leaving the gated create (its attachment
+     * would be `provisioning` for that whole window in the real host). */
+    enter: (orgId: string) => inGate.set(orgId, (inGate.get(orgId) ?? 0) + 1),
+    leave: (orgId: string) => inGate.set(orgId, (inGate.get(orgId) ?? 0) - 1),
+  };
+}
+
+/** Drive a gated create the way the attachment does: the session's
+ * attachment is `provisioning` from before create() until (in these
+ * tests) the create settles. */
+async function createAs(
+  gated: SandboxProvider,
+  h: ReturnType<typeof fakeHost>,
+  orgId: string,
+  sessionId: string,
+): Promise<Sandbox> {
+  h.enter(orgId);
+  try {
+    return await gated.create({ sessionId });
+  } finally {
+    h.leave(orgId);
+  }
 }
 
 describe("withSandboxCapacityGate", () => {
@@ -66,10 +95,11 @@ describe("withSandboxCapacityGate", () => {
 
   it("admits under the ceiling and delegates create", async () => {
     const inner = fakeInner();
-    const { host } = fakeHost({ ready: { org1: 2 } });
-    const gated = withSandboxCapacityGate(inner, { ceiling: 5, waitMs: 0, host: () => host });
+    const h = fakeHost();
+    h.setOthers("org1", 2);
+    const gated = withSandboxCapacityGate(inner, { ceiling: 5, waitMs: 0, host: () => h.host });
 
-    const sb = await gated.create({ sessionId: "s1" });
+    const sb = await createAs(gated, h, "org1", "s1");
 
     expect(sb.id).toBe("sbx-1");
     expect(inner.created).toEqual(["s1"]);
@@ -77,91 +107,132 @@ describe("withSandboxCapacityGate", () => {
 
   it("fails fast at the ceiling when waitMs is 0, naming the corrective action", async () => {
     const inner = fakeInner();
-    const { host } = fakeHost({ ready: { org1: 5 } });
-    const gated = withSandboxCapacityGate(inner, { ceiling: 5, waitMs: 0, host: () => host });
+    const h = fakeHost();
+    h.setOthers("org1", 5);
+    const gated = withSandboxCapacityGate(inner, { ceiling: 5, waitMs: 0, host: () => h.host });
 
-    await expect(gated.create({ sessionId: "s1" })).rejects.toThrow(SandboxStartupError);
-    await expect(gated.create({ sessionId: "s1" })).rejects.toThrow(/VALET_ORG_SANDBOX_CEILING/);
+    await expect(createAs(gated, h, "org1", "s1")).rejects.toThrow(SandboxStartupError);
+    await expect(createAs(gated, h, "org1", "s1")).rejects.toThrow(/VALET_ORG_SANDBOX_CEILING/);
     expect(inner.created).toEqual([]);
   });
 
   it("a waiter admits once capacity frees", async () => {
     const inner = fakeInner();
-    const { host, setReady } = fakeHost({ ready: { org1: 5 } });
+    const h = fakeHost();
+    h.setOthers("org1", 5);
     const gated = withSandboxCapacityGate(inner, {
       ceiling: 5,
       waitMs: 5_000,
       pollIntervalMs: 5,
-      host: () => host,
+      host: () => h.host,
     });
 
-    const pending = gated.create({ sessionId: "s1" });
+    const pending = createAs(gated, h, "org1", "s1");
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(inner.created).toEqual([]); // still waiting
-    setReady("org1", 4); // a sandbox freed
+    h.setOthers("org1", 4); // a sandbox freed
 
     const sb = await pending;
     expect(sb.id).toBe("sbx-1");
   });
 
-  it("counts its own admitted-but-not-ready creates (a burst cannot over-admit)", async () => {
+  it("a burst cannot over-admit, including through the post-create prep window", async () => {
     let release: (() => void) | undefined;
     const blocked = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let createCalls = 0;
     const inner = fakeInner({
       create: async (opts) => {
-        await blocked; // hold every admitted create in flight
+        createCalls += 1;
+        if (createCalls <= 2) {
+          // The first two creates RESOLVE quickly — in the real system
+          // their attachments stay `provisioning` through prep, which
+          // `createAs`'s enter/leave models by holding the count until
+          // the whole gated create settles. The gate must not re-admit
+          // against their freed in-create state.
+          return fakeSandbox(opts.sessionId ?? "?");
+        }
+        await blocked;
         return fakeSandbox(opts.sessionId ?? "?");
       },
     });
-    const { host } = fakeHost({ ready: { org1: 0 } });
+    const h = fakeHost();
     const gated = withSandboxCapacityGate(inner, {
       ceiling: 2,
-      waitMs: 200,
+      waitMs: 150,
       pollIntervalMs: 5,
-      host: () => host,
+      host: () => h.host,
     });
 
-    const results = [
-      gated.create({ sessionId: "a" }),
-      gated.create({ sessionId: "b" }),
-      gated.create({ sessionId: "c" }),
-    ].map((p) =>
-      p.then(
-        (sb) => ({ ok: true as const, id: sb.id }),
-        (err: unknown) => ({ ok: false as const, err }),
-      ),
-    );
-    // Hold a+b in flight past c's gate timeout (200ms): while they hold
-    // the only two slots, c must never admit.
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    release?.();
-    const settled = await Promise.all(results);
+    // a and b admit and resolve; their sessions stay live (prep → ready):
+    // model by moving them into `others` after the create settles.
+    await createAs(gated, h, "org1", "a");
+    await createAs(gated, h, "org1", "b");
+    h.setOthers("org1", 2);
 
-    const admitted = settled.filter((r) => r.ok);
-    const rejected = settled.filter((r) => !r.ok);
-    // Two slots: exactly two admitted; the third timed out at the gate.
-    expect(admitted).toHaveLength(2);
-    expect(rejected).toHaveLength(1);
+    // c must wait the full window and time out — the two slots are held
+    // by a and b even though their create() calls resolved long ago.
+    const outcome = await createAs(gated, h, "org1", "c").then(
+      () => "admitted",
+      (err: unknown) => (err instanceof SandboxStartupError ? "timeout" : "other"),
+    );
+    release?.();
+
+    expect(outcome).toBe("timeout");
+    expect(createCalls).toBe(2); // only a and b ever reached the provider
   });
 
-  it("a failed create frees its in-flight slot", async () => {
-    let calls = 0;
-    const inner = fakeInner({
-      create: async (opts) => {
-        calls += 1;
-        if (calls === 1) throw new Error("boom");
-        return fakeSandbox(opts.sessionId ?? "?");
-      },
+  it("waiters do not deadlock against each other's provisioning attachments", async () => {
+    const inner = fakeInner();
+    const h = fakeHost();
+    const gated = withSandboxCapacityGate(inner, {
+      ceiling: 2,
+      waitMs: 1_000,
+      pollIntervalMs: 5,
+      host: () => h.host,
     });
-    const { host } = fakeHost({ ready: { org1: 0 } });
-    const gated = withSandboxCapacityGate(inner, { ceiling: 1, waitMs: 0, host: () => host });
 
-    await expect(gated.create({ sessionId: "a" })).rejects.toThrow("boom");
-    // The slot the failed create held is free again — no wait needed.
-    const sb = await gated.create({ sessionId: "b" });
-    expect(sb.id).toBe("b");
+    // Three concurrent creates, zero existing pods: all three attachments
+    // read `provisioning` (counted by the host), all three park at the
+    // gate. Subtracting the waiting set is what lets two of them through.
+    const results = await Promise.all([
+      createAs(gated, h, "org1", "a").then(
+        () => "admitted",
+        () => "rejected",
+      ),
+      createAs(gated, h, "org1", "b").then(
+        () => "admitted",
+        () => "rejected",
+      ),
+      createAs(gated, h, "org1", "c").then(
+        () => "admitted",
+        () => "rejected",
+      ),
+    ]);
+
+    expect(results.filter((r) => r === "admitted").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a session destroyed while waiting abandons its create instead of eating the next slot", async () => {
+    const inner = fakeInner();
+    const orgOf: Record<string, string | null> = { s1: "org1" };
+    const h = fakeHost({ orgOf });
+    h.setOthers("org1", 5);
+    const gated = withSandboxCapacityGate(inner, {
+      ceiling: 5,
+      waitMs: 5_000,
+      pollIntervalMs: 5,
+      host: () => h.host,
+    });
+
+    const pending = createAs(gated, h, "org1", "s1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    orgOf.s1 = null; // session evicted/destroyed
+    h.setOthers("org1", 4); // capacity frees right after
+
+    await expect(pending).rejects.toThrow(/destroyed while waiting/);
+    expect(inner.created).toEqual([]);
   });
 
   it("admits ungated when the host is not yet bound or the org is unresolvable", async () => {
@@ -169,24 +240,23 @@ describe("withSandboxCapacityGate", () => {
     const gatedNoHost = withSandboxCapacityGate(inner, { ceiling: 1, waitMs: 0, host: () => null });
     await gatedNoHost.create({ sessionId: "s1" });
 
-    const { host } = fakeHost({ orgOf: {}, ready: { org1: 99 } });
-    const hostNoOrg: CapacityGateHost = { ...host, sessionOrgId: () => null };
-    const gatedNoOrg = withSandboxCapacityGate(inner, { ceiling: 1, waitMs: 0, host: () => hostNoOrg });
-    await gatedNoOrg.create({}); // no sessionId at all
+    const h = fakeHost({ orgOf: { s2: null } });
+    h.setOthers("org1", 99);
+    const gated = withSandboxCapacityGate(inner, { ceiling: 1, waitMs: 0, host: () => h.host });
+    await gated.create({ sessionId: "s2" }); // uncached session
+    await gated.create({}); // no sessionId at all
 
-    expect(inner.created).toHaveLength(2);
+    expect(inner.created).toHaveLength(3);
   });
 
   it("orgs do not contend with each other", async () => {
     const inner = fakeInner();
-    const { host } = fakeHost({
-      orgOf: { a: "org1", b: "org2" },
-      ready: { org1: 5, org2: 0 },
-    });
-    const gated = withSandboxCapacityGate(inner, { ceiling: 5, waitMs: 0, host: () => host });
+    const h = fakeHost({ orgOf: { a: "org1", b: "org2" } });
+    h.setOthers("org1", 5);
+    const gated = withSandboxCapacityGate(inner, { ceiling: 5, waitMs: 0, host: () => h.host });
 
-    await expect(gated.create({ sessionId: "a" })).rejects.toThrow(SandboxStartupError);
-    await expect(gated.create({ sessionId: "b" })).resolves.toBeDefined();
+    await expect(createAs(gated, h, "org1", "a")).rejects.toThrow(SandboxStartupError);
+    await expect(createAs(gated, h, "org2", "b")).resolves.toBeDefined();
   });
 
   it("preserves optional-member ABSENCE (capability presence checks stay honest)", () => {

@@ -2323,15 +2323,19 @@ export class Thread {
    * unconditionally in the turn's finally, regardless of whether a role was
    * also applied this turn.
    *
-   * Skipped entirely for `warmSandboxOnClaim: false` sessions while the
-   * attachment isn't ready: nothing is provisioning in that case (no warm()
-   * kick happened this turn), so a "provisioning" hint would be false. The
-   * lazy attachment contract covers first touch silently instead.
+   * For `warmSandboxOnClaim: false` sessions the hint applies only while
+   * the attachment is actually `provisioning` — a lazy session's earlier
+   * turn may have kicked a provision that is still booting when this turn
+   * claims. In the `detached` state nothing is provisioning (no warm()
+   * kick happened), so a "provisioning" hint would be false and the lazy
+   * first-touch contract covers it silently instead.
    */
   private applyColdHintForTurn(): string {
     const preHintPrompt = this.agent.state.systemPrompt;
     if (this.session.attachment.state === "ready") return preHintPrompt;
-    if (this.session.options.warmSandboxOnClaim === false) return preHintPrompt;
+    if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
+      return preHintPrompt;
+    }
     const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
     const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
     this.agent.state.systemPrompt = preHintPrompt + hint;
