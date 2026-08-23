@@ -47,9 +47,35 @@ design.
    whatever was idle at that moment), and this sweep is that window's
    named owner. Kubernetes-only in effect (gated on hibernation
    capability + derivable sandbox ids).
-3. **Backpressure: sandbox slots are a bounded per-org resource.** (See
-   the backpressure section below.)
+3. **Backpressure: sandbox slots are a bounded per-org resource.**
+   `withSandboxCapacityGate`
+   (`packages/api/src/engine/gated-sandbox-provider.ts`) wraps the built
+   `SandboxProvider`. A `create()` admits only while the org's live count
+   (ready attachments in the host cache + the gate's
+   admitted-but-not-yet-ready creates) is under
+   `VALET_ORG_SANDBOX_CEILING` (default 25; `<= 0` disables). Over the
+   ceiling the create WAITS — logged, and measured by the
+   `valet.sandbox.capacity_wait{outcome}` histogram — up to
+   `VALET_SANDBOX_CAPACITY_WAIT_MINUTES` (default 10; `0` fails fast),
+   then fails terminally (`SandboxStartupError`) naming the ceiling and
+   the corrective action. The gate counts its own in-flight admissions
+   separately from cache state, so a fan-out burst cannot deadlock on
+   its own `provisioning` attachments. Org resolution rides the host
+   cache (`sessionOrgId`); creates with no resolvable org (conformance
+   tests, tooling) admit ungated and fall under the reconcile sweep's
+   unowned report.
 
 ## Deviations & notes
 
-- (grows as the implementation lands)
+- Capacity-gate scope, v1: the count is one process's view (host cache +
+  local in-flight set) — sandboxes surviving a restart re-count only as
+  their sessions re-cache, and a multi-replica api would need a shared
+  count. Fan-out bursts are in-process, so this covers the incident
+  class. `resume()` (hibernation wake) is not gated; admission order
+  among waiters is poll-based, not FIFO. There is also a bounded
+  over-admit window (≤1 per concurrent create, milliseconds) between a
+  create resolving and its attachment reaching `ready`.
+- The wait is visible to operators (log + metric) and to the user as the
+  eventual terminal error; a dedicated "waiting for sandbox capacity"
+  wire state for the session UI and the workflow run timeline is
+  deferred until the web client grows a surface for it.

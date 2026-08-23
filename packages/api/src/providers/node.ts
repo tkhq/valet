@@ -29,6 +29,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -64,6 +65,8 @@ import {
   resolveHibernatedRetentionMs,
   resolveSandboxAgeReportMs,
   resolveIdleMinutes,
+  resolveOrgSandboxCeiling,
+  resolveSandboxCapacityWaitMs,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -265,7 +268,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Backend selection (kubernetes-deployment plan Task 6, spec decision 7):
   // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the
   // pre-Task-6 unconditional `new DockerSandboxProvider()` behavior.
-  const sandboxProvider = buildSandboxProvider(process.env);
+  //
+  // Wrapped in the per-org capacity gate (D.5): a create beyond the org's
+  // sandbox ceiling waits for capacity instead of saturating the cluster.
+  // The gate reads the EngineHost cache through a late-bound ref (the host
+  // is constructed further down, with this provider as a dep).
+  const gateHostRef: { current: EngineHost | null } = { current: null };
+  const sandboxProvider = withSandboxCapacityGate(buildSandboxProvider(process.env), {
+    ceiling: resolveOrgSandboxCeiling(process.env),
+    waitMs: resolveSandboxCapacityWaitMs(process.env),
+    host: () => gateHostRef.current,
+  });
   const imageBuilder = resolveImageBuilder(process.env);
   const eventStream = new PgEventStream(pgdb);
   const baseCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
@@ -396,6 +409,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       return statusRef(req, ctx);
     },
   });
+  // Arm the capacity gate now that the host exists — creates admitted
+  // before this line (none happen during construction) pass ungated.
+  gateHostRef.current = engineHost;
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer

@@ -183,6 +183,34 @@ export function resolveSandboxAgeReportMs(env: NodeJS.ProcessEnv): number {
   return n * 3_600_000;
 }
 
+/**
+ * Max concurrent live sandboxes one org may hold
+ * (`VALET_ORG_SANDBOX_CEILING`, default 25), enforced by the capacity
+ * gate (`engine/gated-sandbox-provider.ts`). A fan-out that needs more
+ * WAITS at the gate instead of saturating the cluster. Zero, negative,
+ * or non-numeric disables the gate.
+ */
+export function resolveOrgSandboxCeiling(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_ORG_SANDBOX_CEILING;
+  if (raw === undefined || raw === "") return 25;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
+/**
+ * How long an over-ceiling sandbox create waits for capacity before it
+ * fails terminally (`VALET_SANDBOX_CAPACITY_WAIT_MINUTES`, default 10).
+ * Zero, negative, or non-numeric means fail fast (no wait).
+ */
+export function resolveSandboxCapacityWaitMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_SANDBOX_CAPACITY_WAIT_MINUTES;
+  if (raw === undefined || raw === "") return 10 * 60_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 60_000;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

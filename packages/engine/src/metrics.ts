@@ -34,6 +34,7 @@ interface Instruments {
   sandboxCreated: Counter;
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
+  sandboxCapacityWait: Histogram;
 }
 
 let instruments: Instruments | null = null;
@@ -86,6 +87,11 @@ function inst(): Instruments {
     sandboxFlagged: meter.createCounter("valet.sandbox.flagged", {
       description:
         "Sandboxes flagged by the reconcile sweep without a destroy, by kind (over_age, unowned). A sustained non-zero rate means a lifecycle owner failed to clean up — the alert signal for the alert-don't-auto-repair rule.",
+    }),
+    sandboxCapacityWait: meter.createHistogram("valet.sandbox.capacity_wait", {
+      unit: "ms",
+      description:
+        "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
     }),
   };
   return instruments;
@@ -172,4 +178,10 @@ export function recordSandboxDestroyed(reason: SandboxDestroyReason): void {
  * condition persists, so `increase(...) > 0` alerts cleanly. */
 export function recordSandboxFlagged(kind: SandboxFlagKind, count: number): void {
   if (count > 0) inst().sandboxFlagged.add(count, { kind });
+}
+
+/** A create's wait at the per-org capacity gate. Recorded only when the
+ * create actually waited (or timed out) — an uncontended admit is silent. */
+export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" | "timeout"): void {
+  inst().sandboxCapacityWait.record(waitedMs, { outcome });
 }

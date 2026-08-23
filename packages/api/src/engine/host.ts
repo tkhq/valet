@@ -1705,6 +1705,31 @@ export class EngineHost {
     this.tokenMintedAt.set(sessionId, mintedAt);
   }
 
+  /** The cached session's org, or null when uncached — the capacity
+   * gate's org-resolution seam (`gated-sandbox-provider.ts`). A
+   * provisioning attachment always belongs to a cached session, so a null
+   * here means the create did not come from a session at all. */
+  sessionOrgId(sessionId: string): string | null {
+    return this.cache.get(sessionId)?.session.options.orgId ?? null;
+  }
+
+  /**
+   * How many cached sessions of this org hold a LIVE sandbox (`ready`
+   * attachment). Deliberately excludes `provisioning`: the capacity gate
+   * counts its own admitted-but-not-yet-ready creates separately —
+   * counting `provisioning` here would deadlock a burst (every waiter
+   * would count every other waiter). `suspended` is excluded because a
+   * suspended sandbox holds no pod.
+   */
+  countReadySandboxSessions(orgId: string): number {
+    let count = 0;
+    for (const entry of this.cache.values()) {
+      if (entry.session.options.orgId !== orgId) continue;
+      if (entry.session.attachment.state === "ready") count += 1;
+    }
+    return count;
+  }
+
   /**
    * Stamps `sessionId`'s last-gateway-touch time to `Date.now()` (final-
    * review fix wave, hibernation arc). Called by `routes/gateway-proxy.ts`
