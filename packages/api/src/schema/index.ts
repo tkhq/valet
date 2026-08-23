@@ -783,7 +783,10 @@ export const memoryFiles = pgTable(
 // `orgs.allow_public_artifacts` is on). The tool surface can only create
 // `org` rows; widening to `public` is a human UI action recorded in
 // `public_by`. Revoke sets `revoked_at` and keeps the row for audit;
-// re-share after revoke mints a fresh token so a leaked link stays dead.
+// re-share after revoke mints a fresh token (a leaked link stays dead)
+// AND resets visibility to `org` — revoke ends the audience decision
+// along with the link, so the tool surface can never restore anonymous
+// access.
 export const artifacts = pgTable(
   "artifacts",
   {

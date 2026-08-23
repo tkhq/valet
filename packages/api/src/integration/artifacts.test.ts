@@ -83,10 +83,13 @@ describe("api integration: artifacts", () => {
       await writeMemoryFile(api.baseUrl, "artifacts/plan.md", "# Plan\n\nBody.\n");
       const shared = await share(api.baseUrl, "artifacts/plan.md");
 
+      // Revoke with a NON-canonical spelling of the same path — rows store
+      // the normalized path, and revoke must normalize too, or the link
+      // stays live behind a 404.
       const revoke = await fetch(`${api.baseUrl}/api/artifacts/share`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "artifacts/plan.md", revoke: true }),
+        body: JSON.stringify({ path: "/artifacts/plan.md", revoke: true }),
       });
       expect(revoke.status).toBe(200);
       expect((await fetch(readUrl(api.baseUrl, shared.url))).status).toBe(404);
@@ -152,6 +155,15 @@ describe("api integration: artifacts", () => {
         body: JSON.stringify({ path: "artifacts/never-shared.md", revoke: true }),
       });
       expect(revoke.status).toBe(404);
+
+      // Reserved-path shapes are a 400 (mapped ReservedPathError), never a
+      // 500 — the same mapping the memory routes use.
+      const reserved = await fetch(`${api.baseUrl}/api/artifacts/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "artifacts/../escape.md" }),
+      });
+      expect(reserved.status).toBe(400);
     } finally {
       await api.cleanup();
     }
@@ -205,6 +217,38 @@ describe("api integration: artifacts", () => {
       });
       expect(narrowed.status).toBe(200);
       expect(((await narrowed.json()) as { visibility: string }).visibility).toBe("org");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("re-share after revoke RESETS a widened artifact to org visibility", async () => {
+    const api = await bootTestApi();
+    try {
+      await writeMemoryFile(api.baseUrl, "artifacts/leak-check.md", "# Leak Check\n\nBody.\n");
+      const shared = await share(api.baseUrl, "artifacts/leak-check.md");
+
+      // Human actions: enable the opt-in, widen to public, then revoke.
+      await fetch(`${api.baseUrl}/api/org/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowPublicArtifacts: true }),
+      });
+      const widened = await fetch(`${api.baseUrl}/api/artifacts/${shared.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ visibility: "public" }),
+      });
+      expect(((await widened.json()) as { visibility: string }).visibility).toBe("public");
+      await fetch(`${api.baseUrl}/api/artifacts/${shared.id}`, { method: "DELETE" });
+
+      // The agent re-shares. Revoke ended the audience decision, so the
+      // reactivated link must be org-visibility again — the tool surface
+      // must never be the thing that restores anonymous access.
+      const reshared = await share(api.baseUrl, "artifacts/leak-check.md");
+      expect(reshared.visibility).toBe("org");
+      const read = await fetch(readUrl(api.baseUrl, reshared.url));
+      expect(((await read.json()) as GetArtifactResponse).visibility).toBe("org");
     } finally {
       await api.cleanup();
     }

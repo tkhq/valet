@@ -59,14 +59,70 @@ export interface BuildAuthMiddlewareOpts {
 }
 
 /**
+ * The AuthUser for a resolved better-auth session, or `undefined` when
+ * none resolves. The try/catch is the "don't trust the auth provider not
+ * to throw" rule — a malformed/oversized cookie must read as no-session,
+ * not a 500. Shared by rung 3 of the ladder and `resolveOptionalUser`.
+ */
+async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Promise<AuthUser | undefined> {
+  let sessionResult: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
+  try {
+    sessionResult = await auth.api.getSession({ headers });
+  } catch {
+    sessionResult = null;
+  }
+  if (!sessionResult) return undefined;
+  return {
+    id: sessionResult.user.id,
+    email: sessionResult.user.email,
+    name: sessionResult.user.name,
+    role: normalizeRole(sessionResult.user.role),
+    orgId: await resolveOrgId(db),
+  };
+}
+
+/** The AuthUser behind a valid api key, or `undefined` for an invalid,
+ * malformed, or dangling one. Shared by rung 4 and `resolveOptionalUser`. */
+async function userFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<AuthUser | undefined> {
+  let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
+  try {
+    result = await auth.api.verifyApiKey({ body: { key } });
+  } catch {
+    return undefined;
+  }
+  if (!result.valid || !result.key) return undefined;
+  const rows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
+  const row = rows[0];
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name ?? undefined,
+    role: row.role,
+    orgId: await resolveOrgId(db),
+  };
+}
+
+/** The seeded local-dev identity (an admin) — rung 5's stub default. */
+function stubUser(): AuthUser {
+  return {
+    id: LOCAL_USER.id,
+    email: LOCAL_USER.email,
+    name: LOCAL_USER.name,
+    role: LOCAL_USER.role,
+    orgId: LOCAL_ORG.id,
+  };
+}
+
+/**
  * Best-effort caller identity for routes mounted BEFORE the auth
  * middleware that still want to know who is asking (today: the public
  * artifact read, whose `org` visibility serves logged-in org members and
- * 401s everyone else). Mirrors rungs 3 (session) and 5 (stub) of the
- * ladder below, but never writes a response: `undefined` means anonymous,
- * and the route decides what that means. Deliberately narrower than the
- * middleware — no internal-token, sandbox, or api-key rungs, because a
- * public content URL is a browser surface, not a programmatic one.
+ * 401s everyone else). Resolves through the same identity builders the
+ * ladder below uses (session, api key, stub), but never writes a
+ * response: `undefined` means anonymous, and the route decides what that
+ * means. Deliberately narrower than the middleware — no internal-token or
+ * sandbox rungs, because those principals carry no user identity.
  */
 export async function resolveOptionalUser(
   c: Context<AppEnv>,
@@ -74,36 +130,18 @@ export async function resolveOptionalUser(
 ): Promise<AuthUser | undefined> {
   const { auth, db } = opts;
   if (auth) {
-    // Same "don't trust the auth provider not to throw" rule as rung 3.
-    let sessionResult: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
-    try {
-      sessionResult = await auth.api.getSession({ headers: c.req.raw.headers });
-    } catch {
-      sessionResult = null;
-    }
-    if (!sessionResult) return undefined;
-    return {
-      id: sessionResult.user.id,
-      email: sessionResult.user.email,
-      name: sessionResult.user.name,
-      role: normalizeRole(sessionResult.user.role),
-      orgId: await resolveOrgId(db),
-    };
+    const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
+    if (sessionUser) return sessionUser;
+    const apiKeyHeader = c.req.header("x-api-key");
+    if (apiKeyHeader) return userFromApiKey(auth, db, apiKeyHeader);
+    return undefined;
   }
 
   // Stub identity — same gate as rung 5: only when NO real auth instance
   // exists. Anonymous access is untestable through HTTP in stub mode (the
   // stub answers for everyone); the artifact access matrix covers it in
   // unit tests instead (`services/artifacts.ts`'s `decideArtifactAccess`).
-  if (process.env.VALET_LOCAL_AUTH === "1") {
-    return {
-      id: LOCAL_USER.id,
-      email: LOCAL_USER.email,
-      name: LOCAL_USER.name,
-      role: LOCAL_USER.role,
-      orgId: LOCAL_ORG.id,
-    };
-  }
+  if (process.env.VALET_LOCAL_AUTH === "1") return stubUser();
 
   return undefined;
 }
@@ -181,52 +219,24 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 
     if (auth) {
       // 3. Session (cookie or session header). A malformed/oversized cookie
-      // must fall through to the next rung, not 500 — better-auth doesn't
-      // guarantee it returns null instead of throwing on garbage input.
-      let sessionResult: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
-      try {
-        sessionResult = await auth.api.getSession({ headers: c.req.raw.headers });
-      } catch {
-        sessionResult = null;
-      }
-      if (sessionResult) {
-        c.set("user", {
-          id: sessionResult.user.id,
-          email: sessionResult.user.email,
-          name: sessionResult.user.name,
-          role: normalizeRole(sessionResult.user.role),
-          orgId: await resolveOrgId(db),
-        } satisfies AuthUser);
+      // must fall through to the next rung, not 500 — `userFromSession`
+      // absorbs the throw.
+      const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
+      if (sessionUser) {
+        c.set("user", sessionUser);
         await next();
         return;
       }
 
-      // 4. API key — explicit credential, invalid always 401s. A
-      // malformed/oversized key must 401 cleanly rather than 500 — same
-      // "don't trust the auth provider not to throw" rule as rung 3.
+      // 4. API key — explicit credential, invalid always 401s (malformed,
+      // unverified, and dangling keys all resolve to `undefined`).
       const apiKeyHeader = c.req.header("x-api-key");
       if (apiKeyHeader) {
-        let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
-        try {
-          result = await auth.api.verifyApiKey({ body: { key: apiKeyHeader } });
-        } catch {
+        const apiKeyUser = await userFromApiKey(auth, db, apiKeyHeader);
+        if (!apiKeyUser) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        if (!result.valid || !result.key) {
-          return c.json({ error: "invalid api key" }, 401);
-        }
-        const apiKeyRows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
-        const row = apiKeyRows[0];
-        if (!row) {
-          return c.json({ error: "invalid api key" }, 401);
-        }
-        c.set("user", {
-          id: row.id,
-          email: row.email,
-          name: row.name ?? undefined,
-          role: row.role,
-          orgId: await resolveOrgId(db),
-        } satisfies AuthUser);
+        c.set("user", apiKeyUser);
         await next();
         return;
       }
@@ -253,13 +263,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         }
       }
 
-      c.set("user", {
-        id: LOCAL_USER.id,
-        email: LOCAL_USER.email,
-        name: LOCAL_USER.name,
-        role: LOCAL_USER.role,
-        orgId: LOCAL_ORG.id,
-      } satisfies AuthUser);
+      c.set("user", stubUser());
       await next();
       return;
     }

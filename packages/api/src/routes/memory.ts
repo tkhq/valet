@@ -137,9 +137,11 @@ function authorizeOwner(db: AppDb, owner: Principal, callerId: string, access: S
  * memory. One chokepoint cannot be half-applied.
  *
  * Exported for `routes/artifacts.ts`: sharing acts on a memory scope, so
- * the share route resolves its caller (internal tool headers, sandbox
- * principal, or session user + `?ownerType=&ownerId=`) through this same
- * chokepoint rather than a second copy of the ladder.
+ * the share route resolves its caller (internal tool headers, or session
+ * user + `?ownerType=&ownerId=`) through this same chokepoint rather than
+ * a second copy of the ladder. The sandbox branch below never fires there
+ * — the auth middleware only admits sandbox tokens on `/api/memory` and
+ * `/api/sandbox` prefixes.
  */
 export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
   const internalHeader = c.req.header("x-valet-internal");
@@ -187,8 +189,10 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
 }
 
 /** Maps service-layer errors to HTTP responses. Rethrows anything else so
- * the app's global error handler produces a 500. */
-function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 400 | 404 } | null {
+ * the app's global error handler produces a 500. Exported for
+ * `routes/artifacts.ts`, whose share path runs through the same memory
+ * service and throws the same error shapes. */
+export function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 400 | 404 } | null {
   if (err instanceof ReservedPathError) {
     return { body: { error: err.message, code: "reserved_path" }, status: 400 };
   }

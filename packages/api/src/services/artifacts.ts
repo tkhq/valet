@@ -13,9 +13,10 @@
  * `allow_public_artifacts` opt-in, live-checked on every read.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { NotFoundError, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
+import { normalizePath } from "../lib/okf.js";
 import { artifacts, orgs } from "../schema/index.js";
 import { readFile, type MemoryScope } from "./memory.js";
 
@@ -68,52 +69,63 @@ export async function shareArtifact(db: AppDb, scope: MemoryScope, opts: ShareAr
   const existing = existingRows[0];
 
   if (existing) {
-    // A revoked artifact's token may have leaked — that is usually why it
-    // was revoked — so reactivation replaces it.
-    const token = existing.revokedAt === null ? existing.token : mintToken();
-    await db
+    const reactivating = existing.revokedAt !== null;
+    const [row] = await db
       .update(artifacts)
       .set({
-        token,
+        // A revoked artifact's token may have leaked — that is usually why
+        // it was revoked — so reactivation replaces it.
+        token: reactivating ? mintToken() : existing.token,
         title: result.file.title,
         content: result.file.content,
         actorUserId: scope.actorUserId,
         sourceSessionId: opts.sourceSessionId ?? existing.sourceSessionId,
         updatedAt: now,
         revokedAt: null,
+        // A live refresh keeps the stored visibility (a human widened it;
+        // re-publishing content is not a scope decision). Reactivating a
+        // REVOKED row resets to `org`: revoke ended the audience decision
+        // along with the link, and the tool surface must never be the
+        // thing that restores anonymous access.
+        ...(reactivating ? { visibility: "org" as const, publicBy: null } : {}),
       })
-      .where(eq(artifacts.id, existing.id));
-    const rows = await db.select().from(artifacts).where(eq(artifacts.id, existing.id)).limit(1);
-    const row = rows[0];
+      .where(eq(artifacts.id, existing.id))
+      .returning();
     if (!row) throw new NotFoundError("artifact", existing.id);
     return row;
   }
 
-  const row: typeof artifacts.$inferInsert = {
-    id: randomUUID(),
-    token: mintToken(),
-    ownerType: scope.owner.type,
-    ownerId: scope.owner.id,
-    orgId: opts.orgId,
-    actorUserId: scope.actorUserId,
-    sourceSessionId: opts.sourceSessionId ?? "",
-    sourceMemoryPath: result.file.path,
-    title: result.file.title,
-    content: result.file.content,
-    visibility: "org",
-    createdAt: now,
-    updatedAt: now,
-  };
-  await db.insert(artifacts).values(row);
-  const rows = await db.select().from(artifacts).where(eq(artifacts.id, row.id)).limit(1);
-  const inserted = rows[0];
-  if (!inserted) throw new NotFoundError("artifact", row.id);
+  const [inserted] = await db
+    .insert(artifacts)
+    .values({
+      id: randomUUID(),
+      token: mintToken(),
+      ownerType: scope.owner.type,
+      ownerId: scope.owner.id,
+      orgId: opts.orgId,
+      actorUserId: scope.actorUserId,
+      sourceSessionId: opts.sourceSessionId ?? "",
+      sourceMemoryPath: result.file.path,
+      title: result.file.title,
+      content: result.file.content,
+      visibility: "org",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  if (!inserted) throw new NotFoundError("artifact", "inserted row");
   return inserted;
 }
 
 /** Revoke the active artifact for `path` in this scope. 404 when nothing
  * is shared at that path. */
 export async function revokeArtifactByPath(db: AppDb, scope: MemoryScope, path: string): Promise<void> {
+  // Rows store the CANONICAL memory path (share reads through `readFile`,
+  // which normalizes). Normalize here too, or a caller who shared with
+  // '/x.md' and revokes with the same string misses the row — a 404 while
+  // the link stays live. Throws ReservedPathError for garbage, same as
+  // the share path.
+  const normalized = normalizePath(path);
   const rows = await db
     .select()
     .from(artifacts)
@@ -121,13 +133,13 @@ export async function revokeArtifactByPath(db: AppDb, scope: MemoryScope, path: 
       and(
         eq(artifacts.ownerType, scope.owner.type),
         eq(artifacts.ownerId, scope.owner.id),
-        eq(artifacts.sourceMemoryPath, path),
+        eq(artifacts.sourceMemoryPath, normalized),
         isNull(artifacts.revokedAt),
       ),
     )
     .limit(1);
   const row = rows[0];
-  if (!row) throw new NotFoundError("artifact", path);
+  if (!row) throw new NotFoundError("artifact", normalized);
   await db.update(artifacts).set({ revokedAt: Date.now() }).where(eq(artifacts.id, row.id));
 }
 
@@ -141,16 +153,39 @@ export async function getArtifactById(db: AppDb, id: string): Promise<ArtifactRo
   return rows[0];
 }
 
+/** Everything the list/manage surfaces need — deliberately WITHOUT
+ * `content`: a list of shares must not drag every snapshot body out of
+ * the database. */
+export interface ArtifactSummaryRow {
+  id: string;
+  token: string;
+  sourceMemoryPath: string;
+  title: string;
+  visibility: "org" | "public";
+  revokedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const summaryColumns = {
+  id: artifacts.id,
+  token: artifacts.token,
+  sourceMemoryPath: artifacts.sourceMemoryPath,
+  title: artifacts.title,
+  visibility: artifacts.visibility,
+  revokedAt: artifacts.revokedAt,
+  createdAt: artifacts.createdAt,
+  updatedAt: artifacts.updatedAt,
+};
+
 /** The caller's own shares — the rows where they were the sharing actor.
  * Org admins additionally see every artifact in the org. */
 export async function listArtifacts(
   db: AppDb,
   caller: { id: string; orgId: string; orgAdmin: boolean },
-): Promise<ArtifactRow[]> {
-  const rows = caller.orgAdmin
-    ? await db.select().from(artifacts).where(eq(artifacts.orgId, caller.orgId))
-    : await db.select().from(artifacts).where(eq(artifacts.actorUserId, caller.id));
-  return rows.sort((a, b) => b.updatedAt - a.updatedAt);
+): Promise<ArtifactSummaryRow[]> {
+  const where = caller.orgAdmin ? eq(artifacts.orgId, caller.orgId) : eq(artifacts.actorUserId, caller.id);
+  return db.select(summaryColumns).from(artifacts).where(where).orderBy(desc(artifacts.updatedAt));
 }
 
 export async function setArtifactVisibility(
@@ -159,7 +194,7 @@ export async function setArtifactVisibility(
   visibility: ArtifactVisibility,
   actorUserId: string,
 ): Promise<ArtifactRow> {
-  await db
+  const [row] = await db
     .update(artifacts)
     .set({
       visibility,
@@ -168,9 +203,8 @@ export async function setArtifactVisibility(
       publicBy: visibility === "public" ? actorUserId : null,
       updatedAt: Date.now(),
     })
-    .where(eq(artifacts.id, id));
-  const rows = await db.select().from(artifacts).where(eq(artifacts.id, id)).limit(1);
-  const row = rows[0];
+    .where(eq(artifacts.id, id))
+    .returning();
   if (!row) throw new NotFoundError("artifact", id);
   return row;
 }

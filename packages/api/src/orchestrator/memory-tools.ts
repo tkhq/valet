@@ -371,12 +371,15 @@ export const memShareTool = defineTool({
         const body = asShareResultBody(await parseJsonBody(res));
         if (!body?.url) return { text: `[memory_error] share succeeded but returned no URL` };
         // State the audience so the agent relays it accurately (spec, Tool
-        // surface): the reader must know a login is required.
-        return {
-          text:
-            `shared ${args.path} → ${body.url}\n` +
-            `Audience: logged-in members of the user's org. The user can widen or revoke this link from the memory page.`,
-        };
+        // surface) — from the response's ACTUAL visibility, not an
+        // assumption: refreshing a document a human already widened keeps
+        // it public, and telling the user "login required" for an
+        // anonymous link is exactly the misreport this line must prevent.
+        const audience =
+          body.visibility === "public"
+            ? "Anyone with the link — no login required (a human widened this link earlier)."
+            : "Logged-in members of the user's org. The user can widen or revoke this link from the memory page.";
+        return { text: `shared ${args.path} → ${body.url}\nAudience: ${audience}` };
       },
     );
   },

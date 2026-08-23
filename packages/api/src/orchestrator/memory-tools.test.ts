@@ -276,7 +276,7 @@ describe("mem_* tools: real HTTP round trip", () => {
     expect(shared.text).toContain("/a/");
     // The audience line is what the agent relays — it must state the login
     // requirement, not imply a public link.
-    expect(shared.text).toContain("logged-in members");
+    expect(shared.text).toContain("Logged-in members");
 
     const revoked = await memShareTool.execute({ path: "artifacts/report.md", revoke: true }, ctx);
     expect(revoked.text).toBe("revoked share for artifacts/report.md");

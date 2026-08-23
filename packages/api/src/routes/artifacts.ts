@@ -23,7 +23,6 @@
  */
 import { Hono, type Context } from "hono";
 import { eq } from "drizzle-orm";
-import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { ValetAuth } from "../auth/index.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -33,7 +32,7 @@ import { requireUser, resolveOptionalUser, type AuthUser } from "../middleware/a
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
-import { resolveScope } from "./memory.js";
+import { handleServiceError, resolveScope } from "./memory.js";
 import type { MemoryScope } from "../services/memory.js";
 import {
   decideArtifactAccess,
@@ -46,6 +45,7 @@ import {
   setArtifactVisibility,
   shareArtifact,
   type ArtifactRow,
+  type ArtifactSummaryRow,
 } from "../services/artifacts.js";
 import type {
   ArtifactListItem,
@@ -56,19 +56,35 @@ import type {
   ShareArtifactResponse,
 } from "../wire/types.js";
 
-/** Share-link base: the deployment's public URL when one is configured
- * (`VALET_PUBLIC_URL` / public https `BETTER_AUTH_URL` — the same chain
- * webhook registration uses), else the origin the request itself arrived
- * on, which is what a dev stack's browser can actually reach. */
+/** `BETTER_AUTH_URL`'s origin, even when `publicUrlFromEnv` rejects it
+ * (http, localhost, `*.localdev`). Those are still the address users load
+ * the app FROM in dev and localdev deploys — unlike the request origin. */
+function authUrlOrigin(env: NodeJS.ProcessEnv): string | undefined {
+  if (!env.BETTER_AUTH_URL) return undefined;
+  try {
+    return new URL(env.BETTER_AUTH_URL).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Share-link base, in trust order: the deployment's public URL
+ * (`VALET_PUBLIC_URL` / public https `BETTER_AUTH_URL` — the chain
+ * webhook registration uses), else `BETTER_AUTH_URL`'s origin verbatim,
+ * else the origin the request arrived on. The last resort is only right
+ * for browser-originated requests; a `mem_share` tool call reaches this
+ * process over its own loopback (`apiBaseUrl` in `main.ts`), so without
+ * the `BETTER_AUTH_URL` rung every helm/localdev deploy would mint
+ * unreachable `http://127.0.0.1:8788/a/…` links. */
 function shareUrlBase(c: Context<AppEnv>): string {
-  return publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
+  return publicUrlFromEnv(process.env) ?? authUrlOrigin(process.env) ?? new URL(c.req.url).origin;
 }
 
 function shareUrl(c: Context<AppEnv>, token: string): string {
   return `${shareUrlBase(c)}/a/${token}`;
 }
 
-function toListItem(c: Context<AppEnv>, row: ArtifactRow): ArtifactListItem {
+function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListItem {
   return {
     id: row.id,
     path: row.sourceMemoryPath,
@@ -81,27 +97,43 @@ function toListItem(c: Context<AppEnv>, row: ArtifactRow): ArtifactListItem {
   };
 }
 
-/** Same service-error mapping the memory routes use — shares fail with the
- * memory service's own error shapes (reserved path, not found, etc.). */
-function mapServiceError(err: unknown): { body: { error: string; code?: string }; status: 400 | 404 } | null {
-  if (err instanceof NotFoundError) {
-    return { body: { error: err.message, code: "not_found" }, status: 404 };
-  }
-  if (err instanceof ValidationError) {
-    return { body: { error: err.message, code: "validation_error" }, status: 400 };
-  }
-  if (err instanceof ValetError && (err.statusCode === 404 || err.statusCode === 400)) {
-    return { body: { error: err.message, code: err.code }, status: err.statusCode };
-  }
-  return null;
-}
-
 // ─── Public read ───────────────────────────────────────────────────────
 
 /** Generous per-IP bound on token guessing. 128-bit tokens make guessing
  * hopeless anyway; the limiter just keeps a scanner from being free. */
 const PUBLIC_READ_LIMIT = 120;
 const PUBLIC_READ_WINDOW_MS = 60_000;
+
+/** The socket peer address, when the runtime exposes it. `@hono/node-server`
+ * hands the raw `IncomingMessage` through `c.env.incoming`; other adapters
+ * (Bun) don't, and this narrows to `undefined` there. */
+function socketAddress(c: Context<AppEnv>): string | undefined {
+  const env: unknown = c.env;
+  if (typeof env !== "object" || env === null || !("incoming" in env)) return undefined;
+  const incoming = (env as { incoming: unknown }).incoming;
+  if (typeof incoming !== "object" || incoming === null || !("socket" in incoming)) return undefined;
+  const socket = (incoming as { socket: unknown }).socket;
+  if (typeof socket !== "object" || socket === null || !("remoteAddress" in socket)) return undefined;
+  const addr = (socket as { remoteAddress: unknown }).remoteAddress;
+  return typeof addr === "string" ? addr : undefined;
+}
+
+/**
+ * Rate-limit key for one client. `x-forwarded-for` is client-supplied, so
+ * it is only trusted when `VALET_TRUST_PROXY=1` says a proxy that strips
+ * inbound XFF (the helm ingress) fronts this process — otherwise a direct
+ * caller could rotate spoofed values for a fresh bucket per request.
+ * Untrusted mode keys on the socket peer address, which a client cannot
+ * choose. "direct" is the last resort when neither exists (non-node
+ * adapters), collapsing to one shared bucket — safe, but coarse.
+ */
+function clientKey(c: Context<AppEnv>): string {
+  if (process.env.VALET_TRUST_PROXY === "1") {
+    const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    if (forwarded) return forwarded;
+  }
+  return socketAddress(c) ?? "direct";
+}
 
 export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
@@ -116,15 +148,21 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
     // Never index a share URL, whatever the outcome.
     c.header("X-Robots-Tag", "noindex");
 
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "direct";
-    if (!limiter.allow(ip, Date.now())) {
+    if (!limiter.allow(clientKey(c), Date.now())) {
       return c.json({ error: "rate limited" }, 429);
     }
 
     const { db } = c.var.providers;
-    const artifact = await getArtifactByToken(db, c.req.param("token"));
-    const allowPublic = artifact ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
-    const user = await resolveOptionalUser(c, { auth, db });
+    // Independent lookups — overlap them; this is the anonymous hot path.
+    const [artifact, user] = await Promise.all([
+      getArtifactByToken(db, c.req.param("token")),
+      resolveOptionalUser(c, { auth, db }),
+    ]);
+    if (!artifact) return c.json({ error: "not found" }, 404);
+    // The opt-in only matters for `public` rows — skip the orgs read for
+    // the default `org` visibility (`decideArtifactAccess` ignores it).
+    const allowPublic =
+      artifact.visibility === "public" ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
 
     const access = decideArtifactAccess({ artifact, allowPublicArtifacts: allowPublic, user });
     if (access.kind === "not_found") {
@@ -133,10 +171,6 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
     if (access.kind === "login") {
       return c.json({ error: "This document is shared with a Valet organization. Log in to view it." }, 401);
     }
-
-    // `artifact` is non-null on every `serve` branch — `decideArtifactAccess`
-    // returns `not_found` for an undefined artifact.
-    if (!artifact) return c.json({ error: "not found" }, 404);
 
     // Sharer attribution only for logged-in org viewers (spec: yes for
     // `org`, no for `public`) — an anonymous reader learns no names.
@@ -172,7 +206,7 @@ artifactsRouter.post("/share", async (c) => {
   try {
     scope = await resolveScope(c, "read");
   } catch (err) {
-    const mapped = mapServiceError(err);
+    const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
@@ -207,7 +241,7 @@ artifactsRouter.post("/share", async (c) => {
     };
     return c.json(resp);
   } catch (err) {
-    const mapped = mapServiceError(err);
+    const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
@@ -216,7 +250,7 @@ artifactsRouter.post("/share", async (c) => {
 /** The artifact's auth boundary. A session caller's own org; internal
  * (tool) callers carry no user, so this deployment's single org resolves
  * the same way the auth middleware resolves it for everyone. */
-function orgIdForShare(c: Context<AppEnv>, db: AppDb): Promise<string> | string {
+async function orgIdForShare(c: Context<AppEnv>, db: AppDb): Promise<string> {
   const user = requireUser(c);
   if (user) return user.orgId;
   return resolveOrgId(db);

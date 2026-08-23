@@ -3,7 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Check, Copy, ExternalLink, Share2 } from "lucide-react";
 import { useOrg } from "~/api/settings";
 import { usePatchArtifact, useRevokeArtifact, useArtifacts, useShareArtifact } from "~/api/artifacts";
+import { memoryHref } from "~/components/markdown";
 import { Button, Dialog, DialogContent, DialogTitle, Switch } from "~/components/primitives";
+import { useCopyToClipboard } from "~/lib/use-copy";
 import { MemoryDoc } from "./memory-doc";
 
 /**
@@ -40,8 +42,6 @@ export function MemoryViewerDialog({
   }, [path, open]);
   const current = stack[stack.length - 1] ?? path;
 
-  const memoryHref = `/memory/${current.split("/").map(encodeURIComponent).join("/")}`;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -64,7 +64,7 @@ export function MemoryViewerDialog({
           </DialogTitle>
           <ShareControls path={current} />
           <a
-            href={memoryHref}
+            href={memoryHref(current)}
             className="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted hover:text-moss"
             title="Open in the full memory explorer"
           >
@@ -96,7 +96,7 @@ export function MemoryViewerDialog({
  */
 function ShareControls({ path }: { path: string }) {
   const [panelOpen, setPanelOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
   const orgQ = useOrg();
   // Fetched only while the panel is open — the dialog itself shouldn't
   // cost a list request per mem_read expansion.
@@ -108,12 +108,6 @@ function ShareControls({ path }: { path: string }) {
   const artifact = artifactsQ.data?.artifacts.find((a) => a.path === path && !a.revoked);
   const allowPublic = orgQ.data?.allowPublicArtifacts ?? false;
   const busy = shareMutation.isPending || patchMutation.isPending || revokeMutation.isPending;
-
-  async function copyUrl(url: string) {
-    await navigator.clipboard.writeText(url);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
 
   return (
     <div className="relative">
@@ -140,7 +134,7 @@ function ShareControls({ path }: { path: string }) {
                 />
                 <button
                   type="button"
-                  onClick={() => void copyUrl(artifact.url)}
+                  onClick={() => void copy(artifact.url)}
                   className="rounded p-1.5 text-muted hover:text-moss"
                   aria-label="Copy share link"
                 >

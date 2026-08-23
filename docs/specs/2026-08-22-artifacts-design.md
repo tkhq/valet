@@ -81,7 +81,9 @@ live reference. Reasons:
 To publish an update, the agent (or the user) runs `mem_share` again on the
 same path. Re-share overwrites the stored content and keeps the same token,
 so the link stays stable. Revoking and re-sharing mints a new token, so a
-leaked link dies with the revoke.
+leaked link dies with the revoke — and resets visibility to `org`: revoke
+ends the audience decision along with the link, so the tool surface can
+never be the thing that restores anonymous access.
 
 ## Data model
 
@@ -142,7 +144,8 @@ mem_share { path, revoke? }
 - The tool result always states the audience ("anyone in your org who is
   logged in") so the agent relays it accurately.
 
-Skill guidance (`packages/plugin-memory/skills/memory/SKILL.md`):
+Agent guidance (rule 7 of `MEMORY_RULES` in
+`packages/api/src/orchestrator/persona.ts`):
 
 - Put documents meant for humans under `artifacts/` (type `note`).
 - Share only when the user asks for a link or clearly wants to hand the
@@ -166,7 +169,10 @@ share route can grow a decision gate later.
    `getSession` on the request headers). No session → 401. Session but
    not a member of `artifact.orgId` → 404 (do not confirm existence).
 4. Serve `{ title, content, updatedAt, visibility }`.
-5. Rate-limit by IP before the token lookup. Responses carry
+5. Rate-limit by client IP before the token lookup. The IP comes from
+   `x-forwarded-for` only when `VALET_TRUST_PROXY=1` (the helm chart sets
+   it — the ingress overwrites the header); otherwise the socket peer
+   address, which a client cannot spoof. Responses carry
    `X-Robots-Tag: noindex`.
 
 ### Internal (tool transport, `x-valet-internal` dual-auth)
@@ -184,8 +190,9 @@ share route can grow a decision gate later.
   share from the memory viewer.
 - `PATCH /api/artifacts/:id` `{ visibility }` — widen or narrow. Widening
   to `public` requires `allowPublicArtifacts` on and the caller to be the
-  artifact owner (`actorUserId` or owner-scope member for team/org owners)
-  or an org admin. Widening records `publicBy`.
+  sharer (`actorUserId`) or an org admin. Widening records `publicBy`.
+  Management by other members of a team/org owner scope is not
+  implemented; add it when a team asks for it.
 - `DELETE /api/artifacts/:id` — revoke.
 
 Org setting surface: add `allowPublicArtifacts` to
@@ -205,10 +212,14 @@ New web route `/a/$token`, added to `PUBLIC_ROUTES` in
   body through the existing `Markdown` component
   (`packages/web/src/components/markdown.tsx` — GFM, no raw HTML). No
   memory link handling: memory cross-links inside an artifact render as
-  plain text spans, not links, because the reader has no memory access.
-- Share URLs are built server-side from the existing public-URL chain
-  (`VALET_PUBLIC_URL`, else HTTPS non-local `BETTER_AUTH_URL` — the
-  `channels/host.ts` preference order), else the request origin in dev.
+  ordinary markdown links whose relative targets lead nowhere useful —
+  acceptable, because the reader has no memory access either way.
+- Share URLs are built server-side, in trust order: `VALET_PUBLIC_URL`,
+  else public https `BETTER_AUTH_URL` (the `channels/host.ts` preference
+  order), else `BETTER_AUTH_URL`'s origin verbatim (dev and localdev
+  deploys), else the request origin. The `BETTER_AUTH_URL` rung matters:
+  `mem_share` tool calls reach the api over its own loopback, so a
+  request-origin-only fallback would mint unreachable `127.0.0.1` links.
 
 ## Memory viewer dialog
 
