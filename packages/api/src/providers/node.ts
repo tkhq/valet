@@ -272,13 +272,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Wrapped in the per-org capacity gate (D.5): a create beyond the org's
   // sandbox ceiling waits for capacity instead of saturating the cluster.
   // The gate reads the EngineHost cache through a late-bound ref (the host
-  // is constructed further down, with this provider as a dep).
+  // is constructed further down, with this provider as a dep). Only
+  // slot-FREEING backends are gated: without hibernation (docker/local) a
+  // ready attachment never releases its slot short of session deletion,
+  // so a long-lived dev stack would wedge every new create at the
+  // ceiling — and those backends have no bounded pod budget to protect.
   const gateHostRef: { current: EngineHost | null } = { current: null };
-  const sandboxProvider = withSandboxCapacityGate(buildSandboxProvider(process.env), {
-    ceiling: resolveOrgSandboxCeiling(process.env),
-    waitMs: resolveSandboxCapacityWaitMs(process.env),
-    host: () => gateHostRef.current,
-  });
+  const rawSandboxProvider = buildSandboxProvider(process.env);
+  const sandboxProvider = rawSandboxProvider.capabilities().hibernation
+    ? withSandboxCapacityGate(rawSandboxProvider, {
+        ceiling: resolveOrgSandboxCeiling(process.env),
+        waitMs: resolveSandboxCapacityWaitMs(process.env),
+        host: () => gateHostRef.current,
+      })
+    : rawSandboxProvider;
   const imageBuilder = resolveImageBuilder(process.env);
   const eventStream = new PgEventStream(pgdb);
   const baseCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));

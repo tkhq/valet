@@ -87,7 +87,16 @@ export function withSandboxCapacityGate(
     try {
       let waited = false;
       for (;;) {
-        const occupied = host.countLiveSandboxSessions(orgId) - waiting.size;
+        // Subtract only waiters still resolvable in the cache: a waiter
+        // whose session was destroyed/evicted mid-wait is already gone
+        // from the count, and subtracting its stale waiting entry too
+        // would over-free a slot and admit past the ceiling until its own
+        // next poll notices.
+        let liveWaiters = 0;
+        for (const id of waiting) {
+          if (host.sessionOrgId(id) !== null) liveWaiters += 1;
+        }
+        const occupied = host.countLiveSandboxSessions(orgId) - liveWaiters;
         if (occupied < opts.ceiling) {
           if (waited) recordSandboxCapacityWait(Date.now() - startedAt, "admitted");
           return;
@@ -109,11 +118,13 @@ export function withSandboxCapacityGate(
           );
         }
         await new Promise((resolve) => setTimeout(resolve, pollMs));
-        // A session destroyed while waiting must not consume the next
-        // freed slot for a pod nobody will use — its cache entry (and so
-        // its org resolution) is gone the moment it is evicted.
+        // A session destroyed or evicted while waiting must not consume
+        // the next freed slot for a pod nobody will use.
         if (host.sessionOrgId(sessionId) === null) {
-          throw new Error(`sandbox create abandoned: session ${sessionId} was destroyed while waiting for capacity`);
+          throw new Error(
+            `sandbox create abandoned: session ${sessionId} left the host cache while waiting for capacity. ` +
+              "Reopen the session and retry.",
+          );
         }
       }
     } finally {

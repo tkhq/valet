@@ -817,6 +817,12 @@ export class SandboxAttachment {
   }
 
   private async doProvisionInner(): Promise<void> {
+    // Set BEFORE any await, including provider.create. The api's per-org
+    // capacity gate (gated-sandbox-provider.ts) depends on this ordering:
+    // it counts `provisioning|ready` attachments and subtracts its own
+    // parked waiters, which is only correct while every create-in-flight
+    // session reads `provisioning` for the whole call. Moving this flip
+    // after an await silently breaks the gate's admission math.
     this._state = "provisioning";
     this.emitStatus();
     const provider = this.provider;

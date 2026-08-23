@@ -138,25 +138,45 @@ export class IdleHibernationSweep {
       // never provisioned or already reclaimed), or it is already
       // suspended ("idle" — an earlier pass crashed between suspend and
       // stamp). Either way the row must leave `active`, or it re-sweeps
-      // forever; `writeHibernated`'s status='active' guard protects a
-      // concurrent wake.
+      // forever. The stamp still needs the liveness re-check below: a
+      // wake that landed during the awaits above keeps the row `active`
+      // (its status guard would pass!), and a mid-stamp flip would show a
+      // chatting session as paused with no heal until its next prompt.
+      if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
       await writeHibernated(this.deps.db, sessionId, sandboxId);
       console.log(
         `IdleHibernationSweep: stamped idle session ${sessionId} hibernated (sandbox state ${status.state})`,
       );
       return;
     }
+    if (status.state !== "ready") {
+      // provisioning / error / anything mid-flight: suspending would
+      // scale down a sandbox the controller is still converging (or wedge
+      // a failed one into a fake hibernation the wake path cannot serve).
+      // Skip; the next pass re-judges, and the reconcile sweep's over-age
+      // report owns anything permanently stuck here.
+      console.warn(
+        `IdleHibernationSweep: session ${sessionId} sandbox ${sandboxId} is '${status.state}'; not suspendable, skipping`,
+      );
+      return;
+    }
 
-    // Re-check both race signals immediately before the suspend — nothing
-    // awaits between these checks and the suspend call. A wake building
-    // the session into the cache, or a submission admitted since the
-    // checks above, wins.
-    if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
+    // Re-check both race signals — the unsettled read first, then the
+    // (synchronous) liveness check immediately before the suspend, so
+    // nothing awaits between the last check and the suspend call. A wake
+    // building the session into the cache, or a submission admitted since
+    // the checks above, wins.
     const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0) return;
     if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
 
     await this.deps.engineHost.suspendSandbox(sandboxId);
+    // Liveness one last time BEFORE the stamp: a wake that slipped in
+    // during the suspend await re-resumes the sandbox through its own
+    // provisioning (create-adopt resumes a Suspended CR), but its row is
+    // still `active` — the guard on `writeHibernated` cannot catch it, so
+    // this check is what keeps a live session from being shown as paused.
+    if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
     // Same guarded flip the cache sweep's onHibernate hook writes
     // (conditioned on status='active', records the reaper's destroy
     // handle, clears the reclaim stamp).

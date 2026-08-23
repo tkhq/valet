@@ -490,19 +490,6 @@ export class EngineHost {
    * lives as long as that `Session`'s attachment instance does.
    */
   private trackHibernationWake(sessionId: string, session: Session): void {
-    // Building INTO the cache is itself a wake in the row-status sense: a
-    // `hibernated` row whose session is being rebuilt (a prompt, a channel
-    // message, boot restore) must flip back to `active` even if the
-    // session never touches its sandbox again — a chat-only assistant
-    // makes no `ready` attachment transition, so the listener below would
-    // never fire and the row would read hibernated while the session
-    // chats. `onWake`'s write is guarded on status='hibernated', so this
-    // is a no-op for every ordinary build.
-    if (this.opts.onWake) {
-      Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
-        console.error(`EngineHost: onWake (build) failed for session ${sessionId}:`, err),
-      );
-    }
     let wasSuspended = false;
     session.attachment.onStatus((status) => {
       if (status.state === "suspended") {
@@ -1677,6 +1664,29 @@ export class EngineHost {
    */
   sessionLiveOrBuilding(sessionId: string): boolean {
     return this.cache.has(sessionId) || this.inflight.has(sessionId);
+  }
+
+  /**
+   * Flip a `hibernated` row back to `active` because the session is about
+   * to be USED — a prompt, a channel delivery, a child_send, an explicit
+   * open. Callers at those intent points invoke this after materializing
+   * the session; read-only paths (GET messages, WS attach, gateway
+   * proxying) must NOT — a view of a hibernated session is not a wake,
+   * and flipping the row on views would un-park suspended sandboxes from
+   * the reaper's retention indefinitely. Chat-only wakes never make a
+   * `ready` attachment transition, so neither `onWake` nor
+   * `onSessionReady` would fire for them — this is their heal path.
+   * Awaited (unlike the attachment-transition hooks) so a caller that
+   * immediately re-stamps status — the pause route — cannot be reordered
+   * against it. Guarded no-op for rows in any other status.
+   */
+  async markSessionUsed(sessionId: string): Promise<void> {
+    if (!this.opts.onWake) return;
+    try {
+      await this.opts.onWake(sessionId);
+    } catch (err) {
+      console.error(`EngineHost: markSessionUsed failed for session ${sessionId}:`, err);
+    }
   }
 
   /**

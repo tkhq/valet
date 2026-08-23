@@ -231,7 +231,49 @@ describe("withSandboxCapacityGate", () => {
     orgOf.s1 = null; // session evicted/destroyed
     h.setOthers("org1", 4); // capacity frees right after
 
-    await expect(pending).rejects.toThrow(/destroyed while waiting/);
+    await expect(pending).rejects.toThrow(/left the host cache while waiting/);
+    expect(inner.created).toEqual([]);
+  });
+
+  it("a stale (evicted) waiter does not free a slot for the waiters behind it", async () => {
+    const inner = fakeInner();
+    const orgOf: Record<string, string | null> = { a: "org1", b: "org1" };
+    const h = fakeHost({ orgOf });
+    h.setOthers("org1", 5);
+    const gated = withSandboxCapacityGate(inner, {
+      ceiling: 5,
+      waitMs: 200,
+      pollIntervalMs: 5,
+      host: () => h.host,
+    });
+
+    // a is driven by hand (not createAs): its attachment leaves the count
+    // at EVICTION time, exactly once — a finally-based leave would double
+    // count the departure.
+    h.enter("org1");
+    const aPending = gated.create({ sessionId: "a" });
+    const bPending = createAs(gated, h, "org1", "b");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    // a's session is evicted: its attachment leaves the count immediately,
+    // but its waiting entry survives until a's own next poll. b must not
+    // read that stale entry as freed capacity — the 5 other pods are still
+    // running.
+    orgOf.a = null;
+    h.leave("org1");
+
+    const [aOut, bOut] = await Promise.all([
+      aPending.then(
+        () => "admitted",
+        (err: unknown) => (err instanceof Error && /left the host cache/.test(err.message) ? "abandoned" : "other"),
+      ),
+      bPending.then(
+        () => "admitted",
+        (err: unknown) => (err instanceof SandboxStartupError ? "timeout" : "other"),
+      ),
+    ]);
+
+    expect(aOut).toBe("abandoned");
+    expect(bOut).toBe("timeout");
     expect(inner.created).toEqual([]);
   });
 

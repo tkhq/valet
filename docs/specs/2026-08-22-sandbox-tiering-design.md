@@ -46,7 +46,12 @@ design.
    the violation is expected in normal operation (every restart strands
    whatever was idle at that moment), and this sweep is that window's
    named owner. Kubernetes-only in effect (gated on hibernation
-   capability + derivable sandbox ids).
+   capability + derivable sandbox ids). Hardening from review: only a
+   `ready` sandbox is suspendable (a provisioning/error one is left to
+   converge or to the reconcile sweep's over-age report), and liveness
+   is re-checked immediately before every stamp — including the
+   stamp-only released/idle paths — because a wake that lands mid-pass
+   keeps the row `active` and the write guard alone cannot catch it.
 3. **Backpressure: sandbox slots are a bounded per-org resource.**
    `withSandboxCapacityGate`
    (`packages/api/src/engine/gated-sandbox-provider.ts`) wraps the built
