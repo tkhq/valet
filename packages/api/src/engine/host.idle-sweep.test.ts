@@ -348,7 +348,7 @@ describe("EngineHost idle sweep", () => {
     host.evictAll();
   });
 
-  it("invokes onHibernate after a successful suspend and onWake on the next ready", async () => {
+  it("invokes onHibernate after a successful suspend and onWake at build and on the next ready", async () => {
     vi.useFakeTimers();
     const provider = new HibernatingTestProvider();
     const store = new InMemorySessionStore();
@@ -367,15 +367,20 @@ describe("EngineHost idle sweep", () => {
     const sessionId = "s-wake";
     const session = await buildReadySession(host, sessionId);
     await stampActivity(store, sessionId, "th-wake");
+    // onWake also fires on the build into the cache (a hibernated row must
+    // heal even for a chat-only wake that never makes a `ready` attachment
+    // transition); its DB write is guarded on status='hibernated', so a
+    // build-time fire on an ordinary session is a no-op.
+    expect(woke).toEqual([sessionId]);
 
     await vi.advanceTimersByTimeAsync(120_000);
     expect(session.attachment.state).toBe("suspended");
     expect(hibernated).toEqual([sessionId]);
-    expect(woke).toEqual([]);
+    expect(woke).toEqual([sessionId]); // no second fire while suspended
 
     await session.attachment.ensureReady({ timeoutMs: 5_000 });
     expect(session.attachment.state).toBe("ready");
-    expect(woke).toEqual([sessionId]);
+    expect(woke).toEqual([sessionId, sessionId]); // the real wake
 
     host.evictAll();
   });
