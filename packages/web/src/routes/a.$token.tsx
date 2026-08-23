@@ -48,7 +48,10 @@ function ArtifactPage() {
               : "The share was revoked, or the link is wrong. Ask the person who sent it for a fresh one."}
           </p>
           {status === 401 && (
-            <a href="/login" className="inline-block text-sm text-moss hover:underline">
+            <a
+              href={`/login?next=${encodeURIComponent(`/a/${token}`)}`}
+              className="inline-block text-sm text-moss hover:underline"
+            >
               Go to login
             </a>
           )}

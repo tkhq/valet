@@ -2,6 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { authClient } from "~/lib/auth-client";
 import { useAuthConfig } from "~/api/auth-config";
+import { safeNextPath } from "~/lib/next-path";
 import { Button, Input, Label, Spinner } from "~/components/primitives";
 
 /**
@@ -9,17 +10,35 @@ import { Button, Input, Label, Spinner } from "~/components/primitives";
  * buttons filtered to what `GET /api/auth-config` reports connected
  * (`stub: true` deployments report empty `social`/`sso` and this page is
  * unreachable anyway — the guard in `api/client.ts` never fires).
+ *
+ * `?next=` (artifacts design): where to land after sign-in — set by the
+ * central 401 redirect and by the shared-artifact page, so a teammate who
+ * followed an `/a/{token}` link gets the document, not the dashboard.
+ * Sanitized to a same-origin path at the search boundary (`safeNextPath`),
+ * so the render body never sees an open-redirect value.
  */
+interface LoginSearch {
+  next?: string;
+}
+
 export const Route = createFileRoute("/login")({
-  component: LoginPage,
+  validateSearch: (raw): LoginSearch => ({
+    next: safeNextPath(raw.next),
+  }),
+  component: LoginRoute,
 });
+
+function LoginRoute() {
+  const { next } = Route.useSearch();
+  return <LoginPage next={next} />;
+}
 
 const SOCIAL_LABEL: Record<"google" | "github", string> = {
   google: "Continue with Google",
   github: "Continue with GitHub",
 };
 
-export function LoginPage() {
+export function LoginPage({ next }: { next?: string } = {}) {
   const navigate = useNavigate();
   const authConfigQ = useAuthConfig();
   const [email, setEmail] = useState("");
@@ -47,7 +66,7 @@ export function LoginPage() {
       setError(signInError.message ?? "Couldn’t sign in. Check your email and password.");
       return;
     }
-    navigate({ to: "/" });
+    navigate({ to: next ?? "/" });
   }
 
   const social = authConfigQ.data?.social ?? [];
@@ -119,7 +138,7 @@ export function LoginPage() {
                 onClick={() =>
                   authClient.signIn.social({
                     provider,
-                    callbackURL: `${window.location.origin}/`,
+                    callbackURL: `${window.location.origin}${next ?? "/"}`,
                   })
                 }
               >
@@ -137,7 +156,7 @@ export function LoginPage() {
                   // not the vite server the user is on.
                   authClient.signIn.sso({
                     providerId: "oidc",
-                    callbackURL: `${window.location.origin}/`,
+                    callbackURL: `${window.location.origin}${next ?? "/"}`,
                   })
                 }
               >
@@ -149,7 +168,7 @@ export function LoginPage() {
 
         <p className="text-center text-sm text-muted">
           New here?{" "}
-          <Link to="/signup" className="text-moss hover:underline">
+          <Link to="/signup" search={{ next }} className="text-moss hover:underline">
             Create an account
           </Link>
         </p>

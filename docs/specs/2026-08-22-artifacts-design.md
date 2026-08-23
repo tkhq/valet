@@ -312,12 +312,24 @@ Two call sites stay opted out, on purpose:
 2. The artifact page shows the sharer's display name to `org` viewers and
    nothing to anonymous readers.
 
+## Return-to after login
+
+`/login` and `/signup` take a `?next=` parameter: the path to land on
+after sign-in. The central 401 redirect sets it from the interrupted
+location, and the `/a/$token` error state's login link sets it to the
+artifact path — so a logged-out teammate who follows a shared link gets
+the document after signing in, not the dashboard. All three sign-in paths
+honor it: email/password navigates to it, and the social/SSO buttons put
+it in the OAuth `callbackURL`.
+
+`next` is attacker-constructable, so `safeNextPath`
+(`packages/web/src/lib/next-path.ts`) validates it at the search boundary:
+same-origin relative paths only (one leading `/`; `//host` and `/\host`
+are scheme-relative in browsers and rejected), and never the auth pages
+themselves. Anything else degrades to `/`.
+
 ## Deviations from this spec
 
-- The 401 → login redirect on `/a/$token` uses the api client's central
-  handler, which goes to plain `/login` without a return-to parameter. The
-  login page has no return-to support today; adding it is a separate,
-  small change.
 - The memory viewer dialog reads the caller's OWN memory scope
   (`useMemoryDoc` with no owner filter). In a team assistant's session,
   expanding a team-scoped file shows the viewer's empty state instead of
