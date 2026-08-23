@@ -14,6 +14,9 @@ import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
+import type { HibernationReaper } from "../engine/hibernation-reaper.js";
+import type { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
+import type { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -52,6 +55,12 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
+  /** Destroys sandboxes hibernated past the retention window; `start()`/`stop()` called from main.ts. */
+  hibernationReaper: HibernationReaper;
+  /** Destroys settled workflow runs' session sandboxes; `start()`/`stop()` called from main.ts. */
+  workflowSandboxReclaimer: WorkflowSandboxReclaimer;
+  /** Provider-side orphan/TTL reconciler; `start()`/`stop()` called from main.ts. */
+  sandboxReconcileSweep: SandboxReconcileSweep;
   /** Inbound/outbound channel transport routing (Task 8); `start()`/`stop()` called from main.ts. */
   channelHost: ChannelHost;
 

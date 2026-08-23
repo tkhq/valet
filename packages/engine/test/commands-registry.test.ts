@@ -43,6 +43,26 @@ describe("buildCommandRegistry", () => {
     expect(r.nearMiss("status")).toBeUndefined(); // exact match is not a near-miss
   });
 
+  it("resolves command names case-insensitively", () => {
+    const r = buildCommandRegistry({ skills: [skill], pluginCommands: [], bareSkillNames: false });
+    expect(r.resolve("STATUS")?.source).toBe("builtin");
+    expect(r.resolve("Skill:Review")?.source).toBe("skill");
+    expect(r.resolve("MODEL")?.source).toBe("builtin");
+  });
+
+  it("suggests the namespaced command for a bare suffix", () => {
+    // The web popup surfaces "skill:review" for the token "review"; a user
+    // who sends the bare token anyway gets pointed at the real name.
+    const r = buildCommandRegistry({ skills: [skill], pluginCommands: [], bareSkillNames: false });
+    expect(r.nearMiss("review")).toBe("skill:review");
+  });
+
+  it("matches near misses case-insensitively", () => {
+    const r = buildCommandRegistry({ skills: [], pluginCommands: [], bareSkillNames: false });
+    expect(r.nearMiss("STATSU")).toBe("status");
+    expect(r.nearMiss("STATUS")).toBeUndefined(); // resolves case-insensitively already
+  });
+
   it("two same-named skills produce one skill:<name> entry resolving to the later one", () => {
     const first = { name: "review", description: "First version", content: "# v1" };
     const second = { name: "review", description: "Second version", content: "# v2" };

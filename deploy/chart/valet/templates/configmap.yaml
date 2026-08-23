@@ -48,6 +48,12 @@ data:
   # from the api pod (retention manifest deletes) — the in-cluster Service DNS.
   VALET_PREBUILD_REGISTRY_PUSH: {{ printf "%s-registry.%s.svc.cluster.local:5000" (include "valet.fullname" .) .Values.sandbox.namespace | quote }}
   VALET_PREBUILD_REGISTRY_INSECURE: "true"
+  # Per-org baked-image cache budget. The api default (20 GB) is larger than
+  # the bundled registry volume (registry.storageSize, 10Gi), so the eviction
+  # ceiling could never fire before the disk filled. Keep this value below
+  # registry.storageSize, and remember it is PER ORG — a multi-org instance
+  # needs (orgs x budget) < storageSize, or a bigger volume.
+  VALET_PREBUILD_CACHE_BUDGET_GB: {{ .Values.registry.cacheBudgetGb | quote }}
   {{- else if .Values.externalRegistry.url }}
   VALET_PREBUILD_REGISTRY: {{ .Values.externalRegistry.url | quote }}
   # External registry: no push/pull split — both hosts are the same endpoint.

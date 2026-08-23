@@ -149,6 +149,40 @@ export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
   return n * 3_600_000;
 }
 
+/**
+ * How long a session may sit `hibernated` before the reaper
+ * (`engine/hibernation-reaper.ts`) destroys its sandbox
+ * (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`, default 72h). The default
+ * outlasts a weekend: reaping only resets the workspace volume (chat
+ * history and memories live in postgres), but a Monday-morning user should
+ * still find Friday's uncommitted work. Zero, negative, or non-numeric
+ * disables the reaper entirely.
+ */
+export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES;
+  if (raw === undefined || raw === "") return 72 * 60 * 60_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 60_000;
+}
+
+/**
+ * Age past which the reconcile sweep (`engine/sandbox-reconcile-sweep.ts`)
+ * REPORTS a sandbox as an invariant violation:
+ * `VALET_SANDBOX_AGE_REPORT_HOURS`, default 168 (7 days). Report only —
+ * never a destroy; an age-based kill would mask the broken owner and wipe
+ * legitimately long-lived active workspaces (CLAUDE.md: "Invariants:
+ * alert, don't auto-repair"). Zero, negative, or non-numeric disables the
+ * report (the sweep's orphan rule stays on).
+ */
+export function resolveSandboxAgeReportMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_SANDBOX_AGE_REPORT_HOURS;
+  if (raw === undefined || raw === "") return 168 * 3_600_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * 3_600_000;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

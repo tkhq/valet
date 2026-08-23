@@ -63,7 +63,16 @@ export function MessageItem({
               <TextBlock text={message.content} />
             )}
             {message.parts.map((part, i) => (
-              <PartView key={i} part={part} />
+              // Tool cards hold per-mount UI state (expansion, user-touch
+              // override), so key them by their stable callId: an index key
+              // hands one call's state to a different call whenever the
+              // parts array shifts (streaming sweep, message_update
+              // replacement). Text/thinking parts are stateless and
+              // positional, so the index is fine for them.
+              <PartView
+                key={part.kind === "tool_call" ? `tc-${part.callId}` : `${part.kind}-${i}`}
+                part={part}
+              />
             ))}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
               <p className="text-xs italic text-muted">

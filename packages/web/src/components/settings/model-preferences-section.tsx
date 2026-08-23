@@ -4,6 +4,7 @@ import type { ModelInfo } from "@valet/api/wire";
 import { Badge, Button, Input, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useLlmProviderPreferences, useModels, usePutLlmProviderPreferences } from "~/api/settings";
+import { matchesNeedle } from "~/lib/text-match";
 
 /**
  * Organization · Models — ordered model preferences (llm-providers design,
@@ -142,14 +143,7 @@ function AddModelTypeahead({
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
 
-  const q = query.trim().toLowerCase();
-  const matches = options.filter(
-    (m) =>
-      q === "" ||
-      m.id.toLowerCase().includes(q) ||
-      m.name.toLowerCase().includes(q) ||
-      m.providerName.toLowerCase().includes(q),
-  );
+  const matches = options.filter((m) => matchesNeedle(query, [m.id, m.name, m.providerName]));
 
   return (
     <div className="space-y-1">

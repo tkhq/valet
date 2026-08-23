@@ -39,7 +39,7 @@ import {
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
-import { identityForUser } from "../channels/identity-links.js";
+import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import type { RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
@@ -210,10 +210,12 @@ export interface EngineHostOpts {
    * Best-effort hook (sandbox hibernation plan, Task 3/4 seam): invoked
    * after the idle sweep successfully suspends a session's sandbox. Task 4
    * wires this to stamp `agent_sessions.status = "hibernated"` — this
-   * package (Task 3) only exposes the seam. Errors are caught and logged,
-   * never thrown into the sweep loop.
+   * package (Task 3) only exposes the seam. `sandboxId` is the suspended
+   * attachment's provider handle, recorded by the hibernated-sandbox reaper
+   * as its destroy handle. Errors are caught and logged, never thrown into
+   * the sweep loop.
    */
-  onHibernate?: (sessionId: string) => Promise<void> | void;
+  onHibernate?: (sessionId: string, sandboxId?: string) => Promise<void> | void;
   /**
    * Best-effort hook (sandbox hibernation plan, Task 3/4 seam): invoked the
    * first time a previously-suspended session's attachment reaches `ready`
@@ -470,7 +472,7 @@ export class EngineHost {
     await session.attachment.suspend();
 
     if (this.opts.onHibernate) {
-      Promise.resolve(this.opts.onHibernate(sessionId)).catch((err) =>
+      Promise.resolve(this.opts.onHibernate(sessionId, session.attachment.sandboxId)).catch((err) =>
         console.error(`EngineHost: onHibernate failed for session ${sessionId}:`, err),
       );
     }
@@ -1045,17 +1047,12 @@ export class EngineHost {
           const stored =
             (await credentials.get(owner, service)) ??
             (await credentials.get({ type: "org", id: orgId }, service));
-          if (stored) {
-            // Activates plugin-slack's dormant private-channel check (its
-            // V2-GAP comment): the identity link is the single source of
-            // truth for the owner's Slack user id, regardless of how the
-            // link was created.
-            const identity = await identityForUser(db, "slack", userId);
-            if (identity) {
-              return { ...stored, metadata: { ...stored.metadata, owner_slack_user_id: identity.externalId } };
-            }
-          }
-          return stored ?? null;
+          // Activates plugin-slack's private-channel check: the identity
+          // link is the single source of truth for the owner's Slack user
+          // id, regardless of how the link was created. Shared with the
+          // workflow action invoker (`plugins/action-invoker.ts`).
+          if (stored) return withSlackOwnerMetadata(db, userId, stored);
+          return null;
         }
         return await credentials.get(owner, service);
       }
@@ -1754,6 +1751,12 @@ export class EngineHost {
    */
   async destroySandbox(sandboxId: string): Promise<void> {
     await this.opts.sandboxProvider.destroy(sandboxId);
+  }
+
+  /** Recompute the sandbox id a workspace would provision under
+   * (`SandboxProvider.deriveId`); null for backend-assigned ids. */
+  deriveSandboxId(sessionKey: string): string | null {
+    return this.opts.sandboxProvider.deriveId?.(sessionKey) ?? null;
   }
 
   /**

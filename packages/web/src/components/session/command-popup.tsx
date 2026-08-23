@@ -33,36 +33,56 @@ const SOURCE_LABEL: Record<WireCommandInfo["source"], string> = {
 };
 
 /**
- * Adapt registry commands (already prefix-filtered) into popup items.
+ * Filter and rank registry commands for the popup, then adapt to items.
+ * This function is the single owner of popup ordering — the composer
+ * passes the raw registry and the typed token, nothing pre-sorted.
  *
- * `recency` (command name → last-used epoch ms, from `~/lib/command-recency`)
- * floats what the user actually uses to the top. Groups must stay contiguous —
- * the popup renders group-by-group while ↑/↓ walk the flat item order, so a
- * command sorted away from its group would break keyboard navigation. Recency
- * therefore sorts at two levels: groups by their most recently used command,
- * then commands within a group. Sort is stable, so untouched commands keep
- * the registry's order (built-in → skill → plugin, registration order within).
- * Contiguity holds even when two groups share one max stamp: any cross-group
- * tie falls through to the deterministic `SOURCE_ORDER` comparison, so every
- * member of one source still sorts to the same side of the other's.
+ * Matching: a command matches when its name contains `query`
+ * case-insensitively, so "/review" surfaces "skill:review" without the
+ * namespace. Match quality is tiered: exact name, then prefix, then
+ * substring. An empty query matches every command at one tier.
+ *
+ * Ranking runs at two levels because groups must stay contiguous — the
+ * popup renders group-by-group while ↑/↓ walk the flat item order, so a
+ * command sorted away from its group would break keyboard navigation.
+ * Groups sort by their best match tier, then by their most recently used
+ * command (`recency`: command name → last-used epoch ms, from
+ * `~/lib/command-recency`), then by `SOURCE_ORDER`. Within a group:
+ * match tier, then recency, then registration order (the sort is
+ * stable). Tier outranks recency at both levels so the command the user
+ * is actually typing never loses to a recently used substring match.
  */
 export function commandsToItems(
   commands: WireCommandInfo[],
   recency: CommandRecency = {},
+  query = "",
 ): PopupItem[] {
-  const groupRecency = new Map<WireCommandInfo["source"], number>();
+  const q = query.toLowerCase();
+  const matches: { c: WireCommandInfo; tier: number }[] = [];
   for (const c of commands) {
+    const lower = c.name.toLowerCase();
+    if (!lower.includes(q)) continue;
+    matches.push({ c, tier: lower === q ? 2 : lower.startsWith(q) ? 1 : 0 });
+  }
+  const groupTier = new Map<WireCommandInfo["source"], number>();
+  const groupRecency = new Map<WireCommandInfo["source"], number>();
+  for (const { c, tier } of matches) {
+    if (tier > (groupTier.get(c.source) ?? -1)) groupTier.set(c.source, tier);
     const used = recency[c.name] ?? 0;
     if (used > (groupRecency.get(c.source) ?? 0)) groupRecency.set(c.source, used);
   }
-  const ordered = [...commands].sort((a, b) => {
-    const byGroup = (groupRecency.get(b.source) ?? 0) - (groupRecency.get(a.source) ?? 0);
-    if (byGroup !== 0) return byGroup;
-    const bySource = SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source);
+  const ordered = [...matches].sort((a, b) => {
+    const byGroupTier = (groupTier.get(b.c.source) ?? 0) - (groupTier.get(a.c.source) ?? 0);
+    if (byGroupTier !== 0) return byGroupTier;
+    const byGroupRecency =
+      (groupRecency.get(b.c.source) ?? 0) - (groupRecency.get(a.c.source) ?? 0);
+    if (byGroupRecency !== 0) return byGroupRecency;
+    const bySource = SOURCE_ORDER.indexOf(a.c.source) - SOURCE_ORDER.indexOf(b.c.source);
     if (bySource !== 0) return bySource;
-    return (recency[b.name] ?? 0) - (recency[a.name] ?? 0);
+    if (b.tier !== a.tier) return b.tier - a.tier;
+    return (recency[b.c.name] ?? 0) - (recency[a.c.name] ?? 0);
   });
-  return ordered.map((c) => ({
+  return ordered.map(({ c }) => ({
     id: c.name,
     label: `/${c.name}`,
     detail: c.description,

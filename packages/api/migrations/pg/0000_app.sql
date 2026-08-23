@@ -224,6 +224,8 @@ CREATE TABLE "agent_sessions" (
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
 	"bake_id" text,
+	"hibernated_sandbox_id" text,
+	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -582,6 +584,7 @@ CREATE TABLE "workflow_runs" (
 	"attempt" integer DEFAULT 0 NOT NULL,
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
+	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

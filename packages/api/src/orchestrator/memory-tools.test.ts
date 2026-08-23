@@ -23,6 +23,8 @@ import {
   memPatchTool,
   memReadTool,
   memSearchTool,
+  memMoveTool,
+  memLinksTool,
   memShareTool,
   memRmTool,
   buildMemoryTools,
@@ -62,9 +64,18 @@ afterEach(async () => {
 });
 
 describe("buildMemoryTools", () => {
-  it("returns exactly the six mem_* tools", () => {
+  it("returns exactly the eight mem_* tools", () => {
     const names = buildMemoryTools().map((t) => t.name);
-    expect(names).toEqual(["mem_write", "mem_patch", "mem_read", "mem_search", "mem_share", "mem_rm"]);
+    expect(names).toEqual([
+      "mem_write",
+      "mem_patch",
+      "mem_read",
+      "mem_search",
+      "mem_move",
+      "mem_links",
+      "mem_share",
+      "mem_rm",
+    ]);
   });
 });
 
@@ -171,6 +182,53 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const result = await memReadTool.execute({ path: "notes/" }, ctx);
     expect(result.text).toContain("one.md");
+  });
+
+  it("mem_move renames a file, rewrites the referencer, and relays the type warning", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+
+    await memWriteTool.execute({ path: "people/dana.md", content: "# Dana\n" }, ctx);
+    await memWriteTool.execute({ path: "notes/ref.md", content: "see [Dana](/people/dana.md)\n" }, ctx);
+
+    const moveResult = await memMoveTool.execute({ from: "people/dana.md", to: "workflows/dana.md" }, ctx);
+    expect(moveResult.text).toContain("moved people/dana.md → workflows/dana.md (v2)");
+    expect(moveResult.text).toContain("1 referencing file(s) updated: notes/ref.md");
+    expect(moveResult.text).toContain("⚠");
+    expect(moveResult.text).toContain("type remains 'person'");
+
+    const readResult = await memReadTool.execute({ path: "notes/ref.md" }, ctx);
+    expect(readResult.text).toContain("[Dana](/workflows/dana.md)");
+  });
+
+  it("mem_links lists inbound and outbound edges with phantoms marked", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+
+    await memWriteTool.execute({ path: "people/erin.md", content: "# Erin\n" }, ctx);
+    await memWriteTool.execute(
+      { path: "projects/x/hub.md", content: "# Hub\n\n[Erin](/people/erin.md) and [gone](/notes/gone.md)\n" },
+      ctx,
+    );
+
+    const result = await memLinksTool.execute({ path: "projects/x/hub.md" }, ctx);
+    expect(result.text).toContain("links for projects/x/hub.md");
+    expect(result.text).toContain("inbound (0)");
+    expect(result.text).toContain("outbound (2):");
+    expect(result.text).toContain("people/erin.md — Erin [person]");
+    expect(result.text).toContain("notes/gone.md (phantom — no file at this path)");
+
+    const erin = await memLinksTool.execute({ path: "people/erin.md" }, ctx);
+    expect(erin.text).toContain("inbound (1):");
+    expect(erin.text).toContain("projects/x/hub.md — Hub");
   });
 
   it("mem_read on a missing file surfaces a [memory_error]", async () => {

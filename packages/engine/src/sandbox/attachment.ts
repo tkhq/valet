@@ -6,7 +6,12 @@ import type {
   SpecProvider,
 } from "../types.js";
 import { markSpanError, withSpan } from "../tracing.js";
-import { recordSandboxProvision } from "../metrics.js";
+import {
+  recordSandboxCreated,
+  recordSandboxDestroyed,
+  recordSandboxProvision,
+  type SandboxDestroyReason,
+} from "../metrics.js";
 import {
   SandboxPreparationError,
   SandboxStartupError,
@@ -587,8 +592,21 @@ export class SandboxAttachment {
    * it resolves, the newly-created sandbox is discarded (best-effort
    * destroyed) rather than adopted.
    */
-  async destroy(): Promise<void> {
-    if (this.destroyed) return;
+  /** `reason` labels the `valet.sandbox.destroyed` counter — pass the
+   * destroying owner's name (run_settled, hibernation_retention,
+   * child_retention, ...) from sweeps; the default names the ordinary
+   * session-deletion path.
+   *
+   * Returns whether the backing sandbox is verifiably gone: true when
+   * there was nothing to destroy or the provider destroy succeeded, false
+   * when the provider destroy FAILED — the attachment is torn down either
+   * way (never retried from here), so a false return is the caller's only
+   * signal to keep its own retry stamp open (the workflow reclaim does).
+   * The destroyed metric is recorded only on a real successful destroy,
+   * so the created−destroyed leak alarm never counts a destroy that left
+   * the sandbox standing. */
+  async destroy(reason: SandboxDestroyReason = "session_destroy"): Promise<boolean> {
+    if (this.destroyed) return true;
     this.destroyed = true;
 
     const sandbox = this._sandbox;
@@ -602,10 +620,20 @@ export class SandboxAttachment {
       w.reject(new SandboxUnavailableError(new Error("sandbox attachment destroyed")));
     }
 
-    if (sandbox?.destroy) {
-      await sandbox.destroy().catch(() => {});
-    } else if (sandbox && this.provider) {
-      await this.provider.destroy(sandbox.id).catch(() => {});
+    if (!sandbox) return true;
+    try {
+      if (sandbox.destroy) {
+        await sandbox.destroy();
+      } else if (this.provider) {
+        await this.provider.destroy(sandbox.id);
+      } else {
+        return true;
+      }
+      recordSandboxDestroyed(reason);
+      return true;
+    } catch (err) {
+      console.error(`SandboxAttachment: destroy of sandbox ${sandbox.id} failed (sandbox may be leaked):`, err);
+      return false;
     }
   }
 
@@ -778,6 +806,9 @@ export class SandboxAttachment {
         // report ok by whether a live handle came out of the provision.
         const ok = this._state === "ready";
         recordSandboxProvision(Date.now() - startedAt, ok);
+        // One side of the created−destroyed gap, the sandbox-leak alarm
+        // (sandbox-lifecycle spec, 2026-08-22).
+        if (ok) recordSandboxCreated();
         span.setAttribute("valet.sandbox.result_state", this._state);
         if (this._sandbox) span.setAttribute("valet.sandbox.id", this._sandbox.id);
         if (!ok) markSpanError(span, `provision ended in state ${this._state}`);

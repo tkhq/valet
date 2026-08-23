@@ -221,6 +221,23 @@ describe("plugin workflow templates", () => {
     expect(collisions).toEqual([]);
   });
 
+  it("every Linear tool node calls list_issues with assignee 'me', never list_my_issues", () => {
+    // Linear is a dynamic MCP plugin, so the definition validator provably
+    // cannot check its action names against a static list — a wrong name
+    // fails only at run time ("unknown action: linear.list_my_issues"). The
+    // official server (mcp.linear.app) exposes `list_issues`, whose own
+    // description reads "For my issues, use 'me' as the assignee." Pin the
+    // verified call here so a regression is caught in CI, not in a run.
+    const linearNodes = owned.flatMap(({ definition }) =>
+      toolNodesOf(definition).filter((node) => node.service === "linear"),
+    );
+    expect(linearNodes.length).toBeGreaterThan(0);
+    for (const node of linearNodes) {
+      expect(node.action).toBe("list_issues");
+      expect(node.params.assignee).toBe("me");
+    }
+  });
+
   describe.each(owned)("$template.id (from $pluginName)", ({ template, definition }) => {
     it("carries a dag/v1 definition", () => {
       expect(isRecord(template.definition)).toBe(true);

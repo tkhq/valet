@@ -31,6 +31,9 @@ interface Instruments {
   sandboxExecDuration: Histogram;
   provisionDuration: Histogram;
   credentialReads: Counter;
+  sandboxCreated: Counter;
+  sandboxDestroyed: Counter;
+  sandboxFlagged: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -73,6 +76,16 @@ function inst(): Instruments {
     }),
     credentialReads: meter.createCounter("valet.credential.reads", {
       description: "Credential accesses, by service and hit/miss",
+    }),
+    sandboxCreated: meter.createCounter("valet.sandbox.created", {
+      description: "Sandboxes provisioned (provision ended ready)",
+    }),
+    sandboxDestroyed: meter.createCounter("valet.sandbox.destroyed", {
+      description: "Sandboxes destroyed, by reason (see SandboxDestroyReason)",
+    }),
+    sandboxFlagged: meter.createCounter("valet.sandbox.flagged", {
+      description:
+        "Sandboxes flagged by the reconcile sweep without a destroy, by kind (over_age, unowned). A sustained non-zero rate means a lifecycle owner failed to clean up — the alert signal for the alert-don't-auto-repair rule.",
     }),
   };
   return instruments;
@@ -119,4 +132,44 @@ export function recordSandboxProvision(durationMs: number, ok: boolean): void {
 
 export function recordCredentialRead(service: string, hit: boolean): void {
   inst().credentialReads.add(1, { service, hit });
+}
+
+/** The destroying owner, for `valet.sandbox.destroyed`'s reason attribute.
+ * A closed union so a typo'd reason cannot silently fragment the series —
+ * add new owners here, not as ad-hoc strings at call sites. */
+export type SandboxDestroyReason =
+  | "session_destroy"
+  | "run_settled"
+  | "hibernation_retention"
+  | "child_settled"
+  | "child_retention"
+  | "orphaned";
+
+/** A reconcile-sweep flag class, for `valet.sandbox.flagged`. */
+export type SandboxFlagKind = "over_age" | "unowned";
+
+/** A provision that ended ready — one side of the created−destroyed gap
+ * that IS the sandbox-leak alarm (sandbox-lifecycle spec, 2026-08-22). */
+export function recordSandboxCreated(): void {
+  inst().sandboxCreated.add(1);
+}
+
+/**
+ * The other side of the leak-alarm gap. Record only a destroy that
+ * actually succeeded — a swallowed provider failure or a cleanup of a
+ * never-counted sandbox (a failed create) must NOT increment, or the gap
+ * reads clean while sandboxes leak. Known imprecision: a derived-handle
+ * destroy whose target never existed (tolerated 404) still counts, since
+ * providers do not report found-vs-absent; it is rare (a run cancelled
+ * before its session ever claimed a turn).
+ */
+export function recordSandboxDestroyed(reason: SandboxDestroyReason): void {
+  inst().sandboxDestroyed.add(1, { reason });
+}
+
+/** A reconcile-sweep flag that deliberately did NOT destroy — the "alert,
+ * don't auto-repair" signal. Re-emitted every sweep pass while the
+ * condition persists, so `increase(...) > 0` alerts cleanly. */
+export function recordSandboxFlagged(kind: SandboxFlagKind, count: number): void {
+  if (count > 0) inst().sandboxFlagged.add(count, { kind });
 }

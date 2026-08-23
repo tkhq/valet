@@ -57,6 +57,7 @@
     "@valet/plugin-google-calendar": "workspace:*",
     "@valet/plugin-google-workspace": "workspace:*",
     "@valet/plugin-linear": "workspace:*",
+    "@valet/plugin-memory": "workspace:*",
     "@valet/plugin-notion": "workspace:*",
     "@valet/plugin-openai": "workspace:*",
     "@valet/plugin-personas": "workspace:*",

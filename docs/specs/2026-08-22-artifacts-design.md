@@ -145,7 +145,8 @@ mem_share { path, revoke? }
   logged in") so the agent relays it accurately.
 
 Agent guidance (rule 7 of `MEMORY_RULES` in
-`packages/api/src/orchestrator/persona.ts`):
+`packages/api/src/orchestrator/persona.ts`, and the "Sharing documents"
+section of `packages/plugin-memory/skills/memory/SKILL.md`):
 
 - Put documents meant for humans under `artifacts/` (type `note`).
 - Share only when the user asks for a link or clearly wants to hand the

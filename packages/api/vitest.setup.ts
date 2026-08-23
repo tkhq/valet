@@ -27,6 +27,9 @@ const SCRUBBED_ENV_VARS = [
   // `workflows/actions.test.ts`.
   "VALET_PUBLIC_URL",
   "BETTER_AUTH_URL",
+  // Limit override: an ambient value would change how many rows the
+  // org-ceiling tests in orchestrator/children.test.ts insert.
+  "VALET_ORG_SESSION_CEILING",
 ] as const;
 
 beforeEach(() => {

@@ -341,9 +341,9 @@ async function getSessionNodeResult(pglite: PGlite, runId: string, nodeId: strin
   );
   const row = result.rows[0];
   if (!row || row.result === null || row.result === undefined) return undefined;
-  // jsonb columns come back already parsed by the driver; tolerate a raw
-  // string defensively (see pg-store.ts's doc comment on the same asymmetry).
-  return typeof row.result === "string" ? JSON.parse(row.result) : row.result;
+  // jsonb comes back already parsed by the driver — never re-parse (see
+  // `fromJsonbColumn` in @valet/store-postgres).
+  return row.result;
 }
 
 /** Narrow the session node's persisted result (`SessionSettledResult`,

@@ -15,6 +15,7 @@
  * automation existed.
  */
 import type { ThreadSummary } from "@valet/api/wire";
+import { matchesNeedle } from "./text-match";
 
 export type ThreadOriginBucket = "all" | "chat" | "auto" | "channel" | "other";
 
@@ -49,13 +50,7 @@ export function threadMatchesSearch(
   thread: Pick<ThreadSummary, "id" | "title" | "key">,
   query: string,
 ): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return (
-    (thread.title ?? "").toLowerCase().includes(q) ||
-    (thread.key ?? "").toLowerCase().includes(q) ||
-    thread.id.toLowerCase().includes(q)
-  );
+  return matchesNeedle(query, [thread.title, thread.key, thread.id]);
 }
 
 /** The sidebar's combined filter: bucket + search, order-preserving. */

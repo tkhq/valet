@@ -114,6 +114,25 @@ export async function identityForUser(
     : null;
 }
 
+/**
+ * Merge the user's linked Slack id into a resolved slack credential's
+ * metadata as `owner_slack_user_id` — the field plugin-slack's
+ * private-channel guard and `slack.dm_owner` read. Both credential
+ * resolution paths call this — the session resolver (`engine/host.ts`)
+ * and the workflow action invoker (`plugins/action-invoker.ts`) — so the
+ * enrichment semantics live in one place. No link → the credential is
+ * returned unchanged and the plugin's guards fail closed.
+ */
+export async function withSlackOwnerMetadata<T extends { metadata?: Record<string, unknown> }>(
+  db: AppDb,
+  userId: string,
+  credential: T,
+): Promise<T> {
+  const identity = await identityForUser(db, "slack", userId);
+  if (!identity) return credential;
+  return { ...credential, metadata: { ...credential.metadata, owner_slack_user_id: identity.externalId } };
+}
+
 export async function setNotifyAttention(
   db: AppDb,
   provider: string,
