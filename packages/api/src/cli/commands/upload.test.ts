@@ -169,7 +169,7 @@ describe("upload command", () => {
 
     it("formats kilobytes", () => {
       expect(formatBytes(5120)).toBe("5 KB");
-      expect(formatBytes(1536)).toBe("2 KB"); // 1.5 rounds to 2
+      expect(formatBytes(1536)).toBe("1.5 KB");
     });
 
     it("formats megabytes", () => {

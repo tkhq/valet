@@ -116,7 +116,7 @@ describe("formatFileAttachmentsNote", () => {
     ];
 
     const result = formatFileAttachmentsNote(files);
-    expect(result).toContain("512 B");
+    expect(result).toContain("512 bytes");
     expect(result).toContain("512 KB");
     expect(result).toContain("500 MB");
   });

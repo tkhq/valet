@@ -25,6 +25,7 @@
     "@mariozechner/pi-agent-core": "0.73.0",
     "@mariozechner/pi-ai": "0.73.0",
     "@opentelemetry/api": "^1.9.1",
+    "@valet/shared": "workspace:*",
     "typebox": "^1.1.24",
     "yaml": "^2.9.0"
   },

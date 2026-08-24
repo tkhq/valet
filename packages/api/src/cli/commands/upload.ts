@@ -13,6 +13,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
+import { formatBytes } from "@valet/shared";
 import { InstanceClient } from "../client.js";
 import { ExitCode } from "../exit.js";
 import { emitNdjson, parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
@@ -149,18 +150,9 @@ export async function prepareUploadFiles(
   return files;
 }
 
-/**
- * Format bytes as a human-readable size for the progress line. Same idiom
- * as the web client.
- */
-export function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) {
-    const mb = bytes / (1024 * 1024);
-    return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
-  }
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
-}
+// One formatter for every surface that prints a file size (see
+// packages/shared); re-exported for this command's tests.
+export { formatBytes };
 
 /**
  * Format a short sha256 suffix (first 8 chars after "sha256:"). For display

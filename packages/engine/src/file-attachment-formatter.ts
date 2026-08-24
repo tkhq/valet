@@ -6,6 +6,7 @@
  * listing each file's path, size, and optional markdown sidecar.
  */
 
+import { formatBytes } from "@valet/shared";
 import type { MessageEntry } from "./types.js";
 
 // File attachment data for annotation — may come from MessageEntry.attachments or AttachmentInfo store
@@ -71,21 +72,3 @@ export function formatFileAttachmentsNote(files: FileAttachment[] | undefined): 
   );
 }
 
-/**
- * Format bytes into human-readable size with shortest sensible unit.
- *
- * @param bytes Byte count
- * @returns Formatted string (e.g. "843 KB", "1.5 MB")
- */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    const kb = bytes / 1024;
-    // Round to 1 decimal for readability, strip trailing .0
-    return (kb % 1 === 0 ? kb : kb.toFixed(1)).toString().replace(/\.0$/, "") + " KB";
-  }
-  const mb = bytes / (1024 * 1024);
-  return (mb % 1 === 0 ? mb : mb.toFixed(1)).toString().replace(/\.0$/, "") + " MB";
-}
