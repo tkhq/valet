@@ -102,5 +102,13 @@ listed so the next pass starts here.
   its badges (decision 2).
 - **Moving workflows and skills between workspaces** — same shape as
   decision 5; add when asked for.
-- **Events feed scoping** — the feed lists org-level facts, not owned
-  rows. It stays unscoped on purpose.
+- **Events feed scoping** — amended 2026-08-24 (small-fixes design,
+  decision 2). The feed still lists org-level facts, not owned rows, and
+  `GET /api/events` still answers with the whole org when it gets no
+  owner. The page filters to the active workspace on first load instead:
+  its scope control starts at "Mine" and sends the switcher's owner, which
+  narrows the feed to events delivered to that workspace's subscriptions,
+  and "All" drops the owner again. The org-wide view stays one click away
+  because an event that matched nothing you own is the row you open when
+  your subscription never fired. The subscriptions list, in the same
+  change, scopes hard to the switcher's owner.

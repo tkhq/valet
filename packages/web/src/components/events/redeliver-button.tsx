@@ -30,6 +30,9 @@ export function RedeliverButton({
 }) {
   const [open, setOpen] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  // Deliberately unscoped: redelivery fans out to every matching
+  // subscription in the org, so the count in the confirm step has to be the
+  // org's count, not the active workspace's.
   const subscriptionsQ = useEventSubscriptions();
   const redeliver = useRedeliverEvent(eventId);
 

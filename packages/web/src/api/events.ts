@@ -21,13 +21,22 @@ import type {
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { api, type OwnerFilter } from "./client";
+
+/** The workspace, as trailing key elements. Same shape as `qkMemory`'s:
+ * trailing, so the bare prefix stays the key that invalidates every
+ * workspace at once. An absent owner adds nothing, which is the key an
+ * unscoped list already had. */
+function ownerKey(owner?: OwnerFilter): readonly string[] {
+  return owner ? [owner.ownerType, owner.ownerId] : [];
+}
 
 export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
-  feed: (service?: string, key?: string) => ["events", "feed", service ?? "", key ?? ""] as const,
+  feed: (service?: string, key?: string, owner?: OwnerFilter) =>
+    ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  subscriptions: () => ["events", "subscriptions"] as const,
+  subscriptions: (owner?: OwnerFilter) => ["events", "subscriptions", ...ownerKey(owner)] as const,
 };
 
 export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogResponse>>) {
@@ -40,13 +49,17 @@ export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogRe
   });
 }
 
+/** `owner` narrows the feed to events delivered to that owner's
+ * subscriptions. Undefined keeps the whole org's feed, which is what the
+ * page's "All" state sends. */
 export function useEvents(
   params?: { service?: string; key?: string },
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventsResponse>>,
 ) {
   return useQuery<ListEventsResponse>({
-    queryKey: qkEvents.feed(params?.service, params?.key),
-    queryFn: () => api.listEvents(params),
+    queryKey: qkEvents.feed(params?.service, params?.key, owner),
+    queryFn: () => api.listEvents(params, owner),
     // New events arrive from external webhooks at any time.
     refetchInterval: 30_000,
     ...opts,
@@ -78,27 +91,34 @@ export function useRedeliverEvent(id: string) {
   });
 }
 
+/** `owner` scopes the list to one workspace: your own subscriptions, or one
+ * team's. Undefined lists every subscription in the org. */
 export function useEventSubscriptions(
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventSubscriptionsResponse>>,
 ) {
   return useQuery<ListEventSubscriptionsResponse>({
-    queryKey: qkEvents.subscriptions(),
-    queryFn: () => api.listEventSubscriptions(),
+    queryKey: qkEvents.subscriptions(owner),
+    queryFn: () => api.listEventSubscriptions(owner),
     ...opts,
   });
 }
 
-export function useCreateEventSubscription() {
+// The three mutations take the workspace they act in, so a write refetches
+// the list the reader is looking at. An absent owner invalidates the bare
+// prefix, which covers every workspace's cached list.
+
+export function useCreateEventSubscription(owner?: OwnerFilter) {
   const qc = useQueryClient();
   return useMutation<CreateEventSubscriptionResponse, Error, CreateEventSubscriptionRequest>({
     mutationFn: (body) => api.createEventSubscription(body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+      qc.invalidateQueries({ queryKey: qkEvents.subscriptions(owner) });
     },
   });
 }
 
-export function usePatchEventSubscription() {
+export function usePatchEventSubscription(owner?: OwnerFilter) {
   const qc = useQueryClient();
   return useMutation<
     PatchEventSubscriptionResponse,
@@ -107,17 +127,17 @@ export function usePatchEventSubscription() {
   >({
     mutationFn: ({ id, body }) => api.patchEventSubscription(id, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+      qc.invalidateQueries({ queryKey: qkEvents.subscriptions(owner) });
     },
   });
 }
 
-export function useDeleteEventSubscription() {
+export function useDeleteEventSubscription(owner?: OwnerFilter) {
   const qc = useQueryClient();
   return useMutation<void, Error, string>({
     mutationFn: (id) => api.deleteEventSubscription(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+      qc.invalidateQueries({ queryKey: qkEvents.subscriptions(owner) });
     },
   });
 }

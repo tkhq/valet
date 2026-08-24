@@ -8,6 +8,7 @@ import {
   SelectMenu,
 } from "~/components/primitives";
 import { useEventCatalog, useEvents } from "~/api/events";
+import { useListOwner } from "~/lib/use-list-owner";
 import { EventRow } from "./event-row";
 
 /** Sentinel for "no filter applied". */
@@ -17,18 +18,38 @@ const ALL = "";
  * at exactly this count may be hiding older events. */
 const FEED_PAGE_SIZE = 50;
 
+/** Which events the feed asks for: those delivered to the active
+ * workspace's subscriptions, or every event the org ingested. */
+type FeedScope = "mine" | "all";
+
+const SCOPE_OPTIONS = [
+  { value: "mine", label: "Mine" },
+  { value: "all", label: "All" },
+] as const;
+
 /**
- * The org's event feed: every normalized event ingested from integration
- * webhooks, newest first, filterable by service and event key (both drawn
- * from the plugin trigger catalog). A row expands into the raw payload and
- * the delivery attempts made for it, so "my subscription never fired" is
+ * The event feed: normalized events ingested from integration webhooks,
+ * newest first, filterable by service and event key (both drawn from the
+ * plugin trigger catalog). A row expands into the raw payload and the
+ * delivery attempts made for it, so "my subscription never fired" is
  * answerable from this page alone.
+ *
+ * The scope control decides which events the question is asked about. It
+ * starts at "Mine", the events that reached the active workspace's own
+ * subscriptions. "All" restores the org-wide feed, and it must stay
+ * available: an event that matched nothing you own is precisely the row you
+ * open when your subscription never fired.
  */
 export function EventFeed() {
   const [service, setService] = useState(ALL);
   const [key, setKey] = useState(ALL);
+  const [scope, setScope] = useState<FeedScope>("mine");
+  const owner = useListOwner();
   const catalogQ = useEventCatalog();
-  const eventsQ = useEvents({ service: service || undefined, key: key || undefined });
+  const eventsQ = useEvents(
+    { service: service || undefined, key: key || undefined },
+    scope === "mine" ? owner : undefined,
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const services = catalogQ.data?.services ?? [];
@@ -39,6 +60,8 @@ export function EventFeed() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
+        <SelectMenu value={scope} onChange={setScope} options={SCOPE_OPTIONS} />
+
         <SelectMenu
           value={service}
           onChange={(next) => {
@@ -83,8 +106,9 @@ export function EventFeed() {
 
       {eventsQ.data && eventsQ.data.events.length === 0 && (
         <EmptyRow>
-          No events yet. Events appear here when a connected integration sends a webhook — connect
-          one on the Integrations page.
+          {scope === "mine"
+            ? "No events reached this workspace's subscriptions yet. Select All to see every event the organization received."
+            : "No events yet. Events appear here when a connected integration sends a webhook — connect one on the Integrations page."}
         </EmptyRow>
       )}
 

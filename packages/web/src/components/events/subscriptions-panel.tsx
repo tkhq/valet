@@ -23,6 +23,8 @@ import {
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
+import { useListOwner } from "~/lib/use-list-owner";
+import type { OwnerFilter } from "~/api/client";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { SubscriptionCreateDialog } from "./subscription-create-dialog";
@@ -61,9 +63,16 @@ function describeTarget(
  * a workflow run or an orchestrator prompt. List with enable/disable and
  * delete; create via `SubscriptionCreateDialog`. Rows show filters
  * read-only (filters are API-only for now).
+ *
+ * The list is the active workspace's: your own subscriptions in the
+ * personal workspace, and one team's in a team workspace. It was org-wide
+ * until 2026-08-24 (small-fixes design, decision 1), which is why the rows
+ * still badge ownership — an unscoped list is what the API answers without
+ * an owner, and the badges stay correct for both.
  */
 export function SubscriptionsPanel() {
-  const subsQ = useEventSubscriptions();
+  const owner = useListOwner();
+  const subsQ = useEventSubscriptions(owner);
   const workflowsQ = useWorkflows();
   const meQ = useMe();
   const teamsQ = useTeams();
@@ -118,6 +127,7 @@ export function SubscriptionsPanel() {
               teamNames={teamNames}
               viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
+              owner={owner}
             />
           ))}
         </div>
@@ -127,7 +137,7 @@ export function SubscriptionsPanel() {
           mount, so mount time must be open time (see its header comment).
           Also keeps its catalog/workflow queries off the tab's initial
           load. */}
-      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} />}
+      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} owner={owner} />}
     </div>
   );
 }
@@ -138,6 +148,7 @@ function SubscriptionRow({
   teamNames,
   viewerId,
   mutable,
+  owner,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
@@ -146,9 +157,12 @@ function SubscriptionRow({
   viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
+  /** The workspace this row is listed under, so a toggle or a delete
+   * refetches the list the reader is looking at. */
+  owner: OwnerFilter | undefined;
 }) {
-  const patch = usePatchEventSubscription();
-  const del = useDeleteEventSubscription();
+  const patch = usePatchEventSubscription(owner);
+  const del = useDeleteEventSubscription(owner);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
 
