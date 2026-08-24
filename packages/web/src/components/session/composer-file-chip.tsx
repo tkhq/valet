@@ -1,6 +1,6 @@
 import { RotateCw, Trash2, AlertCircle, Loader } from "lucide-react";
 import { Button } from "~/components/primitives";
-import { formatSize, type ComposerFile } from "./composer-files";
+import { formatSize, isFileUploading, type ComposerFile } from "./composer-files";
 
 interface FileChipProps {
   file: ComposerFile;
@@ -9,12 +9,12 @@ interface FileChipProps {
 }
 
 /**
- * Display one file chip: filename, size, progress/status, and remove button.
- * Shows spinner during upload, success checkmark when done, error icon + retry
- * button on failure.
+ * Display one file chip: filename, size, and status. Shows a spinner while
+ * the upload is in flight (fetch exposes no upload progress, so there is no
+ * percentage bar), a checkmark when done, error icon + retry on failure.
  */
 export function FileChip({ file, onRemove, onRetry }: FileChipProps) {
-  const isUploading = file.uploadProgress !== null && !file.attachmentRef && !file.error;
+  const isUploading = isFileUploading(file);
   const isSuccess = file.attachmentRef !== undefined;
   const isError = file.error !== undefined;
 
@@ -26,16 +26,13 @@ export function FileChip({ file, onRemove, onRetry }: FileChipProps) {
 
       <div className="flex-1 min-w-0">
         <div className="truncate font-medium">{file.name}</div>
-        {isUploading && (
-          <div className="mt-1 h-1.5 w-full bg-[--border] rounded-full overflow-hidden">
-            <div
-              className="h-full bg-moss transition-all duration-300"
-              style={{ width: `${file.uploadProgress}%` }}
-            />
+        {isError && <div className="text-danger-600 text-xs mt-0.5">{file.error}</div>}
+        {!isError && (
+          <div className="text-muted text-xs">
+            {formatSize(file.bytes)}
+            {isUploading ? " · uploading…" : ""}
           </div>
         )}
-        {isError && <div className="text-danger-600 text-xs mt-0.5">{file.error}</div>}
-        {!isError && <div className="text-muted text-xs">{formatSize(file.bytes)}</div>}
       </div>
 
       {isError && onRetry && (

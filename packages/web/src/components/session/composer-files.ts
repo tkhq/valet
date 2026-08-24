@@ -1,19 +1,35 @@
 /**
  * File upload handling for the composer: upload to the API, hold attachment
- * refs, manage progress and errors, and prepare the request body.
+ * refs, manage errors, and prepare the request body.
  *
  * Unlike images (which are read into data URLs and shipped inline), files
  * are uploaded to the sandbox via multipart POST and referenced by an
  * ephemeral `attachmentRef` that expires 15 minutes after upload.
  *
+ * Intake helpers (size formatting, list/clipboard extraction, drag
+ * detection) are shared with the image path — see `composer-images.ts`.
+ *
  * Everything here is pure or DOM-agnostic, so it's testable without a browser.
  */
+
+import { formatSize, readFailure } from "./composer-images";
+
+export {
+  filesFromClipboard,
+  filesFromList,
+  formatSize,
+  readFailure,
+  transferHasFiles,
+  type ClipboardFileItem,
+} from "./composer-images";
 
 /** Master switch for file upload affordances in the composer. */
 export const FILE_UPLOADS_ENABLED: boolean = true;
 
 /**
- * One file being uploaded, uploaded, or errored.
+ * One file being uploaded, uploaded, or errored. Upload state is derived:
+ * no `attachmentRef` and no `error` means the upload is in flight (uploads
+ * start the moment a file is accepted).
  */
 export interface ComposerFile {
   /** Local unique id for React keys and removal. */
@@ -22,8 +38,6 @@ export interface ComposerFile {
   bytes: number;
   /** The underlying File. Held so the upload hook can stream the bytes. */
   file: File;
-  /** The upload progress: 0-100, or null if not yet started. */
-  uploadProgress: number | null;
   /** Set when upload completes successfully. */
   attachmentRef?: string;
   /** Set when upload fails. */
@@ -43,16 +57,6 @@ export const MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 export interface FileMeta {
   name: string;
   size: number;
-}
-
-/** Human size for limits and labels. */
-export function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) {
-    const mb = bytes / (1024 * 1024);
-    return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
-  }
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
 }
 
 /**
@@ -98,53 +102,6 @@ export function acceptFiles<T extends FileMeta>(
   return { accepted, rejected };
 }
 
-/** Message for a file that couldn't be read (e.g., permission). */
-export function readFailure(name: string): string {
-  return `${name} could not be read. Attach the file again.`;
-}
-
-/**
- * Files from a `FileList` (drop or picker). Nothing is filtered here on
- * purpose — `acceptFiles` judges every file, so a wrong file always earns a
- * message instead of vanishing.
- */
-export function filesFromList(list: ArrayLike<File> | null | undefined): File[] {
-  if (!list) return [];
-  return Array.from(list);
-}
-
-/** The `DataTransferItem` fields we use for clipboard items. */
-export interface ClipboardFileItem {
-  kind: string;
-  getAsFile: () => File | null;
-}
-
-/**
- * Files from a paste. Items of kind "string" are skipped — a text paste
- * stays a text paste.
- */
-export function filesFromClipboard(
-  items: ArrayLike<ClipboardFileItem> | null | undefined,
-): File[] {
-  if (!items) return [];
-  const files: File[] = [];
-  for (const item of Array.from(items)) {
-    if (item.kind !== "file") continue;
-    const file = item.getAsFile();
-    if (file) files.push(file);
-  }
-  return files;
-}
-
-/**
- * True when a drag carries files. Dragged text and links report other
- * types, and the composer must not claim those drops.
- */
-export function transferHasFiles(types: ArrayLike<string> | null | undefined): boolean {
-  if (!types) return false;
-  return Array.from(types).includes("Files");
-}
-
 /** Local id for a held file (same pattern as images). */
 function newFileId(): string {
   return `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -157,22 +114,18 @@ export function createComposerFile(file: File): ComposerFile {
     name: file.name,
     bytes: file.size,
     file,
-    uploadProgress: null,
   };
+}
+
+/** True while this file's upload is still in flight. */
+export function isFileUploading(file: ComposerFile): boolean {
+  return file.attachmentRef === undefined && file.error === undefined;
 }
 
 /**
  * Payload builder for the send request — extract refs from files that have
  * completed upload successfully.
  */
-/**
- * Payload builder for the send request — extract refs from files that have
- * completed upload successfully.
- */
 export function toFileRefs(files: readonly ComposerFile[]): Array<{ ref: string }> {
-  return files
-    .filter((f) => f.attachmentRef)
-    .map((f) => ({
-      ref: f.attachmentRef!,
-    }));
+  return files.flatMap((f) => (f.attachmentRef ? [{ ref: f.attachmentRef }] : []));
 }

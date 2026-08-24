@@ -144,7 +144,9 @@ export function acceptImages<T extends FileMeta>(
   return { accepted, rejected };
 }
 
-function isSupportedImageType(type: string): boolean {
+/** True when the composer's image path handles this MIME type. Anything
+ * else routes to the file-upload path when file uploads are enabled. */
+export function isSupportedImageType(type: string): boolean {
   return SUPPORTED_IMAGE_TYPES.some((supported) => supported === type);
 }
 
