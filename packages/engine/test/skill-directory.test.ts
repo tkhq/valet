@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSkillFromDirectory } from "../src/index.js";
+import { loadSkillFromDirectory } from "../src/roles-skills/directory.js";
 
 let root: string;
 

@@ -13,6 +13,10 @@
     "./test-helpers": {
       "types": "./src/test-helpers/index.ts",
       "import": "./src/test-helpers/index.ts"
+    },
+    "./skills-directory": {
+      "types": "./src/roles-skills/directory.ts",
+      "import": "./src/roles-skills/directory.ts"
     }
   },
   "scripts": {

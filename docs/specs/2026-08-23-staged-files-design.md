@@ -1,7 +1,7 @@
 # Staged Files Design — skill resources and parent-to-child file sharing
 
 **Date:** 2026-08-23
-**Status:** Designed. Implementation in progress.
+**Status:** Implemented: the `session_staged_files` table, the staging service, `staged:` prep steps, skill resource loading (`loadSkillFromDirectory`), skill-tool materialization, `task.files`, and `child_push_file`.
 **Scope:** One subsystem that puts files into a session's sandbox from outside the sandbox. Two producers use it: skill resource bundles (`scripts/`, `references/`, `assets/` per the Agent Skills spec) and orchestrator-to-child file sharing (the `task` tool's `files` parameter and the `child_push_file` tool).
 
 ## Context

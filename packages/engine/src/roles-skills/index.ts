@@ -4,7 +4,7 @@ export {
   type FrontmatterValue,
   type ParsedArtifact,
 } from "./parser.js";
-export { loadRoleFromMarkdown, loadSkillFromMarkdown, loadSkillFromDirectory, SKILL_RESOURCES_MAX_FILES, SKILL_RESOURCES_MAX_BYTES } from "./loader.js";
+export { loadRoleFromMarkdown, loadSkillFromMarkdown } from "./loader.js";
 export {
   validateSkillFrontmatter,
   isLoadable,
