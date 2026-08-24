@@ -16,6 +16,7 @@ import {
   applyVdids,
   parseHeader,
   readTemplateStarter,
+  staticRenderChecks,
   validateDcHtml,
   DC_HTML_VERSION,
   MAX_ARTIFACT_BYTES,
@@ -223,6 +224,9 @@ export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promi
   if (!validation.ok) {
     throw new ValidationError(`Not a valid .dc.html document: ${validation.errors.join(" ")}`);
   }
+  // Render diagnostics (render-checks.ts): what the canvas will strip or
+  // hide, surfaced in the same turn that wrote it.
+  notes.push(...staticRenderChecks(ensured.content));
 
   const { html } = applyVdids(ensured.content);
 

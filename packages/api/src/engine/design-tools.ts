@@ -183,6 +183,42 @@ export const designReadTool = defineTool({
       }
     }
 
+    // The canvas render-health report — what ACTUALLY renders for the
+    // user, measured by the live canvas. This is the only signal that can
+    // contradict plausible-looking markup (hidden sections, stripped
+    // scripts); when it names hidden slides, believe it over the document.
+    let canvasReport = "no canvas report yet (no canvas has rendered this artifact)";
+    const healthRes = await fetch(designUrl(cfg, ctx, "health"), {
+      headers: designHeaders(cfg, ctx, false),
+      signal: ctx.signal,
+    });
+    if (healthRes.ok) {
+      const { report } = (await healthRes.json()) as {
+        report: {
+          revision: string;
+          totalSlides: number;
+          hiddenSlides: number[];
+          scriptsStripped: number;
+        } | null;
+      };
+      if (report) {
+        const stale = report.revision !== current.revision ? ` (STALE: measured at ${report.revision})` : "";
+        const parts: string[] = [];
+        if (report.hiddenSlides.length > 0) {
+          parts.push(
+            `${report.hiddenSlides.length} of ${report.totalSlides} slides render hidden or blank in the user's canvas (slides ${report.hiddenSlides.map((i) => i + 1).join(", ")}) — usually CSS that hides sections by default, relying on scripts that never run`,
+          );
+        }
+        if (report.scriptsStripped > 0) {
+          parts.push(`${report.scriptsStripped} script tag(s) were stripped before rendering`);
+        }
+        canvasReport =
+          parts.length > 0
+            ? `canvas report${stale}: ${parts.join("; ")}`
+            : `canvas report${stale}: all ${report.totalSlides} slides render visibly`;
+      }
+    }
+
     let doc = elideDataUrls(current.content);
     let truncationNote = "";
     if (doc.length > READ_CONTENT_CAP) {
@@ -190,7 +226,7 @@ export const designReadTool = defineTool({
       truncationNote = "\n[document truncated — use design_edit kind='patch' for targeted changes]";
     }
     return {
-      text: `revision ${current.revision}\n${commentLines}\n---- current artifact ----\n${doc}${truncationNote}`,
+      text: `revision ${current.revision}\n${canvasReport}\n${commentLines}\n---- current artifact ----\n${doc}${truncationNote}`,
     };
   },
 });

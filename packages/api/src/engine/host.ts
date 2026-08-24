@@ -65,6 +65,9 @@ const DESIGN_SESSION_PREAMBLE = [
   "The artifact is one self-contained HTML document. Keep the required <meta name=\"valet-design\"> header. For slide decks, each slide is a top-level <section> with speaker notes in an <aside>; do not add your own navigation buttons or scripts — the canvas provides slide navigation, and scripts are stripped.",
   "When the user comments on an element, change that element (design_edit kind='patch'), then resolve the comment with design_comment_resolve. Apply the change BEFORE resolving.",
   "Do not trust your memory of the artifact — the user can revert or edit the design from the canvas between your turns. Call design_read to see the current revision, the document, and any unresolved comments before you edit.",
+  "The canvas CANNOT run JavaScript. A deck that hides slides until a script reveals them (position:absolute + opacity:0 + an .active class) renders as blank slides. Keep every section statically visible; the canvas shows one slide at a time on its own.",
+  "design_read includes a canvas report measuring what actually renders for the user. When it says slides are hidden or blank, believe it over your reading of the markup, and fix the document until the report is clean.",
+  "After a handoff, the canvas artifact is STILL the design deliverable. Requests about the design (layout, clipping, styling) are design_edit work — never edit workspace copies of the design with write/edit/bash.",
 ].join("\n");
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";

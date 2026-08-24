@@ -30,3 +30,4 @@ export type {
   MinimalPageElement,
   SlidesRequestChunk,
 } from "./gslides.js";
+export { staticRenderChecks, hidesSectionsByDefault } from "./render-checks.js";

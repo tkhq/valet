@@ -611,6 +611,15 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/design/revert`,
       { revision },
     ),
+  postDesignHealth: (
+    sessionId: string,
+    body: { revision: string; totalSlides: number; hiddenSlides: number[]; scriptsStripped: number },
+  ) =>
+    request<{ ok: boolean }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/design/health`,
+      body,
+    ),
   listDesignComments: (sessionId: string) =>
     request<DesignCommentsResponse>(
       "GET",

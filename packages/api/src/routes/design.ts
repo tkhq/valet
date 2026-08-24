@@ -57,6 +57,24 @@ export const designRouter = new Hono<AppEnv>();
 const TOKEN_CACHE_TTL_MS = 60_000;
 const tokenCache = new Map<string, { tokens: Record<string, string>; at: number }>();
 
+/**
+ * Latest canvas render-health report per session, in memory. The canvas
+ * measures what ACTUALLY renders (hidden/blank slides, stripped scripts)
+ * and posts it here; design_read serves it back to the agent — the only
+ * feedback path that can catch "the markup looks fine but the user sees
+ * blank slides". In-memory is deliberate: it is a freshness signal from a
+ * live canvas, not durable state; an api restart just waits for the next
+ * report.
+ */
+interface RenderHealthReport {
+  revision: string;
+  totalSlides: number;
+  hiddenSlides: number[];
+  scriptsStripped: number;
+  reportedAt: number;
+}
+const healthReports = new Map<string, RenderHealthReport>();
+
 interface DesignAccess {
   row: AgentSessionRow;
   actorUserId: string;
@@ -350,4 +368,32 @@ designRouter.get("/:id/design/tokens", async (c) => {
     tokens = Object.fromEntries(Object.entries(tokens).filter(([name]) => refs.has(name)));
   }
   return c.json({ tokens });
+});
+
+designRouter.post("/:id/design/health", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  let body: { revision?: string; totalSlides?: number; hiddenSlides?: number[]; scriptsStripped?: number };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.revision !== "string" || typeof body.totalSlides !== "number") {
+    return c.json({ error: "revision and totalSlides are required" }, 400);
+  }
+  healthReports.set(access.row.id, {
+    revision: body.revision,
+    totalSlides: body.totalSlides,
+    hiddenSlides: (body.hiddenSlides ?? []).filter((n): n is number => typeof n === "number").slice(0, 200),
+    scriptsStripped: typeof body.scriptsStripped === "number" ? body.scriptsStripped : 0,
+    reportedAt: Date.now(),
+  });
+  return c.json({ ok: true });
+});
+
+designRouter.get("/:id/design/health", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  return c.json({ report: healthReports.get(access.row.id) ?? null });
 });

@@ -9,7 +9,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { DesignRevisionSummary } from "@valet/api/wire";
-import { ApiError } from "~/api/client";
+import { api, ApiError } from "~/api/client";
 import { useSendPrompt, useSession, useThreads } from "~/api/queries";
 import {
   qkDesign,
@@ -138,6 +138,8 @@ function DesignCanvasPage() {
   const [commentVdid, setCommentVdid] = useState<string | null>(null);
   const [activeSlide, setActiveSlide] = useState(0);
   const canvasRef = useRef<HTMLDivElement>(null);
+  // Dedupe render-health posts: one report per (revision, measurement).
+  const lastHealthKey = useRef("");
   const chatPanel = useDragResize({
     storageKey: "vd.chatWidth",
     initial: 340,
@@ -421,6 +423,16 @@ function DesignCanvasPage() {
               commentMode={commentMode}
               onElementClick={(vdid) => {
                 if (commentMode) setCommentVdid(vdid);
+              }}
+              onRenderHealth={(health) => {
+                const revision = artifactQ.data?.revision;
+                if (!revision) return;
+                const key = `${revision}:${JSON.stringify(health)}`;
+                if (key === lastHealthKey.current) return;
+                lastHealthKey.current = key;
+                // Fire-and-forget: the report is a freshness signal for
+                // design_read, never worth blocking the canvas over.
+                void api.postDesignHealth(sessionId, { revision, ...health }).catch(() => {});
               }}
               className="mx-auto max-w-4xl rounded bg-white shadow dark:bg-neutral-950"
             />

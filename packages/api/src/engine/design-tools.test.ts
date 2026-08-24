@@ -348,7 +348,7 @@ describe("design tools", () => {
     expect(result.text).toContain("Connect Google Workspace in Settings");
   });
 
-  it("design_read reports revision, unresolved comments, and the elided document", async () => {
+  it("design_read reports revision, unresolved comments, the canvas report, and the elided document", async () => {
     const docWithImage = DOC.replace(
       "<h1",
       '<img src="data:image/png;base64,AAAAAAAA" alt="big"><h1',
@@ -358,6 +358,16 @@ describe("design tools", () => {
       if (u.endsWith("/design/artifact")) {
         return Promise.resolve(
           new Response(JSON.stringify({ revision: "r-007", content: docWithImage }), { status: 200 }),
+        );
+      }
+      if (u.endsWith("/design/health")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              report: { revision: "r-007", totalSlides: 6, hiddenSlides: [1, 2, 3, 4, 5], scriptsStripped: 1 },
+            }),
+            { status: 200 },
+          ),
         );
       }
       return Promise.resolve(
@@ -374,10 +384,38 @@ describe("design tools", () => {
     });
     const result = await designReadTool.execute({}, ctxWith(CFG));
     expect(result.text).toContain("revision r-007");
+    expect(result.text).toContain("5 of 6 slides render hidden or blank");
+    expect(result.text).toContain("slides 2, 3, 4, 5, 6");
+    expect(result.text).toContain("1 script tag(s) were stripped");
     expect(result.text).toContain("dc_1 on [data-vdid=abc123]: Make it pop");
     expect(result.text).not.toContain("dc_2");
     expect(result.text).toContain('src="[embedded image]"');
     expect(result.text).not.toContain("base64");
+  });
+
+  it("design_read marks a canvas report from an older revision as stale", async () => {
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-008", content: DOC }), { status: 200 }),
+        );
+      }
+      if (u.endsWith("/design/health")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              report: { revision: "r-007", totalSlides: 6, hiddenSlides: [], scriptsStripped: 0 },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify({ comments: [] }), { status: 200 }));
+    });
+    const result = await designReadTool.execute({}, ctxWith(CFG));
+    expect(result.text).toContain("STALE: measured at r-007");
+    expect(result.text).toContain("all 6 slides render visibly");
   });
 
   it("design_edit relays server notes (header normalization, staleness)", async () => {

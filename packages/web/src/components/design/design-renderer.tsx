@@ -20,6 +20,17 @@ import { checkDesignVersion, sanitizeDesignHtml } from "./sanitize";
  */
 const OVERLAY_CSS = `
   .vd-body { display: block; min-height: 100%; }
+  /* The canvas owns slide navigation. Reveal-style decks ship sections as
+     position:absolute + opacity:0 and rely on a script (stripped) to add
+     an .active class — without this override 5 of 6 slides render as
+     blank rectangles while the markup looks fine to every tool. */
+  section.vd-active {
+    display: block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    position: relative !important;
+  }
   .vd-hover-target { outline: 2px dashed #3b82f6; outline-offset: 2px; }
   [data-vd-comments] { position: relative; outline: 2px solid #f59e0b; outline-offset: 2px; }
   [data-vd-comments]::after {
@@ -31,6 +42,16 @@ const OVERLAY_CSS = `
     z-index: 10;
   }
 `;
+
+export interface DesignRenderHealth {
+  totalSlides: number;
+  /** 0-based indexes of top-level sections the artifact's OWN styles hide
+   * (display:none / visibility:hidden / opacity≈0 / zero-height) —
+   * measured before the canvas applies its slide toggling. */
+  hiddenSlides: number[];
+  /** `<script>` tags in the raw document; all of them are stripped. */
+  scriptsStripped: number;
+}
 
 export interface DesignRendererProps {
   /** The full `.dc.html` document (unsanitized — sanitized here). */
@@ -49,6 +70,10 @@ export interface DesignRendererProps {
   onElementClick?: (vdid: string) => void;
   /** Renders a crosshair cursor while comment mode is armed. */
   commentMode?: boolean;
+  /** Called after each mount with what ACTUALLY renders — the feedback an
+   * agent cannot get from markup alone. Only the main canvas passes this;
+   * thumbnails do not. */
+  onRenderHealth?: (health: DesignRenderHealth) => void;
   className?: string;
 }
 
@@ -83,10 +108,13 @@ export function DesignRenderer({
   commentCounts,
   onElementClick,
   commentMode,
+  onRenderHealth,
   className,
 }: DesignRendererProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<ShadowRoot | null>(null);
+  const healthRef = useRef(onRenderHealth);
+  healthRef.current = onRenderHealth;
   // Bumped after every innerHTML replacement so the attribute-mutating
   // effects (slides, badges) re-run against the fresh DOM.
   const [domVersion, setDomVersion] = useState(0);
@@ -162,6 +190,29 @@ export function DesignRenderer({
     for (const styleEl of Array.from(shadow.querySelectorAll("style"))) {
       styleEl.textContent = remapDocumentSelectors(styleEl.textContent ?? "");
     }
+    // Measure artifact-intrinsic visibility HERE, before the slide-toggle
+    // effect adds its own inline display/vd-active overrides.
+    if (healthRef.current) {
+      const sections = topLevelSections(shadow);
+      const hiddenSlides: number[] = [];
+      sections.forEach((el, i) => {
+        const cs = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        if (
+          cs.display === "none" ||
+          cs.visibility === "hidden" ||
+          parseFloat(cs.opacity) < 0.05 ||
+          rect.height < 8
+        ) {
+          hiddenSlides.push(i);
+        }
+      });
+      healthRef.current({
+        totalSlides: sections.length,
+        hiddenSlides,
+        scriptsStripped: (content.match(/<script\b/gi) ?? []).length,
+      });
+    }
     setDomVersion((v) => v + 1);
     // `version.ok` is derived from `content`; content is the real input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -183,18 +234,27 @@ export function DesignRenderer({
     };
   }, [tokens]);
 
-  // Slides: show only the active top-level <section>.
+  // Slides: show ONLY the active top-level <section>, and force it visible
+  // even when the artifact's own stylesheet hides sections by default.
   useEffect(() => {
     const shadow = shadowRef.current;
     if (!shadow) return;
     const sections = topLevelSections(shadow);
     if (activeSlideIndex === undefined) {
-      for (const s of sections) s.style.removeProperty("display");
+      for (const s of sections) {
+        s.style.removeProperty("display");
+        s.classList.remove("vd-active");
+      }
       return;
     }
     sections.forEach((s, i) => {
-      if (i === activeSlideIndex) s.style.removeProperty("display");
-      else s.style.setProperty("display", "none");
+      if (i === activeSlideIndex) {
+        s.style.removeProperty("display");
+        s.classList.add("vd-active");
+      } else {
+        s.style.setProperty("display", "none");
+        s.classList.remove("vd-active");
+      }
     });
   }, [activeSlideIndex, domVersion]);
 
