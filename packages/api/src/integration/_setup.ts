@@ -34,9 +34,9 @@ import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
-import { SkillSyncService } from "../services/skill-sync.js";
+import { RepoContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
-import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
+import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -153,7 +153,7 @@ export interface BootTestApiOpts {
   imageBuilder?: ImageBuilder | null;
   /** Overrides the GitHub API base URL two constructed services read
    * through: the `PrebuildService`'s credential/contents resolution (ignored
-   * when `imageBuilder` is unset), and the skill-sync reader. Point it at
+   * when `imageBuilder` is unset), and the content-sync reader. Point it at
    * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
 }
@@ -463,10 +463,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
 
-  // Skill-repository sync. Constructed with the same real deps
+  // Repository content sync. Constructed with the same real deps
   // `buildNodeProviders` uses, but NEVER started on its timer — tests drive
   // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
-  const skillSync = new SkillSyncService({
+  const contentSync = new RepoContentSyncService({
     db,
     reader: new GitHubSkillRepoReader({ apiUrl: opts.githubApiUrl }),
     readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
@@ -493,7 +493,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowScheduler,
     webhookRateLimiter,
     eventDispatcher,
-    skillSync,
+    contentSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

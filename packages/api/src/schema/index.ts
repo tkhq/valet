@@ -839,8 +839,9 @@ export const artifacts = pgTable(
 // `content_sha` is the SHA-256 of `content`. The repo importer will compare
 // it to decide whether an upstream body changed.
 //
-// `source_id` will point at a `skill_sources` row once repository sync
-// exists. It carries no foreign key yet, because that table is not built.
+// `source_id` names the `content_sources` row this skill is mirrored from.
+// It carries no foreign key, and `services/content-sources.ts` deletes the
+// mirrored rows with the source.
 //
 // Ownership columns and the owner index mirror `workflow_definitions` below,
 // because skill access follows the same rule: your own rows plus the rows of
@@ -873,14 +874,27 @@ export const skills = pgTable(
   ],
 );
 
-// One tracked skill repository. A `repo`-origin row in `skills` above is a
-// MIRROR of a `SKILL.md` in one of these repositories, and sync is the only
-// thing that writes those rows, so a source and the skills it carries are
-// created and destroyed together.
+/**
+ * What one tracked repository mirrors. `skills` is the kind that ships;
+ * `workflows` and `templates` are the kinds the 2026-08-24 workflows MVP
+ * design adds on the same rail
+ * (`docs/specs/2026-08-24-workflows-mvp-design.md`, decision 1).
+ */
+export type ContentKind = "skills" | "workflows" | "templates";
+
+// One tracked repository. A `repo`-origin row in `skills` above is a MIRROR
+// of a `SKILL.md` in one of these repositories, and sync is the only thing
+// that writes those rows, so a source and the content it carries are created
+// and destroyed together.
 //
 // Do not confuse this row with the engine's `SkillSource` type, which is one
-// assembled skill on its way into a session. In prose here, "skill source"
+// assembled skill on its way into a session. In prose here, "content source"
 // always means the tracked repository.
+//
+// `kinds` says which content the sync collects from the repository. One
+// collector per kind reads the same tree, so a repository tracked for two
+// kinds still costs one head-commit read per poll — see
+// `services/content-sync/collector.ts`.
 //
 // `ref` empty means the repository's default branch. `subpath` empty means
 // the repository root. Both are part of the UNIQUE key, so one repository can
@@ -888,18 +902,18 @@ export const skills = pgTable(
 //
 // The last four sync columns are the whole change-detection state:
 // `last_sha` is the commit the last sync read, and `last_manifest_hash` is a
-// hash over the skill files that commit held. A poll that finds the same
+// hash over the tracked files that commit held. A poll that finds the same
 // commit stops after one API call; a poll that finds a moved commit with the
-// same manifest records the commit and writes no skill rows.
+// same manifest records the commit and writes no mirrored rows.
 //
 // `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
 // and retry state, shaped like `event_deliveries` — see
-// `services/skill-sync.ts` for the claim statement and the backoff ladder.
-// `last_error` carries whatever the last sync needs to tell the reader:
-// the failure for `status='error'`, and the per-skill warnings for
+// `services/content-sync/service.ts` for the claim statement and the backoff
+// ladder. `last_error` carries whatever the last sync needs to tell the
+// reader: the failure for `status='error'`, and the per-file warnings for
 // `status='warning'` (a sync that succeeded but skipped a malformed file).
-export const skillSources = pgTable(
-  "skill_sources",
+export const contentSources = pgTable(
+  "content_sources",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
@@ -907,7 +921,7 @@ export const skillSources = pgTable(
     ownerId: text("owner_id").notNull(),
     /** The user who added the source. This is the only user identity a team
      * source or an org source carries, and the sweep runs with no request
-     * context, so it is what `services/skill-source-credential.ts` reads to
+     * context, so it is what `services/content-source-credential.ts` reads to
      * pick a team source's GitHub credential. NULL means the row predates
      * this column, and a NULL row syncs with no credential. */
     createdBy: text("created_by"),
@@ -915,9 +929,12 @@ export const skillSources = pgTable(
     repoFullName: text("repo_full_name").notNull(),
     /** Branch, tag, or commit. Empty means the default branch. */
     ref: text("ref").notNull().default(""),
-    /** Narrows the skill scan to one directory. Empty scans the whole
-     * repository, which is the normal case. */
+    /** Narrows the scan to one directory. Empty scans the whole repository,
+     * which is the normal case. */
     subpath: text("subpath").notNull().default(""),
+    /** The content kinds this source collects. Defaults to skills only, so
+     * every row written before workflow sync existed keeps its behavior. */
+    kinds: jsonb("kinds").notNull().default(["skills"]).$type<ContentKind[]>(),
     enabled: boolean("enabled").notNull().default(true),
     status: text("status", { enum: ["pending", "ok", "warning", "error"] })
       .notNull()
@@ -932,9 +949,9 @@ export const skillSources = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [
-    index("skill_sources_owner").on(t.orgId, t.ownerType, t.ownerId),
-    index("skill_sources_due").on(t.enabled, t.nextAttemptAt),
-    uniqueIndex("skill_sources_repo").on(
+    index("content_sources_owner").on(t.orgId, t.ownerType, t.ownerId),
+    index("content_sources_due").on(t.enabled, t.nextAttemptAt),
+    uniqueIndex("content_sources_repo").on(
       t.orgId,
       t.ownerType,
       t.ownerId,
@@ -1638,8 +1655,8 @@ export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
-/** One tracked skill repository. Not the engine's `SkillSource`. */
-export type SkillSourceRow = typeof skillSources.$inferSelect;
+/** One tracked repository. Not the engine's `SkillSource`. */
+export type ContentSourceRow = typeof contentSources.$inferSelect;
 export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;

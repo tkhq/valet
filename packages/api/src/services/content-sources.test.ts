@@ -1,5 +1,5 @@
 /**
- * Tracked skill repositories — the `skill_sources` rows a person adds, and
+ * Tracked repositories — the `content_sources` rows a person adds, and
  * the repo-spec parsing that turns what they paste into one row.
  *
  * Ownership mirrors `services/skills.ts` exactly (your own rows plus the rows
@@ -13,16 +13,16 @@ import { orgMembers, orgs, skills, users } from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "./teams.js";
 import { createSkill, type SkillOwner } from "./skills.js";
 import {
-  createSkillSource,
-  decodeSkillSourceCursor,
-  deleteSkillSource,
-  listSkillSources,
-  ownedSkillSourceRow,
+  createContentSource,
+  decodeContentSourceCursor,
+  deleteContentSource,
+  listContentSources,
+  ownedContentSourceRow,
   parseRepoInput,
-  SKILL_SOURCE_DEFAULT_LIMIT,
-  SkillSourceConflictError,
-  SkillSourceInputError,
-} from "./skill-sources.js";
+  CONTENT_SOURCE_DEFAULT_LIMIT,
+  ContentSourceConflictError,
+  ContentSourceInputError,
+} from "./content-sources.js";
 
 const ORG = "org1";
 
@@ -60,18 +60,18 @@ describe("parseRepoInput", () => {
   });
 
   it("rejects a host that is not GitHub", () => {
-    expect(() => parseRepoInput("https://gitlab.com/tkhq/skills")).toThrow(SkillSourceInputError);
+    expect(() => parseRepoInput("https://gitlab.com/tkhq/skills")).toThrow(ContentSourceInputError);
   });
 
   it("rejects text that is not a repository", () => {
-    expect(() => parseRepoInput("")).toThrow(SkillSourceInputError);
-    expect(() => parseRepoInput("skills")).toThrow(SkillSourceInputError);
-    expect(() => parseRepoInput("tkhq/skills/extra")).toThrow(SkillSourceInputError);
+    expect(() => parseRepoInput("")).toThrow(ContentSourceInputError);
+    expect(() => parseRepoInput("skills")).toThrow(ContentSourceInputError);
+    expect(() => parseRepoInput("tkhq/skills/extra")).toThrow(ContentSourceInputError);
   });
 
   it("rejects a subdirectory that climbs out of the repository", () => {
     expect(() => parseRepoInput("tkhq/skills", { subpath: "../etc" })).toThrow(
-      SkillSourceInputError,
+      ContentSourceInputError,
     );
   });
 });
@@ -89,12 +89,12 @@ describe("skill sources service", () => {
   /** The repositories one caller reaches on the first page, which every case
    * below stays well inside. */
   async function repos(userId: string): Promise<string[]> {
-    const page = await listSkillSources(db, owner(userId), undefined, SKILL_SOURCE_DEFAULT_LIMIT, undefined);
+    const page = await listContentSources(db, owner(userId), undefined, CONTENT_SOURCE_DEFAULT_LIMIT, undefined);
     return page.rows.map((r) => r.repoFullName);
   }
 
   it("creates a source for the caller and schedules its first sync now", async () => {
-    const created = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const created = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     expect(created.id).toMatch(/^skillsrc_/);
     expect(created.repoFullName).toBe("tkhq/skills");
@@ -107,35 +107,35 @@ describe("skill sources service", () => {
   });
 
   it("hides another user's source behind the null a missing id returns", async () => {
-    const mine = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const mine = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
-    expect(await ownedSkillSourceRow(db, owner("u2"), mine.id)).toBeNull();
-    expect(await ownedSkillSourceRow(db, owner("u2"), "skillsrc_missing")).toBeNull();
+    expect(await ownedContentSourceRow(db, owner("u2"), mine.id)).toBeNull();
+    expect(await ownedContentSourceRow(db, owner("u2"), "skillsrc_missing")).toBeNull();
   });
 
   it("rejects the same repository and subdirectory twice in one owner scope", async () => {
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
-    await expect(createSkillSource(db, owner("u1"), { repo: "tkhq/skills" })).rejects.toThrow(
-      SkillSourceConflictError,
+    await expect(createContentSource(db, owner("u1"), { repo: "tkhq/skills" })).rejects.toThrow(
+      ContentSourceConflictError,
     );
     // A different subdirectory of the same repository is a different source.
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "agent" });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "agent" });
   });
 
   it("records who added the source, whatever the source belongs to", async () => {
     // The sweep has no request context, so `created_by` is the only user
     // identity a team source carries. Without it the sync cannot pick a
     // credential, and the whole source falls back to an anonymous read —
-    // see `services/skill-source-credential.ts`.
+    // see `services/content-source-credential.ts`.
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
 
-    const personal = await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });
-    const teamSource = await createSkillSource(db, owner("u1"), {
+    const personal = await createContentSource(db, owner("u1"), { repo: "tkhq/mine" });
+    const teamSource = await createContentSource(db, owner("u1"), {
       repo: "tkhq/ours",
       teamId: team.id,
     });
-    const orgSource = await createSkillSource(db, owner("u1"), {
+    const orgSource = await createContentSource(db, owner("u1"), {
       repo: "tkhq/theirs",
       ownerType: "org",
       isOrgAdmin: true,
@@ -145,15 +145,15 @@ describe("skill sources service", () => {
     expect(teamSource.createdBy).toBe("u1");
     expect(orgSource.createdBy).toBe("u1");
     // Persisted, not only present on the returned object: the sweep re-reads
-    // the row and never sees what `createSkillSource` returned.
-    const stored = await ownedSkillSourceRow(db, owner("u1"), teamSource.id);
+    // the row and never sees what `createContentSource` returned.
+    const stored = await ownedContentSourceRow(db, owner("u1"), teamSource.id);
     expect(stored?.createdBy).toBe("u1");
   });
 
   it("lists the caller's own sources and every team source they can reach", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/mine" });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
 
     expect(await repos("u1")).toEqual(["tkhq/mine", "tkhq/ours"]);
     expect(await repos("u2")).toEqual([]);
@@ -164,19 +164,19 @@ describe("skill sources service", () => {
 
   it("pages by repository name, and stops issuing a cursor at the last page", async () => {
     for (const repo of ["tkhq/a", "tkhq/b", "tkhq/c"]) {
-      await createSkillSource(db, owner("u1"), { repo });
+      await createContentSource(db, owner("u1"), { repo });
     }
 
-    const first = await listSkillSources(db, owner("u1"), undefined, 2, undefined);
+    const first = await listContentSources(db, owner("u1"), undefined, 2, undefined);
     expect(first.rows.map((r) => r.repoFullName)).toEqual(["tkhq/a", "tkhq/b"]);
     expect(first.nextCursor).toBeDefined();
 
-    const second = await listSkillSources(
+    const second = await listContentSources(
       db,
       owner("u1"),
       undefined,
       2,
-      decodeSkillSourceCursor(first.nextCursor ?? ""),
+      decodeContentSourceCursor(first.nextCursor ?? ""),
     );
     expect(second.rows.map((r) => r.repoFullName)).toEqual(["tkhq/c"]);
     expect(second.nextCursor).toBeUndefined();
@@ -186,17 +186,17 @@ describe("skill sources service", () => {
     // `(repo, subpath)` repeats across owners — the unique index allows it —
     // so a cursor without the row id would loop on the first of the pair.
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/same" });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/same", teamId: team.id });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/same" });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/same", teamId: team.id });
 
-    const first = await listSkillSources(db, owner("u1"), undefined, 1, undefined);
+    const first = await listContentSources(db, owner("u1"), undefined, 1, undefined);
     expect(first.nextCursor).toBeDefined();
-    const second = await listSkillSources(
+    const second = await listContentSources(
       db,
       owner("u1"),
       undefined,
       1,
-      decodeSkillSourceCursor(first.nextCursor ?? ""),
+      decodeContentSourceCursor(first.nextCursor ?? ""),
     );
 
     expect(second.rows).toHaveLength(1);
@@ -205,21 +205,21 @@ describe("skill sources service", () => {
   });
 
   it("refuses a cursor it did not issue", () => {
-    expect(decodeSkillSourceCursor("not-a-cursor")).toBeUndefined();
+    expect(decodeContentSourceCursor("not-a-cursor")).toBeUndefined();
     // Well-formed base64url JSON, but not this listing's sort key.
-    expect(decodeSkillSourceCursor(Buffer.from('{"s":1}').toString("base64url"))).toBeUndefined();
+    expect(decodeContentSourceCursor(Buffer.from('{"s":1}').toString("base64url"))).toBeUndefined();
   });
 
   it("reports a team the caller does not belong to as not found", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
 
     await expect(
-      createSkillSource(db, owner("u2"), { repo: "tkhq/skills", teamId: team.id }),
+      createContentSource(db, owner("u2"), { repo: "tkhq/skills", teamId: team.id }),
     ).rejects.toThrow(/team/);
   });
 
   it("deletes a source together with the skills it mirrors, and nothing else", async () => {
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     await createSkill(db, owner("u1"), {
       name: "mirrored",
       description: "From the repository.",
@@ -233,23 +233,23 @@ describe("skill sources service", () => {
       content: "# Local\n",
     });
 
-    expect(await deleteSkillSource(db, owner("u1"), source.id)).toBe(true);
+    expect(await deleteContentSource(db, owner("u1"), source.id)).toBe(true);
 
     const left = await db.select().from(skills);
     expect(left.map((r) => r.name)).toEqual(["written-here"]);
-    expect(await ownedSkillSourceRow(db, owner("u1"), source.id)).toBeNull();
+    expect(await ownedContentSourceRow(db, owner("u1"), source.id)).toBeNull();
   });
 
   it("refuses to delete another owner's source", async () => {
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
-    expect(await deleteSkillSource(db, owner("u2"), source.id)).toBe(false);
-    expect(await ownedSkillSourceRow(db, owner("u1"), source.id)).not.toBeNull();
+    expect(await deleteContentSource(db, owner("u2"), source.id)).toBe(false);
+    expect(await ownedContentSourceRow(db, owner("u1"), source.id)).not.toBeNull();
   });
 
   it("removes a deleted team's sources with the team", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
 
     await deleteTeam(db, { teamId: team.id });
 

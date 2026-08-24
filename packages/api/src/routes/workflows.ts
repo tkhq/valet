@@ -52,7 +52,7 @@ import {
 } from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
-import { parseRepoInput, SkillSourceInputError } from "../services/skill-sources.js";
+import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
   SkillRepoReadError,
@@ -281,7 +281,7 @@ workflowsRouter.get("/runs", async (c) => {
  * `{ kind: "user", token, ownerScope: "user" }` — the caller reads their own
  * error here, which is what `ownerScope` selects the wording for.
  *
- * Do NOT reach for `services/skill-source-credential.ts` when you close the
+ * Do NOT reach for `services/content-source-credential.ts` when you close the
  * gap. That module re-checks team and org membership because a source row
  * outlives the membership that justified it; this route is authenticated per
  * request, so the caller's membership is already live. And do NOT resolve
@@ -315,7 +315,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
   try {
     parsed = parseRepoInput(repo, { ref: blankToUndefined(c.req.query("ref")), subpath: path });
   } catch (err) {
-    if (err instanceof SkillSourceInputError) return c.json({ error: err.message }, 400);
+    if (err instanceof ContentSourceInputError) return c.json({ error: err.message }, 400);
     throw err;
   }
   if (parsed.subpath === "") {

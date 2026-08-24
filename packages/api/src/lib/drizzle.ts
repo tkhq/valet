@@ -145,10 +145,24 @@ export async function applyAppMigrations(db: PgDb): Promise<void> {
  * Delete this function at 1.0, when numbered migrations take over.
  */
 async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
-  // Records which person's GitHub credential a team skill source may use.
-  // Null on every row written before the column existed, which the sync
-  // reads as "no credential" rather than climbing to the org's App.
-  await db.query('ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
+  // The 2026-08-24 workflows MVP design renamed `skill_sources` to
+  // `content_sources`, because the sweep now mirrors more than skills. The
+  // rename is idempotent: after the first boot the old name is gone and this
+  // statement does nothing. It must run BEFORE the two column repairs below,
+  // which name the new table.
+  await db.query('ALTER TABLE IF EXISTS "skill_sources" RENAME TO "content_sources"');
+
+  // Records which person's GitHub credential a team source may use. Null on
+  // every row written before the column existed, which the sync reads as
+  // "no credential" rather than climbing to the org's App.
+  await db.query('ALTER TABLE "content_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
+
+  // Which content kinds a source collects. The DEFAULT backfills every
+  // pre-existing row to skills only, so a repository tracked before workflow
+  // sync existed keeps mirroring exactly what it mirrored.
+  await db.query(
+    `ALTER TABLE "content_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
+  );
 
   // The per-group team-sync allowlist. Null on every row written before the
   // column existed, which the sync and Settings read as "never set" —

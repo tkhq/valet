@@ -1930,7 +1930,7 @@ export interface DeleteSkillResponse {
  * A sync reads a public repository with no credential, and a private
  * repository with the credential the source's owner holds — a person's own
  * GitHub account for a personal or team source, and the org's GitHub App for
- * an org source (`packages/api/src/services/skill-source-credential.ts`).
+ * an org source (`packages/api/src/services/content-source-credential.ts`).
  * Nothing on this wire type carries a credential, and `lastMessage` never
  * carries token material.
  */

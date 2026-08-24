@@ -4,7 +4,8 @@
  *
  * These are the rules a repository's owner runs into: which file is a skill,
  * which directory is skipped and why, and what happens when two files claim
- * one name. `skill-sync.test.ts` covers what a sync then DOES with them.
+ * one name. `content-sync/skill-collector.test.ts` covers what a sync then
+ * DOES with them.
  */
 import { describe, expect, it } from "vitest";
 import type { SkillTreeEntry } from "./skill-repo-reader.js";

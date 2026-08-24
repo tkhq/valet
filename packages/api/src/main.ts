@@ -358,10 +358,10 @@ providers.workflowScheduler.start();
 // freshly-ingested ones between nudges) get delivered.
 providers.eventDispatcher.start();
 
-// Skill-repository sync (agent-skills design): begin the sweep that re-reads
-// every tracked repository on its own schedule, and imports any source added
-// while this process was down.
-providers.skillSync.start();
+// Repository content sync (agent-skills design): begin the sweep that
+// re-reads every tracked repository on its own schedule, and imports any
+// source added while this process was down.
+providers.contentSync.start();
 
 // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
 // queued/building rows orphaned by a prior process crash/restart, then begin
@@ -526,9 +526,9 @@ async function close(): Promise<void> {
     console.error("eventDispatcher.stop failed:", err);
   }
   try {
-    await providers.skillSync.stop();
+    await providers.contentSync.stop();
   } catch (err) {
-    console.error("skillSync.stop failed:", err);
+    console.error("contentSync.stop failed:", err);
   }
   try {
     providers.prebuildService.stop();

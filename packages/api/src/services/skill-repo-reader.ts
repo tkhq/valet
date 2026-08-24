@@ -20,7 +20,7 @@
  *
  * ## The reader does not choose the credential
  *
- * `services/skill-source-credential.ts` makes that choice from the source
+ * `services/content-source-credential.ts` makes that choice from the source
  * row's owner, and this class carries only what it is given. The two stay
  * apart on purpose: reading a private repository through the wrong
  * credential is a privilege escalation, so the rule that picks one must live
@@ -34,7 +34,7 @@
  *
  * ## A token goes in the header and nowhere else
  *
- * `skill_sources.last_error` holds this module's error text, and the product
+ * `content_sources.last_error` holds this module's error text, and the product
  * shows that column to every reader of the source. So a token must never
  * reach an error message, a log line, a query string, or the database. The
  * reader keeps the token inside its own header map and keeps only the KIND
@@ -43,7 +43,7 @@
  * ## Rate limits
  *
  * Anonymous GitHub allows 60 requests per hour per IP; an authenticated
- * request gets 5000. `services/skill-sync.ts` polls on a long interval and
+ * request gets 5000. `services/content-sync/service.ts` polls on a long interval and
  * stops after one call when the head commit has not moved, which is what
  * keeps the anonymous budget workable.
  */
@@ -124,7 +124,7 @@ export function describeCredential(
  *
  * ## The message must fit the person who READS it
  *
- * This text goes to `skill_sources.last_error`, and the product shows that
+ * This text goes to `content_sources.last_error`, and the product shows that
  * column to everyone who can see the source. On a personal source the reader
  * and the credential holder are the same person, so "get access to the
  * repository" is an action they can do. On a TEAM source they are usually
@@ -367,7 +367,7 @@ const DEFAULT_REF = "HEAD";
 
 /**
  * Deadline for one GitHub request. A hung connection must not pin the sweep:
- * `SkillSyncService.pollOnce` holds its `draining` flag for a whole pass, so
+ * `RepoContentSyncService.pollOnce` holds its `draining` flag for a whole pass, so
  * one stalled read stops every other source from syncing until the socket
  * gives up on its own.
  */

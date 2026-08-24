@@ -14,7 +14,7 @@ import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   orgMembers,
   skills,
-  skillSources,
+  contentSources,
   teamMembers,
   teams,
   workflowDefinitions,
@@ -99,7 +99,7 @@ export function idpManagedTeamMessage(team: IdpManagedTeamRef, mutation: IdpMana
  * the service directly, and it keeps the refusal with the rule it enforces.
  *
  * The team sync is the deliberate exception. It writes `team_members`
- * directly and never calls the guarded functions, the same way `skill-sync`
+ * directly and never calls the guarded functions, the same way `content-sync`
  * owns its `repo`-origin skill rows.
  */
 export class IdpManagedTeamError extends Error {
@@ -565,8 +565,8 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
       .delete(skills)
       .where(and(eq(skills.ownerType, "team"), eq(skills.ownerId, opts.teamId)));
     await tx
-      .delete(skillSources)
-      .where(and(eq(skillSources.ownerType, "team"), eq(skillSources.ownerId, opts.teamId)));
+      .delete(contentSources)
+      .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, opts.teamId)));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

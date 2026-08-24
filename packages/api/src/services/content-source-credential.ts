@@ -1,7 +1,7 @@
 /**
- * Which GitHub credential a skill source syncs with.
+ * Which GitHub credential a content source syncs with.
  *
- * This is the whole tenancy rule for skill sync, in one function, because
+ * This is the whole tenancy rule for repository sync, in one function, because
  * picking the wrong credential here is a privilege escalation and a reviewer
  * must be able to check the rule without reading the sweep.
  *
@@ -25,7 +25,7 @@
  *
  * ## The binding is re-checked at READ time, not at creation
  *
- * `createSkillSource` checks team membership before it writes the row. That
+ * `createContentSource` checks team membership before it writes the row. That
  * check alone is not enough, because the row then reads GitHub every
  * `SYNC_INTERVAL_MS` for as long as it exists, and any remaining team member
  * can force a read with "Sync now". If the person named in `created_by`
@@ -34,7 +34,7 @@
  * reads. Nothing would show it: the source row shows the OWNER, not the
  * identity funding the read.
  *
- * So `resolveSkillSourceCredential` asks the same questions again on every
+ * So `resolveContentSourceCredential` asks the same questions again on every
  * sync, matching `isTeamMember`'s stated contract that "a member removed
  * from a team must lose access to its resources on their very next request":
  *
@@ -70,7 +70,7 @@
  *   - `unavailable` — a credential exists but the server cannot read it, for
  *                     example after the encryption key changed.
  */
-import type { SkillSourceRow } from "../schema/index.js";
+import type { ContentSourceRow } from "../schema/index.js";
 import {
   GitHubAuthError,
   resolveGitHubToken,
@@ -98,14 +98,14 @@ const ANONYMOUS: SkillRepoCredential = { kind: "none" };
  * raw crypto error through `CredentialStore.get`, for instance. That fault
  * is reported as `unavailable` and logged here, because letting it propagate
  * would fail the whole sync and write the crypto error onto
- * `skill_sources.last_error`, where it names no corrective action.
+ * `content_sources.last_error`, where it names no corrective action.
  *
  * A membership query that throws lands in the same catch, which is the safe
  * direction: an unconfirmed membership must not hand out a token.
  */
-export async function resolveSkillSourceCredential(
+export async function resolveContentSourceCredential(
   deps: GitHubTokenDeps,
-  source: SkillSourceRow,
+  source: ContentSourceRow,
 ): Promise<SkillRepoCredential> {
   try {
     if (source.ownerType === "org") {
@@ -163,7 +163,7 @@ export async function resolveSkillSourceCredential(
     // Only the message, and only to the server log. The source row is shown
     // to users, and an arbitrary error is not written for them to read.
     console.error(
-      `skill sync ${source.id}: cannot read the GitHub credential:`,
+      `content sync ${source.id}: cannot read the GitHub credential:`,
       err instanceof Error ? err.message : String(err),
     );
     return { kind: "unavailable" };
@@ -171,16 +171,16 @@ export async function resolveSkillSourceCredential(
 }
 
 /**
- * The reader factory `SkillSyncService` calls once per sync. Both the server
+ * The reader factory `RepoContentSyncService` calls once per sync. Both the server
  * (`providers/node.ts`) and the integration harness build it from here, so
  * neither can hold its own copy of the rule above.
  */
 export function skillRepoReaderFactory(
   deps: GitHubTokenDeps,
   opts: { apiUrl?: string } = {},
-): (source: SkillSourceRow) => Promise<SkillRepoReader> {
+): (source: ContentSourceRow) => Promise<SkillRepoReader> {
   return async (source) => {
-    const credential = await resolveSkillSourceCredential(deps, source);
+    const credential = await resolveContentSourceCredential(deps, source);
     return new GitHubSkillRepoReader({ apiUrl: opts.apiUrl, credential });
   };
 }
