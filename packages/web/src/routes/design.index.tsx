@@ -62,14 +62,17 @@ function DesignHubPage() {
 
   async function createDesign(template: string) {
     if (create.isPending) return;
+    // A prompt is required: a session created without one starts an agent
+    // with no brief, and the seeded template alone is not a design.
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
     try {
-      const trimmed = prompt.trim();
       const created = await create.mutateAsync({
         // Same working-directory default as the new-session dialog.
         workspace: DEFAULT_WORKSPACE,
         kind: "design",
         template,
-        ...(trimmed ? { initialPrompt: trimmed } : {}),
+        initialPrompt: trimmed,
         ...(scope.teamId !== undefined ? { teamId: scope.teamId } : {}),
       });
       void navigate({
@@ -105,7 +108,7 @@ function DesignHubPage() {
             autoFocus
             className="flex-1"
           />
-          <Button type="submit" disabled={create.isPending}>
+          <Button type="submit" disabled={create.isPending || prompt.trim() === ""}>
             {create.isPending ? "Creating…" : "Create"}
           </Button>
         </form>
@@ -116,21 +119,22 @@ function DesignHubPage() {
           </div>
         )}
 
-        {/* Template gallery — a card click creates right away, carrying the
-            prompt text if any. */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {/* Template gallery — a card click only SELECTS the template.
+            Create (above) is the single creation path, and it requires a
+            prompt: card-click-creates shipped once and minted briefless
+            sessions before the user finished typing. */}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3" role="radiogroup" aria-label="Template">
           {TEMPLATES.map((t) => (
             <button
               key={t.id}
               type="button"
+              role="radio"
+              aria-checked={selected === t.id}
               disabled={create.isPending}
-              onClick={() => {
-                setSelected(t.id);
-                void createDesign(t.id);
-              }}
+              onClick={() => setSelected(t.id)}
               className={cn(
                 "flex flex-col items-start gap-2 rounded border bg-paper p-4 text-left hover:bg-ink-wash disabled:opacity-60",
-                selected === t.id ? "border-moss" : "border-line",
+                selected === t.id ? "border-moss bg-moss-wash/30" : "border-line",
               )}
             >
               <t.Icon className="h-5 w-5 text-moss" aria-hidden />
@@ -153,7 +157,7 @@ function DesignHubPage() {
           )}
           {!recentQ.isLoading && !recentQ.error && recents.length === 0 && (
             <EmptyRow className="py-0">
-              No designs yet. Pick a template above to start one.
+              No designs yet. Describe what to create above, pick a template, and select Create.
             </EmptyRow>
           )}
           {recents.length > 0 && (
