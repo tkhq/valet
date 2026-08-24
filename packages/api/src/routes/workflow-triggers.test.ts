@@ -63,9 +63,10 @@ async function seedScheduleRow(
   a: TestApi,
   id: string,
   orgId: string,
-  workflowId: string | null = null,
-  owner: { type: "user" | "team"; id: string } = { type: "user", id: "someone" },
+  opts: { workflowId?: string | null; owner?: { type: "user" | "team"; id: string } } = {},
 ): Promise<void> {
+  const workflowId = opts.workflowId ?? null;
+  const owner = opts.owner ?? { type: "user", id: "someone" };
   const now = Date.now();
   await a.providers.db.insert(workflowSchedules).values({
     id,
@@ -227,7 +228,7 @@ describe("GET /api/workflows/triggers", () => {
   it("returns both schedule and event-trigger items with correct kind discriminants", async () => {
     const a = await boot();
     const wfId = await createWorkflow(a.baseUrl, "wf_1");
-    await seedScheduleRow(a, "sched_1", "local-org", null, { type: "user", id: "local-user" });
+    await seedScheduleRow(a, "sched_1", "local-org", { owner: { type: "user", id: "local-user" } });
     await seedEventTriggerRow(a, "trig_1", "local-org", wfId);
 
     const res = await fetch(`${a.baseUrl}/api/workflows/triggers`);
@@ -248,7 +249,7 @@ describe("GET /api/workflows/triggers", () => {
     const a = await boot();
     const wfId = await createWorkflow(a.baseUrl, "wf_filtered");
     // orchestrator, no workflowId
-    await seedScheduleRow(a, "sched_orch", "local-org", null, { type: "user", id: "local-user" });
+    await seedScheduleRow(a, "sched_orch", "local-org", { owner: { type: "user", id: "local-user" } });
     await seedEventTriggerRow(a, "trig_wf", "local-org", wfId);
 
     const res = await fetch(`${a.baseUrl}/api/workflows/triggers?workflowId=${wfId}`);
@@ -266,7 +267,7 @@ describe("GET /api/workflows/triggers", () => {
 describe("PATCH /api/workflows/schedules/:id", () => {
   it("200s with enabled: false; 404s on unknown id", async () => {
     const a = await boot();
-    await seedScheduleRow(a, "sched_patch", "local-org", null, { type: "user", id: "local-user" });
+    await seedScheduleRow(a, "sched_patch", "local-org", { owner: { type: "user", id: "local-user" } });
 
     const res = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_patch`, {
       method: "PATCH",
@@ -303,7 +304,7 @@ describe("PATCH /api/workflows/schedules/:id", () => {
 describe("DELETE /api/workflows/schedules/:id", () => {
   it("200s first delete then 404s second delete", async () => {
     const a = await boot();
-    await seedScheduleRow(a, "sched_del", "local-org", null, { type: "user", id: "local-user" });
+    await seedScheduleRow(a, "sched_del", "local-org", { owner: { type: "user", id: "local-user" } });
 
     const first = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_del`, { method: "DELETE" });
     expect(first.status).toBe(200);
@@ -321,7 +322,7 @@ describe("POST /api/workflows/schedules/:id/run", () => {
   it("200s and creates a workflow_runs row whose id starts with wfrun_sch_", async () => {
     const a = await boot();
     const wfId = await createWorkflow(a.baseUrl, "wf_for_fire");
-    await seedScheduleRow(a, "sched_fire", "local-org", wfId);
+    await seedScheduleRow(a, "sched_fire", "local-org", { workflowId: wfId });
 
     const res = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_fire/run`, { method: "POST" });
     expect(res.status).toBe(200);
@@ -580,7 +581,7 @@ describe("same-org owner scoping", () => {
     const a = await boot();
     await seedTeamWithCaller(a, "team_a");
     await seedWorkflowRow(a, "wf_team", { type: "team", id: "team_a" });
-    await seedScheduleRow(a, "sched_team", "local-org", "wf_team", { type: "team", id: "team_a" });
+    await seedScheduleRow(a, "sched_team", "local-org", { workflowId: "wf_team", owner: { type: "team", id: "team_a" } });
     // Created by `someone`, but its target workflow belongs to the caller's
     // team — reachable-workflow access must admit the caller.
     await seedEventTriggerRow(a, "trig_team", "local-org", "wf_team");

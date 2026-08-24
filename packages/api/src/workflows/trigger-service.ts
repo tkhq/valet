@@ -9,7 +9,7 @@
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
@@ -19,6 +19,7 @@ import {
   canAccessTriggerRow,
   ownedDefinitionRow,
   triggerAccessSets,
+  type TriggerAccessSets,
   type WorkflowOwner,
 } from "./service.js";
 
@@ -108,27 +109,40 @@ export async function createWorkflowTrigger(
   return { ok: true, trigger };
 }
 
+/** The row shape `canAccessTriggerRow` judges. The row's own owner is the
+ * CREATOR, not the workflow's owner, so the workflow-reach arm is what
+ * admits teammates. One builder so the list filter and the single-row
+ * loader can never disagree about that shape. */
+function triggerAccessRow(
+  row: typeof eventSubscriptions.$inferSelect,
+  trigger: WorkflowTriggerSummary,
+): { ownerType: string; ownerId: string; workflowId: string } {
+  return { ownerType: row.ownerType, ownerId: row.ownerId, workflowId: trigger.workflowId };
+}
+
+/** Pass `sets` when the caller already holds this request's
+ * `triggerAccessSets` (the aggregated triggers read builds them once for
+ * both lists); omitted, the sets are fetched here. */
 export async function listWorkflowTriggers(
   db: AppDb,
   owner: WorkflowOwner,
   workflowId?: string,
+  sets?: TriggerAccessSets,
 ): Promise<WorkflowTriggerSummary[]> {
-  const [rows, sets] = await Promise.all([
-    db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId)),
-    triggerAccessSets(db, owner),
+  const conditions = [eq(eventSubscriptions.orgId, owner.orgId)];
+  // `target` is JSONB; the workflow id lives at target->>'workflowId'.
+  if (workflowId !== undefined) conditions.push(sql`${eventSubscriptions.target}->>'workflowId' = ${workflowId}`);
+  const [rows, resolvedSets] = await Promise.all([
+    db.select().from(eventSubscriptions).where(and(...conditions)),
+    sets ?? triggerAccessSets(db, owner),
   ]);
   return rows
     .map((row) => {
       const trigger = rowToTrigger(row);
       if (!trigger) return null;
-      // The row's own owner is the CREATOR, not the workflow's owner, so
-      // the workflow-reach arm is what admits teammates (see
-      // `canAccessTriggerRow`).
-      const accessRow = { ownerType: row.ownerType, ownerId: row.ownerId, workflowId: trigger.workflowId };
-      return canAccessTriggerRow(owner, sets, accessRow) ? trigger : null;
+      return canAccessTriggerRow(owner, resolvedSets, triggerAccessRow(row, trigger)) ? trigger : null;
     })
-    .filter((t): t is WorkflowTriggerSummary => t !== null)
-    .filter((t) => workflowId === undefined || t.workflowId === workflowId);
+    .filter((t): t is WorkflowTriggerSummary => t !== null);
 }
 
 /**
@@ -151,8 +165,7 @@ async function accessibleTriggerRow(
   if (!row) return null;
   const trigger = rowToTrigger(row);
   if (!trigger) return null;
-  const accessRow = { ownerType: row.ownerType, ownerId: row.ownerId, workflowId: trigger.workflowId };
-  if (!canAccessTriggerRow(owner, await triggerAccessSets(db, owner), accessRow)) return null;
+  if (!canAccessTriggerRow(owner, await triggerAccessSets(db, owner), triggerAccessRow(row, trigger))) return null;
   return { row, trigger };
 }
 

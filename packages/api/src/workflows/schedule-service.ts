@@ -13,6 +13,7 @@ import {
   canAccessTriggerRow,
   ownedDefinitionRow,
   triggerAccessSets,
+  type TriggerAccessSets,
   type WorkflowOwner,
 } from "./service.js";
 
@@ -156,19 +157,22 @@ export async function createWorkflowSchedule(
   return { ok: true, schedule: rowToSummary(inserted[0]!) };
 }
 
+/** Pass `sets` when the caller already holds this request's
+ * `triggerAccessSets` (the aggregated triggers read builds them once for
+ * both lists); omitted, the sets are fetched here. */
 export async function listWorkflowSchedules(
   db: AppDb,
   owner: WorkflowOwner,
   workflowId?: string,
+  sets?: TriggerAccessSets,
 ): Promise<WorkflowScheduleSummary[]> {
-  const [rows, sets] = await Promise.all([
-    db.select().from(workflowSchedules).where(eq(workflowSchedules.orgId, owner.orgId)),
-    triggerAccessSets(db, owner),
+  const conditions = [eq(workflowSchedules.orgId, owner.orgId)];
+  if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
+  const [rows, resolvedSets] = await Promise.all([
+    db.select().from(workflowSchedules).where(and(...conditions)),
+    sets ?? triggerAccessSets(db, owner),
   ]);
-  return rows
-    .filter((row) => canAccessTriggerRow(owner, sets, row))
-    .map(rowToSummary)
-    .filter((s) => workflowId === undefined || s.workflowId === workflowId);
+  return rows.filter((row) => canAccessTriggerRow(owner, resolvedSets, row)).map(rowToSummary);
 }
 
 /**
