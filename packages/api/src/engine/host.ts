@@ -53,7 +53,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
-import { materializeSkillResources } from "./staged-files.js";
+import { deleteStagedForSession, materializeSkillResources } from "./staged-files.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
@@ -1599,6 +1599,13 @@ export class EngineHost {
           await revokeSessionGrants(this.opts.db, sessionId);
         } catch (err) {
           console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+        }
+        // Staged files (2026-08-23 design): rows and blobs die with the
+        // session. Best-effort for the same reason as the grants above.
+        try {
+          await deleteStagedForSession(this.opts.db, this.opts.blobs, sessionId);
+        } catch (err) {
+          console.error(`EngineHost: deleting staged files for ${sessionId} failed:`, err);
         }
       }
     }
