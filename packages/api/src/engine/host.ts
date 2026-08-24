@@ -52,6 +52,7 @@ import {
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
+import { buildDesignTools } from "./design-tools.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -279,6 +280,10 @@ export interface SessionMeta {
   /** Request a rootless docker daemon inside this session's sandbox
    * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
   docker?: boolean;
+  /** Which authoring surface the session drives (Valet Design spec).
+   * "design" attaches the design_* ToolDefs + their toolConfig; absent or
+   * "code" changes nothing. */
+  kind?: "code" | "design";
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -647,6 +652,17 @@ export class EngineHost {
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    // Valet Design: a design session gets the design_* ToolDefs plus the
+    // apiBaseUrl/internalToken toolConfig they call back through (the same
+    // HTTP seam the orchestrator's mem_* tools use). Requires
+    // opts.apiBaseUrl — absent (some tests) the tools degrade to their
+    // [design_unavailable] answer.
+    const designTools = meta.kind === "design" ? buildDesignTools() : [];
+    const designToolConfig =
+      meta.kind === "design" && this.opts.apiBaseUrl
+        ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken() } }
+        : {};
+    const sessionTools = [...designTools, ...extras.tools];
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -668,9 +684,10 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
-            tools: extras.tools.length ? extras.tools : undefined,
+            tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
+            ...designToolConfig,
             ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
@@ -689,9 +706,10 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
-          tools: extras.tools.length ? extras.tools : undefined,
+          tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
+          ...designToolConfig,
           ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),

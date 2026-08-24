@@ -43,6 +43,9 @@ export interface SessionMetaSource {
   /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
+  /** Which authoring surface the session drives (Valet Design spec).
+   * Present on the app row; omitted by orchestrator/child callers. */
+  kind?: "code" | "design";
 }
 
 /**
@@ -100,6 +103,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
+    ...(src.kind !== undefined ? { kind: src.kind } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
     userEmail: userRows[0]?.email,

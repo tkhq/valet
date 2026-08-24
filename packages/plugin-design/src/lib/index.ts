@@ -19,3 +19,5 @@ export { loadDesignSystem, parseDesignTokens } from "./design-system.js";
 export type { DesignSystem, DesignSystemSource } from "./design-system.js";
 export { marpToDcHtml, dcHtmlToMarp } from "./marp.js";
 export type { MarpConversion } from "./marp.js";
+export { applyElementPatches } from "./patch.js";
+export type { PatchResult } from "./patch.js";

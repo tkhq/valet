@@ -90,6 +90,11 @@ export interface SessionSummary {
    * tell a personal session from a team's, and every session looked
    * personal because that is all one could create. */
   owner: AssistantOwner;
+  /** Which authoring surface the session drives (Valet Design spec).
+   * "code" for every pre-design session. */
+  kind: "code" | "design";
+  /** Design template the session was minted from; null for kind="code". */
+  template: string | null;
 }
 
 /** A single repo bound to a session (GitHub/repo integration plan, Task 2).
@@ -136,6 +141,12 @@ export interface CreateSessionRequest {
   repos?: RepoBinding[];
   /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */
   repo?: RepoBinding;
+  /** Which authoring surface the session drives. Defaults to "code".
+   * "design" seeds the session's artifact from `template`'s starter file
+   * and attaches the design_* tools (Valet Design spec). */
+  kind?: "code" | "design";
+  /** Required when kind="design": the template to seed from. */
+  template?: string;
 }
 
 export interface ListSessionsResponse {
