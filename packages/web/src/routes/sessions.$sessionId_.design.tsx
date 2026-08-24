@@ -17,11 +17,13 @@ import {
   useAddComment,
   useDesignArtifact,
   useDesignComments,
+  useDesignExports,
   useDesignRevisions,
   useDesignTokens,
   useRevertRevision,
 } from "~/api/design";
 import { useSessionStream, useStreamStore } from "~/stores/stream";
+import { formatBytes } from "~/lib/format-bytes";
 import { DesignRenderer } from "~/components/design/design-renderer";
 import { parseSlides, sanitizeDesignHtml, type SlideInfo } from "~/components/design/sanitize";
 import { SessionView } from "~/components/session/session-view";
@@ -104,7 +106,8 @@ const EXPORT_OPTIONS: ExportOption[] = [
     id: "pptx",
     label: "PowerPoint (.pptx)",
     badge: "agent",
-    description: "Editable slides via marp-cli (needs the design sandbox image with Chromium).",
+    description:
+      "The agent renders editable slides in its sandbox; the file then appears under “Exported files” below for download.",
     action: { kind: "agent", prompt: "Export the design as pptx." },
     slidesOnly: true,
   },
@@ -199,6 +202,11 @@ function DesignCanvasPage() {
   const [zoomIdx, setZoomIdx] = useState(ZOOM_STEPS.indexOf(1));
   const [historyOpen, setHistoryOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  // Only fetch/poll while the modal is open — the list reads the sandbox.
+  const exportsQ = useDesignExports(sessionId, {
+    enabled: exportOpen,
+    refetchInterval: exportOpen ? 4000 : false,
+  });
   const [exportChoice, setExportChoice] = useState<string>("html");
   const [commentMode, setCommentMode] = useState(false);
   const [commentVdid, setCommentVdid] = useState<string | null>(null);
@@ -638,6 +646,27 @@ function DesignCanvasPage() {
             <p className="mt-3 text-[11px] text-muted">
               Agent exports run in the chat and open an approval gate naming everything that leaves.
             </p>
+            {(exportsQ.data?.files.length ?? 0) > 0 && (
+              <div className="mt-3 border-t border-line pt-3">
+                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  Exported files
+                </p>
+                <ul className="space-y-1">
+                  {exportsQ.data?.files.map((f) => (
+                    <li key={f.name} className="flex items-center justify-between gap-3 text-sm">
+                      <span className="min-w-0 truncate text-ink">{f.name}</span>
+                      <a
+                        className="shrink-0 text-xs font-medium text-moss hover:underline"
+                        href={`/api/sessions/${encodeURIComponent(sessionId)}/design/exports/${encodeURIComponent(f.name)}`}
+                        download={f.name}
+                      >
+                        Download ({formatBytes(f.size)})
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <DialogFooter>
               <Button variant="ghost" size="sm" onClick={() => setExportOpen(false)}>
                 Cancel

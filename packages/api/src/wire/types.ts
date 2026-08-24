@@ -809,6 +809,16 @@ export interface DesignTokensResponse {
   tokens: Record<string, string>;
 }
 
+/** One file the agent exported to the sandbox's /workspace/exports. */
+export interface DesignExportFile {
+  name: string;
+  size: number;
+}
+
+export interface DesignExportsResponse {
+  files: DesignExportFile[];
+}
+
 /**
  * Thin projection of the engine's `QueueState` for the wire. The full items
  * live behind the admin REST surface; the live socket ships only id lists so

@@ -234,6 +234,25 @@ describe("design acceptance (API-level)", () => {
     expect(edit.status).toBe(404);
   });
 
+  it("design exports: empty list without a live sandbox; hostile names 404 before any sandbox read", async () => {
+    const sessionId = await createDesignSession("slides");
+    const list = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/exports`);
+    expect(list.status).toBe(200);
+    expect(await list.json()).toEqual({ files: [] });
+
+    // Traversal and dotfiles (the marp intermediate) 404 on the name check
+    // alone — no sandbox is consulted.
+    for (const name of ["..%2F..%2Fetc%2Fpasswd", ".valet-design-export.md", "a%2Fb.pdf"]) {
+      const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/exports/${name}`);
+      expect(res.status).toBe(404);
+    }
+
+    // A well-formed name with no live sandbox: 409 (wake it) or 404 (no
+    // such file on a live-but-empty sandbox) — never a 500.
+    const missing = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/exports/deck.pdf`);
+    expect([404, 409]).toContain(missing.status);
+  });
+
   it("design session create rejects a missing or unknown template with the valid list", async () => {
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST",

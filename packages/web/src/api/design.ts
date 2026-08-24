@@ -15,6 +15,7 @@ import {
 import type {
   DesignArtifactResponse,
   DesignCommentsResponse,
+  DesignExportsResponse,
   DesignRevisionsResponse,
   DesignTokensResponse,
   ListSessionsResponse,
@@ -32,6 +33,7 @@ export const qkDesign = {
     ["design", sessionId, "revisions", rev] as const,
   comments: (sessionId: string) => ["design", sessionId, "comments"] as const,
   tokens: (sessionId: string) => ["design", sessionId, "tokens"] as const,
+  exports: (sessionId: string) => ["design", sessionId, "exports"] as const,
 };
 
 /** Design sessions only (`GET /api/sessions?kind=design`), for the hub. */
@@ -95,6 +97,21 @@ export function useDesignTokens(
   return useQuery<DesignTokensResponse>({
     queryKey: qkDesign.tokens(sessionId),
     queryFn: () => api.getDesignTokens(sessionId),
+    enabled: !!sessionId,
+    ...opts,
+  });
+}
+
+/** Files the agent exported to the sandbox's /workspace/exports — the
+ * Export modal's "Exported files" list. Polled while the modal is open so
+ * an agent export that finishes mid-look appears without a reopen. */
+export function useDesignExports(
+  sessionId: string,
+  opts?: Partial<UseQueryOptions<DesignExportsResponse>>,
+) {
+  return useQuery<DesignExportsResponse>({
+    queryKey: qkDesign.exports(sessionId),
+    queryFn: () => api.listDesignExports(sessionId),
     enabled: !!sessionId,
     ...opts,
   });

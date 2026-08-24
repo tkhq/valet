@@ -46,6 +46,7 @@ import type {
   DesignArtifactResponse,
   DesignCommentsResponse,
   DesignRevisionsResponse,
+  DesignExportsResponse,
   DesignTokensResponse,
   DeleteOrgPolicyResponse,
   DeletePolicyOverrideRequest,
@@ -637,6 +638,11 @@ export const api = {
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/design/comments`,
       body,
+    ),
+  listDesignExports: (sessionId: string) =>
+    request<DesignExportsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/design/exports`,
     ),
   getDesignTokens: (sessionId: string) =>
     request<DesignTokensResponse>(

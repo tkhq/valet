@@ -499,6 +499,23 @@ For `gslides`: delegate to the sandbox. Transpile the artifact to Slides `batchU
 - `design_export.completed`: format, download_url or presentation_url.
 - `design_export.failed`: error reason.
 
+**Download path (as built):** pdf/pptx/html exports land in the sandbox's
+`/workspace/exports`. Two session-scoped routes make them reachable — the
+signed-URL service from the draft is not v1:
+
+- `GET /api/sessions/:id/design/exports` — list `{name, size}`. Returns
+  `{files: []}` when the session has no live engine entry (a listing must
+  not start a sandbox). Dotfiles and names outside `[A-Za-z0-9][A-Za-z0-9._ -]*`
+  are hidden — this also hides the marp intermediate.
+- `GET /api/sessions/:id/design/exports/:name` — stream one file with an
+  attachment disposition. Hostile names 404 before any sandbox read; a
+  well-formed name without a live sandbox 409s and names the fix (wake the
+  session).
+
+The canvas Export modal renders this list as "Exported files" with download
+links, polling while the modal is open so an agent export that finishes
+mid-look appears without a reopen.
+
 ### design_handoff
 
 Spawn a child coding session with the artifact as the starting point.
@@ -850,5 +867,5 @@ Implementation review against the v2 codebase forced five corrections. Each is n
 Three more landed during implementation:
 
 6. **vdid stability beats content-hash recomputation.** `applyVdids` preserves an element's EXISTING id and only content-hashes elements without one. Recomputing on every edit would detach comment anchors whenever text changed — including Scenario C's externally edited slide title, whose id must ride home in the Slides objectId. The `vdid_stability_report` reduces to collision/new-id accounting.
-7. **Export artifacts land in the workspace; reports land in the tool result.** `design_export` writes html/pdf/pptx to `/workspace/exports/` and returns the path — no signed-URL service in v1. Import/export reports for Marp and Slides print in the tool result (visible in the thread, durable in the transcript) instead of being written into artifact metadata: an export must not mutate the artifact, and a metadata write is a mutation.
+7. **Export artifacts land in the workspace; reports land in the tool result.** `design_export` writes html/pdf/pptx to `/workspace/exports/` and returns the path — no signed-URL service in v1. The user downloads them through `GET /design/exports[/:name]` (surfaced as "Exported files" in the canvas Export modal); without that surface the agent's "grab it from the Export menu" advice looped back to another agent export. Import/export reports for Marp and Slides print in the tool result (visible in the thread, durable in the transcript) instead of being written into artifact metadata: an export must not mutate the artifact, and a metadata write is a mutation.
 8. **Handoff embeds the artifact; no git commit in v1.** `design_handoff` spawns the child with the artifact inline in its brief and passes the parent's repo binding through, so the child clones the same repository. The embedded copy strips `data:` image payloads and caps at 150 KB — a near-cap artifact would otherwise exceed the child's context window. Committing the artifact to the repo (and pinning `startRef` to that commit) is a re-entry seam — it needs a sandbox with a clone and a commit-authorship decision v1 does not force.

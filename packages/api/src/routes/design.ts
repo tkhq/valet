@@ -29,6 +29,7 @@ import {
   DEFAULT_DESIGN_TOKENS,
 } from "@valet/plugin-design/lib";
 import { handleServiceError } from "./memory.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionRepos, type AgentSessionRow } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
@@ -481,6 +482,76 @@ designRouter.post("/:id/design/scratchpad", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+// ── Sandbox export downloads ─────────────────────────────────────────────
+// design_export pdf/pptx/html writes into the sandbox's /workspace/exports.
+// These routes are the ONLY path from that directory to the user's machine
+// — without them the agent's "grab it from the Export menu" advice loops
+// back to another agent export.
+
+const EXPORTS_DIR = "/workspace/exports";
+/** No leading dot (hides the marp intermediate), no slashes (no traversal). */
+const SAFE_EXPORT_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,120}$/;
+const EXPORT_CONTENT_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  html: "text/html; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
+  png: "image/png",
+  svg: "image/svg+xml",
+};
+
+designRouter.get("/:id/design/exports", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  const { db, engineHost } = c.var.providers;
+  // A session with no live engine entry has no reachable sandbox; report
+  // "no files" rather than spinning up a sandbox for a listing.
+  if (!engineHost.isLive(access.row.id)) return c.json({ files: [] });
+  const session = await engineHost.sessionFor(access.row.id, await loadSessionMeta(db, access.row));
+  let names: string[];
+  try {
+    names = await session.sandbox.readdir(EXPORTS_DIR);
+  } catch {
+    return c.json({ files: [] }); // no exports directory yet
+  }
+  const files: Array<{ name: string; size: number }> = [];
+  for (const name of names) {
+    if (!SAFE_EXPORT_NAME.test(name)) continue;
+    const st = await session.sandbox.stat(`${EXPORTS_DIR}/${name}`).catch(() => null);
+    if (st?.isFile) files.push({ name, size: st.size });
+  }
+  return c.json({ files });
+});
+
+designRouter.get("/:id/design/exports/:name", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  const name = c.req.param("name");
+  if (!SAFE_EXPORT_NAME.test(name)) return c.json({ error: "file not found" }, 404);
+  const { db, engineHost } = c.var.providers;
+  if (!engineHost.isLive(access.row.id)) {
+    return c.json(
+      { error: "the session's sandbox is not running. Send the session a message to wake it, then retry." },
+      409,
+    );
+  }
+  const session = await engineHost.sessionFor(access.row.id, await loadSessionMeta(db, access.row));
+  let data: Uint8Array;
+  try {
+    data = await session.sandbox.readBinary(`${EXPORTS_DIR}/${name}`);
+  } catch {
+    return c.json({ error: "file not found" }, 404);
+  }
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  c.header("Content-Type", EXPORT_CONTENT_TYPES[ext] ?? "application/octet-stream");
+  c.header("Content-Disposition", `attachment; filename="${name}"`);
+  // Copy into a plain ArrayBuffer: Uint8Array's own .buffer types as
+  // ArrayBufferLike, which Hono's body() refuses.
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  return c.body(buf);
 });
 
 /**

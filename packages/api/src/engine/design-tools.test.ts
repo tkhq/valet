@@ -291,9 +291,8 @@ describe("design tools", () => {
 
     const result = await designExportTool.execute({ format: "html", filename: "launch" }, ctx);
     expect(result.text).toContain("exported revision r-002 to /workspace/exports/launch.html");
-    // The result steers the agent away from treating sandbox files as
-    // user deliverables.
-    expect(result.text).toContain("the user cannot reach sandbox files");
+    // The result names the download path so the agent can relay it.
+    expect(result.text).toContain('Export menu under "Exported files"');
     expect(gateBodies[0]).toContain("artifact document");
     expect(gateBodies[0]).toContain("output: /workspace/exports/launch.html");
     expect(written[0].path).toBe("/workspace/exports/launch.html");
