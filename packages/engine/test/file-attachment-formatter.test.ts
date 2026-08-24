@@ -62,8 +62,7 @@ describe("formatFileAttachmentsNote", () => {
         path: "/workspace/uploads/data.zip",
         bytes: 2 * 1024 * 1024, // 2 MB
         sha256: "ghi789",
-        mimeType: "application/zip",
-        markdownPath: "/workspace/uploads/data",
+        extractedTo: "/workspace/uploads/data",
         name: "data.zip",
       },
     ];
@@ -138,8 +137,7 @@ describe("formatFileAttachmentsNote", () => {
         path: "/workspace/uploads/data.zip",
         bytes: 2 * 1024 * 1024,
         sha256: "ghi789",
-        mimeType: "application/zip",
-        markdownPath: "/workspace/uploads/data",
+        extractedTo: "/workspace/uploads/data",
         name: "data.zip",
       },
       {
@@ -174,7 +172,7 @@ describe("formatFileAttachmentsNote", () => {
     ];
 
     const result = formatFileAttachmentsNote(files);
-    expect(result).toContain("- /workspace/uploads/mystery (1 KB, unknown)");
+    expect(result).toContain("- /workspace/uploads/mystery (1 KB, application/octet-stream)");
   });
 
   it("correctly formats fractional KB values", () => {
@@ -192,5 +190,79 @@ describe("formatFileAttachmentsNote", () => {
     const result = formatFileAttachmentsNote(files);
     // Should format as "1.5 KB"
     expect(result).toMatch(/1\.5 KB/);
+  });
+
+  it("formats only extractedTo set (no mimeType, no markdownPath)", () => {
+    const files: FileAttachment[] = [
+      {
+        type: "file",
+        path: "/workspace/uploads/bundle.tgz",
+        bytes: 2048,
+        sha256: "abc",
+        name: "bundle.tgz",
+        extractedTo: "/workspace/uploads/bundle/",
+      },
+    ];
+
+    const result = formatFileAttachmentsNote(files);
+    expect(result).toContain("- /workspace/uploads/bundle.tgz (extracted to /workspace/uploads/bundle/)");
+  });
+
+  it("formats markdownPath set with mimeType absent (presence, not mimeType, is the signal)", () => {
+    const files: FileAttachment[] = [
+      {
+        type: "file",
+        path: "/workspace/uploads/report.pdf",
+        bytes: 843 * 1024,
+        sha256: "abc123",
+        name: "report.pdf",
+        markdownPath: "/workspace/uploads/report.pdf.md",
+        // mimeType deliberately absent
+      },
+    ];
+
+    const result = formatFileAttachmentsNote(files);
+    expect(result).toContain("- /workspace/uploads/report.pdf (843 KB, PDF, markdown at /workspace/uploads/report.pdf.md)");
+  });
+
+  it("formats neither extractedTo nor markdownPath set (plain file)", () => {
+    const files: FileAttachment[] = [
+      {
+        type: "file",
+        path: "/workspace/uploads/notes.txt",
+        bytes: 1024,
+        sha256: "txt123",
+        name: "notes.txt",
+        mimeType: "text/plain",
+      },
+      {
+        type: "file",
+        path: "/workspace/uploads/data.bin",
+        bytes: 2048,
+        sha256: "bin123",
+        name: "data.bin",
+        // mimeType absent - should default to application/octet-stream
+      },
+    ];
+
+    const result = formatFileAttachmentsNote(files);
+    expect(result).toContain("- /workspace/uploads/notes.txt (1 KB, text/plain)");
+    expect(result).toContain("- /workspace/uploads/data.bin (2 KB, application/octet-stream)");
+  });
+
+  it("appends trailing slash to extractedTo when not present", () => {
+    const files: FileAttachment[] = [
+      {
+        type: "file",
+        path: "/workspace/uploads/bundle.zip",
+        bytes: 2048,
+        sha256: "abc",
+        name: "bundle.zip",
+        extractedTo: "/workspace/uploads/bundle",
+      },
+    ];
+
+    const result = formatFileAttachmentsNote(files);
+    expect(result).toContain("- /workspace/uploads/bundle.zip (extracted to /workspace/uploads/bundle/)");
   });
 });

@@ -376,6 +376,8 @@ export interface MessageEntry extends BaseEntry {
         sha256: string;
         mimeType?: string;
         markdownPath?: string; // for PDFs with a text sidecar
+        extractedTo?: string; // extract root for a zip that was extracted (e.g. "/workspace/uploads/data/")
+        extractedFiles?: string[]; // full listing of extracted files (may be truncated by producer)
         name: string; // display name (basename of path)
       }
   >;

@@ -137,6 +137,8 @@ function projectAttachments(
         sha256: att.sha256,
         mimeType: att.mimeType,
         markdownPath: att.markdownPath,
+        extractedTo: att.extractedTo,
+        extractedFiles: att.extractedFiles,
         name: att.name,
       });
     }

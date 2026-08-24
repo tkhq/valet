@@ -147,7 +147,7 @@ describe("entryToMessage — attachments projection", () => {
     expect(msg?.attachments?.[1].kind).toBe("file");
   });
 
-  it("preserves optional file fields (mimeType, markdownPath)", () => {
+  it("preserves optional file fields (mimeType, markdownPath, extractedTo, extractedFiles)", () => {
     const entry = baseEntry({
       attachments: [
         {
@@ -156,7 +156,7 @@ describe("entryToMessage — attachments projection", () => {
           bytes: 1024,
           sha256: "txt123",
           name: "plain.txt",
-          // mimeType and markdownPath omitted
+          // mimeType, markdownPath, extractedTo, extractedFiles omitted
         },
       ],
     });
@@ -167,7 +167,38 @@ describe("entryToMessage — attachments projection", () => {
       bytes: 1024,
       sha256: "txt123",
       name: "plain.txt",
-      // mimeType and markdownPath not present
+      // optional fields not present
+    });
+  });
+
+  it("projects extractedTo and extractedFiles through to wire shape", () => {
+    const extractedFiles = [
+      "/workspace/uploads/bundle/file1.txt",
+      "/workspace/uploads/bundle/file2.txt",
+      "/workspace/uploads/bundle/subdir/file3.txt",
+    ];
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "file",
+          path: "/workspace/uploads/bundle.tar.gz",
+          bytes: 5120,
+          sha256: "tar123",
+          name: "bundle.tar.gz",
+          extractedTo: "/workspace/uploads/bundle/",
+          extractedFiles: extractedFiles,
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments?.[0]).toEqual({
+      kind: "file",
+      path: "/workspace/uploads/bundle.tar.gz",
+      bytes: 5120,
+      sha256: "tar123",
+      name: "bundle.tar.gz",
+      extractedTo: "/workspace/uploads/bundle/",
+      extractedFiles: extractedFiles,
     });
   });
 

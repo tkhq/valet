@@ -39,27 +39,20 @@ export function formatFileAttachmentsNote(files: FileAttachment[]): string {
 
   const lines = files.map((file) => {
     const sizeStr = formatBytes(file.bytes);
-    const mimeType = file.mimeType || "unknown";
 
-    // For PDFs with markdown sidecars, include sidecar path.
-    if (mimeType === "application/pdf" && file.markdownPath) {
+    // If markdownPath is set → render as PDF-with-sidecar (regardless of mimeType)
+    if (file.markdownPath) {
       return `  - ${file.path} (${sizeStr}, PDF, markdown at ${file.markdownPath})`;
     }
 
-    // For archives that were extracted, indicate extraction root with trailing /.
-    // Use markdownPath as a signal for extraction in this MVP.
-    // The spec does not define extracted[] on the file variant,
-    // so we rely on markdownPath presence. In future, when extraction
-    // tracking lands, this can be refined to use an extracted: string[] field.
-    if (
-      (mimeType === "application/zip" || mimeType === "application/x-zip-compressed") &&
-      file.markdownPath
-    ) {
-      // markdownPath holds extraction root for archives
-      return `  - ${file.path} (extracted to ${file.markdownPath}/)`;
+    // Else if extractedTo is set → render as extracted archive
+    if (file.extractedTo) {
+      const extractRoot = file.extractedTo.endsWith("/") ? file.extractedTo : `${file.extractedTo}/`;
+      return `  - ${file.path} (extracted to ${extractRoot})`;
     }
 
-    // Plain file: path, size, MIME type
+    // Else → render as plain file
+    const mimeType = file.mimeType ?? "application/octet-stream";
     return `  - ${file.path} (${sizeStr}, ${mimeType})`;
   });
 

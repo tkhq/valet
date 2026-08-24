@@ -470,6 +470,8 @@ export interface PromptFileAttachment {
   sha256: string;
   mimeType?: string;
   markdownPath?: string;
+  extractedTo?: string;
+  extractedFiles?: string[];
   name: string;
 }
 
