@@ -39,7 +39,7 @@ export interface VdidReport {
   addressable: number;
   /** vdids that collided and were suffixed, in document order. */
   collisions: string[];
-  /** vdids whose value changed from what the element previously carried. */
+  /** vdids newly stamped in this pass (elements that had none). */
   regenerated: string[];
 }
 
@@ -58,29 +58,39 @@ function vdidFor(el: HTMLElement): string {
 }
 
 /**
- * Recompute `data-vdid` for every addressable element in the document.
- * Returns the rewritten HTML plus a stability report. Existing ids that
- * still match their content are untouched; changed content regenerates
- * the id (and the report records it).
+ * Ensure every addressable element carries a `data-vdid`. An EXISTING id
+ * is preserved verbatim — once assigned, an element keeps its id through
+ * edits and format round trips, which is what keeps comment anchors alive
+ * when text changes (Scenario C: an externally edited slide title keeps
+ * the id its Slides objectId carried home). Only elements WITHOUT an id
+ * get one, content-hashed from their stable attributes. Preserved ids
+ * join the collision set so a new element can never mint a duplicate.
  */
 export function applyVdids(html: string): { html: string; report: VdidReport } {
   const root = parse(html, { comment: true });
-  const seen = new Map<string, number>();
+  const taken = new Set<string>();
   const report: VdidReport = { addressable: 0, collisions: [], regenerated: [] };
 
+  const addressable: HTMLElement[] = [];
   for (const el of root.querySelectorAll("*")) {
     if (!ADDRESSABLE_TAGS.has(el.tagName.toLowerCase())) continue;
-    report.addressable += 1;
+    addressable.push(el);
+    const existing = el.getAttribute("data-vdid");
+    if (existing) taken.add(existing);
+  }
+  report.addressable = addressable.length;
 
+  for (const el of addressable) {
+    if (el.getAttribute("data-vdid")) continue;
     const base = vdidFor(el);
-    const count = seen.get(base) ?? 0;
-    seen.set(base, count + 1);
-    const vdid = count === 0 ? base : `${base}_${count}`;
-    if (count > 0) report.collisions.push(vdid);
-
-    const previous = el.getAttribute("data-vdid");
-    if (previous && previous !== vdid) report.regenerated.push(vdid);
-    if (previous !== vdid) el.setAttribute("data-vdid", vdid);
+    let vdid = base;
+    for (let n = 1; taken.has(vdid); n++) {
+      vdid = `${base}_${n}`;
+    }
+    if (vdid !== base) report.collisions.push(vdid);
+    taken.add(vdid);
+    el.setAttribute("data-vdid", vdid);
+    report.regenerated.push(vdid);
   }
 
   return { html: root.toString(), report };

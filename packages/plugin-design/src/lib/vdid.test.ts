@@ -21,14 +21,19 @@ describe("vdid addressing", () => {
     expect(second.html).toBe(first.html);
   });
 
-  it("id survives unrelated document changes (content-hash, not position)", () => {
-    const before = applyVdids("<body><section><h2>Case Study</h2></section></body>");
-    const vdid = /data-vdid="([0-9a-f_]+)"><h2/.exec(before.html)?.[1];
-    const grown = applyVdids(
-      `<body><section><h1>New First Slide</h1></section><section data-vdid="x"><h2>Case Study</h2></section></body>`,
-    );
-    // The section around Case Study hashes the same regardless of its position.
-    expect(grown.html).toContain(`data-vdid="${vdid}"><h2`);
+  it("new elements hash the same regardless of document position", () => {
+    const before = applyVdids("<body><h2>Case Study</h2></body>");
+    const vdid = /<h2 data-vdid="([0-9a-f_]+)"/.exec(before.html)?.[1];
+    const grown = applyVdids("<body><h1>New First Slide</h1><h2>Case Study</h2></body>");
+    expect(grown.html).toContain(`<h2 data-vdid="${vdid}"`);
+  });
+
+  it("an existing id is preserved even when the element's content changed", () => {
+    // Scenario C: an externally edited slide title keeps the id its Slides
+    // objectId carried home; re-addressing must not rewrite it.
+    const { html, report } = applyVdids('<body><h2 data-vdid="deadbeef00000000">Edited Title</h2><p>New</p></body>');
+    expect(html).toContain('data-vdid="deadbeef00000000"');
+    expect(report.regenerated).toHaveLength(1); // only the new <p>
   });
 
   it("suffixes collisions in document order and reports them", () => {

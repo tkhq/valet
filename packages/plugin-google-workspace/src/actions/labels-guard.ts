@@ -53,9 +53,11 @@ export const READ_GET_ACTIONS: string[] = [
   'sheets.get_table',
   'sheets.list_tables',
   'sheets.get_conditional_formatting',
+  'slides.get_presentation',
 ];
 
 export const WRITE_MODIFY_ACTIONS: string[] = [
+  'slides.batch_update',
   'drive.copy_file',
   'drive.move_file',
   'drive.rename_file',
@@ -112,6 +114,7 @@ export const WRITE_MODIFY_ACTIONS: string[] = [
 ];
 
 export const CREATE_ACTIONS: string[] = [
+  'slides.create_presentation',
   'drive.create_document',
   'drive.create_folder',
   'drive.create_from_template',
@@ -317,6 +320,9 @@ export function extractFileId(actionId: string, params: Record<string, unknown>)
   }
   if (actionId.startsWith('sheets.')) {
     return typeof params.spreadsheetId === 'string' ? params.spreadsheetId : null;
+  }
+  if (actionId.startsWith('slides.')) {
+    return typeof params.presentationId === 'string' ? params.presentationId : null;
   }
   return null;
 }

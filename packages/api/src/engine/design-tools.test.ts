@@ -10,6 +10,7 @@ import { applyVdids } from "@valet/plugin-design/lib";
 import {
   designCommentResolveTool,
   designEditTool,
+  designExportTool,
   designHandoffTool,
   designImportMarpTool,
   designRenderTokenTool,
@@ -205,6 +206,94 @@ describe("design tools", () => {
     );
     const result = await designHandoffTool.execute({}, ctxWith(CFG));
     expect(result.text).toContain("[design_handoff unavailable]");
+  });
+
+  it("design_export html gates on the manifest and writes into /workspace/exports", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const gateBodies: string[] = [];
+    const written: Array<{ path: string; content: string }> = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = (gate) => {
+      gateBodies.push(gate.body ?? "");
+      return Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    };
+    ctx.sandbox = {
+      mkdir: () => Promise.resolve(),
+      writeFile: (path: string, content: string) => {
+        written.push({ path, content });
+        return Promise.resolve();
+      },
+    } as unknown as ToolContext["sandbox"];
+
+    const result = await designExportTool.execute({ format: "html", filename: "launch" }, ctx);
+    expect(result.text).toBe("exported revision r-002 to /workspace/exports/launch.html");
+    expect(gateBodies[0]).toContain("artifact document");
+    expect(written[0].path).toBe("/workspace/exports/launch.html");
+    expect(written[0].content).toBe(DOC);
+  });
+
+  it("design_export declined gate writes nothing", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "deny", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = {
+      mkdir: () => Promise.reject(new Error("must not be called")),
+      writeFile: () => Promise.reject(new Error("must not be called")),
+    } as unknown as ToolContext["sandbox"];
+    const result = await designExportTool.execute({ format: "html" }, ctx);
+    expect(result.text).toContain("declined");
+  });
+
+  it("design_export gslides creates a presentation and applies fenced chunks", async () => {
+    const googleCalls: Array<{ url: string; body?: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", (url: URL | string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 }),
+        );
+      }
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      googleCalls.push({ url: u, body });
+      if (u.endsWith("/presentations")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ presentationId: "pres1", revisionId: "grev1" }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ writeControl: { requiredRevisionId: "grev2" } }), { status: 200 }),
+      );
+    });
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.credentials = {
+      get: (service?: string) =>
+        Promise.resolve(service === "google_workspace" ? { accessToken: "gtok" } : null),
+      request: () => Promise.reject(new Error("unused")),
+    } as unknown as ToolContext["credentials"];
+
+    const result = await designExportTool.execute({ format: "gslides", filename: "Deck" }, ctx);
+    expect(result.text).toContain("https://docs.google.com/presentation/d/pres1/edit");
+    // One create + one batchUpdate chunk (DOC has no <section>, so the body
+    // exports as a single slide).
+    expect(googleCalls[0].url).toContain("/presentations");
+    const update = googleCalls[1];
+    expect(update.url).toContain("pres1:batchUpdate");
+    expect(update.body?.writeControl).toEqual({ requiredRevisionId: "grev1" });
+  });
+
+  it("design_export gslides without a Google credential names the fix", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    const result = await designExportTool.execute({ format: "gslides" }, ctx);
+    expect(result.text).toContain("Connect Google Workspace in Settings");
   });
 
   it("design_comment_resolve POSTs the resolve route", async () => {

@@ -21,3 +21,12 @@ export { marpToDcHtml, dcHtmlToMarp } from "./marp.js";
 export type { MarpConversion } from "./marp.js";
 export { applyElementPatches } from "./patch.js";
 export type { PatchResult } from "./patch.js";
+export { dcHtmlToSlidesChunks, slidesToDcHtml } from "./gslides.js";
+export type {
+  GslidesExport,
+  GslidesImport,
+  MinimalPresentation,
+  MinimalPage,
+  MinimalPageElement,
+  SlidesRequestChunk,
+} from "./gslides.js";

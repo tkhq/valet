@@ -1,0 +1,26 @@
+# Design-export sandbox variant (Valet Design spec, §Sandbox Image).
+# Extends the k8s sandbox image with what design_export(pdf|pptx) runs:
+# marp-cli plus a headless Chromium for its PDF/PPTX rendering. The stock
+# image can export html and gslides; only pdf/pptx need this variant.
+#
+# Build (matches the sandbox-k8s pattern — repo root as context):
+#   docker build -f docker/Dockerfile.sandbox-design -t valet-sandbox-design .
+# Point VALET_SANDBOX_IMAGE at the result for local testing. On the
+# kubernetes backend the image must be registry-hosted, same rule as every
+# sandbox image (CLAUDE.md, "Sandbox gotchas").
+ARG BASE_IMAGE=valet-sandbox-k8s:latest
+FROM ${BASE_IMAGE}
+
+# Chromium for marp-cli's PDF/PPTX rendering. marp-cli finds it via
+# CHROME_PATH; --no-sandbox is required because the container itself is the
+# sandbox (no user namespaces for Chromium's own).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV CHROME_PATH=/usr/bin/chromium
+ENV CHROME_NO_SANDBOX=true
+
+# Preinstall marp-cli globally so design_export's `npx @marp-team/marp-cli`
+# resolves offline (the export egress policy denies registry fetches).
+RUN npm install -g @marp-team/marp-cli@4

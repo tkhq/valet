@@ -19,7 +19,17 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import type { ChildSpawner, SpawnChildRequest, ToolContext, ToolDef, ToolResult } from "@valet/engine";
-import { applyElementPatches, marpToDcHtml, parseHeader, MAX_ARTIFACT_BYTES } from "@valet/plugin-design/lib";
+import {
+  applyElementPatches,
+  dcHtmlToMarp,
+  dcHtmlToSlidesChunks,
+  marpToDcHtml,
+  parseHeader,
+  slidesToDcHtml,
+  MAX_ARTIFACT_BYTES,
+  type MinimalPresentation,
+} from "@valet/plugin-design/lib";
+import { batchUpdateChunked, createPresentation, getPresentation } from "@valet/plugin-google-workspace/slides";
 
 const UNAVAILABLE_TEXT = "[design_unavailable] design endpoint not configured";
 
@@ -326,6 +336,186 @@ export const designImportImageTool = defineTool({
   },
 });
 
+// ─── design_export ─────────────────────────────────────────────────────
+
+/** The ExportManifest gate body (spec §design_export): name what leaves. */
+function exportManifest(content: string): string {
+  const dataImages = (content.match(/src="data:/g) ?? []).length;
+  const externalRefs = [...content.matchAll(/(?:src|href)="(https?:\/\/[^"]+)"/g)].map((m) => m[1]);
+  const styleBlocks = (content.match(/<style/g) ?? []).length;
+  const lines = [
+    `- artifact document (${Buffer.byteLength(content)} bytes, ${styleBlocks} style block${styleBlocks === 1 ? "" : "s"})`,
+    `- ${dataImages} embedded image${dataImages === 1 ? "" : "s"}`,
+  ];
+  if (externalRefs.length > 0) {
+    lines.push(`- external references: ${[...new Set(externalRefs)].join(", ")}`);
+  }
+  return lines.join("\n");
+}
+
+async function getGoogleToken(ctx: ToolContext): Promise<string | null> {
+  const cred = await ctx.credentials.get("google_workspace");
+  const token = cred?.accessToken;
+  return typeof token === "string" && token.length > 0 ? token : null;
+}
+
+export const designExportTool = defineTool({
+  name: "design_export",
+  description:
+    "Export the artifact to html, pdf, pptx, or gslides. html/pdf/pptx land in /workspace/exports/; gslides creates a Google Slides presentation and returns its URL. Exports never mutate the artifact. Opens an export-manifest approval gate naming everything that leaves.",
+  parameters: Type.Object({
+    format: Type.Union(
+      [Type.Literal("html"), Type.Literal("pdf"), Type.Literal("pptx"), Type.Literal("gslides")],
+      { description: "Target format." },
+    ),
+    filename: Type.Optional(
+      Type.String({ description: "Output file name (html/pdf/pptx) or presentation title (gslides)." }),
+    ),
+  }),
+  execute: async (args, ctx): Promise<ToolResult> => {
+    const cfg = resolveDesignConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const current = await readArtifact(cfg, ctx);
+    if ("error" in current) return { text: `[design_export failed] ${current.error}` };
+
+    // ExportManifest gate (spec §design_export + threat 8): the user
+    // approves the scope of what leaves — every referenced file named.
+    const resolution = await ctx.requestDecision({
+      type: "approval",
+      title: `Export design as ${args.format}?`,
+      body: `This export includes:\n${exportManifest(current.content)}${args.format === "gslides" ? "\n\nA new presentation will be created in the connected Google Drive." : ""}`,
+      actions: [
+        { id: "approve", label: "Export", style: "primary" },
+        { id: "deny", label: "Cancel", style: "danger" },
+      ],
+      resumeKey: `design-export:${args.format}:${current.revision}`,
+    });
+    if (resolution.actionId !== "approve") {
+      return { text: `${args.format} export declined by ${resolution.resolvedBy}` };
+    }
+
+    const baseName = (args.filename ?? `design-${current.revision}`).replace(/\.(html|pdf|pptx)$/, "");
+
+    if (args.format === "html") {
+      const path = `/workspace/exports/${baseName}.html`;
+      try {
+        await ctx.sandbox.mkdir("/workspace/exports");
+      } catch {
+        // Already exists — fine.
+      }
+      await ctx.sandbox.writeFile(path, current.content);
+      return { text: `exported revision ${current.revision} to ${path}` };
+    }
+
+    if (args.format === "pdf" || args.format === "pptx") {
+      const { output: markdown, report } = dcHtmlToMarp(current.content);
+      const mdPath = `/tmp/valet-design-export.md`;
+      const outPath = `/workspace/exports/${baseName}.${args.format}`;
+      try {
+        await ctx.sandbox.mkdir("/workspace/exports");
+      } catch {
+        // Already exists — fine.
+      }
+      await ctx.sandbox.writeFile(mdPath, markdown);
+      const flag = args.format === "pdf" ? "--pdf" : "--pptx";
+      const result = await ctx.sandbox.exec(
+        `npx -y @marp-team/marp-cli@latest ${mdPath} ${flag} --allow-local-files -o ${outPath}`,
+        { timeout: 180_000 },
+      );
+      if (result.exitCode !== 0) {
+        return {
+          text: `[design_export failed] marp-cli exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-800)}. PDF/PPTX export needs Chromium in the sandbox image — use an image built from docker/Dockerfile.sandbox-design, or export html instead.`,
+        };
+      }
+      const reportText = report.length > 0 ? `\nexport report:\n- ${report.join("\n- ")}` : "";
+      return { text: `exported revision ${current.revision} to ${outPath}${reportText}` };
+    }
+
+    // gslides
+    const token = await getGoogleToken(ctx);
+    if (!token) {
+      return {
+        text: "[design_export failed] Missing Google Workspace credential. Connect Google Workspace in Settings, then retry the export.",
+      };
+    }
+    const { title, chunks, report } = dcHtmlToSlidesChunks(current.content, args.filename ?? "Valet Design export");
+    try {
+      const presentation = await createPresentation(args.filename ?? title, token);
+      const result = await batchUpdateChunked(presentation.presentationId, chunks, token, {
+        ...(presentation.revisionId ? { initialRevisionId: presentation.revisionId } : {}),
+      });
+      const url = `https://docs.google.com/presentation/d/${presentation.presentationId}/edit`;
+      const reportText = report.length > 0 ? `\nexport report:\n- ${report.join("\n- ")}` : "\nexport report: clean export";
+      if (result.error) {
+        return {
+          text: `[design_export partial] ${result.error}. ${result.applied}/${chunks.length} slides applied to ${url}. Retry the export to recreate cleanly, or fix the named slide.${reportText}`,
+        };
+      }
+      return {
+        text: `exported revision ${current.revision} to Google Slides: ${url} (presentation id ${presentation.presentationId})${reportText}`,
+      };
+    } catch (err) {
+      return { text: `[design_export failed] ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
+
+// ─── design_import_gslides ─────────────────────────────────────────────
+
+export const designImportGslidesTool = defineTool({
+  name: "design_import_gslides",
+  description:
+    "Import a Google Slides presentation as this session's artifact (a new revision — the previous state stays revertible). Elements exported by design_export keep their ids, so comment anchors survive the round trip.",
+  parameters: Type.Object({
+    presentation_id: Type.String({ description: "Google Slides presentation ID (from the URL or a prior export)." }),
+  }),
+  execute: async (args, ctx): Promise<ToolResult> => {
+    const cfg = resolveDesignConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+
+    const resolution = await ctx.requestDecision({
+      type: "approval",
+      title: "Import Google Slides presentation?",
+      body: `Replace the current design with the converted contents of presentation ${args.presentation_id}. The previous revision stays revertible.`,
+      actions: [
+        { id: "approve", label: "Import", style: "primary" },
+        { id: "deny", label: "Cancel", style: "danger" },
+      ],
+      resumeKey: `design-import-gslides:${args.presentation_id}`,
+    });
+    if (resolution.actionId !== "approve") {
+      return { text: `import of presentation ${args.presentation_id} declined by ${resolution.resolvedBy}` };
+    }
+
+    const token = await getGoogleToken(ctx);
+    if (!token) {
+      return {
+        text: "[design_import_gslides failed] Missing Google Workspace credential. Connect Google Workspace in Settings, then retry the import.",
+      };
+    }
+    try {
+      const presentation: MinimalPresentation = await getPresentation(args.presentation_id, token);
+      const { output, report } = slidesToDcHtml(presentation);
+      const res = await fetch(designUrl(cfg, ctx, "edit"), {
+        method: "POST",
+        headers: designHeaders(cfg, ctx, true),
+        body: JSON.stringify({
+          content: output,
+          summary: `Imported Google Slides presentation ${args.presentation_id}`,
+        }),
+        signal: ctx.signal,
+      });
+      if (!res.ok) return { text: `[design_import_gslides failed] ${await readError(res)}` };
+      const body = (await res.json()) as { revision: string };
+      const reportText =
+        report.length > 0 ? `\nimport report:\n- ${report.join("\n- ")}` : "\nimport report: clean import";
+      return { text: `imported presentation ${args.presentation_id} as revision ${body.revision}${reportText}` };
+    } catch (err) {
+      return { text: `[design_import_gslides failed] ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
+
 // ─── design_handoff ────────────────────────────────────────────────────
 
 export const designHandoffTool = defineTool({
@@ -389,6 +579,8 @@ export function buildDesignTools(): ToolDef[] {
     designCommentResolveTool,
     designImportMarpTool,
     designImportImageTool,
+    designImportGslidesTool,
+    designExportTool,
     designHandoffTool,
   ];
 }
