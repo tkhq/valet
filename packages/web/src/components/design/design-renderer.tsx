@@ -172,6 +172,14 @@ export function DesignRenderer({
       <div
         ref={hostRef}
         style={{
+          // Containment is load-bearing, not cosmetic: artifacts may use
+          // `position: fixed` / viewport units, and fixed descendants of a
+          // shadow root otherwise position AND hit-test against the app
+          // viewport — an artifact overlay silently swallows clicks on the
+          // history panel and chat input. `contain: paint` makes this host
+          // the containing block for fixed descendants and clips painting
+          // to the canvas box.
+          contain: "paint",
           transform: zoom === 1 ? undefined : `scale(${zoom})`,
           transformOrigin: "top center",
           cursor: commentMode ? "crosshair" : undefined,

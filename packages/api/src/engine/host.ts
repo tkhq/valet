@@ -54,6 +54,17 @@ import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { buildDesignTools } from "./design-tools.js";
 import { readTemplateStarter } from "@valet/plugin-design/lib";
+
+/**
+ * Standing instruction for kind='design' sessions (Valet Design spec,
+ * §Tools). Injected as system context by `buildSession`.
+ */
+const DESIGN_SESSION_PREAMBLE = [
+  "This is a DESIGN session. The deliverable is the design artifact the user sees rendered live in their canvas — not a file in the workspace.",
+  "Make every change to the design with the design_edit tool (kind='rewrite' for the whole document, kind='patch' to replace elements by data-vdid). Never write the deliverable to a workspace file with the write tool; the user cannot see workspace files in the canvas.",
+  "The artifact is one self-contained HTML document. Keep the required <meta name=\"valet-design\"> header. For slide decks, each slide is a top-level <section> with speaker notes in an <aside>; do not add your own navigation buttons or scripts — the canvas provides slide navigation, and scripts are stripped.",
+  "When the user comments on an element, change that element (design_edit kind='patch'), then resolve the comment with design_comment_resolve. Apply the change BEFORE resolving. Do not trust your memory of the artifact — the user can revert or edit the design between your turns; re-read it when in doubt.",
+].join("\n");
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -667,15 +678,24 @@ export class EngineHost {
     // orchestrator's memory snapshot uses. Best-effort: a stale template
     // name means no guidance, never a failed build.
     let designSystemContext = {};
-    if (meta.kind === "design" && meta.template) {
-      try {
-        const { prompt } = readTemplateStarter(meta.template);
-        designSystemContext = {
-          systemContext: [{ name: "design-template", content: prompt.trim(), order: 20 }],
-        };
-      } catch {
-        // Unknown template — proceed without guidance.
+    if (meta.kind === "design") {
+      // Without this preamble the model treats a design session like a
+      // coding session: it writes the deliverable to a workspace file with
+      // the `write` tool and the user's canvas never updates (observed in
+      // live verification). The artifact-is-the-deliverable framing must be
+      // in the system context, not only in the tool descriptions.
+      let content = DESIGN_SESSION_PREAMBLE;
+      if (meta.template) {
+        try {
+          const { prompt } = readTemplateStarter(meta.template);
+          content += `\n\nTemplate guidance (${meta.template}): ${prompt.trim()}`;
+        } catch {
+          // Unknown template — preamble alone still applies.
+        }
       }
+      designSystemContext = {
+        systemContext: [{ name: "design-session", content, order: 20 }],
+      };
     }
     const designToolConfig =
       meta.kind === "design" && this.opts.apiBaseUrl
