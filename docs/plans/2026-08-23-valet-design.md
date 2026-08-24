@@ -252,9 +252,8 @@ Implement the child-session spawn for code implementation.
 Implement three acceptance-test suites covering the three scenarios from the spec.
 
 **Deliverables:**
-- `tests/design/acceptance/document-page.test.ts`: Scenario A — create document, edit, revert, share, export PDF, handoff.
-- `tests/design/acceptance/slide-deck.test.ts`: Scenario B — create slides, edit individual slide, insert slide, export PDF and PPTX.
-- `tests/design/acceptance/gslides-roundtrip.test.ts`: Scenario C — create slides, export to Gslides, external edit, import back, handoff. Skipped if `plugin-google-workspace` not connected.
+- `packages/api/src/integration/design-acceptance.test.ts`: Scenarios A and B at the API level — create/seed, internal edit seam, events, revert, comments, fences. (Repo convention puts integration tests in the package's vitest tree, not a root `tests/` dir.)
+- Scenario C's serializer round trip: `packages/plugin-design/src/lib/gslides.test.ts` + fenced-transport tests in `packages/api/src/engine/design-tools.test.ts`. The live Google round trip needs a connected credential and stays out of CI.
 - Each test: API-level assertions (rows created, WebSocket events emitted, revisions written).
 - No UI automation; test the JSON flow end-to-end.
 - Kill-mid-turn scenario: test one export in progress, kill sandbox, restart, verify export-state is resumable or gracefully fails.
