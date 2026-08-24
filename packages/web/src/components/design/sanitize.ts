@@ -83,8 +83,16 @@ export function parseSlides(sanitizedHtml: string): SlideInfo[] {
     return {
       index,
       vdid: section.getAttribute("data-vdid"),
-      heading: headingEl?.textContent?.trim() || `Slide ${index + 1}`,
-      notes: aside?.textContent?.trim() ?? "",
+      // data-label wins (the Claude Design attribute); first heading is
+      // the fallback for decks that don't set it.
+      heading:
+        section.getAttribute("data-label")?.trim() ||
+        headingEl?.textContent?.trim() ||
+        `Slide ${index + 1}`,
+      // data-speaker-notes wins over an <aside> child.
+      notes:
+        section.getAttribute("data-speaker-notes")?.trim() ||
+        (aside?.textContent?.trim() ?? ""),
     };
   });
 }

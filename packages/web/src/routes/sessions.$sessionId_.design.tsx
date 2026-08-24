@@ -88,12 +88,9 @@ function useDragResize(opts: {
   return { size, start };
 }
 
-// Slide previews render the real artifact at a fixed design width, scaled
-// into the strip — the same DesignRenderer as the canvas, so a thumbnail
+// Slide previews are the real DesignRenderer in stage mode: the renderer
+// fit-scales the fixed 1920×1080 stage into the thumb box, so a thumbnail
 // can never drift from what the slide actually looks like.
-const THUMB_W = 144;
-const THUMB_RENDER_W = 960;
-
 function SlideThumb({
   content,
   tokens,
@@ -103,15 +100,9 @@ function SlideThumb({
   tokens: Record<string, string>;
   index: number;
 }) {
-  const scale = THUMB_W / THUMB_RENDER_W;
   return (
-    <div
-      className="pointer-events-none w-full overflow-hidden rounded bg-white dark:bg-neutral-950"
-      style={{ height: (THUMB_W * 9) / 16 }}
-    >
-      <div style={{ width: THUMB_RENDER_W, transform: `scale(${scale})`, transformOrigin: "top left" }}>
-        <DesignRenderer content={content} tokens={tokens} activeSlideIndex={index} />
-      </div>
+    <div className="pointer-events-none w-full overflow-hidden rounded bg-white dark:bg-neutral-950">
+      <DesignRenderer content={content} tokens={tokens} activeSlideIndex={index} />
     </div>
   );
 }

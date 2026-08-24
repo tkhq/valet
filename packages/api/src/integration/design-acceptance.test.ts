@@ -113,12 +113,21 @@ describe("design acceptance (API-level)", () => {
     expect(revs.current).toBe("r-003");
     expect(revs.revisions.map((r) => r.revision)).toEqual(["r-003", "r-002", "r-001"]);
 
-    // Share subset (threat 2): with no design system the map is empty, and
-    // never errors — the shared canvas falls back to artifact defaults.
+    // Share subset (threat 2): only tokens the artifact references ship.
+    // The default Valet design system is always present underneath, so the
+    // subset carries exactly the referenced defaults — never the full map.
     const tokens = (await (
       await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/tokens?subset=artifact`)
     ).json()) as { tokens: Record<string, string> };
-    expect(tokens.tokens).toEqual({});
+    const full = (await (
+      await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/tokens`)
+    ).json()) as { tokens: Record<string, string> };
+    expect(Object.keys(full.tokens).length).toBeGreaterThan(20); // defaults served
+    expect(Object.keys(tokens.tokens).length).toBeGreaterThan(0);
+    expect(Object.keys(tokens.tokens).length).toBeLessThan(Object.keys(full.tokens).length);
+    for (const name of Object.keys(tokens.tokens)) {
+      expect(reverted.content).toContain(`var(${name}`);
+    }
 
     // Comment lifecycle: user posts, tool resolves.
     const vdid = /data-vdid="([0-9a-f_]+)"/.exec(reverted.content)?.[1] ?? "";
@@ -172,8 +181,8 @@ describe("design acceptance (API-level)", () => {
 
     // Insert a slide before the last one; the existing sections' ids survive.
     const withInsert = afterEdit.content.replace(
-      /<section data-vdid="([0-9a-f_]+)">\s*<h2/,
-      '<section><h2>Workflow Engine</h2><p>New slide.</p><aside>added</aside></section><section data-vdid="$1"><h2',
+      /<section([^>]*data-vdid="[0-9a-f_]+"[^>]*)>(\s*<h2)/,
+      "<section><h2>Workflow Engine</h2><p>New slide.</p><aside>added</aside></section><section$1>$2",
     );
     const insertRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/edit`, {
       method: "POST",

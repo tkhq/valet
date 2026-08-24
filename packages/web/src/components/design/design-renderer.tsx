@@ -94,6 +94,26 @@ function remapDocumentSelectors(css: string): string {
     .replace(/(^|[\s,{}])(?:html|body)(?![\w-])/g, "$1.vd-body");
 }
 
+/**
+ * The fixed logical stage for slides (the Claude Design model: slides are
+ * authored at 1920×1080 and the viewer scales to fit). A fixed stage makes
+ * layout deterministic — overflow is measured against a known height, and
+ * a slide renders identically at every viewport size.
+ */
+export const STAGE_W = 1920;
+export const STAGE_H = 1080;
+
+function applyStageSizing(sections: HTMLElement[]): void {
+  for (const s of sections) {
+    s.style.setProperty("width", `${STAGE_W}px`);
+    s.style.setProperty("height", `${STAGE_H}px`);
+    s.style.setProperty("box-sizing", "border-box");
+    // Visually clip what overflows the stage — that IS what export and
+    // present show; the health report names the overflowing slides.
+    s.style.setProperty("overflow", "hidden");
+  }
+}
+
 /** Outermost `<section>`s at any depth — agents often wrap slides in a
  * container div, and a strict children-only read blanked the slide strip
  * and active-slide toggling for those documents. */
@@ -118,6 +138,12 @@ export function DesignRenderer({
   const shadowRef = useRef<ShadowRoot | null>(null);
   const healthRef = useRef(onRenderHealth);
   healthRef.current = onRenderHealth;
+  const slidesModeRef = useRef(activeSlideIndex !== undefined);
+  slidesModeRef.current = activeSlideIndex !== undefined;
+  // Fit scale for the fixed stage (slides mode): stage width → container
+  // width, recomputed on container resize.
+  const [fitScale, setFitScale] = useState(1);
+  const frameRef = useRef<HTMLDivElement>(null);
   // Bumped after every innerHTML replacement so the attribute-mutating
   // effects (slides, badges) re-run against the fresh DOM.
   const [domVersion, setDomVersion] = useState(0);
@@ -193,6 +219,11 @@ export function DesignRenderer({
     for (const styleEl of Array.from(shadow.querySelectorAll("style"))) {
       styleEl.textContent = remapDocumentSelectors(styleEl.textContent ?? "");
     }
+    // Slides mode: put every slide on the fixed stage BEFORE measuring, so
+    // the overflow lint measures against the same box the viewer shows.
+    if (slidesModeRef.current) {
+      applyStageSizing(topLevelSections(shadow));
+    }
     // Measure artifact-intrinsic visibility HERE, before the slide-toggle
     // effect adds its own inline display/vd-active overrides.
     if (healthRef.current) {
@@ -258,6 +289,7 @@ export function DesignRenderer({
       }
       return;
     }
+    applyStageSizing(sections);
     sections.forEach((s, i) => {
       if (i === activeSlideIndex) {
         s.style.removeProperty("display");
@@ -268,6 +300,21 @@ export function DesignRenderer({
       }
     });
   }, [activeSlideIndex, domVersion]);
+
+  // Fit the stage to the container (slides mode only).
+  useEffect(() => {
+    if (activeSlideIndex === undefined) return;
+    const frame = frameRef.current;
+    if (!frame) return;
+    const update = () => {
+      const w = frame.clientWidth;
+      if (w > 0) setFitScale(w / STAGE_W);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(frame);
+    return () => ro.disconnect();
+  }, [activeSlideIndex === undefined]);
 
   // Unresolved-comment badges.
   useEffect(() => {
@@ -296,24 +343,38 @@ export function DesignRenderer({
     );
   }
 
+  const slidesMode = activeSlideIndex !== undefined;
+  const stageScale = fitScale * zoom;
   return (
-    <div className={className}>
+    <div className={className} ref={frameRef}>
       <div
-        ref={hostRef}
-        style={{
-          // Containment is load-bearing, not cosmetic: artifacts may use
-          // `position: fixed` / viewport units, and fixed descendants of a
-          // shadow root otherwise position AND hit-test against the app
-          // viewport — an artifact overlay silently swallows clicks on the
-          // history panel and chat input. `contain: paint` makes this host
-          // the containing block for fixed descendants and clips painting
-          // to the canvas box.
-          contain: "paint",
-          transform: zoom === 1 ? undefined : `scale(${zoom})`,
-          transformOrigin: "top center",
-          cursor: commentMode ? "crosshair" : undefined,
-        }}
-      />
+        style={slidesMode ? { height: STAGE_H * stageScale } : undefined}
+      >
+        <div
+          ref={hostRef}
+          style={{
+            // Containment is load-bearing, not cosmetic: artifacts may use
+            // `position: fixed` / viewport units, and fixed descendants of a
+            // shadow root otherwise position AND hit-test against the app
+            // viewport — an artifact overlay silently swallows clicks on the
+            // history panel and chat input. `contain: paint` makes this host
+            // the containing block for fixed descendants and clips painting
+            // to the canvas box.
+            contain: "paint",
+            ...(slidesMode
+              ? {
+                  width: STAGE_W,
+                  transform: `scale(${stageScale})`,
+                  transformOrigin: "top left",
+                }
+              : {
+                  transform: zoom === 1 ? undefined : `scale(${zoom})`,
+                  transformOrigin: "top center",
+                }),
+            cursor: commentMode ? "crosshair" : undefined,
+          }}
+        />
+      </div>
     </div>
   );
 }

@@ -52,6 +52,16 @@ export function staticRenderChecks(html: string): string[] {
     );
   }
 
+  // Design-system adherence (soft): a document painted entirely in raw
+  // hex with zero token references ignores the design system it was given.
+  const hexCount = (html.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).length;
+  const varCount = (html.match(/var\(--/g) ?? []).length;
+  if (hexCount > 12 && varCount === 0) {
+    notes.push(
+      `${hexCount} raw hex colors and no design-system tokens — prefer var(--color-primary), var(--color-bg), var(--color-fg) etc. (design_render_token lists every token) so the design stays consistent and re-themeable.`,
+    );
+  }
+
   if (hidesSectionsByDefault(html)) {
     notes.push(
       "the stylesheet hides <section> elements by default (opacity:0 / display:none / visibility:hidden). With scripts stripped, nothing reveals them — every slide except a pre-marked one renders blank. Make every section statically visible; the canvas shows one slide at a time on its own.",
