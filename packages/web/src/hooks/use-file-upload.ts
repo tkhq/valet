@@ -3,11 +3,9 @@
  * error handling, and attachment ref extraction.
  */
 import { useCallback } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import type { ComposerFile } from "~/components/session/composer-files";
 
 export function useFileUpload(sessionId: string) {
-  const qc = useQueryClient();
 
   /**
    * Upload a single file to the session. Returns the updated ComposerFile
@@ -18,11 +16,8 @@ export function useFileUpload(sessionId: string) {
   const uploadFile = useCallback(
     async (file: ComposerFile): Promise<ComposerFile> => {
       const formData = new FormData();
-      // The input File is already available in the session state,
-      // but we need to re-read it via the DOM (through the file input ref)
-      // or hold it separately. For now, this signature assumes the caller
-      // will have the File object available and pass it separately.
-      // See the composer for the full integration pattern.
+      formData.append("file", file.file, file.name);
+      // extract=auto is the API default; the composer does not expose the extract knob today
 
       try {
         const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files`, {
@@ -43,12 +38,9 @@ export function useFileUpload(sessionId: string) {
 
         const data = (await res.json()) as Record<string, unknown>;
         const attachmentRef = typeof data.attachmentRef === "string" ? data.attachmentRef : undefined;
-
         if (!attachmentRef) {
           return { ...file, error: "Invalid response from server" };
         }
-
-        // Mark upload complete
         return { ...file, uploadProgress: 100, attachmentRef };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Upload failed";

@@ -20,6 +20,8 @@ export interface ComposerFile {
   id: string;
   name: string;
   bytes: number;
+  /** The underlying File. Held so the upload hook can stream the bytes. */
+  file: File;
   /** The upload progress: 0-100, or null if not yet started. */
   uploadProgress: number | null;
   /** Set when upload completes successfully. */
@@ -154,6 +156,7 @@ export function createComposerFile(file: File): ComposerFile {
     id: newFileId(),
     name: file.name,
     bytes: file.size,
+    file,
     uploadProgress: null,
   };
 }

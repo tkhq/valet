@@ -41,6 +41,7 @@ describe("composer-files", () => {
         id: `file-${i}`,
         name: `file${i}.txt`,
         bytes: 1024,
+        file: new File([], `file${i}.txt`),
         uploadProgress: null,
       }));
       const result = acceptFiles(current, [{ name: "one-more.txt", size: 1024 }]);
@@ -55,6 +56,7 @@ describe("composer-files", () => {
           id: "file-1",
           name: "large.txt",
           bytes: 200 * 1024 * 1024,
+          file: new File([], "large.txt"),
           uploadProgress: null,
         },
       ];
@@ -71,6 +73,7 @@ describe("composer-files", () => {
       const composer = createComposerFile(file);
       expect(composer.name).toBe("test.txt");
       expect(composer.bytes).toBe(7);
+      expect(composer.file).toBe(file);
       expect(composer.uploadProgress).toBeNull();
       expect(composer.attachmentRef).toBeUndefined();
       expect(composer.error).toBeUndefined();
@@ -80,9 +83,9 @@ describe("composer-files", () => {
   describe("toFileRefs", () => {
     it("extracts refs from uploaded files", () => {
       const files: ComposerFile[] = [
-        { id: "1", name: "a.pdf", bytes: 100, uploadProgress: null, attachmentRef: "att_abc" },
-        { id: "2", name: "b.txt", bytes: 50, uploadProgress: null }, // no ref
-        { id: "3", name: "c.zip", bytes: 200, uploadProgress: null, attachmentRef: "att_def" },
+        { id: "1", name: "a.pdf", bytes: 100, file: new File([], "a.pdf"), uploadProgress: null, attachmentRef: "att_abc" },
+        { id: "2", name: "b.txt", bytes: 50, file: new File([], "b.txt"), uploadProgress: null }, // no ref
+        { id: "3", name: "c.zip", bytes: 200, file: new File([], "c.zip"), uploadProgress: null, attachmentRef: "att_def" },
       ];
       const refs = toFileRefs(files);
       expect(refs).toHaveLength(2);
@@ -92,7 +95,7 @@ describe("composer-files", () => {
 
     it("returns empty array when no files have refs", () => {
       const files: ComposerFile[] = [
-        { id: "1", name: "a.pdf", bytes: 100, uploadProgress: null },
+        { id: "1", name: "a.pdf", bytes: 100, file: new File([], "a.pdf"), uploadProgress: null },
       ];
       const refs = toFileRefs(files);
       expect(refs).toHaveLength(0);
