@@ -322,11 +322,38 @@ describe("design tools", () => {
     expect(written[0]).not.toContain(";");
   });
 
-  it("design_export pdf keeps every intermediate file under /workspace", async () => {
-    // The docker provider's writeFile lands on the HOST filesystem; only the
-    // /workspace bind mount is shared with exec() inside the container. An
-    // intermediate written anywhere else (we shipped /tmp once) is invisible
-    // to marp and the export fails with a usage dump.
+  /** Sandbox stub for the chromium export pipeline: probe answers with the
+   * binary, prints "succeed" by making stat(outPdf) resolve after the print
+   * command ran, and every command + write is recorded. */
+  function chromiumSandbox(written: string[], commands: string[]) {
+    let printed = false;
+    return stubSandbox({
+      mkdir: () => Promise.resolve(),
+      writeFile: (path: string, content: string) => {
+        written.push(path);
+        void content;
+        return Promise.resolve();
+      },
+      stat: (path: string) =>
+        printed && path.endsWith(".pdf")
+          ? Promise.resolve({ isFile: true, isDirectory: false, size: 1000 })
+          : Promise.reject(new Error("not found")),
+      exec: (command: string) => {
+        commands.push(command);
+        if (command.startsWith("command -v")) {
+          return Promise.resolve({ stdout: "/usr/bin/chromium\n", stderr: "", exitCode: 0 });
+        }
+        if (command.includes("--print-to-pdf")) printed = true;
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+      },
+    });
+  }
+
+  it("design_export pdf prints the STYLED document with chromium, intermediates under /workspace", async () => {
+    // Two regressions pinned here: (1) the marp-markdown path flattened the
+    // deck to unstyled text — pdf must print the real HTML with chromium;
+    // (2) the docker provider's writeFile lands on the HOST filesystem, so
+    // every intermediate must live under the /workspace bind mount.
     vi.stubGlobal("fetch", () =>
       Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
     );
@@ -334,28 +361,65 @@ describe("design tools", () => {
     const commands: string[] = [];
     const ctx = ctxWith(CFG);
     ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
-    ctx.sandbox = stubSandbox({
-      mkdir: () => Promise.resolve(),
-      writeFile: (path: string) => {
-        written.push(path);
-        return Promise.resolve();
-      },
-      exec: (command: string) => {
-        commands.push(command);
-        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
-      },
-    });
+    ctx.sandbox = chromiumSandbox(written, commands);
 
     const result = await designExportTool.execute({ format: "pdf", filename: "deck" }, ctx);
     expect(result.text).toContain("exported revision r-002 to /workspace/exports/deck.pdf");
     for (const path of written) {
       expect(path.startsWith("/workspace/")).toBe(true);
     }
-    // marp reads the same markdown path the tool wrote.
-    const mdPath = written.find((p) => p.endsWith(".md"));
-    expect(mdPath).toBeDefined();
-    expect(commands[0]).toContain(`marp ${mdPath}`);
-    expect(commands[0]).toContain("--pdf");
+    const print = commands.find((cmd) => cmd.includes("--print-to-pdf"));
+    expect(print).toContain("--print-to-pdf=/workspace/exports/deck.pdf");
+    expect(print).toContain("file:///workspace/exports/.vd-export.html");
+    // The styled document, not a markdown outline, is what got written.
+    expect(written).toContain("/workspace/exports/.vd-export.html");
+    expect(commands.some((cmd) => cmd.includes("marp "))).toBe(false);
+  });
+
+  it("design_export pptx rasterizes the printed pages and builds an image-per-slide deck", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const written: string[] = [];
+    const commands: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = chromiumSandbox(written, commands);
+
+    const result = await designExportTool.execute({ format: "pptx", filename: "deck" }, ctx);
+    expect(result.text).toContain("exported revision r-002 to /workspace/exports/deck.pptx");
+    expect(commands.some((cmd) => cmd.startsWith("pdftoppm "))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes("node /workspace/exports/.vd-pptx.cjs"))).toBe(true);
+    expect(written).toContain("/workspace/exports/.vd-pptx.json");
+    for (const path of written) {
+      expect(path.startsWith("/workspace/")).toBe(true);
+    }
+  });
+
+  it("design_export pdf falls back to the marp outline when the sandbox has no chromium", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const commands: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = stubSandbox({
+      mkdir: () => Promise.resolve(),
+      writeFile: () => Promise.resolve(),
+      stat: () => Promise.reject(new Error("not found")),
+      exec: (command: string) => {
+        commands.push(command);
+        if (command.startsWith("command -v")) {
+          return Promise.resolve({ stdout: "", stderr: "not found", exitCode: 1 });
+        }
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+      },
+    });
+
+    const result = await designExportTool.execute({ format: "pdf", filename: "deck" }, ctx);
+    // The fallback is honest about what it produced.
+    expect(result.text).toContain("TEXT OUTLINE");
+    expect(commands.some((cmd) => cmd.includes("marp "))).toBe(true);
   });
 
   it("design_export declined gate writes nothing", async () => {

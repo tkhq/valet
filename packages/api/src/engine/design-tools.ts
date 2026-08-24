@@ -24,6 +24,7 @@ import {
   dcHtmlToMarp,
   dcHtmlToSlidesChunks,
   injectDeckRuntime,
+  inlineDesignTokens,
   marpToDcHtml,
   parseHeader,
   slidesToDcHtml,
@@ -91,6 +92,104 @@ async function readArtifact(cfg: DesignToolConfig, ctx: ToolContext): Promise<Ar
   const body = (await res.json()) as { revision: string; content: string; scratchpad?: string };
   return { revision: body.revision, content: body.content, scratchpad: body.scratchpad ?? "" };
 }
+
+/** Session design tokens for export copies. The canvas injects tokens at
+ * render time; an export renders without the canvas, so they must travel
+ * inlined. {} on failure — the artifact's own var() fallbacks then carry
+ * the rendering. */
+async function fetchExportTokens(cfg: DesignToolConfig, ctx: ToolContext): Promise<Record<string, string>> {
+  try {
+    const res = await fetch(designUrl(cfg, ctx, "tokens"), {
+      headers: designHeaders(cfg, ctx, false),
+      signal: ctx.signal,
+    });
+    if (!res.ok) return {};
+    const { tokens } = (await res.json()) as { tokens?: Record<string, string> };
+    return tokens ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/** Decode the handful of entities the .dc.html writer produces in
+ * attribute values — enough for speaker notes riding data-speaker-notes. */
+function decodeAttrEntities(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/** Per-slide speaker notes in document order, or null when any top-level
+ * structure is ambiguous (the pptx build then skips notes rather than
+ * mis-assigning them). */
+function extractSpeakerNotes(dcHtml: string): string[] {
+  const notes: string[] = [];
+  for (const m of dcHtml.matchAll(/<section\b([^>]*)>/g)) {
+    const attr = /data-speaker-notes="([^"]*)"/.exec(m[1] ?? "");
+    notes.push(attr ? decodeAttrEntities(attr[1]) : "");
+  }
+  return notes;
+}
+
+/** Last-resort pdf/pptx path for sandboxes without Chromium: marp renders
+ * a TEXT OUTLINE of the deck — content survives, styling does not. The
+ * stock image always has Chromium; this only runs on older or minimal
+ * images. */
+async function marpFallbackExport(
+  ctx: ToolContext,
+  current: { revision: string; content: string },
+  baseName: string,
+  format: "pdf" | "pptx",
+): Promise<ToolResult> {
+  const { output: markdown, report } = dcHtmlToMarp(current.content);
+  const mdPath = `/workspace/exports/.valet-design-export.md`;
+  const outPath = `/workspace/exports/${baseName}.${format}`;
+  await ctx.sandbox.writeFile(mdPath, markdown);
+  const flag = format === "pdf" ? "--pdf" : "--pptx";
+  // The npx fallback pins @4 to match the baked major — an unpinned
+  // `@latest` always consults the registry, defeating the offline install.
+  const result = await ctx.sandbox.exec(
+    `if command -v marp >/dev/null 2>&1; then marp ${mdPath} ${flag} --allow-local-files -o ${outPath}; else npx -y @marp-team/marp-cli@4 ${mdPath} ${flag} --allow-local-files -o ${outPath}; fi`,
+    { timeout: 180_000 },
+  );
+  await ctx.sandbox.exec(`rm -f ${mdPath}`, { timeout: 10_000 }).catch(() => {
+    // Leftover intermediate file is harmless (dotfile in exports/).
+  });
+  if (result.exitCode !== 0) {
+    return {
+      text: `[design_export failed] no Chromium in this sandbox, and the marp fallback exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-600)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships both. For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity.`,
+    };
+  }
+  const reportText = report.length > 0 ? `\nexport report:\n- ${report.join("\n- ")}` : "";
+  return {
+    text: `exported revision ${current.revision} to ${outPath} as a TEXT OUTLINE — this sandbox has no Chromium, so the deck's styling was not preserved. Tell the user: for a styled PDF use the canvas Export menu -> PDF (instant print view).${reportText}`,
+  };
+}
+
+/** Node script the pptx build runs inside the sandbox: one full-bleed
+ * image per rendered slide page, speaker notes attached when the counts
+ * line up. pptxgenjs is baked globally in the stock image (NODE_PATH). */
+const PPTX_BUILD_SCRIPT = `
+const fs = require("fs"), path = require("path");
+const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, ".vd-pptx.json"), "utf8"));
+const Pptx = require("pptxgenjs");
+const imgs = fs.readdirSync(cfg.dir)
+  .filter((f) => /^\\.vd-slide-?\\d+\\.png$/.test(f))
+  .sort((a, b) => Number(/(\\d+)\\.png$/.exec(a)[1]) - Number(/(\\d+)\\.png$/.exec(b)[1]));
+if (imgs.length === 0) { console.error("no rendered slide images"); process.exit(1); }
+const p = new Pptx();
+p.defineLayout({ name: "VD", width: 20, height: 11.25 }); // 1920x1080 at 96dpi, in inches
+p.layout = "VD";
+imgs.forEach((f, i) => {
+  const s = p.addSlide();
+  s.addImage({ path: path.join(cfg.dir, f), x: 0, y: 0, w: 20, h: 11.25 });
+  if (Array.isArray(cfg.notes) && cfg.notes.length === imgs.length && cfg.notes[i]) s.addNotes(cfg.notes[i]);
+});
+p.writeFile({ fileName: cfg.out }).then(() => console.log("ok")).catch((e) => { console.error(e); process.exit(1); });
+`;
 
 // ─── design_edit ───────────────────────────────────────────────────────
 
@@ -677,9 +776,11 @@ export const designExportTool = defineTool({
       // Slides exports get a small standalone viewer runtime (keyboard
       // navigation + speaker notes), the way Claude Design exports do.
       // Export-only: this copy runs in a real browser; the canvas
-      // sanitizer never sees it.
+      // sanitizer never sees it. Tokens ride inlined — outside the canvas
+      // nothing else provides them.
       const isDeck = (parseHeader(current.content)?.template ?? "") === "slides";
-      const exported = isDeck ? injectDeckRuntime(current.content) : current.content;
+      const withTokens = inlineDesignTokens(current.content, await fetchExportTokens(cfg, ctx));
+      const exported = isDeck ? injectDeckRuntime(withTokens) : withTokens;
       await ctx.sandbox.writeFile(path, exported);
       return {
         text: `exported revision ${current.revision} to ${path}. The user can download it from the canvas Export menu under "Exported files".`,
@@ -687,40 +788,96 @@ export const designExportTool = defineTool({
     }
 
     if (args.format === "pdf" || args.format === "pptx") {
-      const { output: markdown, report } = dcHtmlToMarp(current.content);
-      // The intermediate markdown must live under /workspace: on the docker
-      // provider, writeFile lands on the HOST filesystem and only the
-      // workspace bind mount is visible to exec() inside the container. A
-      // /tmp path writes to the host and marp then can't find its input.
-      const mdPath = `/workspace/exports/.valet-design-export.md`;
-      const outPath = `/workspace/exports/${baseName}.${args.format}`;
+      // Render the REAL styled document with Chromium — the earlier
+      // marp-markdown path flattened the deck to a text outline and
+      // produced unstyled output. Every intermediate lives under
+      // /workspace: on the docker provider, writeFile lands on the HOST
+      // filesystem and only the workspace bind mount is visible to exec()
+      // inside the container.
+      const dir = "/workspace/exports";
+      const outPath = `${dir}/${baseName}.${args.format}`;
       try {
-        await ctx.sandbox.mkdir("/workspace/exports");
+        await ctx.sandbox.mkdir(dir);
       } catch {
         // Already exists — fine.
       }
-      await ctx.sandbox.writeFile(mdPath, markdown);
-      const flag = args.format === "pdf" ? "--pdf" : "--pptx";
-      // Prefer the globally installed `marp` binary (the stock image,
-      // docker/Dockerfile.sandbox-k8s, bakes marp-cli@4 exactly so exports
-      // work with registry egress denied).
-      // The npx fallback pins @4 to match the baked major — an unpinned
-      // `@latest` always consults the registry, defeating the offline install.
-      const result = await ctx.sandbox.exec(
-        `if command -v marp >/dev/null 2>&1; then marp ${mdPath} ${flag} --allow-local-files -o ${outPath}; else npx -y @marp-team/marp-cli@4 ${mdPath} ${flag} --allow-local-files -o ${outPath}; fi`,
+      const isDeck = (parseHeader(current.content)?.template ?? "") === "slides";
+      const tokens = await fetchExportTokens(cfg, ctx);
+      let doc = inlineDesignTokens(current.content, tokens);
+      // The deck runtime's @media print rules paginate one slide per
+      // 1920x1080 page — the same layout the browser print view uses.
+      if (isDeck) doc = injectDeckRuntime(doc);
+      const srcPath = `${dir}/.vd-export.html`;
+      await ctx.sandbox.writeFile(srcPath, doc);
+      const cleanup = () =>
+        ctx.sandbox
+          .exec(
+            `rm -f ${dir}/.vd-export.html ${dir}/.vd-export.pdf ${dir}/.vd-slide*.png ${dir}/.vd-pptx.cjs ${dir}/.vd-pptx.json`,
+            { timeout: 10_000 },
+          )
+          .catch(() => {
+            // Leftover dotfiles are hidden from the exports listing.
+          });
+
+      const chrome = await ctx.sandbox.exec(
+        "command -v chromium || command -v chromium-browser || command -v google-chrome",
+        { timeout: 10_000 },
+      );
+      if (chrome.exitCode !== 0) {
+        // No Chromium (older or minimal image): fall back to the marp
+        // text outline so SOMETHING exports, and say what was lost.
+        await cleanup();
+        return marpFallbackExport(ctx, current, baseName, args.format);
+      }
+      const bin = chrome.stdout.trim().split("\n")[0];
+      const pdfPath = args.format === "pdf" ? outPath : `${dir}/.vd-export.pdf`;
+      const print = await ctx.sandbox.exec(
+        `${bin} --headless --no-sandbox --disable-gpu --hide-scrollbars --virtual-time-budget=5000 --no-pdf-header-footer --print-to-pdf=${pdfPath} file://${srcPath}`,
         { timeout: 180_000 },
       );
-      if (result.exitCode !== 0) {
+      const printed = await ctx.sandbox.stat(pdfPath).catch(() => null);
+      if (print.exitCode !== 0 || !printed?.isFile) {
+        await cleanup();
         return {
-          text: `[design_export failed] marp-cli exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-800)}. PDF/PPTX rendering needs marp-cli + Chromium, which the stock sandbox image ships (docker/Dockerfile.sandbox-k8s) — this sandbox is running an older or minimal image. For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity. As a fallback, design_export html produces a standalone deck the user can download from the Export menu under "Exported files".`,
+          text: `[design_export failed] Chromium print exited ${print.exitCode}: ${(print.stderr || print.stdout).slice(-800)}. For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity.`,
         };
       }
-      await ctx.sandbox.exec(`rm -f ${mdPath}`, { timeout: 10_000 }).catch(() => {
-        // Leftover intermediate file is harmless (dotfile in exports/).
-      });
-      const reportText = report.length > 0 ? `\nexport report:\n- ${report.join("\n- ")}` : "";
+
+      if (args.format === "pptx") {
+        // Rasterize the rendered pages (96dpi = 1920x1080 px) and build a
+        // full-fidelity image-per-slide pptx with speaker notes attached.
+        const ppm = await ctx.sandbox.exec(`pdftoppm -png -r 96 ${pdfPath} ${dir}/.vd-slide`, {
+          timeout: 120_000,
+        });
+        if (ppm.exitCode !== 0) {
+          await cleanup();
+          return {
+            text: `[design_export failed] pdftoppm exited ${ppm.exitCode}: ${(ppm.stderr || ppm.stdout).slice(-400)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships poppler-utils — this sandbox is running an older image. The PDF export works; offer that instead.`,
+          };
+        }
+        await ctx.sandbox.writeFile(`${dir}/.vd-pptx.cjs`, PPTX_BUILD_SCRIPT);
+        await ctx.sandbox.writeFile(
+          `${dir}/.vd-pptx.json`,
+          JSON.stringify({ dir, out: outPath, notes: isDeck ? extractSpeakerNotes(current.content) : [] }),
+        );
+        const build = await ctx.sandbox.exec(
+          `NODE_PATH="$(npm root -g)" node ${dir}/.vd-pptx.cjs`,
+          { timeout: 120_000 },
+        );
+        if (build.exitCode !== 0) {
+          await cleanup();
+          return {
+            text: `[design_export failed] pptx build exited ${build.exitCode}: ${(build.stderr || build.stdout).slice(-400)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships pptxgenjs — this sandbox is running an older image. The PDF export works; offer that instead.`,
+          };
+        }
+      }
+      await cleanup();
+      const pptxNote =
+        args.format === "pptx"
+          ? " Slides are full-fidelity images with speaker notes attached; for text-editable slides, export to Google Slides instead."
+          : "";
       return {
-        text: `exported revision ${current.revision} to ${outPath}. The user can download it from the canvas Export menu under "Exported files".${reportText}`,
+        text: `exported revision ${current.revision} to ${outPath}. The user can download it from the canvas Export menu under "Exported files".${pptxNote}`,
       };
     }
 

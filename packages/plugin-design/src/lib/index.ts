@@ -31,7 +31,7 @@ export type {
   SlidesRequestChunk,
 } from "./gslides.js";
 export { staticRenderChecks, hidesSectionsByDefault } from "./render-checks.js";
-export { injectDeckRuntime } from "./deck-runtime.js";
+export { injectDeckRuntime, inlineDesignTokens } from "./deck-runtime.js";
 export { DEFAULT_DESIGN_TOKENS } from "./default-design-system.js";
 
 import { readFileSync as __readGuide } from "node:fs";

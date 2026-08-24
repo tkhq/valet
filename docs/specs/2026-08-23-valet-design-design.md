@@ -481,9 +481,11 @@ Export the artifact to an external format: HTML, PDF, PPTX, Google Slides.
 
 **Semantics:**
 
-For `html`: return the artifact bytes directly as a downloadable blob.
+For `html`: write the artifact (tokens inlined; deck viewer runtime injected for slides) into `/workspace/exports`.
 
-For `pdf` or `pptx`: delegate to the sandbox. Pass the artifact bytes to `@marp-team/marp-cli` via a temporary `file://` input, collect the output, and return a signed download URL.
+For `pdf`: delegate to the sandbox. Write the STYLED document (tokens inlined, deck runtime's print CSS paginating one slide per 1920x1080 page) and print it with headless Chromium. The draft's marp-cli path is the fallback for Chromium-less sandboxes only — marp flattens the deck to a text outline and loses all styling.
+
+For `pptx`: print the styled PDF as above, rasterize each page with `pdftoppm` (96dpi = 1920x1080), and assemble an image-per-slide deck with `pptxgenjs`, attaching each slide's `data-speaker-notes`. Full fidelity, image slides; text-editable export is Google Slides' job.
 
 For `gslides`: delegate to the sandbox. Transpile the artifact to Slides `batchUpdate` commands, chunk per slide with `writeControl.requiredRevisionId` fencing, call `presentations.batchUpdate`, and return the presentation URL.
 

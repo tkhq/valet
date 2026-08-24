@@ -23,6 +23,7 @@ import { and, eq } from "drizzle-orm";
 import {
   extractTokenRefs,
   injectDeckRuntime,
+  inlineDesignTokens,
   isDesignTemplate,
   parseDesignTokens,
   parseHeader,
@@ -349,9 +350,11 @@ designRouter.post("/:id/design/comments/:cid/resolve", async (c) => {
  * `?subset=artifact` limits the response to tokens the artifact references
  * (the share-link stripping rule).
  */
-designRouter.get("/:id/design/tokens", async (c) => {
-  const access = await resolveAccess(c);
-  if (!access) return c.json({ error: "session not found" }, 404);
+/** Resolve the session's design tokens: the Valet defaults, overlaid by
+ * the first session repo's design-tokens.json / _ds_manifest.json when one
+ * exists. Shared by the tokens route and the export/download paths (an
+ * export renders outside the canvas, so tokens must travel inlined). */
+async function resolveSessionTokens(c: Context<AppEnv>, access: DesignAccess): Promise<Record<string, string>> {
   const { db, engineCredentials, encryptionKey } = c.var.providers;
 
   // The Valet default design system is always present; repository tokens
@@ -407,9 +410,16 @@ designRouter.get("/:id/design/tokens", async (c) => {
       }
     }
   }
+  return tokens;
+}
+
+designRouter.get("/:id/design/tokens", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  let tokens = await resolveSessionTokens(c, access);
 
   if (c.req.query("subset") === "artifact") {
-    const detail = await getArtifactBySession(db, access.row.id);
+    const detail = await getArtifactBySession(c.var.providers.db, access.row.id);
     const refs = new Set(detail ? extractTokenRefs(detail.content) : []);
     tokens = Object.fromEntries(Object.entries(tokens).filter(([name]) => refs.has(name)));
   }
@@ -572,7 +582,13 @@ designRouter.get("/:id/design/download", async (c) => {
   // the instant PDF path, no Chromium or sandbox involved.
   const printView = c.req.query("vd-print") === "1";
   const isDeck = parseHeader(detail.content)?.template === "slides";
-  const body = format === "html" && isDeck ? injectDeckRuntime(detail.content) : detail.content;
+  // format=html renders OUTSIDE the canvas, so the session tokens ride
+  // inlined. format=dc stays byte-faithful — it is the re-import source.
+  let body = detail.content;
+  if (format === "html") {
+    body = inlineDesignTokens(body, await resolveSessionTokens(c, access));
+    if (isDeck) body = injectDeckRuntime(body);
+  }
   const name = (access.row.title ?? "design").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "design";
   const filename = format === "html" ? `${name}.html` : `${name}.dc.html`;
 

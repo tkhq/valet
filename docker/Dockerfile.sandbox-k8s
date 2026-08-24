@@ -169,15 +169,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm cache clean --force
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Design exports (Valet Design spec §Sandbox Image): marp-cli renders
-# design_export's PDF/PPTX against the chromium installed above — no
-# second browser, ~15 MB on top of the layer that already paid for it.
-# Single-image lineage: these ship in THE stock image, never a variant
-# (profile/docker are runtime switches, not image selectors).
+# Design exports (Valet Design spec §Sandbox Image): design_export prints
+# the styled artifact with the chromium installed above, rasterizes pages
+# with poppler's pdftoppm, and assembles PPTX with pptxgenjs (NODE_PATH
+# resolves the global install). fonts-inter matches the default design
+# system's sans stack so exports render like the canvas. marp-cli stays as
+# the text-outline fallback for chromium-less sandboxes and for
+# design_import_marp. Single-image lineage: these ship in THE stock image,
+# never a variant (profile/docker are runtime switches, not image
+# selectors).
 # CHROME_NO_SANDBOX: chromium's own sandbox cannot nest inside the
 # container sandbox; marp-cli reads this env in headless runs.
 ARG MARP_CLI_VERSION=4.2.3
-RUN npm install -g "@marp-team/marp-cli@${MARP_CLI_VERSION}" \
+ARG PPTXGENJS_VERSION=3.12.0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      poppler-utils fonts-inter \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g "@marp-team/marp-cli@${MARP_CLI_VERSION}" "pptxgenjs@${PPTXGENJS_VERSION}" \
     && npm cache clean --force
 ENV CHROME_PATH=/usr/bin/chromium
 ENV CHROME_NO_SANDBOX=1
