@@ -59,8 +59,11 @@ interface ExportOption {
   label: string;
   badge: "instant" | "agent";
   description: string;
-  /** Instant: a download URL. Agent: the chat request. */
-  action: { kind: "download"; format: "dc" | "html" } | { kind: "agent"; prompt: string };
+  /** Instant: a download URL or print view. Agent: the chat request. */
+  action:
+    | { kind: "download"; format: "dc" | "html" }
+    | { kind: "print" }
+    | { kind: "agent"; prompt: string };
   /** Only shown for slides artifacts. */
   slidesOnly?: boolean;
 }
@@ -92,10 +95,10 @@ const EXPORT_OPTIONS: ExportOption[] = [
   {
     id: "pdf",
     label: "PDF",
-    badge: "agent",
+    badge: "instant",
     description:
-      "Rendered in the session sandbox via marp-cli (needs the design sandbox image with Chromium).",
-    action: { kind: "agent", prompt: "Export the design as pdf." },
+      "Opens a print view in a new tab with one slide per page — choose \u201cSave as PDF\u201d in the print dialog. Full fidelity, nothing to install.",
+    action: { kind: "print" },
   },
   {
     id: "pptx",
@@ -325,8 +328,11 @@ function DesignCanvasPage() {
    * agent options run in chat behind the ExportManifest gate. */
   function runExport(option: ExportOption) {
     setExportOpen(false);
+    const base = `/api/sessions/${encodeURIComponent(sessionId)}/design/download`;
     if (option.action.kind === "download") {
-      window.location.href = `/api/sessions/${encodeURIComponent(sessionId)}/design/download?format=${option.action.format}`;
+      window.location.href = `${base}?format=${option.action.format}`;
+    } else if (option.action.kind === "print") {
+      window.open(`${base}?format=html&vd-print=1`, "_blank", "noopener");
     } else {
       void sendToAgent(option.action.prompt);
     }

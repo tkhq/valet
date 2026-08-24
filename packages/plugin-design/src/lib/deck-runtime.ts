@@ -10,6 +10,20 @@
 export function injectDeckRuntime(dcHtml: string): string {
   const runtime = `
 <style id="vd-deck-style">
+  /* Print: every slide, one per page, at stage size — File > Print >
+     Save as PDF is the no-Chromium PDF path. */
+  @page { size: 1920px 1080px; margin: 0; }
+  @media print {
+    html, body { background: #fff; }
+    .vd-deck-stage { position: static; display: block; }
+    .vd-deck-stage > section {
+      display: block !important;
+      transform: none !important;
+      page-break-after: always;
+      break-after: page;
+    }
+    .vd-deck-counter, .vd-deck-notes { display: none !important; }
+  }
   html, body { margin: 0; height: 100%; background: #111; }
   .vd-deck-stage { position: fixed; inset: 0; display: grid; place-items: center; }
   .vd-deck-stage > section { width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden; flex-shrink: 0; }
@@ -58,6 +72,12 @@ export function injectDeckRuntime(dcHtml: string): string {
   window.addEventListener("resize", fit);
   fit();
   render();
+  // Print view (?vd-print=1, served inline by the download route): open
+  // the browser's print dialog once the deck is laid out — Save as PDF
+  // is the instant, full-fidelity PDF path.
+  if (/[?&]vd-print=1/.test(window.location.search)) {
+    window.addEventListener("load", function () { setTimeout(function () { window.print(); }, 400); });
+  }
 })();
 </script>`;
   const close = dcHtml.lastIndexOf("</body>");

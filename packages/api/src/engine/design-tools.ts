@@ -681,7 +681,9 @@ export const designExportTool = defineTool({
       const isDeck = (parseHeader(current.content)?.template ?? "") === "slides";
       const exported = isDeck ? injectDeckRuntime(current.content) : current.content;
       await ctx.sandbox.writeFile(path, exported);
-      return { text: `exported revision ${current.revision} to ${path}` };
+      return {
+        text: `exported revision ${current.revision} to ${path} (note: the user cannot reach sandbox files — if this export is FOR the user, point them at the canvas Export menu, which downloads instantly to their machine)`,
+      };
     }
 
     if (args.format === "pdf" || args.format === "pptx") {
@@ -705,7 +707,7 @@ export const designExportTool = defineTool({
       );
       if (result.exitCode !== 0) {
         return {
-          text: `[design_export failed] marp-cli exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-800)}. PDF/PPTX export needs Chromium in the sandbox image — use an image built from docker/Dockerfile.sandbox-design, or export html instead.`,
+          text: `[design_export failed] marp-cli exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-800)}. PDF/PPTX rendering needs Chromium in the sandbox image (docker/Dockerfile.sandbox-design). For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity. Do NOT export html to /workspace as a substitute — the user cannot reach files in the sandbox.`,
         };
       }
       const reportText = report.length > 0 ? `\nexport report:\n- ${report.join("\n- ")}` : "";

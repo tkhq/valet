@@ -496,12 +496,18 @@ designRouter.get("/:id/design/download", async (c) => {
   if (!detail) return c.json({ error: "this session has no design artifact" }, 404);
 
   const format = c.req.query("format") === "html" ? "html" : "dc";
+  // Print view: serve the viewer INLINE so it renders in a tab and opens
+  // the print dialog (the runtime watches ?vd-print=1) — Save as PDF is
+  // the instant PDF path, no Chromium or sandbox involved.
+  const printView = c.req.query("vd-print") === "1";
   const isDeck = parseHeader(detail.content)?.template === "slides";
   const body = format === "html" && isDeck ? injectDeckRuntime(detail.content) : detail.content;
   const name = (access.row.title ?? "design").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "design";
   const filename = format === "html" ? `${name}.html` : `${name}.dc.html`;
 
   c.header("Content-Type", "text/html; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  if (!printView) {
+    c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  }
   return c.body(body);
 });
