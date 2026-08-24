@@ -10,6 +10,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { and, asc, eq } from "drizzle-orm";
+import {
+  SandboxPreparationError,
+  SandboxStartupError,
+  SandboxSupersededError,
+  SandboxUnavailableError,
+  WorkspaceProvisioningError,
+} from "@valet/engine";
 import type { BlobStore, PrepStep, Sandbox } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { sessionStagedFiles } from "../schema/index.js";
@@ -76,27 +83,27 @@ export function stagedAbsolutePath(row: Pick<StagedFileSnap, "targetPath">): str
   return posix.join(WORKSPACE_ROOT, row.targetPath);
 }
 
+/**
+ * POSIX single-quote escaping for values interpolated into exec commands.
+ * Every provider runs `exec` through `sh -c`, so a raw `'` in a path
+ * terminates the quoting; this turns each into `'\''`. Use it on EVERY
+ * path this module puts into a command string — the paths come from tool
+ * arguments the model writes.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/** True when a staged row is a skill script that needs its executable bit
+ * restored after a re-apply (skill bodies instruct `./scripts/x.sh`). */
+function isSkillScript(row: Pick<StagedFileSnap, "origin" | "targetPath">): boolean {
+  return row.origin === "skill" && /^\.valet\/skills\/[^/]+\/scripts\//.test(row.targetPath);
+}
+
 /** Buffers a blob-store stream. Payload sizes are capped at stage time
  * (design decision 8), so buffering is bounded. */
 async function readAll(stream: ReadableStream): Promise<Uint8Array> {
-  const reader = (stream as ReadableStream<Uint8Array>).getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.byteLength;
-    }
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 async function loadPayload(row: StagedFileSnap, blobs: BlobStore | undefined): Promise<Uint8Array> {
@@ -137,12 +144,17 @@ export function buildStagedStep(
     async apply(sandbox: Sandbox) {
       const target = stagedAbsolutePath(row);
       if (row.kind === "file") {
-        const payload = await loadPayload(row, deps.blobs);
         await sandbox.mkdir(posix.dirname(target));
         if (row.inlineContent !== null) {
           await sandbox.writeFile(target, row.inlineContent);
         } else {
-          await sandbox.writeBinary(target, payload);
+          await sandbox.writeBinary(target, await loadPayload(row, deps.blobs));
+        }
+        // A skill script re-applied after sandbox replacement must come
+        // back executable — the activation-time chmod does not survive
+        // the container. Best-effort, same as the activation path.
+        if (isSkillScript(row)) {
+          await sandbox.exec(`chmod a+rx ${shellQuote(target)}`).catch(() => {});
         }
         return;
       }
@@ -151,7 +163,7 @@ export function buildStagedStep(
       const tmp = `${STAGED_TMP_DIR}/staged-${row.id}.tgz`;
       await sandbox.mkdir(STAGED_TMP_DIR);
       await sandbox.writeBinary(tmp, payload);
-      const cmd = `mkdir -p '${target}' && tar xzf '${tmp}' -C '${target}' && rm -f '${tmp}'`;
+      const cmd = `mkdir -p ${shellQuote(target)} && tar xzf ${shellQuote(tmp)} -C ${shellQuote(target)} && rm -f ${shellQuote(tmp)}`;
       const result = await sandbox.exec(cmd);
       if (result.exitCode !== 0) {
         throw new Error(
@@ -221,7 +233,12 @@ export async function stageForSession(deps: StageDeps, args: StageArgs): Promise
     )
     .limit(1);
   const id = existing[0]?.id ?? `sf_${randomUUID()}`;
-  const blobKey = inline ? null : `staged/${args.sessionId}/${id}`;
+  // The key carries a content-hash suffix so a row can only ever point at
+  // the blob its contentHash describes. Two racing pushes to one target
+  // then cannot leave the surviving row's hash naming one payload while
+  // the key holds the other — the losing blob just orphans (storage
+  // waste, cleaned when its key is superseded or the session dies).
+  const blobKey = inline ? null : `staged/${args.sessionId}/${id}/${contentHash.slice(0, 16)}`;
 
   if (!inline) {
     if (!deps.blobs) {
@@ -264,9 +281,12 @@ export async function stageForSession(deps: StageDeps, args: StageArgs): Promise
       },
     });
 
-  // A payload that moved from blob to inline leaves its old blob behind.
-  if (inline && existing[0]?.blobKey && deps.blobs) {
-    await deps.blobs.delete(existing[0].blobKey).catch(() => {});
+  // A superseded payload leaves its old blob behind — delete it once the
+  // row points elsewhere (or inline). Best-effort: an orphan blob is
+  // storage waste, never wrong behavior.
+  const oldKey = existing[0]?.blobKey;
+  if (oldKey && oldKey !== blobKey && deps.blobs) {
+    await deps.blobs.delete(oldKey).catch(() => {});
   }
 
   return {
@@ -364,7 +384,7 @@ export async function materializeSkillResources(
   // Best-effort executable bit for scripts/ — some providers' writeBinary
   // lands 0644, and "run scripts/x.sh" is the whole point of the bundle.
   if (hasScripts) {
-    await ctx.sandbox.exec(`chmod -R a+rx '${rootAbs}/scripts'`).catch(() => {});
+    await ctx.sandbox.exec(`chmod -R a+rx ${shellQuote(`${rootAbs}/scripts`)}`).catch(() => {});
   }
   return rootAbs;
 }
@@ -375,28 +395,56 @@ export async function materializeSkillResources(
  * tarball, built through the workspace tmp dir so the docker provider's
  * container-side exec and host-side read see the same file.
  */
+/** Sandbox-backend failures that must surface as themselves — mapping
+ * them to "path not found" would send the agent chasing a file problem
+ * when the sandbox never came up. */
+function isSandboxFailure(err: unknown): boolean {
+  return (
+    err instanceof SandboxUnavailableError ||
+    err instanceof WorkspaceProvisioningError ||
+    err instanceof SandboxStartupError ||
+    err instanceof SandboxSupersededError ||
+    err instanceof SandboxPreparationError
+  );
+}
+
 export async function snapshotFromSandbox(
   sandbox: Sandbox,
   fromPath: string,
+  opts?: { maxBytes?: number },
 ): Promise<{ kind: "file" | "bundle"; payload: Uint8Array }> {
   const rel = validateTargetPath(fromPath);
   const abs = posix.join(WORKSPACE_ROOT, rel);
-  let stat: { isFile: boolean; isDirectory: boolean };
+  const maxBytes = opts?.maxBytes;
+  const assertWithinCap = (size: number, what: string) => {
+    if (maxBytes !== undefined && size > maxBytes) {
+      throw new Error(
+        `${what} "${fromPath}" is ${size} bytes; the share cap is ${maxBytes} bytes. Share a smaller file or directory.`,
+      );
+    }
+  };
+  let stat: { isFile: boolean; isDirectory: boolean; size: number };
   try {
     stat = await sandbox.stat(abs);
-  } catch {
+  } catch (err) {
+    if (isSandboxFailure(err)) throw err;
     throw new Error(
       `Path "${fromPath}" was not found in the sandbox workspace. Name a file or directory under ${WORKSPACE_ROOT}.`,
     );
   }
   if (stat.isFile) {
+    // Cap check BEFORE the read: readBinary buffers the whole file in the
+    // API process, so an oversized payload must be rejected from the stat.
+    assertWithinCap(stat.size, "File");
     return { kind: "file", payload: await sandbox.readBinary(abs) };
   }
   if (!stat.isDirectory) {
-    throw new Error(`Path "${fromPath}" is neither a file nor a directory.`);
+    throw new Error(
+      `Path "${fromPath}" is neither a file nor a directory. Name a regular file or directory under ${WORKSPACE_ROOT}.`,
+    );
   }
   const tmp = `${STAGED_TMP_DIR}/snap-${randomUUID()}.tgz`;
-  const cmd = `mkdir -p '${STAGED_TMP_DIR}' && tar czf '${tmp}' -C '${abs}' .`;
+  const cmd = `mkdir -p ${shellQuote(STAGED_TMP_DIR)} && tar czf ${shellQuote(tmp)} -C ${shellQuote(abs)} .`;
   const result = await sandbox.exec(cmd);
   if (result.exitCode !== 0) {
     throw new Error(
@@ -404,8 +452,11 @@ export async function snapshotFromSandbox(
     );
   }
   try {
+    // Same pre-read cap check for the tarball the exec just produced.
+    const tarStat = await sandbox.stat(tmp);
+    assertWithinCap(tarStat.size, "Directory");
     return { kind: "bundle", payload: await sandbox.readBinary(tmp) };
   } finally {
-    await sandbox.exec(`rm -f '${tmp}'`).catch(() => {});
+    await sandbox.exec(`rm -f ${shellQuote(tmp)}`).catch(() => {});
   }
 }

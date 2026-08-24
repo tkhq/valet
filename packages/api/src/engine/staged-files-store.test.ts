@@ -6,6 +6,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, describe, expect, it, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
+import { SandboxUnavailableError } from "@valet/engine";
 import type { BlobStore, ExecOpts, ExecResult, Sandbox } from "@valet/engine";
 import { buildAppDb, buildAppQueryable, applyAppMigrations } from "../lib/drizzle.js";
 import { sessionStagedFiles } from "../schema/index.js";
@@ -96,7 +97,7 @@ describe("stageForSession", () => {
       },
     );
     expect(row.inlineContent).toBeNull();
-    expect(row.blobKey).toBe(`staged/sess-1/${row.id}`);
+    expect(row.blobKey).toBe(`staged/sess-1/${row.id}/${row.contentHash.slice(0, 16)}`);
     expect(blobs.blobs.get(row.blobKey!)).toEqual(payload);
   });
 
@@ -194,6 +195,9 @@ describe("snapshotFromSandbox", () => {
       async stat(path: string) {
         if (opts.files?.[path]) return { isFile: true, isDirectory: false, size: opts.files[path].byteLength };
         if (opts.dirs?.includes(path)) return { isFile: false, isDirectory: true, size: 0 };
+        if (opts.tarBytes && path.includes(".tgz")) {
+          return { isFile: true, isDirectory: false, size: opts.tarBytes.byteLength };
+        }
         throw new Error(`ENOENT: ${path}`);
       },
       async mkdir() {},
@@ -316,5 +320,103 @@ describe("materializeSkillResources", () => {
     await expect(
       materializeSkillResources({ db }, evil, { sessionId: "sess-evil", sandbox: recordingSandbox() }),
     ).rejects.toThrow(/workspace/i);
+  });
+});
+
+describe("snapshotFromSandbox guards", () => {
+  function sizedSandbox(opts: {
+    fileSize?: number;
+    dir?: string;
+    tarSize?: number;
+    statError?: Error;
+  }): Sandbox & { reads: string[] } {
+    const reads: string[] = [];
+    return {
+      id: "sb-sized",
+      reads,
+      async readFile() {
+        throw new Error("not implemented");
+      },
+      async readBinary(path: string) {
+        reads.push(path);
+        return new Uint8Array([1]);
+      },
+      async writeFile() {},
+      async writeBinary() {},
+      async readdir() {
+        return [];
+      },
+      async stat(path: string) {
+        if (opts.statError) throw opts.statError;
+        if (opts.dir && path === `/workspace/${opts.dir}`) {
+          return { isFile: false, isDirectory: true, size: 0 };
+        }
+        if (path.includes(".tgz")) {
+          return { isFile: true, isDirectory: false, size: opts.tarSize ?? 1 };
+        }
+        if (opts.fileSize !== undefined) {
+          return { isFile: true, isDirectory: false, size: opts.fileSize };
+        }
+        throw new Error(`ENOENT: ${path}`);
+      },
+      async mkdir() {},
+      async rm() {},
+      async exec(): Promise<ExecResult> {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+  }
+
+  it("rejects an oversized file BEFORE reading it into memory", async () => {
+    const sandbox = sizedSandbox({ fileSize: 1024 });
+    await expect(snapshotFromSandbox(sandbox, "big.bin", { maxBytes: 100 })).rejects.toThrow(
+      /100/,
+    );
+    expect(sandbox.reads).toHaveLength(0);
+  });
+
+  it("rejects an oversized directory tarball BEFORE reading it into memory", async () => {
+    const sandbox = sizedSandbox({ dir: "data", tarSize: 5000 });
+    await expect(snapshotFromSandbox(sandbox, "data", { maxBytes: 100 })).rejects.toThrow(/100/);
+    expect(sandbox.reads).toHaveLength(0);
+  });
+
+  it("rethrows sandbox availability errors instead of reporting 'not found'", async () => {
+    const sandbox = sizedSandbox({ statError: new SandboxUnavailableError() });
+    await expect(snapshotFromSandbox(sandbox, "report.md")).rejects.toThrow(
+      /\[sandbox_unavailable\]/,
+    );
+  });
+});
+
+describe("stageForSession blob consistency", () => {
+  it("re-push with new content writes a NEW blob key and deletes the old one", async () => {
+    const blobs = new MemoryBlobStore();
+    const payload = new Uint8Array(INLINE_MAX_BYTES + 1);
+    const first = await stageForSession(
+      { db, blobs },
+      {
+        sessionId: "sess-b",
+        origin: "share",
+        originKey: "parent-1",
+        targetPath: "big.bin",
+        kind: "file",
+        payload,
+      },
+    );
+    const second = await stageForSession(
+      { db, blobs },
+      {
+        sessionId: "sess-b",
+        origin: "share",
+        originKey: "parent-1",
+        targetPath: "big.bin",
+        kind: "file",
+        payload: new Uint8Array(INLINE_MAX_BYTES + 2),
+      },
+    );
+    expect(second.blobKey).not.toBe(first.blobKey);
+    expect(blobs.blobs.has(second.blobKey!)).toBe(true);
+    expect(blobs.blobs.has(first.blobKey!)).toBe(false);
   });
 });

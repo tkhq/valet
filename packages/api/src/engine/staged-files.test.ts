@@ -219,3 +219,61 @@ describe("buildPrepSteps staged apply", () => {
     );
   });
 });
+
+describe("staged apply shell safety", () => {
+  it("quotes a bundle target containing a single quote so the exec cannot break out", async () => {
+    const blobs = new MemoryBlobStore();
+    await blobs.put("staged/sess/sf-q", new Uint8Array([1]));
+    const snap: ResolveSnapshot = {
+      ...baseSnap,
+      stagedFiles: [
+        makeStaged({
+          id: "sf-q",
+          kind: "bundle",
+          inlineContent: null,
+          blobKey: "staged/sess/sf-q",
+          targetPath: "input/O'Brien data",
+        }),
+      ],
+    };
+    const steps = buildPrepSteps(snap, computeSpec(snap).steps, undefined, { blobs });
+    const sandbox = new RecordingSandbox();
+    await steps.find((s) => s.id === "staged:sf-q")?.apply(sandbox);
+    const cmd = sandbox.execCalls.find((c) => c.includes("tar"));
+    // POSIX escape: the apostrophe becomes '\'' so the path never
+    // terminates the quoting.
+    expect(cmd).toContain("O'\\''Brien");
+    expect(cmd).not.toContain("-C '/workspace/input/O'Brien");
+  });
+
+  it("re-applies a skill scripts/ file with the executable bit restored", async () => {
+    const snap: ResolveSnapshot = {
+      ...baseSnap,
+      stagedFiles: [
+        makeStaged({
+          id: "sf-s",
+          origin: "skill",
+          targetPath: ".valet/skills/pdf/scripts/run.sh",
+          inlineContent: "#!/bin/sh\n",
+        }),
+      ],
+    };
+    const steps = buildPrepSteps(snap, computeSpec(snap).steps, undefined, {
+      blobs: new MemoryBlobStore(),
+    });
+    const sandbox = new RecordingSandbox();
+    await steps.find((s) => s.id === "staged:sf-s")?.apply(sandbox);
+    const chmod = sandbox.execCalls.find((c) => c.includes("chmod"));
+    expect(chmod).toContain(".valet/skills/pdf/scripts/run.sh");
+  });
+
+  it("does not chmod non-script staged files", async () => {
+    const snap: ResolveSnapshot = { ...baseSnap, stagedFiles: [makeStaged()] };
+    const steps = buildPrepSteps(snap, computeSpec(snap).steps, undefined, {
+      blobs: new MemoryBlobStore(),
+    });
+    const sandbox = new RecordingSandbox();
+    await steps.find((s) => s.id === "staged:sf-1")?.apply(sandbox);
+    expect(sandbox.execCalls.filter((c) => c.includes("chmod"))).toHaveLength(0);
+  });
+});
