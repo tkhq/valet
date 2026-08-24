@@ -841,3 +841,9 @@ Implementation review against the v2 codebase forced five corrections. Each is n
 3. **Session creation is REST, not a `design.create` tool.** `POST /api/sessions` with `kind`/`template` seeds revision `r-001` from the template starter. See §Tools.
 4. **Bytes live inline.** Revisions store content in a `text` column (the `artifacts` table precedent); `storage_ref` is dropped. Timestamps are `bigint` epoch ms. See §Data Model.
 5. **In-place migration repair.** Every new table/column added to the applied `0000_app.sql` needs a matching statement in `addColumnsMissingFromAppliedMigrations`, or deployed databases silently miss it. See §Data Model.
+
+Three more landed during implementation:
+
+6. **vdid stability beats content-hash recomputation.** `applyVdids` preserves an element's EXISTING id and only content-hashes elements without one. Recomputing on every edit would detach comment anchors whenever text changed — including Scenario C's externally edited slide title, whose id must ride home in the Slides objectId. The `vdid_stability_report` reduces to collision/new-id accounting.
+7. **Export artifacts land in the workspace; reports land in the tool result.** `design_export` writes html/pdf/pptx to `/workspace/exports/` and returns the path — no signed-URL service in v1. Import/export reports for Marp and Slides print in the tool result (visible in the thread, durable in the transcript) instead of being written into artifact metadata: an export must not mutate the artifact, and a metadata write is a mutation.
+8. **Handoff embeds the artifact; no git commit in v1.** `design_handoff` spawns the child with the artifact inline in its brief and passes the parent's repo binding through, so the child clones the same repository. Committing the artifact to the repo (and pinning `startRef` to that commit) is a re-entry seam — it needs a sandbox with a clone and a commit-authorship decision v1 does not force.
