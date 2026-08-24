@@ -5,9 +5,15 @@
  * the routes' behavior is covered by design-artifacts tests.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ToolContext } from "@valet/engine";
+import type { SpawnChildRequest, ToolContext } from "@valet/engine";
 import { applyVdids } from "@valet/plugin-design/lib";
-import { designCommentResolveTool, designEditTool, designRenderTokenTool } from "./design-tools.js";
+import {
+  designCommentResolveTool,
+  designEditTool,
+  designHandoffTool,
+  designImportMarpTool,
+  designRenderTokenTool,
+} from "./design-tools.js";
 
 const DOC = applyVdids(
   `<!DOCTYPE html><html><head><meta name="valet-design" content="v=1; template=document"></head><body><h1>Old</h1></body></html>`,
@@ -135,6 +141,70 @@ describe("design tools", () => {
     );
     const none = await designRenderTokenTool.execute({ token_name: "x" }, ctxWith(CFG));
     expect(none.text).toContain("no design system is connected");
+  });
+
+  it("design_import_marp gates, reads the workspace file, and writes the converted deck", async () => {
+    const writes: Array<{ url: string; body: { content: string; summary: string } }> = [];
+    vi.stubGlobal("fetch", (url: URL | string, init?: RequestInit) => {
+      writes.push({ url: String(url), body: JSON.parse(String(init?.body)) as (typeof writes)[0]["body"] });
+      return Promise.resolve(new Response(JSON.stringify({ revision: "r-002" }), { status: 200 }));
+    });
+
+    const gates: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = (gate) => {
+      gates.push(gate.title);
+      return Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    };
+    ctx.sandbox = {
+      readFile: (path: string) => Promise.resolve(`---\nmarp: true\n---\n\n# Deck from ${path}\n`),
+    } as unknown as ToolContext["sandbox"];
+
+    const result = await designImportMarpTool.execute({ file_path: "/workspace/deck.md" }, ctx);
+    expect(gates).toEqual(["Import Marp deck?"]);
+    expect(result.text).toContain("imported /workspace/deck.md as revision r-002");
+    expect(writes[0].body.content).toContain("valet-design");
+    expect(writes[0].body.content).toContain("Deck from /workspace/deck.md");
+  });
+
+  it("design_import_marp declined gate imports nothing", async () => {
+    const writes: string[] = [];
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      writes.push(String(url));
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "deny", resolvedBy: "u1", resolvedAt: 1 });
+    const result = await designImportMarpTool.execute({ file_path: "/workspace/deck.md" }, ctx);
+    expect(result.text).toContain("declined");
+    expect(writes).toEqual([]);
+  });
+
+  it("design_handoff spawns a child whose prompt embeds the artifact", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-003", content: DOC }), { status: 200 })),
+    );
+    const spawned: SpawnChildRequest[] = [];
+    const ctx = ctxWith({
+      ...CFG,
+      childSpawner: (req: SpawnChildRequest) => {
+        spawned.push(req);
+        return Promise.resolve({ childSessionId: "s_child", queueItemId: "q1" });
+      },
+    });
+    const result = await designHandoffTool.execute({ implementation_task: "Build the landing page" }, ctx);
+    expect(result.text).toContain("spawned coding child s_child from revision r-003");
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].prompt).toContain("Build the landing page");
+    expect(spawned[0].prompt).toContain("valet-design");
+  });
+
+  it("design_handoff without a spawner names the limitation", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-003", content: DOC }), { status: 200 })),
+    );
+    const result = await designHandoffTool.execute({}, ctxWith(CFG));
+    expect(result.text).toContain("[design_handoff unavailable]");
   });
 
   it("design_comment_resolve POSTs the resolve route", async () => {

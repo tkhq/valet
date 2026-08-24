@@ -660,7 +660,16 @@ export class EngineHost {
     const designTools = meta.kind === "design" ? buildDesignTools() : [];
     const designToolConfig =
       meta.kind === "design" && this.opts.apiBaseUrl
-        ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken() } }
+        ? {
+            toolConfig: {
+              apiBaseUrl: this.opts.apiBaseUrl,
+              internalToken: internalToken(),
+              // design_handoff spawns the coding child through the same
+              // spawner the orchestrator's task tool uses. Children still
+              // get no spawner of their own (depth limit unchanged).
+              ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
+            },
+          }
         : {};
     const sessionTools = [...designTools, ...extras.tools];
     const sandboxOpts = {
