@@ -77,7 +77,13 @@ describe("task tool: spawner present", () => {
     const owner: Principal = { type: "user", id: "u1" };
     let seenReq: SpawnChildRequest | undefined;
     let seenCtx:
-      | { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal }
+      | {
+          parentSessionId: string;
+          parentThreadId: string;
+          actorUserId: string;
+          owner: Principal;
+          sandbox?: import("../src/types.js").Sandbox;
+        }
       | undefined;
     const spawner = vi.fn(async (req: SpawnChildRequest, spawnCtx) => {
       seenReq = req;
@@ -110,6 +116,9 @@ describe("task tool: spawner present", () => {
       parentThreadId: "parent-thread",
       actorUserId: "u1",
       owner,
+      // The parent's sandbox handle rides along for files[] snapshots
+      // (staged-files design, 2026-08-23).
+      sandbox: ctx.sandbox,
     });
     expect(result.text).toBe(
       "spawned child session child-1 (submission queue-1). Its result will arrive in this thread as a child.settled signal.",
@@ -130,7 +139,13 @@ describe("task tool: spawner present", () => {
 
   it("defaults owner to {type: user, id: ctx.userId} when ctx.owner is absent", async () => {
     let seenCtx:
-      | { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal }
+      | {
+          parentSessionId: string;
+          parentThreadId: string;
+          actorUserId: string;
+          owner: Principal;
+          sandbox?: import("../src/types.js").Sandbox;
+        }
       | undefined;
     const spawner = vi.fn(async (_req: SpawnChildRequest, spawnCtx) => {
       seenCtx = spawnCtx;
