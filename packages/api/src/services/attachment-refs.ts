@@ -27,6 +27,18 @@ export interface AttachmentInfo {
 const TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
+ * Thrown when a ref does not resolve: unknown, expired, already used, or
+ * minted for a different session. Carries the ref so HTTP handlers can map
+ * it to a 400 without string-matching the message.
+ */
+export class UnknownAttachmentError extends Error {
+  constructor(readonly ref: string) {
+    super(`unknown attachment: ${ref}`);
+    this.name = "UnknownAttachmentError";
+  }
+}
+
+/**
  * Per-session attachment ref store.
  */
 class AttachmentRefStore {
@@ -58,10 +70,12 @@ class AttachmentRefStore {
   }
 
   /**
-   * Consume a ref (single-use, removes on read).
-   * Returns the info if found and not expired, null otherwise.
+   * Read a ref without consuming it. Returns the info if found and not
+   * expired, null otherwise. Callers that need all-or-nothing semantics
+   * peek every ref first, then consume only after the whole operation
+   * succeeds — a bad ref in a batch must not burn the good ones.
    */
-  consume(sessionId: string, ref: string): AttachmentInfo | null {
+  peek(sessionId: string, ref: string): AttachmentInfo | null {
     const sessionMap = this.store.get(sessionId);
     if (!sessionMap) return null;
 
@@ -75,11 +89,23 @@ class AttachmentRefStore {
       return null;
     }
 
+    return info;
+  }
+
+  /**
+   * Consume a ref (single-use, removes on read).
+   * Returns the info if found and not expired, null otherwise.
+   */
+  consume(sessionId: string, ref: string): AttachmentInfo | null {
+    const info = this.peek(sessionId, ref);
+    if (!info) return null;
+
     // Single-use: delete after consuming
-    sessionMap.delete(ref);
+    const sessionMap = this.store.get(sessionId);
+    sessionMap?.delete(ref);
 
     // Clean up empty session map
-    if (sessionMap.size === 0) {
+    if (sessionMap && sessionMap.size === 0) {
       this.store.delete(sessionId);
     }
 
@@ -91,9 +117,7 @@ class AttachmentRefStore {
    * Returns a stop function.
    */
   startSweep(intervalMs: number = 60 * 1000): () => void {
-    if (this.sweepHandle) {
-      clearInterval(this.sweepHandle);
-    }
+    this.stopSweep();
 
     this.sweepHandle = setInterval(() => {
       const now = Date.now();
@@ -111,13 +135,19 @@ class AttachmentRefStore {
         }
       }
     }, intervalMs);
+    // The sweep must not hold the process open — mirrors the other
+    // periodic sweeps started in main.ts.
+    this.sweepHandle.unref();
 
-    return () => {
-      if (this.sweepHandle) {
-        clearInterval(this.sweepHandle);
-        this.sweepHandle = null;
-      }
-    };
+    return () => this.stopSweep();
+  }
+
+  /** Stop the TTL sweep if one is running. */
+  stopSweep(): void {
+    if (this.sweepHandle) {
+      clearInterval(this.sweepHandle);
+      this.sweepHandle = null;
+    }
   }
 
   /**
@@ -146,8 +176,6 @@ export function getAttachmentRefStore(): AttachmentRefStore {
  * Reset the store (for testing).
  */
 export function resetAttachmentRefStore(): void {
-  if (instance) {
-    instance.startSweep(); // Stop any running sweep
-  }
+  instance?.stopSweep();
   instance = null;
 }

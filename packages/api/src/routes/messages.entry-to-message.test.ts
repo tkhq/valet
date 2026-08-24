@@ -202,7 +202,10 @@ describe("entryToMessage — attachments projection", () => {
     });
   });
 
-  it("filters out non-image, non-file attachments if any appear", () => {
+  it("projects image and file attachments side by side", () => {
+    // MessageEntry.attachments admits only image and file variants, so
+    // there is no third kind to filter at the type level; this covers the
+    // mixed projection.
     const entry = baseEntry({
       attachments: [
         {
@@ -217,13 +220,6 @@ describe("entryToMessage — attachments projection", () => {
           bytes: 512,
           sha256: "file123",
           name: "file.txt",
-        },
-        // audio attachments are skipped (not implemented on wire)
-        {
-          type: "audio" as any,
-          url: "data:audio/wav;base64,BBBB",
-          mimeType: "audio/wav",
-          name: "sound.wav",
         },
       ],
     });

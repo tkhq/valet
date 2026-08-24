@@ -470,7 +470,7 @@ const webDistDir = webDistPath();
 // server-adapter.ts.
 const adapter = await selectServerAdapter();
 // Attachment ref store initialization: start the TTL sweep that cleans up
-// expired refs every 60 seconds.
+// expired refs every 60 seconds. The interval is `.unref()`'d inside.
 getAttachmentRefStore().startSweep();
 
 // `startServer` from createApp is renamed at the destructure so it can't

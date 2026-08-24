@@ -13,7 +13,7 @@
  */
 import { Hono, type Context } from "hono";
 import { eq, inArray } from "drizzle-orm";
-import { dispatchCommand, formatFileAttachmentsNote } from "@valet/engine";
+import { dispatchCommand } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -44,7 +44,11 @@ import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import type { Providers } from "../providers/types.js";
 import { canViewSession } from "../services/session-access.js";
-import { getAttachmentRefStore, type AttachmentInfo } from "../services/attachment-refs.js";
+import {
+  getAttachmentRefStore,
+  UnknownAttachmentError,
+  type AttachmentInfo,
+} from "../services/attachment-refs.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -56,7 +60,7 @@ export const messagesRouter = new Hono<AppEnv>();
  * model change — in `routes/sessions.ts`) are NOT widened by this; talking
  * to a team's orchestrator is not the same decision as reconfiguring it.
  */
-async function loadOwnedSession(c: Context<AppEnv>) {
+export async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
@@ -439,16 +443,18 @@ export async function submitSessionPrompt(
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
 
-  // Resolve file attachment refs
+  // Resolve file attachment refs. Two phases so a bad ref in the batch (or
+  // a submit failure below) does not burn the good refs: peek everything
+  // first — nothing is consumed until the prompt is queued.
   const attachmentRefStore = getAttachmentRefStore();
   const resolvedFileAttachments: AttachmentInfo[] = [];
 
   if (fileRefs && fileRefs.length > 0) {
     for (const { ref } of fileRefs) {
-      const info = attachmentRefStore.consume(row.id, ref);
+      const info = attachmentRefStore.peek(row.id, ref);
       if (!info) {
-        // Ref not found, expired, or wrong session
-        throw new Error(`unknown attachment: ${ref}`);
+        // Ref not found, expired, already used, or wrong session
+        throw new UnknownAttachmentError(ref);
       }
       resolvedFileAttachments.push(info);
     }
@@ -496,12 +502,12 @@ export async function submitSessionPrompt(
     })),
   ];
 
-  // Wire the annotation: prepend file attachment note to content
-  let promptText = outcome?.kind === "expand" ? outcome.text : text;
-  if (resolvedFileAttachments.length > 0) {
-    const note = formatFileAttachmentsNote(resolvedFileAttachments);
-    promptText = `${note}\n\n${promptText}`;
-  }
+  // The file-attachment note is NOT baked into the prompt text here: the
+  // engine renders it at transcript-build time from the persisted
+  // MessageEntry.attachments (see `userContentBlocks` in the engine), so
+  // the persisted user text stays clean and slash-command dispatch below
+  // still sees text that starts with "/".
+  const promptText = outcome?.kind === "expand" ? outcome.text : text;
 
   const withAttachments = (t: string) =>
     allAttachments.length > 0 ? { text: t, attachments: allAttachments } : t;
@@ -510,6 +516,12 @@ export async function submitSessionPrompt(
     outcome && outcome.kind === "execute"
       ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
       : await thread.submitPrompt(withAttachments(promptText), {});
+
+  // Prompt queued — now consume the refs (single-use). A ref raced away by
+  // a concurrent submit is already resolved into this prompt; ignore.
+  for (const { ref } of fileRefs ?? []) {
+    attachmentRefStore.consume(row.id, ref);
+  }
 
   await db
     .update(agentSessions)
@@ -573,7 +585,7 @@ messagesRouter.post("/:id/messages", async (c) => {
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);
   } catch (err) {
-    if (err instanceof Error && err.message.startsWith("unknown attachment:")) {
+    if (err instanceof UnknownAttachmentError) {
       return c.json(
         {
           error: err.message,
