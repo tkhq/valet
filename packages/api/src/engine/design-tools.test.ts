@@ -5,7 +5,7 @@
  * the routes' behavior is covered by design-artifacts tests.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SpawnChildRequest, ToolContext } from "@valet/engine";
+import type { CredentialProvider, Sandbox, SpawnChildRequest, ToolContext } from "@valet/engine";
 import { applyVdids } from "@valet/plugin-design/lib";
 import {
   designCommentResolveTool,
@@ -21,21 +21,49 @@ const DOC = applyVdids(
 ).html;
 const H1_VDID = /<h1 data-vdid="([0-9a-f_]+)"/.exec(DOC)?.[1] ?? "";
 
+/** Full Sandbox stub: every required method throws until a test overrides
+ * the ones its tool actually uses (CLAUDE.md type-safety rule 2 — build
+ * the full shape, never double-cast a partial). */
+function stubSandbox(overrides: Partial<Sandbox> = {}): Sandbox {
+  const unused = (method: string) => () => Promise.reject(new Error(`sandbox.${method} not stubbed`));
+  return {
+    id: "sb1",
+    readFile: unused("readFile"),
+    readBinary: unused("readBinary"),
+    writeFile: unused("writeFile"),
+    writeBinary: unused("writeBinary"),
+    readdir: unused("readdir"),
+    stat: unused("stat"),
+    mkdir: unused("mkdir"),
+    rm: unused("rm"),
+    exec: unused("exec"),
+    ...overrides,
+  };
+}
+
+function stubCredentials(overrides: Partial<CredentialProvider> = {}): CredentialProvider {
+  return {
+    get: () => Promise.resolve(null),
+    request: () => Promise.reject(new Error("credentials.request not stubbed")),
+    ...overrides,
+  };
+}
+
 function ctxWith(config: Record<string, unknown> | undefined): ToolContext {
   return {
     userId: "u1",
     orgId: "org1",
     sessionId: "s1",
     threadId: "t1",
-    credentials: { get: () => Promise.resolve(undefined) },
-    sandbox: {} as ToolContext["sandbox"],
+    credentials: stubCredentials(),
+    sandbox: stubSandbox(),
     config,
     requestDecision: () => Promise.reject(new Error("no gates in this test")),
     signal: new AbortController().signal,
     threadRead: () => Promise.resolve([]),
     listThreads: () => Promise.resolve([]),
     setModel: () => Promise.reject(new Error("unused")),
-  } as unknown as ToolContext;
+  };
 }
 
 const CFG = { apiBaseUrl: "http://api.test", internalToken: "tok" };
@@ -157,9 +185,9 @@ describe("design tools", () => {
       gates.push(gate.title);
       return Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
     };
-    ctx.sandbox = {
+    ctx.sandbox = stubSandbox({
       readFile: (path: string) => Promise.resolve(`---\nmarp: true\n---\n\n# Deck from ${path}\n`),
-    } as unknown as ToolContext["sandbox"];
+    });
 
     const result = await designImportMarpTool.execute({ file_path: "/workspace/deck.md" }, ctx);
     expect(gates).toEqual(["Import Marp deck?"]);
@@ -219,13 +247,13 @@ describe("design tools", () => {
       gateBodies.push(gate.body ?? "");
       return Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
     };
-    ctx.sandbox = {
+    ctx.sandbox = stubSandbox({
       mkdir: () => Promise.resolve(),
       writeFile: (path: string, content: string) => {
         written.push({ path, content });
         return Promise.resolve();
       },
-    } as unknown as ToolContext["sandbox"];
+    });
 
     const result = await designExportTool.execute({ format: "html", filename: "launch" }, ctx);
     expect(result.text).toBe("exported revision r-002 to /workspace/exports/launch.html");
@@ -240,10 +268,10 @@ describe("design tools", () => {
     );
     const ctx = ctxWith(CFG);
     ctx.requestDecision = () => Promise.resolve({ actionId: "deny", resolvedBy: "u1", resolvedAt: 1 });
-    ctx.sandbox = {
+    ctx.sandbox = stubSandbox({
       mkdir: () => Promise.reject(new Error("must not be called")),
       writeFile: () => Promise.reject(new Error("must not be called")),
-    } as unknown as ToolContext["sandbox"];
+    });
     const result = await designExportTool.execute({ format: "html" }, ctx);
     expect(result.text).toContain("declined");
   });
@@ -270,11 +298,10 @@ describe("design tools", () => {
     });
     const ctx = ctxWith(CFG);
     ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
-    ctx.credentials = {
+    ctx.credentials = stubCredentials({
       get: (service?: string) =>
         Promise.resolve(service === "google_workspace" ? { accessToken: "gtok" } : null),
-      request: () => Promise.reject(new Error("unused")),
-    } as unknown as ToolContext["credentials"];
+    });
 
     const result = await designExportTool.execute({ format: "gslides", filename: "Deck" }, ctx);
     expect(result.text).toContain("https://docs.google.com/presentation/d/pres1/edit");

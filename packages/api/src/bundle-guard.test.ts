@@ -18,7 +18,11 @@ describe.skipIf(!bundleExists)("built bundle guards", () => {
     const src = readFileSync(bundlePath, "utf8");
     expect(src).not.toMatch(/from ["']tsx["']/);
     expect(src).not.toMatch(/require\(["']tsx["']\)/);
-    expect(src).not.toMatch(/["']tsx["']\s*,/); // spawn("tsx", ...) / execa
+    // spawn-shaped uses only. A bare /["']tsx["']\s*,/ also matched marp's
+    // syntax-highlighter language aliases (["ts", "tsx", ...]) — data, not
+    // an invocation.
+    expect(src).not.toMatch(/(?:spawn|spawnSync|execFile|execFileSync|execa|fork)\s*\(\s*["']tsx["']/);
+    expect(src).not.toMatch(/\[\s*["']tsx["']\s*,/); // command arrays: ["tsx", "script.ts"]
   });
 
   it("inlined the engine + app migration SQL into the bundle", () => {

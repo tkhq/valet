@@ -94,6 +94,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
   "src/integration/usage-summary.test.ts",
+  "src/integration/design-acceptance.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [
@@ -123,6 +124,7 @@ export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INT
  * ROOT workspace config from the wrong cwd — enumerate instead of globbing.
  * A new plugin gaining tests must be added here (guarded by lib.test.ts). */
 const TESTED_PLUGINS = [
+  "@valet/plugin-design",
   "@valet/plugin-github",
   "@valet/plugin-gmail",
   "@valet/plugin-google-calendar",
