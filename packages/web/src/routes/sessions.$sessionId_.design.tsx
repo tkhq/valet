@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  Download,
   FileOutput,
   History,
   Maximize,
@@ -26,7 +25,7 @@ import { useSessionStream, useStreamStore } from "~/stores/stream";
 import { DesignRenderer } from "~/components/design/design-renderer";
 import { parseSlides, sanitizeDesignHtml, type SlideInfo } from "~/components/design/sanitize";
 import { SessionView } from "~/components/session/session-view";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Dialog, DialogContent, DialogFooter, Spinner } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import { cn } from "~/lib/cn";
 
@@ -48,16 +47,74 @@ export const Route = createFileRoute("/sessions/$sessionId_/design")({
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
 
-/** Export menu entries. Each sends the agent the design_export request —
- * the agent owns the ExportManifest approval gate, so the flow stays
- * user-approved even when started from a button. */
-const EXPORT_OPTIONS = [
-  { format: "html", label: "HTML (standalone viewer)", prompt: "Export the design as html." },
-  { format: "project", label: "Project folder", prompt: "Export the design as a project folder." },
-  { format: "pdf", label: "PDF", prompt: "Export the design as pdf." },
-  { format: "pptx", label: "PowerPoint (pptx)", prompt: "Export the design as pptx." },
-  { format: "gslides", label: "Google Slides", prompt: "Export the design to Google Slides." },
-] as const;
+/**
+ * Export options (the Claude Design model): every option carries a
+ * description and an Instant / Uses-agent badge, so the modal explains
+ * what each download actually is before anything happens. Instant options
+ * download straight from the browser; agent options run in chat and open
+ * the ExportManifest approval gate.
+ */
+interface ExportOption {
+  id: string;
+  label: string;
+  badge: "instant" | "agent";
+  description: string;
+  /** Instant: a download URL. Agent: the chat request. */
+  action: { kind: "download"; format: "dc" | "html" } | { kind: "agent"; prompt: string };
+  /** Only shown for slides artifacts. */
+  slidesOnly?: boolean;
+}
+
+const EXPORT_OPTIONS: ExportOption[] = [
+  {
+    id: "html",
+    label: "Standalone HTML",
+    badge: "instant",
+    description:
+      "One self-contained file that opens anywhere, even offline. Slide decks include a built-in viewer: arrow keys to navigate, \u201cs\u201d for speaker notes.",
+    action: { kind: "download", format: "html" },
+  },
+  {
+    id: "dc",
+    label: "Design file (.dc.html)",
+    badge: "instant",
+    description: "The raw design document — re-import it into another design session, or hand it to a coding agent.",
+    action: { kind: "download", format: "dc" },
+  },
+  {
+    id: "project",
+    label: "Project folder",
+    badge: "agent",
+    description:
+      "The deck, your agent's scratchpad, and the design system (tokens + guide) written into the session workspace as a folder.",
+    action: { kind: "agent", prompt: "Export the design as a project folder." },
+  },
+  {
+    id: "pdf",
+    label: "PDF",
+    badge: "agent",
+    description:
+      "Rendered in the session sandbox via marp-cli (needs the design sandbox image with Chromium).",
+    action: { kind: "agent", prompt: "Export the design as pdf." },
+  },
+  {
+    id: "pptx",
+    label: "PowerPoint (.pptx)",
+    badge: "agent",
+    description: "Editable slides via marp-cli (needs the design sandbox image with Chromium).",
+    action: { kind: "agent", prompt: "Export the design as pptx." },
+    slidesOnly: true,
+  },
+  {
+    id: "gslides",
+    label: "Google Slides",
+    badge: "agent",
+    description:
+      "Creates a presentation in your connected Google Drive; element ids survive the round trip so you can import edits back.",
+    action: { kind: "agent", prompt: "Export the design to Google Slides." },
+    slidesOnly: true,
+  },
+];
 
 /**
  * Pointer-drag panel resizing (the Claude Design slider). `invert` is for
@@ -138,7 +195,8 @@ function DesignCanvasPage() {
 
   const [zoomIdx, setZoomIdx] = useState(ZOOM_STEPS.indexOf(1));
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportChoice, setExportChoice] = useState<string>("html");
   const [commentMode, setCommentMode] = useState(false);
   const [commentVdid, setCommentVdid] = useState<string | null>(null);
   const [activeSlide, setActiveSlide] = useState(0);
@@ -263,18 +321,15 @@ function DesignCanvasPage() {
     setCommentMode(false);
   }
 
-  /** Download the current artifact as a .dc.html file, client-side. */
-  function downloadArtifact() {
-    const content = artifactQ.data?.content;
-    if (!content) return;
-    const name = (session.data?.title || "design").replace(/[^a-zA-Z0-9._-]+/g, "-");
-    const blob = new Blob([content], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${name}.dc.html`;
-    a.click();
-    URL.revokeObjectURL(url);
+  /** Run the chosen export: instant options download from the API;
+   * agent options run in chat behind the ExportManifest gate. */
+  function runExport(option: ExportOption) {
+    setExportOpen(false);
+    if (option.action.kind === "download") {
+      window.location.href = `/api/sessions/${encodeURIComponent(sessionId)}/design/download?format=${option.action.format}`;
+    } else {
+      void sendToAgent(option.action.prompt);
+    }
   }
 
   if (session.isLoading || artifactQ.isLoading) {
@@ -371,41 +426,10 @@ function DesignCanvasPage() {
             <ZoomIn className="h-4 w-4" />
           </Button>
         </div>
-        <Button variant="ghost" size="sm" onClick={downloadArtifact} title="Download the .dc.html file">
-          <Download className="h-4 w-4" aria-hidden />
-          <span>Download</span>
+        <Button variant="ghost" size="sm" onClick={() => setExportOpen(true)}>
+          <FileOutput className="h-4 w-4" aria-hidden />
+          <span>Export</span>
         </Button>
-        <div className="relative">
-          <Button
-            variant={exportMenuOpen ? "secondary" : "ghost"}
-            size="sm"
-            aria-expanded={exportMenuOpen}
-            onClick={() => setExportMenuOpen((v) => !v)}
-          >
-            <FileOutput className="h-4 w-4" aria-hidden />
-            <span>Export</span>
-          </Button>
-          {exportMenuOpen && (
-            <div className="absolute right-0 top-full z-20 mt-1 w-52 rounded border border-line bg-paper py-1 shadow-lg">
-              {EXPORT_OPTIONS.map((opt) => (
-                <button
-                  key={opt.format}
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-ink-wash"
-                  onClick={() => {
-                    setExportMenuOpen(false);
-                    void sendToAgent(opt.prompt);
-                  }}
-                >
-                  {opt.label}
-                </button>
-              ))}
-              <div className="border-t border-line/60 px-3 py-1.5 text-[10px] text-muted">
-                Runs through the agent; approve the export gate in chat.
-              </div>
-            </div>
-          )}
-        </div>
         <Button
           variant={commentMode ? "secondary" : "ghost"}
           size="sm"
@@ -566,6 +590,64 @@ function DesignCanvasPage() {
             </>
           )}
         </div>
+
+        {/* Export modal: one entry point, every option described. */}
+        <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+          <DialogContent title="Export design">
+            <div className="space-y-1" role="radiogroup" aria-label="Export format">
+              {EXPORT_OPTIONS.filter((o) => isSlides || !o.slidesOnly).map((opt) => (
+                <label
+                  key={opt.id}
+                  className={cn(
+                    "flex cursor-pointer items-start gap-3 rounded border p-3",
+                    exportChoice === opt.id ? "border-moss bg-moss-wash/40" : "border-line hover:bg-ink-wash",
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="export-format"
+                    className="mt-1 accent-[var(--moss)]"
+                    checked={exportChoice === opt.id}
+                    onChange={() => setExportChoice(opt.id)}
+                  />
+                  <span className="min-w-0">
+                    <span className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-ink">{opt.label}</span>
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                          opt.badge === "instant"
+                            ? "bg-success-wash text-ink"
+                            : "bg-moss-wash text-moss",
+                        )}
+                      >
+                        {opt.badge === "instant" ? "Instant" : "Uses agent"}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block text-xs text-muted">{opt.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <p className="mt-3 text-[11px] text-muted">
+              Agent exports run in the chat and open an approval gate naming everything that leaves.
+            </p>
+            <DialogFooter>
+              <Button variant="ghost" size="sm" onClick={() => setExportOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  const opt = EXPORT_OPTIONS.find((o) => o.id === exportChoice);
+                  if (opt) runExport(opt);
+                }}
+              >
+                Export
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* History panel */}
         {historyOpen && (

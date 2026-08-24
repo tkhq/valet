@@ -22,6 +22,7 @@ import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
 import {
   extractTokenRefs,
+  injectDeckRuntime,
   isDesignTemplate,
   parseDesignTokens,
   parseHeader,
@@ -480,4 +481,27 @@ designRouter.post("/:id/design/scratchpad", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+/**
+ * Instant browser download of the artifact — the user downloading their
+ * own design needs no approval gate (they ARE the approver; nothing
+ * leaves their browser). `format=dc` is the raw document; `format=html`
+ * injects the standalone deck viewer for slides artifacts.
+ */
+designRouter.get("/:id/design/download", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  const detail = await getArtifactBySession(c.var.providers.db, access.row.id);
+  if (!detail) return c.json({ error: "this session has no design artifact" }, 404);
+
+  const format = c.req.query("format") === "html" ? "html" : "dc";
+  const isDeck = parseHeader(detail.content)?.template === "slides";
+  const body = format === "html" && isDeck ? injectDeckRuntime(detail.content) : detail.content;
+  const name = (access.row.title ?? "design").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "design";
+  const filename = format === "html" ? `${name}.html` : `${name}.dc.html`;
+
+  c.header("Content-Type", "text/html; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  return c.body(body);
 });
