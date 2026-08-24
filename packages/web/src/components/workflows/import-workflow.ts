@@ -3,21 +3,32 @@
  * out. No React, so the shapes it accepts and the messages it refuses with
  * are tested directly.
  *
- * One parser reads both sources the import dialog offers — a pasted or
- * uploaded file, and a file read out of a public repository through
- * `GET /api/workflows/import/repo-file`. A second parser for the second
- * source would drift into accepting a shape the first one rejects.
+ * One parser reads every source the product offers — a pasted or uploaded
+ * file, a file read out of a public repository through
+ * `GET /api/workflows/import/repo-file`, and a file the repository sync
+ * mirrors. That parser is `parseWorkflowFileValue` in `@valet/workflow`, so
+ * the browser and the server cannot drift into accepting different shapes.
+ * This module supplies the decoder and nothing else.
+ *
+ * ## The decoder
+ *
+ * `JSON.parse` runs first, because every file the editor exports and every
+ * API response is JSON. Only when that throws does a YAML chunk load, and
+ * `import("yaml")` keeps it out of the main bundle: a person who never
+ * imports a YAML workflow never downloads the parser. YAML 1.2 is a superset
+ * of JSON, so the fallback would also read the JSON — trying JSON first is
+ * what keeps the common path synchronous in everything but its signature.
  */
 import {
-  isWorkflowDefinitionShape,
-  validateWorkflowDefinition,
+  parseWorkflowFileValue,
+  WORKFLOW_FILE_EXTENSIONS,
   type WorkflowDefinition,
-} from "~/components/workflows/editor-model";
+} from "@valet/workflow";
 
 /**
- * Refuse a file bigger than this before reading it. `JSON.parse` of a
- * multi-megabyte string blocks the main thread, and no workflow definition
- * is anywhere near this size.
+ * Refuse a file bigger than this before reading it. Parsing a multi-megabyte
+ * string blocks the main thread, and no workflow definition is anywhere near
+ * this size.
  */
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 
@@ -31,17 +42,19 @@ export type ParsedWorkflowImport =
   | { ok: true; value: WorkflowImport }
   | { ok: false; errors: string[] };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
  * File text → a definition to import.
  *
- * Two shapes are accepted, and both already have a producer:
- *   1. A bare definition — what the editor's JSON view shows.
- *   2. `{ name, definition }` — what `GET /api/workflows/:id` answers with,
+ * Three shapes are accepted, and each already has a producer:
+ *   1. The `valet: workflow/v1` envelope — what the repository sync reads and
+ *      what export writes.
+ *   2. A bare definition — what the editor's JSON view shows.
+ *   3. `{ name, definition }` — what `GET /api/workflows/:id` answers with,
  *      so a saved API response imports as it stands, with its name.
+ *
+ * A `valet: workflow-template/v1` file imports as the workflow its graph
+ * describes, under the template's name. Installing a template produces a
+ * local workflow too, so the two paths agree.
  *
  * A failure returns the messages to show. When the shape is right but the
  * graph is wrong, those messages are the validator's own, unaltered: they
@@ -54,41 +67,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * here can still be refused at create, which is why the dialog shows the
  * server's messages too.
  */
-export function parseWorkflowImport(text: string): ParsedWorkflowImport {
+export async function parseWorkflowImport(
+  text: string,
+  fileName?: string,
+): Promise<ParsedWorkflowImport> {
+  const label = fileName === undefined || fileName.trim() === "" ? "The pasted text" : fileName;
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return {
-      ok: false,
-      errors: ["That file is not JSON. Choose an exported workflow definition (.json)."],
-    };
+    try {
+      const { parse } = await import("yaml");
+      raw = parse(text);
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `${label} is neither JSON nor YAML: ${err instanceof Error ? err.message : String(err)}. Choose an exported workflow file.`,
+        ],
+      };
+    }
   }
 
-  if (!isRecord(raw)) {
-    return {
-      ok: false,
-      errors: ["A workflow file holds a JSON object. Choose an exported workflow definition."],
-    };
-  }
+  const parsed = parseWorkflowFileValue(raw, label);
+  if (!parsed.ok) return { ok: false, errors: parsed.errors };
 
-  const envelope = isRecord(raw.definition) ? raw.definition : undefined;
-  const candidate: unknown = envelope ?? raw;
-  const name = typeof raw.name === "string" && raw.name.trim() !== "" ? raw.name.trim() : undefined;
-
-  if (!isWorkflowDefinitionShape(candidate)) {
-    return {
-      ok: false,
-      errors: [
-        'That file holds no workflow definition. A definition carries "version", "nodes" and "edges" — export one from a workflow, or copy it from the editor\'s JSON view.',
-      ],
-    };
-  }
-
-  const result = validateWorkflowDefinition(candidate);
-  if (!result.ok) return { ok: false, errors: result.errors };
-
-  return { ok: true, value: name === undefined ? { definition: candidate } : { name, definition: candidate } };
+  const name = parsed.file.kind === "template" ? parsed.file.template.name : parsed.file.name;
+  return {
+    ok: true,
+    value:
+      name === undefined
+        ? { definition: parsed.file.definition }
+        : { name, definition: parsed.file.definition },
+  };
 }
 
 export interface ImportPreview {
@@ -128,11 +139,16 @@ export function previewWorkflowImport(definition: WorkflowDefinition): ImportPre
 
 /**
  * The name to offer when the file carried none. A file name is the closest
- * thing to one an author chose, so `workflows/nightly-deploy.json` becomes
+ * thing to one an author chose, so `workflows/nightly-deploy.yaml` becomes
  * "nightly-deploy". Pasted text has no file name and falls back.
  */
 export function suggestedImportName(fileName: string | undefined): string {
   const base = (fileName ?? "").split("/").pop() ?? "";
-  const withoutExtension = base.replace(/\.json$/i, "").trim();
+  const extension = WORKFLOW_FILE_EXTENSIONS.find((suffix) =>
+    base.toLowerCase().endsWith(suffix),
+  );
+  const withoutExtension = (
+    extension === undefined ? base : base.slice(0, -extension.length)
+  ).trim();
   return withoutExtension === "" ? "Imported workflow" : withoutExtension;
 }

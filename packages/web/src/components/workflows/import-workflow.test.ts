@@ -1,6 +1,10 @@
 /**
  * The import parser. Every refusal here is a message a person reads, so each
  * case asserts on the message, not only on the failure.
+ *
+ * The shapes themselves are `@valet/workflow`'s `parseWorkflowFileValue`,
+ * covered in that package's own suite. What is covered here is the decoder
+ * this module adds: JSON first, then the YAML chunk.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -23,8 +27,8 @@ const VALID = {
 };
 
 describe("parseWorkflowImport", () => {
-  it("accepts a bare definition", () => {
-    const parsed = parseWorkflowImport(JSON.stringify(VALID));
+  it("accepts a bare definition", async () => {
+    const parsed = await parseWorkflowImport(JSON.stringify(VALID));
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.value.name).toBeUndefined();
@@ -32,8 +36,8 @@ describe("parseWorkflowImport", () => {
     }
   });
 
-  it("accepts the API's own workflow response, and keeps its name", () => {
-    const parsed = parseWorkflowImport(
+  it("accepts the API's own workflow response, and keeps its name", async () => {
+    const parsed = await parseWorkflowImport(
       JSON.stringify({
         id: "wf_1",
         name: "Nightly deploy",
@@ -48,14 +52,51 @@ describe("parseWorkflowImport", () => {
     if (parsed.ok) expect(parsed.value.name).toBe("Nightly deploy");
   });
 
-  it("refuses text that is not JSON", () => {
-    const parsed = parseWorkflowImport("not json at all");
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.errors[0]).toContain("not JSON");
+  it("accepts a pasted YAML envelope, comments and all", async () => {
+    // The shape the repository sync reads. A hand-authored file wants
+    // comments and multi-line text, which is why YAML is the documented
+    // default — and why the dialog has to read one.
+    const parsed = await parseWorkflowImport(
+      [
+        "# The nightly sweep.",
+        "valet: workflow/v1",
+        "name: Nightly triage",
+        "description: Sweeps open issues.",
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "    - id: notify",
+        "      type: tool",
+        "      service: slack",
+        "      action: send_message",
+        "      params: {}",
+        "  edges:",
+        "    - from: trigger",
+        "      to: notify",
+        "",
+      ].join("\n"),
+      "nightly.yaml",
+    );
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.name).toBe("Nightly triage");
+    expect(parsed.value.definition.nodes).toHaveLength(2);
   });
 
-  it("refuses JSON that holds no definition, and says what one looks like", () => {
-    const parsed = parseWorkflowImport(JSON.stringify({ hello: "world" }));
+  it("refuses text that is neither JSON nor YAML", async () => {
+    // Unbalanced brackets are the shape no decoder can read. Plain prose is
+    // a valid YAML scalar, and it is refused a line later for holding no
+    // definition rather than for failing to parse.
+    const parsed = await parseWorkflowImport("{ nodes: [ ");
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.errors[0]).toContain("neither JSON nor YAML");
+  });
+
+  it("refuses a file that holds no definition, and says what one looks like", async () => {
+    const parsed = await parseWorkflowImport(JSON.stringify({ hello: "world" }));
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) {
       expect(parsed.errors[0]).toContain("version");
@@ -64,8 +105,14 @@ describe("parseWorkflowImport", () => {
     }
   });
 
-  it("returns the validator's messages unaltered for a broken graph", () => {
-    const parsed = parseWorkflowImport(
+  it("names the file it refused, so a wrong upload is obvious", async () => {
+    const parsed = await parseWorkflowImport("just some prose", "notes.yaml");
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.errors[0]).toContain("notes.yaml");
+  });
+
+  it("returns the validator's messages unaltered for a broken graph", async () => {
+    const parsed = await parseWorkflowImport(
       JSON.stringify({
         version: "dag/v1",
         nodes: [{ id: "trigger", type: "trigger" }],
@@ -78,16 +125,27 @@ describe("parseWorkflowImport", () => {
     if (!parsed.ok) expect(parsed.errors.some((e) => e.includes("ghost"))).toBe(true);
   });
 
-  it("refuses a definition from another product by its version", () => {
-    const parsed = parseWorkflowImport(JSON.stringify({ version: "n8n", nodes: [], edges: [] }));
+  it("refuses a definition from another product by its version", async () => {
+    const parsed = await parseWorkflowImport(
+      JSON.stringify({ version: "n8n", nodes: [], edges: [] }),
+    );
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.errors.some((e) => e.includes("dag/v1"))).toBe(true);
+  });
+
+  it("names the kinds it reads when a file claims an unknown one", async () => {
+    const parsed = await parseWorkflowImport(
+      JSON.stringify({ valet: "workflow/v2", definition: VALID }),
+      "future.yaml",
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.errors[0]).toContain("workflow/v1");
   });
 });
 
 describe("previewWorkflowImport", () => {
-  it("counts nodes by type and names every service the workflow calls", () => {
-    const parsed = parseWorkflowImport(JSON.stringify(VALID));
+  it("counts nodes by type and names every service the workflow calls", async () => {
+    const parsed = await parseWorkflowImport(JSON.stringify(VALID));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
 
@@ -97,8 +155,8 @@ describe("previewWorkflowImport", () => {
     expect(preview.nodeTypes.map((n) => n.type).sort()).toEqual(["stop", "tool", "trigger"]);
   });
 
-  it("counts a foreach body's service, because the run executes it", () => {
-    const parsed = parseWorkflowImport(
+  it("counts a foreach body's service, because the run executes it", async () => {
+    const parsed = await parseWorkflowImport(
       JSON.stringify({
         version: "dag/v1",
         nodes: [
@@ -125,6 +183,11 @@ describe("previewWorkflowImport", () => {
 describe("suggestedImportName", () => {
   it("takes the file name without its directory or extension", () => {
     expect(suggestedImportName("workflows/nightly-deploy.json")).toBe("nightly-deploy");
+  });
+
+  it("strips a YAML extension too, now that the sync reads one", () => {
+    expect(suggestedImportName(".valet/workflows/nightly-deploy.yaml")).toBe("nightly-deploy");
+    expect(suggestedImportName(".valet/workflows/nightly-deploy.yml")).toBe("nightly-deploy");
   });
 
   it("falls back when there is no file name", () => {
