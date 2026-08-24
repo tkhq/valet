@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import type { Sandbox } from "@valet/engine";
+import type { Sandbox, ExecOpts, ExecResult } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 
 let api: TestApi | undefined;
@@ -61,7 +61,7 @@ class MockSandbox implements Sandbox {
     throw new Error("Not implemented");
   }
 
-  async exec() {
+  async exec(_command: string, _opts?: ExecOpts): Promise<ExecResult> {
     throw new Error("Not implemented");
   }
 }
