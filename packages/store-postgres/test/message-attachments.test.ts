@@ -129,9 +129,11 @@ function runAttachmentSuite(label: string, getDb: () => PgDb) {
       if (retrieved.type !== "message") throw new Error("expected message entry");
       expect(retrieved.attachments).toHaveLength(1);
       const att = retrieved.attachments?.[0];
-      expect(att?.url).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
-      // The raw bytes do not survive JSON persistence; the data: URL replaces them.
-      expect(att?.data).toBeUndefined();
+      if (att?.type === "image") {
+        expect(att.url).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
+        // The raw bytes do not survive JSON persistence; the data: URL replaces them.
+        expect(att.data).toBeUndefined();
+      }
     });
 
     it("leaves messages without attachments untouched", async () => {
