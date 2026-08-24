@@ -30,10 +30,12 @@ import { cn } from "~/lib/cn";
 
 /**
  * `/sessions/$sessionId/design` — the canvas (Valet Design spec §Web
- * Surfaces). Center: the rendered artifact. Right: the session chat
+ * Surfaces; layout mirrors Claude Design). Left: the session chat
  * (`SessionView` in panel mode — the same component `/chat`'s slide-over
- * uses, so message rendering is never forked). Slides templates add a
- * slide strip on the left and a speaker-notes pane at the bottom.
+ * uses, so message rendering is never forked), width-resizable by drag.
+ * Then, for slides templates, a strip of real rendered slide previews.
+ * Center: the artifact. Bottom (slides): a height-resizable speaker-notes
+ * pane with a slide counter. Panel sizes persist in localStorage.
  *
  * The trailing `_` in the filename opts this route out of nesting under
  * `sessions.$sessionId.tsx`, which renders no Outlet.
@@ -43,6 +45,76 @@ export const Route = createFileRoute("/sessions/$sessionId_/design")({
 });
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
+
+/**
+ * Pointer-drag panel resizing (the Claude Design slider). `invert` is for
+ * handles on the far edge of their panel (the notes pane grows as the
+ * handle moves UP). The size persists per `storageKey`.
+ */
+function useDragResize(opts: {
+  storageKey: string;
+  initial: number;
+  min: number;
+  max: number;
+  axis: "x" | "y";
+  invert?: boolean;
+}) {
+  const [size, setSize] = useState(() => {
+    const stored = Number(localStorage.getItem(opts.storageKey));
+    return Number.isFinite(stored) && stored >= opts.min && stored <= opts.max
+      ? stored
+      : opts.initial;
+  });
+  useEffect(() => {
+    localStorage.setItem(opts.storageKey, String(Math.round(size)));
+  }, [opts.storageKey, size]);
+
+  const { min, max, axis, invert } = opts;
+  const start = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const origin = axis === "x" ? e.clientX : e.clientY;
+    const base = size;
+    const onMove = (ev: PointerEvent) => {
+      const delta = (axis === "x" ? ev.clientX : ev.clientY) - origin;
+      setSize(Math.min(max, Math.max(min, base + (invert ? -delta : delta))));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+  return { size, start };
+}
+
+// Slide previews render the real artifact at a fixed design width, scaled
+// into the strip — the same DesignRenderer as the canvas, so a thumbnail
+// can never drift from what the slide actually looks like.
+const THUMB_W = 144;
+const THUMB_RENDER_W = 960;
+
+function SlideThumb({
+  content,
+  tokens,
+  index,
+}: {
+  content: string;
+  tokens: Record<string, string>;
+  index: number;
+}) {
+  const scale = THUMB_W / THUMB_RENDER_W;
+  return (
+    <div
+      className="pointer-events-none w-full overflow-hidden rounded bg-white dark:bg-neutral-950"
+      style={{ height: (THUMB_W * 9) / 16 }}
+    >
+      <div style={{ width: THUMB_RENDER_W, transform: `scale(${scale})`, transformOrigin: "top left" }}>
+        <DesignRenderer content={content} tokens={tokens} activeSlideIndex={index} />
+      </div>
+    </div>
+  );
+}
 
 function DesignCanvasPage() {
   const { sessionId } = Route.useParams();
@@ -66,6 +138,21 @@ function DesignCanvasPage() {
   const [commentVdid, setCommentVdid] = useState<string | null>(null);
   const [activeSlide, setActiveSlide] = useState(0);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const chatPanel = useDragResize({
+    storageKey: "vd.chatWidth",
+    initial: 340,
+    min: 240,
+    max: 640,
+    axis: "x",
+  });
+  const notesPanel = useDragResize({
+    storageKey: "vd.notesHeight",
+    initial: 88,
+    min: 44,
+    max: 320,
+    axis: "y",
+    invert: true,
+  });
 
   // Live updates: design.* WS frames carry metadata only; refetch over REST
   // when the stream store reports one (locked decision 3's shape — REST is
@@ -261,24 +348,59 @@ function DesignCanvasPage() {
       </header>
 
       <div className="flex flex-1 min-h-0">
-        {/* Slide strip (slides template only) */}
+        {/* Session chat — the same view every other surface uses. */}
+        <aside
+          style={{ width: chatPanel.size }}
+          className="hidden shrink-0 border-r border-line md:flex md:flex-col md:min-h-0"
+        >
+          <SessionView sessionId={sessionId} panel />
+        </aside>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the chat panel"
+          onPointerDown={chatPanel.start}
+          className="hidden w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-moss/40 active:bg-moss/60 md:block"
+        />
+
+        {/* Slide previews (slides template only) */}
         {isSlides && (
           <nav
             aria-label="Slides"
-            className="w-44 shrink-0 overflow-y-auto border-r border-line p-2 space-y-1"
+            className="w-44 shrink-0 overflow-y-auto border-r border-line bg-neutral-100 p-3 space-y-3 dark:bg-neutral-900"
           >
             {slides.map((slide) => (
               <button
                 key={slide.index}
                 type="button"
+                title={slide.heading}
+                aria-label={`Slide ${slide.index + 1}: ${slide.heading}`}
+                aria-current={slide.index === activeSlide}
                 onClick={() => setActiveSlide(slide.index)}
-                className={cn(
-                  "flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-ink-wash",
-                  slide.index === activeSlide ? "bg-ink-wash text-ink font-medium" : "text-muted",
-                )}
+                className="flex w-full items-start gap-1.5 text-left"
               >
-                <span className="shrink-0 font-mono text-[10px]">{slide.index + 1}</span>
-                <span className="min-w-0 truncate">{slide.heading}</span>
+                <span
+                  className={cn(
+                    "w-4 shrink-0 pt-0.5 text-right font-mono text-[10px]",
+                    slide.index === activeSlide ? "text-ink font-semibold" : "text-muted",
+                  )}
+                >
+                  {slide.index + 1}
+                </span>
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 rounded ring-offset-1",
+                    slide.index === activeSlide
+                      ? "ring-2 ring-moss"
+                      : "ring-1 ring-line hover:ring-moss/50",
+                  )}
+                >
+                  <SlideThumb
+                    content={artifactQ.data.content}
+                    tokens={tokensQ.data?.tokens ?? {}}
+                    index={slide.index}
+                  />
+                </span>
               </button>
             ))}
           </nav>
@@ -320,16 +442,28 @@ function DesignCanvasPage() {
             />
           )}
 
-          {/* Speaker notes (slides template only) */}
+          {/* Speaker notes (slides template only), height-resizable. */}
           {isSlides && (
-            <div className="shrink-0 border-t border-line bg-paper px-4 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-muted">
-                Speaker notes — slide {activeSlide + 1}
+            <>
+              <div
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize the speaker notes"
+                onPointerDown={notesPanel.start}
+                className="h-1 shrink-0 cursor-row-resize border-t border-line bg-transparent transition-colors hover:bg-moss/40 active:bg-moss/60"
+              />
+              <div
+                style={{ height: notesPanel.size }}
+                className="shrink-0 overflow-y-auto bg-paper px-4 py-2"
+              >
+                <div className="text-[10px] uppercase tracking-wider text-muted">
+                  Speaker notes — slide {activeSlide + 1}/{slides.length}
+                </div>
+                <p className="mt-0.5 min-h-[1.25rem] whitespace-pre-wrap text-xs text-ink">
+                  {slides[activeSlide]?.notes || "No notes for this slide."}
+                </p>
               </div>
-              <p className="mt-0.5 min-h-[1.25rem] whitespace-pre-wrap text-xs text-ink">
-                {slides[activeSlide]?.notes || "No notes for this slide."}
-              </p>
-            </div>
+            </>
           )}
         </div>
 
@@ -343,11 +477,6 @@ function DesignCanvasPage() {
             onRevert={(revision) => revert.mutate({ revision })}
           />
         )}
-
-        {/* Session chat — the same view every other surface uses. */}
-        <aside className="hidden w-96 shrink-0 border-l border-line lg:flex lg:flex-col lg:min-h-0">
-          <SessionView sessionId={sessionId} panel />
-        </aside>
       </div>
     </div>
   );
