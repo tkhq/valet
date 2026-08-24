@@ -136,20 +136,60 @@ describe("discoverFromTree", () => {
       expect(found.excludedCandidates).toHaveLength(6);
     });
 
-    it("drops a candidate under a dot-directory, and keeps .claude", () => {
+    it("drops a candidate under a dot-directory, and keeps .claude and .valet", () => {
       const found = discoverFromTree(
         [
           blob(".github/workflows/ci/SKILL.md"),
           blob(".venv/lib/pkg/a/SKILL.md"),
           blob(".claude/skills/triage/SKILL.md"),
+          blob(".valet/skills/deploy/SKILL.md"),
         ],
         "",
       );
 
-      expect(found.accepted.map((c) => c.path)).toEqual([".claude/skills/triage/SKILL.md"]);
+      expect(found.accepted.map((c) => c.path)).toEqual([
+        ".valet/skills/deploy/SKILL.md",
+        ".claude/skills/triage/SKILL.md",
+      ]);
       expect(found.excludedCandidates.map((c) => c.path)).toEqual([
         ".github/workflows/ci/SKILL.md",
         ".venv/lib/pkg/a/SKILL.md",
+      ]);
+    });
+
+    it("reads nothing beside a SKILL.md out of .valet", () => {
+      // `.valet` already carries three unrelated conventions:
+      // `prebuild.yaml` configures the sandbox image, `persona` is written
+      // by the runner, and `workflows/` holds workflow files. Opening the
+      // directory must not turn any of them into a skill candidate.
+      const found = discoverFromTree(
+        [
+          blob(".valet/prebuild.yaml"),
+          blob(".valet/persona"),
+          blob(".valet/workflows/nightly.yaml"),
+          blob(".valet/skills/deploy/SKILL.md"),
+        ],
+        "",
+      );
+
+      expect(found.accepted.map((c) => c.path)).toEqual([".valet/skills/deploy/SKILL.md"]);
+      expect(found.discovered).toBe(1);
+      expect(found.excludedCandidates).toEqual([]);
+    });
+
+    it("reads a prompts directory under .valet", () => {
+      // `/workspace/.valet/prompts/*.md` is already the in-sandbox slash
+      // command layout (`engine/command-providers.ts`), so a repository that
+      // holds one gets the same prompts through sync.
+      const found = discoverFromTree([blob(".valet/prompts/standup.md")], "");
+
+      expect(found.accepted).toEqual([
+        {
+          name: "standup",
+          path: ".valet/prompts/standup.md",
+          blobSha: "blob-.valet/prompts/standup.md",
+          kind: "prompt",
+        },
       ]);
     });
 

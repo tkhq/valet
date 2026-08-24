@@ -41,10 +41,13 @@
  * excluded, so it is imported. Junk arrives nested; a skill name does not.
  *
  * A dot-prefixed ancestor is excluded too, because `.github`, `.vscode` and
- * `.venv` hold tooling. `.claude` is the exception: `.claude/skills/<name>/
- * SKILL.md` is the most likely place for a real skill and must not be lost.
- * Opening `.claude` is also what makes the plugin-tree names below matter,
- * because a downloaded plugin's skills sit under `.claude/plugins`.
+ * `.venv` hold tooling. `.claude` and `.valet` are the two exceptions:
+ * `.claude/skills/<name>/SKILL.md` is the most likely place for a real
+ * skill, and `.valet` is Valet's own per-repository folder, which already
+ * carries `prebuild.yaml`, `prompts/`, and the workflow files the 2026-08-24
+ * workflows MVP design adds. Neither may be lost. Opening `.claude` is also
+ * what makes the plugin-tree names below matter, because a downloaded
+ * plugin's skills sit under `.claude/plugins`.
  *
  * Over-exclusion is recoverable without a new setting. The rules run on the
  * part of the path BELOW the subdirectory, so a source whose subdirectory is
@@ -123,9 +126,13 @@ export const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   "external_plugins",
 ]);
 
-/** The one dot-prefixed directory that is scanned. `.claude/skills/<name>/
- * SKILL.md` is where an agent runtime keeps a repository's own skills. */
-const SCANNED_DOT_DIRECTORY = ".claude";
+/** The dot-prefixed directories that are scanned. `.claude/skills/<name>/
+ * SKILL.md` is where an agent runtime keeps a repository's own skills.
+ * `.valet` is Valet's own per-repository folder, and the 2026-08-24
+ * workflows MVP design puts workflow files under it — a folder the sync
+ * reads for one kind and skips for another would be hard to explain, and a
+ * repository that keeps its skills there means them. */
+const SCANNED_DOT_DIRECTORIES: ReadonlySet<string> = new Set([".claude", ".valet"]);
 
 /** Git's mode for a symbolic link. The blob behind one holds a path string,
  * not the file it points at, so a symlinked `SKILL.md` is not readable as a
@@ -339,7 +346,7 @@ function hasExcludedAncestor(segments: string[]): boolean {
     .some(
       (segment) =>
         EXCLUDED_DIRECTORIES.has(segment) ||
-        (segment.startsWith(".") && segment !== SCANNED_DOT_DIRECTORY),
+        (segment.startsWith(".") && !SCANNED_DOT_DIRECTORIES.has(segment)),
     );
 }
 
