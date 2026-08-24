@@ -1,5 +1,5 @@
-import { Bot, User as UserIcon } from "lucide-react";
-import type { MessagePart, PromptImageAttachment } from "@valet/api/wire";
+import { Bot, User as UserIcon, FileText } from "lucide-react";
+import type { MessagePart, PromptImageAttachment, PromptFileAttachment } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
@@ -136,21 +136,46 @@ function TextBlock({ text }: { text: string }) {
 }
 
 /**
- * Read-only thumbnail strip for a user message's image attachments. Mirrors
- * the composer's `<ComposerImageStrip>` visually (small rounded thumbs on a
- * flex-wrap row), minus the remove control — sent messages are immutable.
+ * Read-only strip for a user message's attachments (images and files).
+ * Images render as thumbnails; files as compact badges with icons.
+ * Sent messages are immutable — no remove control.
  */
-function UserAttachmentStrip({ attachments }: { attachments: PromptImageAttachment[] }) {
+function UserAttachmentStrip({
+  attachments,
+}: {
+  attachments: Array<PromptImageAttachment | PromptFileAttachment>;
+}) {
+  const images = attachments.filter((a): a is PromptImageAttachment => a.kind === "image");
+  const files = attachments.filter((a): a is PromptFileAttachment => a.kind === "file");
+
   return (
-    <div className="flex flex-wrap gap-2 mb-1.5" aria-label="Attached images">
-      {attachments.map((a, i) => (
-        <img
-          key={i}
-          src={a.url}
-          alt={a.name}
-          className="max-h-40 rounded-lg border border-[--border]"
-        />
-      ))}
+    <div className="mb-1.5 space-y-2">
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2" aria-label="Attached images">
+          {images.map((a, i) => (
+            <img
+              key={`img-${i}`}
+              src={a.url}
+              alt={a.name}
+              className="max-h-40 rounded-lg border border-[--border]"
+            />
+          ))}
+        </div>
+      )}
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-2" aria-label="Attached files">
+          {files.map((f, i) => (
+            <div
+              key={`file-${i}`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-[--border] bg-[--bg-secondary]"
+              title={f.path}
+            >
+              <FileText className="h-4 w-4 text-muted" />
+              <span className="truncate">{f.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
