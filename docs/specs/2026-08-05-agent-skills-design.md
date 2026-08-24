@@ -262,10 +262,15 @@ Two things are Valet's, not the spec's. Do not present them as standard fields.
 
 An imported skill uses neither. Both stay because Valet's own skills and `Thread.skill()` depend on them.
 
+## Bundled resources
+
+A spec skill may ship files beside `SKILL.md`: executable code in `scripts/`, documentation in `references/`, templates in `assets/`. A PLUGIN skill can now carry them. `loadSkillFromDirectory` reads the skill directory and fills `SkillSource.resources`, and the `skill` tool writes those files into `/workspace/.valet/skills/<name>/` when the model activates the skill. The tool result names that root, so a relative reference in the body (`scripts/extract.py`) resolves against it. The staged-files design (`2026-08-23-staged-files-design.md`) holds the full mechanism, including how the files come back after a sandbox replacement.
+
+This closes point 3 of the spec's disclosure model for plugin skills: a bundled file loads when the skill is activated, never before.
+
 ## Not implemented
 
-- **Bundled resources.** A spec skill may ship `scripts/`, `references/`, and `assets/`. Sync reads `SKILL.md` and nothing else. A skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open. Carrying those files needs its own table, and `github.read_repo_file` decodes as UTF-8, so it cannot carry a binary asset either.
-- **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
+- **Bundled resources on stored and synced skills.** Sync reads `SKILL.md` and nothing else. A synced skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open. Carrying those files needs resource rows beside the skill, and `github.read_repo_file` decodes as UTF-8, so it cannot carry a binary asset either. The re-entry seam is in the staged-files design.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
 - **Repositories of 100,000 files or more.** GitHub cuts a recursive tree at 100,000 entries, or 7 MB. A source that names a subdirectory falls back to the per-directory walk, which has its own cut at 500 entries and applies no deletions. A source that tracks the whole repository fails the sync and reconciles nothing, because the entries past the cut cannot be told apart from skills the repository no longer holds. Set the subdirectory that holds the skills.
 - **More than 300 skill files in one repository.** The tree finds them in one request; reading them costs one request each, in sequence. A sync past that cap fails and names the subdirectory as the fix, rather than importing a prefix of the list. Raising it needs the content reads to run in parallel and the sweep's claim lease to cover them.
