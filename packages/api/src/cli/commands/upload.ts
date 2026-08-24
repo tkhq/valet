@@ -19,7 +19,12 @@ import { emitNdjson, parseGlobalFlags, printErr, printLine, type ParsedFlags } f
 import { resolveInstance } from "../resolve.js";
 import { streamSession, type StreamSessionOpts } from "../stream.js";
 import type { CliContext } from "../types.js";
-import type { SendPromptRequest, SendPromptResponse, WireEvent } from "../../wire/types.js";
+import type {
+  PostSessionFileUploadResponse,
+  SendPromptRequest,
+  SendPromptResponse,
+  WireEvent,
+} from "../../wire/types.js";
 import { consumeSend, outcomeToExit } from "./send.js";
 
 /** The subset of `InstanceClient` the `upload` command needs. */
@@ -37,22 +42,11 @@ export interface UploadFileInfo {
   overwrite?: boolean;
 }
 
-/** Response for one uploaded file. */
-export interface UploadedFile {
-  path: string;
-  bytes: number;
-  sha256: string;
-  attachmentRef: string;
-  extracted?: string[];
-  pdf?: {
-    type: "TextBased" | "Mixed" | "Scanned" | "ImageBased";
-    confidence?: number;
-    markdownPath?: string;
-    pages?: number;
-    pagesNeedingOcr?: number[];
-    needsOcr?: boolean;
-  };
-}
+/**
+ * Response for one uploaded file — the wire contract, not a copy of it, so
+ * a server-side shape change is a compile error here.
+ */
+export type UploadedFile = PostSessionFileUploadResponse;
 
 /** Full response from uploading files to a session. */
 export interface UploadResponse {
@@ -126,7 +120,12 @@ export function parseUploadArgs(flags: ParsedFlags): UploadArgs | string {
  * Returns file info suitable for the upload request. On error, throws with
  * a user-facing message.
  */
-export async function prepareUploadFiles(paths: string[], dest?: string): Promise<UploadFileInfo[]> {
+export async function prepareUploadFiles(
+  paths: string[],
+  dest?: string,
+  extract?: "auto" | "true" | "false",
+  overwrite?: boolean,
+): Promise<UploadFileInfo[]> {
   const files: UploadFileInfo[] = [];
   for (const p of paths) {
     const abs = path.resolve(p);
@@ -143,8 +142,8 @@ export async function prepareUploadFiles(paths: string[], dest?: string): Promis
     files.push({
       sourcePath: abs,
       dest: paths.length === 1 ? dest : undefined,
-      extract: "auto",
-      overwrite: false,
+      extract: extract ?? "auto",
+      overwrite: overwrite ?? false,
     });
   }
   return files;
@@ -177,9 +176,10 @@ export function shortSha256(full: string): string {
  */
 export function printUploadResult(file: UploadedFile): void {
   const sha = shortSha256(file.sha256);
-  printLine(`  ${path.basename(file.path)} → /workspace/uploads/${path.basename(file.path)} (${formatBytes(file.bytes)}, sha256:${sha})`);
+  printLine(`  ${path.basename(file.path)} → ${file.path} (${formatBytes(file.bytes)}, sha256:${sha})`);
   if (file.extracted) {
-    printLine(`    extracted to ${path.basename(file.path, path.extname(file.path))}/`);
+    // Mirrors the server's extract root: <dest dir>/<zip name without .zip>/
+    printLine(`    extracted ${file.extracted.length} file${file.extracted.length === 1 ? "" : "s"} to ${file.path.replace(/\.zip$/i, "")}/`);
   }
 }
 
@@ -210,8 +210,8 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
   let uploadedFiles: UploadedFile[] = [];
 
   try {
-    // Prepare file metadata from paths.
-    const fileInfos = await prepareUploadFiles(args.paths, args.dest);
+    // Prepare file metadata from paths, carrying the parsed flags through.
+    const fileInfos = await prepareUploadFiles(args.paths, args.dest, args.extract, args.overwrite);
 
     // Upload each file.
     if (!args.json && fileInfos.length > 0) {
@@ -303,29 +303,15 @@ class RealUploadClient implements UploadClient {
     const uploadedFiles: UploadedFile[] = [];
 
     for (const fileInfo of files) {
-      try {
-        const body = await this.instanceClient.uploadFile(
+      uploadedFiles.push(
+        await this.instanceClient.uploadFile(
           sessionId,
           fileInfo.sourcePath,
           fileInfo.dest,
           fileInfo.extract,
           fileInfo.overwrite,
-        );
-
-        if (typeof body !== "object" || body === null) {
-          throw new Error(`invalid response from server`);
-        }
-
-        const uploadedFile = body as UploadedFile;
-        uploadedFiles.push(uploadedFile);
-      } catch (err) {
-        // Re-throw with the proper error message formatting
-        if (err instanceof Error && err.message.startsWith("API request failed")) {
-          // Extract the response body if it's an API error
-          throw err;
-        }
-        throw err;
-      }
+        ),
+      );
     }
 
     return { files: uploadedFiles };

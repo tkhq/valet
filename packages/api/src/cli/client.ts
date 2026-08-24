@@ -24,6 +24,7 @@ import type {
   ListSessionsResponse,
   ListThreadsResponse,
   MeResponse,
+  PostSessionFileUploadResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -58,21 +59,24 @@ export class InstanceClient {
     return this.base;
   }
 
-  private headers(): Record<string, string> {
+  private headers(json: boolean): Record<string, string> {
     return {
-      "content-type": "application/json",
+      // A FormData body sets its own multipart content-type (with boundary);
+      // only JSON bodies get one here.
+      ...(json ? { "content-type": "application/json" } : {}),
       ...(this.apiKey ? { "x-api-key": this.apiKey } : {}),
     };
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
+    const isForm = body instanceof FormData;
     let res: Response;
     try {
       res = await fetch(url, {
         method,
-        headers: this.headers(),
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        headers: this.headers(!isForm),
+        body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
       // fetch rejects only on transport/network failure (DNS, refused, reset).
@@ -199,11 +203,11 @@ export class InstanceClient {
     dest?: string,
     extract?: "auto" | "true" | "false",
     overwrite?: boolean,
-  ): Promise<unknown> {
+  ): Promise<PostSessionFileUploadResponse> {
     const file = await fs.promises.readFile(sourcePath);
     const filename = path.basename(sourcePath);
 
-    // Build the multipart body
+    // Build the multipart body; request() ships FormData as-is.
     const form = new FormData();
     const blob = new Blob([file], { type: "application/octet-stream" });
     form.append("file", blob, filename);
@@ -218,32 +222,10 @@ export class InstanceClient {
       form.append("overwrite", "true");
     }
 
-    const headers: Record<string, string> = {};
-    if (this.apiKey) {
-      headers["x-api-key"] = this.apiKey;
-    }
-
-    const url = `${this.base}/api/sessions/${encodeURIComponent(sessionId)}/files`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: form,
-      });
-    } catch (err) {
-      throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
-    }
-
-    if (res.status === 401) {
-      throw new AuthError(`authentication failed (401) for ${url}`);
-    }
-    if (!res.ok) {
-      throw new ApiError(res.status, await res.text());
-    }
-
-    const text = await res.text();
-    if (text === "") return undefined;
-    return JSON.parse(text) as unknown;
+    return this.request<PostSessionFileUploadResponse>(
+      "POST",
+      `/api/sessions/${encodeURIComponent(sessionId)}/files`,
+      form,
+    );
   }
 }

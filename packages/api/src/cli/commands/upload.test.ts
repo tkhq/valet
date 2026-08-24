@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags } from "../output.js";
-import { formatBytes, parseUploadArgs, shortSha256 } from "./upload.js";
+import { formatBytes, parseUploadArgs, prepareUploadFiles, shortSha256 } from "./upload.js";
 
 describe("upload command", () => {
   describe("parseUploadArgs", () => {
@@ -133,6 +136,29 @@ describe("upload command", () => {
       if (typeof result !== "string") {
         expect(result.json).toBe(true);
       }
+    });
+  });
+
+  describe("prepareUploadFiles", () => {
+    it("threads --extract and --overwrite into every file info", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "valet-upload-"));
+      const file = join(dir, "a.zip");
+      await writeFile(file, "PK");
+
+      const files = await prepareUploadFiles([file], undefined, "false", true);
+      expect(files).toHaveLength(1);
+      expect(files[0].extract).toBe("false");
+      expect(files[0].overwrite).toBe(true);
+    });
+
+    it("defaults extract to auto and overwrite to false", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "valet-upload-"));
+      const file = join(dir, "b.txt");
+      await writeFile(file, "hi");
+
+      const files = await prepareUploadFiles([file]);
+      expect(files[0].extract).toBe("auto");
+      expect(files[0].overwrite).toBe(false);
     });
   });
 
