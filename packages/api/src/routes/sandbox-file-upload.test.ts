@@ -66,19 +66,22 @@ class MockSandbox implements Sandbox {
   }
 }
 
+async function createSession(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace: "/tmp", initialPrompt: "ready" }),
+  });
+  expect(res.status).toBe(201);
+  const { id } = (await res.json()) as any;
+  return id;
+}
+
 describe("POST /api/sessions/:id/files", () => {
   it("accepts a plain text file and returns correct response shape", async () => {
     api = await bootTestApi();
 
-    // Create a session
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    expect(sessionResp.status).toBe(201);
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     // Upload a text file
     const formData = new FormData();
@@ -103,13 +106,7 @@ describe("POST /api/sessions/:id/files", () => {
   it("returns 404 for non-owner", async () => {
     api = await bootTestApi();
 
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     // Create a new user context (simulate non-owner)
     // For now, we'll just verify the route structure
@@ -132,13 +129,7 @@ describe("POST /api/sessions/:id/files", () => {
   it("returns 400 when file field is missing", async () => {
     api = await bootTestApi();
 
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     // Upload without file field
     const formData = new FormData();
@@ -158,13 +149,7 @@ describe("POST /api/sessions/:id/files", () => {
   it("returns 400 when extract parameter is invalid", async () => {
     api = await bootTestApi();
 
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     // Upload with invalid extract value
     const formData = new FormData();
@@ -183,13 +168,7 @@ describe("POST /api/sessions/:id/files", () => {
   it("uses default dest when not provided", async () => {
     api = await bootTestApi();
 
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     const formData = new FormData();
     const textBlob = new Blob(["test"], { type: "text/plain" });
@@ -210,13 +189,7 @@ describe("POST /api/sessions/:id/files", () => {
   it("respects custom dest parameter", async () => {
     api = await bootTestApi();
 
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     const formData = new FormData();
     const textBlob = new Blob(["test"], { type: "text/plain" });
@@ -237,13 +210,7 @@ describe("POST /api/sessions/:id/files", () => {
   it("returns error when extract=true on non-archive", async () => {
     api = await bootTestApi();
 
-    const sessionResp = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initialPrompt: "test" }),
-    });
-    const sessionData = (await sessionResp.json()) as any;
-    const sessionId = sessionData.id;
+    const sessionId = await createSession(api.baseUrl);
 
     const formData = new FormData();
     const textBlob = new Blob(["just text"], { type: "text/plain" });
