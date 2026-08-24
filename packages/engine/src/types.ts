@@ -1598,6 +1598,20 @@ export interface SkillSource {
   invocation?: "context" | "prompt";
   /** Autocomplete hint for the first argument, e.g. "<topic> [audience]". */
   argHint?: string;
+  /** Files the skill ships beside SKILL.md (Agent Skills spec: scripts/,
+   * references/, assets/). Paths are relative to the skill root. Plugin
+   * skills only today. See docs/specs/2026-08-23-staged-files-design.md. */
+  resources?: SkillResource[];
+  /** SHA-256 over the sorted (path, bytes) pairs of `resources`. Set
+   * exactly when `resources` is. Feeds the staged-file step hash. */
+  resourcesHash?: string;
+}
+
+/** One file a skill ships beside its SKILL.md. `path` is relative to the
+ * skill root, e.g. "scripts/extract.py". */
+export interface SkillResource {
+  path: string;
+  data: Uint8Array;
 }
 
 export interface SkillInvokeOptions {
