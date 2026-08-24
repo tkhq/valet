@@ -47,7 +47,59 @@ class MockSandbox implements Sandbox {
   }
 }
 
+// A real `zip -r` archive: dir/, dir/file.txt, root.txt. The explicit
+// directory entry is the regression surface — extraction must skip/mkdir
+// it, not write it as an empty file.
+const ZIP_WITH_DIR_ENTRIES = Buffer.from(
+  "UEsDBAoAAAAAAAdkGF0AAAAAAAAAAAAAAAAEAAAAZGlyL1BLAwQKAAAAAAAHZBhdtviS6hcAAAAXAAAADAAAAGRpci9maWxlLnR4dGhlbGxvIGZyb20gbmVzdGVkIGZpbGUKUEsDBAoAAAAAAAdkGF1jTmJtCgAAAAoAAAAIAAAAcm9vdC50eHRyb290IGZpbGUKUEsBAh4DCgAAAAAAB2QYXQAAAAAAAAAAAAAAAAQAAAAAAAAAAAAQAO1BAAAAAGRpci9QSwECHgMKAAAAAAAHZBhdtviS6hcAAAAXAAAADAAAAAAAAAABAAAApIEiAAAAZGlyL2ZpbGUudHh0UEsBAh4DCgAAAAAAB2QYXWNOYm0KAAAACgAAAAgAAAAAAAAAAQAAAKSBYwAAAHJvb3QudHh0UEsFBgAAAAADAAMAogAAAJMAAAAAAA==",
+  "base64",
+);
+
 describe("extractZip", () => {
+  it("extracts a standard zip with explicit directory entries", async () => {
+    const sandbox = new MockSandbox();
+    sandbox.files.set("/workspace/uploads/data.zip", new Uint8Array(ZIP_WITH_DIR_ENTRIES));
+
+    const result = await extractZip({
+      sandbox,
+      archivePath: "/workspace/uploads/data.zip",
+      extractRoot: "/workspace/uploads/data/",
+      maxTotalUncompressed: 100 * 1024 * 1024,
+      maxEntries: 10000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.extracted.sort()).toEqual([
+        "/workspace/uploads/data/dir/file.txt",
+        "/workspace/uploads/data/root.txt",
+      ]);
+    }
+    // The directory entry became a directory, never a file.
+    expect(sandbox.dirs.has("/workspace/uploads/data/dir")).toBe(true);
+    expect(sandbox.files.has("/workspace/uploads/data/dir")).toBe(false);
+    const nested = sandbox.files.get("/workspace/uploads/data/dir/file.txt");
+    expect(nested && new TextDecoder().decode(nested)).toBe("hello from nested file\n");
+  });
+
+  it("uses caller-provided zipBytes without reading the archive back", async () => {
+    const sandbox = new MockSandbox();
+    // Archive deliberately NOT present in the sandbox: readBinary would throw.
+    const result = await extractZip({
+      sandbox,
+      archivePath: "/workspace/uploads/data.zip",
+      zipBytes: new Uint8Array(ZIP_WITH_DIR_ENTRIES),
+      extractRoot: "/workspace/uploads/data/",
+      maxTotalUncompressed: 100 * 1024 * 1024,
+      maxEntries: 10000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.extracted).toHaveLength(2);
+    }
+  });
+
   it("accepts a valid zip with multiple files", async () => {
     // This test verifies the guard structure is in place.
     // Full integration testing would require actual zip files.
@@ -87,14 +139,13 @@ describe("extractZip", () => {
     if (!result.ok) {
       expect(result).toHaveProperty("error");
       expect(result).toHaveProperty("corrective");
-      expect(result).toHaveProperty("partialFiles");
     } else {
       expect(result).toHaveProperty("extracted");
       expect(Array.isArray(result.extracted)).toBe(true);
     }
   });
 
-  it("returns structured error with partialFiles array", async () => {
+  it("returns structured error and cleans up files it wrote", async () => {
     const sandbox = new MockSandbox();
 
     // Invalid zip data
@@ -113,7 +164,9 @@ describe("extractZip", () => {
     if (!result.ok) {
       expect(result.error).toBeDefined();
       expect(result.corrective).toBeDefined();
-      expect(Array.isArray(result.partialFiles)).toBe(true);
+      // extractZip owns cleanup: nothing it wrote survives a failure.
+      // The raw zip stays in place.
+      expect([...sandbox.files.keys()]).toEqual(["/workspace/uploads/bad.zip"]);
     }
   });
 

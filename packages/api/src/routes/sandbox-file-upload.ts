@@ -1,12 +1,14 @@
 /**
  * `POST /api/sessions/:id/files` — sandbox file upload route.
  *
- * Multipart form-data upload with streaming size cap, magic-byte detection for
- * archives and PDFs, and attachment ref minting. Auth: session-owner only (404
- * for non-owner, never 403). Sandbox-token requests 404 (not in SANDBOX_ALLOWED_PATH_PREFIXES).
+ * Multipart form-data upload with a size cap (the body is buffered in
+ * memory up to the cap, then written to the sandbox in one call),
+ * magic-byte detection for archives and PDFs, and attachment ref minting.
+ * Auth: session-owner only (404 for non-owner, never 403). Sandbox-token
+ * requests 404 (not in SANDBOX_ALLOWED_PATH_PREFIXES).
  *
  * Fields per spec:
- * - file (required, streamed)
+ * - file (required)
  * - dest (optional, default /workspace/uploads/<name>)
  * - extract (optional, auto|true|false, default auto)
  * - overwrite (optional, boolean, default false)
@@ -17,19 +19,15 @@
  * Error responses per spec: 400, 404, 409 (two variants), 413, 415, 422.
  */
 
-import { Hono, type Context } from "hono";
-import { eq } from "drizzle-orm";
-import { createReadStream } from "node:fs";
+import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { Transform } from "node:stream";
 import { basename, dirname } from "node:path";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
 import { resolveUploadDest } from "../services/path-validation.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
 import { extractZip } from "../services/archive-extract.js";
 import { getAttachmentRefStore, type AttachmentInfo } from "../services/attachment-refs.js";
-import { canViewSession } from "../services/session-access.js";
+import { loadOwnedSession } from "./messages.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type {
   PostSessionFileUploadResponse,
@@ -38,51 +36,7 @@ import type {
 
 export const fileUploadRouter = new Hono<AppEnv>();
 
-/**
- * Load owned session — same pattern as messages.ts but for write-level auth.
- * Non-owner → 404, never 403.
- */
-async function loadOwnedSession(c: Context<AppEnv>) {
-  const { db } = c.var.providers;
-  const id = c.req.param("id");
-  const userId = c.var.user.id;
-  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
-  const row = rows[0];
-  if (!row || !(await canViewSession(db, row, userId))) return null;
-  return row;
-}
-
 const MAX_UPLOAD_BYTES = parseInt(process.env.VALET_MAX_UPLOAD_BYTES ?? "52428800", 10); // 50 MB default
-
-/**
- * Size-counting transform stream. Aborts when exceeding the cap.
- */
-function createSizeCounter(maxBytes: number): {
-  transform: Transform;
-  getBytes: () => number;
-} {
-  let count = 0;
-
-  const transform = new Transform({
-    transform(chunk: Buffer | Uint8Array, encoding, callback) {
-      count += Buffer.byteLength(chunk);
-      if (count > maxBytes) {
-        callback(new FileSizeExceededError(maxBytes));
-      } else {
-        callback(null, chunk);
-      }
-    },
-  });
-
-  return { transform, getBytes: () => count };
-}
-
-class FileSizeExceededError extends Error {
-  constructor(maxBytes: number) {
-    super(`File exceeds ${Math.floor(maxBytes / (1024 * 1024))} MB upload cap`);
-    this.name = "FileSizeExceededError";
-  }
-}
 
 /**
  * Magic-byte detection for PDF and ZIP.
@@ -170,7 +124,14 @@ fileUploadRouter.post("/:id/files", async (c) => {
   const sandbox = engineSession.attachment.current();
   if (!sandbox) {
     engineSession.attachment.warm();
-    return c.json({ error: "sandbox not ready", wake: true }, 409);
+    return c.json(
+      {
+        error: "sandbox not ready",
+        corrective: "The sandbox is waking. Retry in a few seconds.",
+        wake: true,
+      },
+      409,
+    );
   }
 
   // Check if dest already exists (unless overwrite=true)
@@ -200,9 +161,11 @@ fileUploadRouter.post("/:id/files", async (c) => {
     );
   }
 
-  // Stream the file, counting size and computing hash
+  // Read the file, counting size and computing the hash. Nothing is written
+  // to the sandbox until the whole body passed the cap — an error here must
+  // NOT touch `uploadPath` (with overwrite=true a pre-existing file lives
+  // there).
   const sha256 = createHash("sha256");
-  const { transform: sizeCounter, getBytes } = createSizeCounter(MAX_UPLOAD_BYTES);
 
   let fileBytes = 0;
   let detectedType: "pdf" | "zip" | "other" = "other";
@@ -232,12 +195,6 @@ fileUploadRouter.post("/:id/files", async (c) => {
 
       // Check size cap
       if (fileBytes > MAX_UPLOAD_BYTES) {
-        // Delete partial file
-        try {
-          await sandbox.rm(uploadPath);
-        } catch {
-          // Ignore
-        }
         return c.json(
           {
             error: `File exceeds ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload cap`,
@@ -249,28 +206,15 @@ fileUploadRouter.post("/:id/files", async (c) => {
 
       chunks.push(chunk);
     }
-  } catch (err) {
-    // Delete partial file on stream error
-    try {
-      await sandbox.rm(uploadPath);
-    } catch {
-      // Ignore
-    }
+  } catch {
     return c.json(
       { error: "Upload stream error", corrective: "Try uploading again." },
       400,
     );
   }
 
-  // Combine chunks and write to sandbox
-  const totalBytes = new Uint8Array(fileBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    totalBytes.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  const sha256Hex = sha256.update(totalBytes).digest("hex");
+  const totalBytes: Uint8Array = Buffer.concat(chunks);
+  const sha256Hex = sha256.digest("hex");
 
   try {
     await sandbox.writeBinary(uploadPath, totalBytes);
@@ -281,7 +225,16 @@ fileUploadRouter.post("/:id/files", async (c) => {
     );
   }
 
-  // Mint attachment ref
+  // extract=true on a file that is neither a zip nor a PDF: nothing to
+  // extract. The file is already written; the client asked for an
+  // extraction that cannot happen, so report it.
+  if (forceExtract && detectedType === "other") {
+    return c.json(
+      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
+      415,
+    );
+  }
+
   const attachmentRefStore = getAttachmentRefStore();
 
   // Determine MIME type
@@ -293,7 +246,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
 
   if (detectedType === "pdf" && shouldExtract) {
     try {
-      const result = extractPdf(totalBytes);
+      const result = await extractPdf(totalBytes);
 
       pdfInfo = {
         type: result.type,
@@ -303,32 +256,32 @@ fileUploadRouter.post("/:id/files", async (c) => {
         needsOcr: result.needsOcr,
       };
 
-      // Write markdown sidecar if we have extractable text
+      // Always write the sidecar: real markdown when the PDF has text, a
+      // one-line stub otherwise (scanned / no extractable text). Only a
+      // real sidecar is reported via markdownPath.
+      const sidecarPath = `${uploadPath}.md`;
+      await sandbox.writeBinary(
+        sidecarPath,
+        new TextEncoder().encode(result.markdown ?? pdfStubMarkdown()),
+      );
       if (result.markdown) {
-        markdownPath = `${uploadPath}.md`;
-        await sandbox.writeBinary(markdownPath, new TextEncoder().encode(result.markdown));
-        pdfInfo.markdownPath = markdownPath;
-      } else if (!result.needsOcr) {
-        // If we should have text but don't, write stub
-        markdownPath = `${uploadPath}.md`;
-        await sandbox.writeBinary(markdownPath, new TextEncoder().encode(pdfStubMarkdown()));
-        // Don't set markdownPath in response when we wrote a stub
-      } else {
-        // Needs OCR, write stub
-        markdownPath = `${uploadPath}.md`;
-        await sandbox.writeBinary(markdownPath, new TextEncoder().encode(pdfStubMarkdown()));
-        // Don't set markdownPath in response
+        markdownPath = sidecarPath;
+        pdfInfo.markdownPath = sidecarPath;
       }
     } catch (err) {
+      if (forceExtract) {
+        // The client explicitly asked for extraction — fail loudly.
+        return c.json(
+          {
+            error: `PDF extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+            corrective: "Retry with extract=false to upload the PDF without a markdown sidecar.",
+          },
+          422,
+        );
+      }
+      // extract=auto: the upload itself succeeded; degrade to no sidecar.
       console.error("PDF extraction error:", err);
-      // Continue without PDF info on error
     }
-  } else if (detectedType === "pdf" && forceExtract) {
-    // extract=true but PDF extraction failed or was disabled
-    return c.json(
-      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
-      415,
-    );
   }
 
   // Handle ZIP extraction
@@ -340,20 +293,14 @@ fileUploadRouter.post("/:id/files", async (c) => {
     const zipResult = await extractZip({
       sandbox,
       archivePath: uploadPath,
+      zipBytes: totalBytes,
       extractRoot,
       maxTotalUncompressed: Math.min(MAX_UPLOAD_BYTES * 10, 500 * 1024 * 1024),
       maxEntries: 10000,
     });
 
     if (!zipResult.ok) {
-      // Delete partial files
-      for (const file of zipResult.partialFiles) {
-        try {
-          await sandbox.rm(file);
-        } catch {
-          // Ignore
-        }
-      }
+      // extractZip already deleted everything it wrote; the raw zip stays.
       return c.json(
         { error: zipResult.error, corrective: zipResult.corrective },
         422,
@@ -361,12 +308,6 @@ fileUploadRouter.post("/:id/files", async (c) => {
     }
 
     extracted = zipResult.extracted;
-  } else if (detectedType === "zip" && forceExtract) {
-    // extract=true but ZIP extraction failed
-    return c.json(
-      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
-      415,
-    );
   }
 
   // Mint attachment ref

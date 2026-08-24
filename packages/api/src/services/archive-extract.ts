@@ -1,24 +1,31 @@
 /**
  * Zip extraction with safety guards per the design spec.
  *
- * Uses yauzl for streaming zip reading. Guards in order:
+ * Uses yauzl for zip reading. Guards in order:
  * 1. Path traversal — entry name normalized, must resolve under extract root.
- * 2. Symlinks and hard links — skip any entry with those attributes.
+ * 2. Symlinks — skip any entry with the symlink mode bit. (Hard links have
+ *    no zip representation; nothing to guard.)
  * 3. Entry count — cap at 10,000.
  * 4. Uncompressed size — cap at min(VALET_MAX_UPLOAD_BYTES × 10, 500 MB).
  * 5. Compression ratio — reject per-entry > 100× ratio without reading bytes.
  * 6. Central directory vs local header mismatch — reject when they disagree.
  *
- * On any abort, all files written from the archive are deleted before returning.
+ * On any abort, extractZip deletes every file it wrote before returning.
+ * The raw uploaded zip remains in place at archivePath.
  */
 
-import { basename, dirname, normalize, resolve as resolvePath } from "node:path";
+import { dirname, normalize, resolve as resolvePath } from "node:path";
 import type { Sandbox } from "@valet/engine";
-import { fromBuffer } from "yauzl";
+import { fromBuffer, type Entry, type ZipFile } from "yauzl";
 
 export interface ExtractZipOpts {
   sandbox: Sandbox;
   archivePath: string; // sandbox path to the uploaded zip
+  /**
+   * The archive bytes, when the caller already holds them (the upload route
+   * does). Skips a full read-back of the archive from the sandbox.
+   */
+  zipBytes?: Uint8Array;
   extractRoot: string; // sandbox path, always ends with "/"
   maxTotalUncompressed: number;
   maxEntries: number;
@@ -33,14 +40,14 @@ export interface ExtractZipError {
   ok: false;
   error: string;
   corrective: string;
-  partialFiles: string[];
 }
 
 /**
  * Extract a zip file with safety guards.
  *
- * Returns the list of extracted files on success, or an error with partial files
- * that must be deleted. The raw uploaded zip remains in place at archivePath.
+ * Returns the list of extracted files on success. On error, every file this
+ * call wrote has already been deleted — cleanup is owned here, not by the
+ * caller. The raw uploaded zip remains in place at archivePath.
  */
 export async function extractZip(
   opts: ExtractZipOpts,
@@ -50,25 +57,28 @@ export async function extractZip(
   // Ensure extractRoot ends with /
   const rootDir = extractRoot.endsWith("/") ? extractRoot : `${extractRoot}/`;
 
-  // Read the zip file from sandbox
-  const zipBytes = await sandbox.readBinary(archivePath);
-  const zipBuffer = Buffer.from(zipBytes);
+  // Use the caller's bytes when provided; otherwise read the zip from the sandbox.
+  const zipBytes = opts.zipBytes ?? (await sandbox.readBinary(archivePath));
+  const zipBuffer = Buffer.from(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
 
   const extracted: string[] = [];
+  // Directories already ensured via mkdir — one round trip per directory,
+  // not one per entry.
+  const madeDirs = new Set<string>();
   let totalUncompressed = 0;
   let entryCount = 0;
 
   try {
     // Open zip per spec (lazyEntries for streaming)
-    const zipfile = await new Promise<any>((resolve, reject) => {
-      fromBuffer(zipBuffer, { lazyEntries: true } as any, (err, zf) => {
+    const zipfile = await new Promise<ZipFile>((resolve, reject) => {
+      fromBuffer(zipBuffer, { lazyEntries: true }, (err, zf) => {
         if (err) reject(err);
         else resolve(zf);
       });
     });
 
     await new Promise<void>((resolve, reject) => {
-      zipfile.on("entry", async (entry: any) => {
+      zipfile.on("entry", async (entry: Entry) => {
         entryCount++;
 
         // Guard 3: Entry count cap
@@ -86,8 +96,27 @@ export async function extractZip(
           return;
         }
 
-        // Guard 2: Symlinks and hard links
-        if (isSymlinkOrHardlink(entry)) {
+        // Directory entries (standard `zip -r` emits explicit "dir/"
+        // entries) carry no bytes. Create the directory and move on —
+        // writing them as files would break every archive with a
+        // directory in it.
+        if (entry.fileName.endsWith("/")) {
+          try {
+            const dirPath = resolvePath(rootDir, entry.fileName);
+            if (!madeDirs.has(dirPath)) {
+              await sandbox.mkdir(dirPath);
+              madeDirs.add(dirPath);
+            }
+            zipfile.readEntry();
+          } catch (err) {
+            zipfile.close();
+            reject(err);
+          }
+          return;
+        }
+
+        // Guard 2: Symlinks
+        if (isSymlink(entry)) {
           // Skip this entry, proceed to next
           zipfile.readEntry();
           return;
@@ -135,14 +164,15 @@ export async function extractZip(
         try {
           const entryPath = resolvePath(rootDir, entry.fileName);
 
-          // Create parent directory
+          // Create parent directory (once per directory)
           const parentDir = dirname(entryPath);
-          if (parentDir && parentDir !== rootDir.slice(0, -1)) {
+          if (parentDir && parentDir !== rootDir.slice(0, -1) && !madeDirs.has(parentDir)) {
             await sandbox.mkdir(parentDir);
+            madeDirs.add(parentDir);
           }
 
           // Extract file contents using yauzl's openReadStream
-          zipfile.openReadStream(entry, (err: Error | null, stream: any) => {
+          zipfile.openReadStream(entry, (err, stream) => {
             if (err) {
               zipfile.close();
               reject(err);
@@ -203,7 +233,6 @@ export async function extractZip(
         ok: false,
         error: err.message,
         corrective: "The archive was rejected by a safety guard. See the message for which one.",
-        partialFiles: extracted,
       };
     }
 
@@ -211,7 +240,6 @@ export async function extractZip(
       ok: false,
       error: (err instanceof Error ? err.message : String(err)) || "Unknown zip extraction error",
       corrective: "The archive could not be extracted. Ensure it is a valid zip file.",
-      partialFiles: extracted,
     };
   }
 }
@@ -265,11 +293,11 @@ function validateEntryPath(
 }
 
 /**
- * Check if an entry is a symlink or hard link.
+ * Check if an entry is a symlink.
  * External file attributes: (externalFileAttributes >>> 16) & 0o170000
- * 0o120000 = symlink
+ * 0o120000 = S_IFLNK
  */
-function isSymlinkOrHardlink(entry: any): boolean {
+function isSymlink(entry: Entry): boolean {
   const mode = (entry.externalFileAttributes >>> 16) & 0o170000;
   return mode === 0o120000; // S_IFLNK (symlink)
 }
