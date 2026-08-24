@@ -32,6 +32,7 @@ import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import {
   addComment,
   emitDesignEvent,
+  updateScratchpad,
   getArtifactBySession,
   getArtifactRowBySession,
   getRevision,
@@ -71,6 +72,7 @@ interface RenderHealthReport {
   totalSlides: number;
   hiddenSlides: number[];
   overflowingSlides: number[];
+  sparseSlides: number[];
   scriptsStripped: number;
   reportedAt: number;
 }
@@ -113,6 +115,7 @@ designRouter.get("/:id/design/artifact", async (c) => {
     revision: detail.artifact.currentRevision,
     sizeBytes: detail.artifact.sizeBytes,
     updatedAt: detail.artifact.updatedAt,
+    scratchpad: detail.artifact.scratchpad,
     content: detail.content,
   };
   return c.json(body);
@@ -353,9 +356,24 @@ designRouter.get("/:id/design/tokens", async (c) => {
       try {
         const file = await reader.readFile(repo.fullName, "design-tokens.json", repo.ref ?? "");
         if (file) tokens = { ...tokens, ...parseDesignTokens(file.text) };
+        // Claude-Design-style manifest at the repo root: tokens as a typed
+        // array ({name, value, kind, scope}); unscoped tokens overlay.
+        const manifest = await reader.readFile(repo.fullName, "_ds_manifest.json", repo.ref ?? "");
+        if (manifest) {
+          const parsed: unknown = JSON.parse(manifest.text);
+          const list =
+            typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { tokens?: unknown }).tokens)
+              ? ((parsed as { tokens: unknown[] }).tokens as Array<Record<string, unknown>>)
+              : [];
+          for (const t of list) {
+            if (typeof t.name === "string" && typeof t.value === "string" && t.scope === undefined) {
+              tokens[t.name.startsWith("--") ? t.name : `--${t.name}`] = t.value;
+            }
+          }
+        }
       } catch {
-        // Unreachable repo degrades to no tokens; the canvas renders with
-        // the artifact's own fallback values.
+        // Unreachable repo (or malformed manifest) degrades to defaults;
+        // the canvas renders with the artifact's own fallback values.
       }
       tokenCache.set(cacheKey, { tokens, at: Date.now() });
       // Bound the map: evict the oldest entries past the cap.
@@ -382,6 +400,7 @@ designRouter.post("/:id/design/health", async (c) => {
     totalSlides?: number;
     hiddenSlides?: number[];
     overflowingSlides?: number[];
+    sparseSlides?: number[];
     scriptsStripped?: number;
   };
   try {
@@ -399,6 +418,9 @@ designRouter.post("/:id/design/health", async (c) => {
     overflowingSlides: (body.overflowingSlides ?? [])
       .filter((n): n is number => typeof n === "number")
       .slice(0, 200),
+    sparseSlides: (body.sparseSlides ?? [])
+      .filter((n): n is number => typeof n === "number")
+      .slice(0, 200),
     scriptsStripped: typeof body.scriptsStripped === "number" ? body.scriptsStripped : 0,
     reportedAt: Date.now(),
   });
@@ -409,4 +431,26 @@ designRouter.get("/:id/design/health", async (c) => {
   const access = await resolveAccess(c);
   if (!access) return c.json({ error: "session not found" }, 404);
   return c.json({ report: healthReports.get(access.row.id) ?? null });
+});
+
+designRouter.post("/:id/design/scratchpad", async (c) => {
+  const access = await resolveAccess(c);
+  if (!access) return c.json({ error: "session not found" }, 404);
+  let body: { content?: string };
+  try {
+    body = (await c.req.json()) as { content?: string };
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.content !== "string") {
+    return c.json({ error: "content is required (the full scratchpad text; empty string clears it)" }, 400);
+  }
+  try {
+    await updateScratchpad(c.var.providers.db, { sessionId: access.row.id, content: body.content });
+    return c.json({ ok: true });
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
 });

@@ -618,6 +618,7 @@ export const api = {
       totalSlides: number;
       hiddenSlides: number[];
       overflowingSlides: number[];
+      sparseSlides: number[];
       scriptsStripped: number;
     },
   ) =>

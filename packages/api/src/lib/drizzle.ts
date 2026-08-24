@@ -223,6 +223,11 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   await db.query(
     'CREATE UNIQUE INDEX IF NOT EXISTS "design_artifacts_session_unique" ON "design_artifacts" ("session_id")',
   );
+  // Design scratchpad (Claude Design parity): the agent's persistent
+  // working memory for a design project. DEFAULT '' backfills old rows.
+  await db.query(
+    `ALTER TABLE "design_artifacts" ADD COLUMN IF NOT EXISTS "scratchpad" text NOT NULL DEFAULT ''`,
+  );
   await db.query(`
     CREATE TABLE IF NOT EXISTS "design_artifact_revisions" (
       "id" text PRIMARY KEY NOT NULL,

@@ -571,6 +571,7 @@ describe("pg app schema + migrations", () => {
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
       { table: "agent_sessions", column: "kind" },
       { table: "agent_sessions", column: "template" },
+      { table: "design_artifacts", column: "scratchpad" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {

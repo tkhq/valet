@@ -848,6 +848,9 @@ export const designArtifacts = pgTable(
     sessionId: text("session_id").notNull(),
     currentRevision: text("current_revision").notNull(),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    // The agent's persistent working memory for this design project:
+    // outline, decisions, placeholders to fix. Free-form markdown.
+    scratchpad: text("scratchpad").notNull().default(""),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

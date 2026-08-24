@@ -52,6 +52,9 @@ export interface DesignRenderHealth {
   /** 0-based indexes of sections whose content is taller than the slide
    * box (scrollHeight > clientHeight) — the content gets clipped. */
   overflowingSlides: number[];
+  /** 0-based indexes of sections whose content occupies less than half
+   * the stage height — top-crammed slides with dead space below. */
+  sparseSlides: number[];
   /** `<script>` tags in the raw document; all of them are stripped. */
   scriptsStripped: number;
 }
@@ -230,6 +233,7 @@ export function DesignRenderer({
       const sections = topLevelSections(shadow);
       const hiddenSlides: number[] = [];
       const overflowingSlides: number[] = [];
+      const sparseSlides: number[] = [];
       sections.forEach((el, i) => {
         const cs = getComputedStyle(el);
         const rect = el.getBoundingClientRect();
@@ -246,12 +250,26 @@ export function DesignRenderer({
         // forgives rounding; a real overflow is tens to hundreds of px.
         if (el.scrollHeight > el.clientHeight + 12) {
           overflowingSlides.push(i);
+          return;
+        }
+        // Underfill lint (stage mode): content pinned to the top with dead
+        // space below — the top-cram failure the craft guide forbids.
+        // Centered content extends past the midline and passes.
+        if (slidesModeRef.current && el.children.length > 0) {
+          const top = el.getBoundingClientRect().top;
+          let maxBottom = top;
+          for (const child of Array.from(el.children)) {
+            const r = child.getBoundingClientRect();
+            if (r.bottom > maxBottom) maxBottom = r.bottom;
+          }
+          if ((maxBottom - top) / STAGE_H < 0.5) sparseSlides.push(i);
         }
       });
       healthRef.current({
         totalSlides: sections.length,
         hiddenSlides,
         overflowingSlides,
+        sparseSlides,
         scriptsStripped: (content.match(/<script\b/gi) ?? []).length,
       });
     }

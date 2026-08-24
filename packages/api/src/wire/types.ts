@@ -773,6 +773,8 @@ export interface DesignArtifactResponse {
   revision: string;
   sizeBytes: number;
   updatedAt: number;
+  /** The agent's persistent project notes (outline, decisions). */
+  scratchpad: string;
   /** The full .dc.html document. */
   content: string;
 }

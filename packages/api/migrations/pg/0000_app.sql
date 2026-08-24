@@ -503,6 +503,7 @@ CREATE TABLE "design_artifacts" (
 	"session_id" text NOT NULL,
 	"current_revision" text NOT NULL,
 	"size_bytes" bigint NOT NULL,
+	"scratchpad" text DEFAULT '' NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

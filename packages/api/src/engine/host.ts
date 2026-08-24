@@ -53,7 +53,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { buildDesignTools } from "./design-tools.js";
-import { readTemplateStarter } from "@valet/plugin-design/lib";
+import { readTemplateStarter, DESIGN_CRAFT_GUIDE } from "@valet/plugin-design/lib";
 
 /**
  * Standing instruction for kind='design' sessions (Valet Design spec,
@@ -69,6 +69,7 @@ const DESIGN_SESSION_PREAMBLE = [
   "design_read includes a canvas report measuring what actually renders for the user: hidden slides, CLIPPED (overflowing) slides, stripped scripts. Believe it over your reading of the markup. After finishing edits, call design_read once and keep fixing until the report is clean — do not tell the user the design is done while slides are hidden or clipped.",
   "A default Valet design system is always available: var(--color-bg), var(--color-fg), var(--color-muted), var(--color-primary), var(--color-accent), var(--color-success/warning/danger), var(--color-bg-dark)/var(--color-fg-dark), var(--font-sans/serif/mono), var(--radius), var(--shadow). Prefer these tokens over hard-coded values; design_render_token lists everything.",
   "After a handoff, the canvas artifact is STILL the design deliverable. Requests about the design (layout, clipping, styling) are design_edit work — never edit workspace copies of the design with write/edit/bash.",
+  "Keep design_scratchpad current: the outline, decisions (type scale, palette, structure), and placeholders to fix before presenting. design_read shows it back to you — it is how you avoid re-deriving the plan or contradicting earlier decisions.",
 ].join("\n");
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -112,6 +113,10 @@ export interface EngineHostOpts {
   blobs?: BlobStore;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
+  /** Model fallback for kind='design' sessions when no user/org/session
+   * preference applies. Design quality tracks model strength; the cheap
+   * dogfooding default produces visibly worse output. */
+  designDefaultModelId?: string;
   /** pi-ai model id; defaults to claude-haiku-4-5 for fast dogfooding. */
   defaultModelId?: string;
   /** Default Docker image for new sandboxes. */
@@ -612,7 +617,13 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(
+      existing,
+      meta.userId,
+      meta.orgId,
+      undefined,
+      meta.kind === "design" ? this.opts.designDefaultModelId : undefined,
+    );
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -699,7 +710,14 @@ export class EngineHost {
         }
       }
       designSystemContext = {
-        systemContext: [{ name: "design-session", content, order: 20 }],
+        systemContext: [
+          { name: "design-session", content, order: 20 },
+          // The craft briefing: composition, type scale, color discipline.
+          // This is what separates designed output from generated output —
+          // without it the model top-crams content and shrinks type to
+          // "fix" overflow (observed live).
+          { name: "design-craft", content: DESIGN_CRAFT_GUIDE, order: 21 },
+        ],
       };
     }
     const designToolConfig =
@@ -2059,12 +2077,18 @@ export class EngineHost {
     userId: string,
     orgId: string,
     overrideId?: string,
+    /** Session-shape fallback consulted BELOW user/org preferences and
+     * ABOVE the stock default (design sessions: visual quality tracks
+     * model strength, so they should not inherit the cheap dogfooding
+     * default unless explicitly chosen). */
+    shapeFallbackId?: string,
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       overrideId ??
       (await this.userDefaultModel(userId)) ??
       (await this.orgPreferredModel(orgId)) ??
+      shapeFallbackId ??
       this.opts.defaultModelId ??
       "claude-haiku-4-5";
     return this.resolveModelObject(orgId, id);

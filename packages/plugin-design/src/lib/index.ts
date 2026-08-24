@@ -32,3 +32,12 @@ export type {
 } from "./gslides.js";
 export { staticRenderChecks, hidesSectionsByDefault } from "./render-checks.js";
 export { DEFAULT_DESIGN_TOKENS } from "./default-design-system.js";
+
+import { readFileSync as __readGuide } from "node:fs";
+import { fileURLToPath as __guidePath } from "node:url";
+/** The design-craft briefing injected into every design session's system
+ * context. Literal read shape — the api bundle inlines it. */
+export const DESIGN_CRAFT_GUIDE: string = __readGuide(
+  __guidePath(new URL("../../guides/design-craft.md", import.meta.url)),
+  "utf8",
+);

@@ -26,6 +26,7 @@ import {
   marpToDcHtml,
   parseHeader,
   slidesToDcHtml,
+  DESIGN_CRAFT_GUIDE,
   MAX_ARTIFACT_BYTES,
   type MinimalPresentation,
 } from "@valet/plugin-design/lib";
@@ -77,6 +78,7 @@ async function readError(res: Response): Promise<string> {
 interface ArtifactRead {
   revision: string;
   content: string;
+  scratchpad: string;
 }
 
 async function readArtifact(cfg: DesignToolConfig, ctx: ToolContext): Promise<ArtifactRead | { error: string }> {
@@ -85,8 +87,8 @@ async function readArtifact(cfg: DesignToolConfig, ctx: ToolContext): Promise<Ar
     signal: ctx.signal,
   });
   if (!res.ok) return { error: await readError(res) };
-  const body = (await res.json()) as { revision: string; content: string };
-  return { revision: body.revision, content: body.content };
+  const body = (await res.json()) as { revision: string; content: string; scratchpad?: string };
+  return { revision: body.revision, content: body.content, scratchpad: body.scratchpad ?? "" };
 }
 
 // ─── design_edit ───────────────────────────────────────────────────────
@@ -199,6 +201,7 @@ export const designReadTool = defineTool({
           totalSlides: number;
           hiddenSlides: number[];
           overflowingSlides?: number[];
+          sparseSlides?: number[];
           scriptsStripped: number;
         } | null;
       };
@@ -214,6 +217,12 @@ export const designReadTool = defineTool({
         if (overflowing.length > 0) {
           parts.push(
             `slide${overflowing.length === 1 ? "" : "s"} ${overflowing.map((i) => i + 1).join(", ")} overflow the slide box — the content is taller than the slide and gets CLIPPED; cut content or reduce sizes until it fits`,
+          );
+        }
+        const sparse = report.sparseSlides ?? [];
+        if (sparse.length > 0) {
+          parts.push(
+            `slide${sparse.length === 1 ? "" : "s"} ${sparse.map((i) => i + 1).join(", ")} leave most of the stage empty (content in the top portion, dead space below) — center the content block vertically or scale it up to fill the 1080px stage`,
           );
         }
         if (report.scriptsStripped > 0) {
@@ -232,9 +241,37 @@ export const designReadTool = defineTool({
       doc = doc.slice(0, READ_CONTENT_CAP);
       truncationNote = "\n[document truncated — use design_edit kind='patch' for targeted changes]";
     }
+    const scratchpadBlock = current.scratchpad.trim()
+      ? `\n---- scratchpad (your project notes) ----\n${current.scratchpad.trim()}`
+      : "";
     return {
-      text: `revision ${current.revision}\n${canvasReport}\n${commentLines}\n---- current artifact ----\n${doc}${truncationNote}`,
+      text: `revision ${current.revision}\n${canvasReport}\n${commentLines}${scratchpadBlock}\n---- current artifact ----\n${doc}${truncationNote}`,
     };
+  },
+});
+
+// ─── design_scratchpad ─────────────────────────────────────────────────
+
+export const designScratchpadTool = defineTool({
+  name: "design_scratchpad",
+  description:
+    "Replace your persistent project notes for this design (shown in every design_read): the outline, decisions made, type-scale choices, placeholders to fix before presenting. Notes survive across turns and reverts — keep them current; they are how future-you avoids re-deriving the plan.",
+  parameters: Type.Object({
+    content: Type.String({
+      description: "The full scratchpad text (markdown). Replaces the previous content; empty string clears it.",
+    }),
+  }),
+  execute: async (args, ctx): Promise<ToolResult> => {
+    const cfg = resolveDesignConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const res = await fetch(designUrl(cfg, ctx, "scratchpad"), {
+      method: "POST",
+      headers: designHeaders(cfg, ctx, true),
+      body: JSON.stringify({ content: args.content }),
+      signal: ctx.signal,
+    });
+    if (!res.ok) return { text: `[design_scratchpad failed] ${await readError(res)}` };
+    return { text: `scratchpad updated (${Buffer.byteLength(args.content)} bytes)` };
   },
 });
 
@@ -471,8 +508,17 @@ export const designExportTool = defineTool({
     "Export the artifact to html, pdf, pptx, or gslides. html/pdf/pptx land in /workspace/exports/; gslides creates a Google Slides presentation and returns its URL. Exports never mutate the artifact. Opens an export-manifest approval gate naming everything that leaves.",
   parameters: Type.Object({
     format: Type.Union(
-      [Type.Literal("html"), Type.Literal("pdf"), Type.Literal("pptx"), Type.Literal("gslides")],
-      { description: "Target format." },
+      [
+        Type.Literal("html"),
+        Type.Literal("project"),
+        Type.Literal("pdf"),
+        Type.Literal("pptx"),
+        Type.Literal("gslides"),
+      ],
+      {
+        description:
+          "Target format. 'project' exports a directory: the deck (with the standalone viewer), scratchpad.md, and the design system (tokens.css + README).",
+      },
     ),
     filename: Type.Optional(
       Type.String({ description: "Output file name (html/pdf/pptx) or presentation title (gslides)." }),
@@ -498,7 +544,9 @@ export const designExportTool = defineTool({
     const destination =
       args.format === "gslides"
         ? `a new Google Slides presentation titled "${args.filename ?? "from the deck's own title"}" in the connected Google Drive`
-        : `/workspace/exports/${baseName}.${args.format}`;
+        : args.format === "project"
+          ? `/workspace/exports/${baseName}/ (deck + scratchpad + design system)`
+          : `/workspace/exports/${baseName}.${args.format}`;
 
     // ExportManifest gate (spec §design_export + threat 8): the user
     // approves the scope of what leaves — every referenced file named,
@@ -515,6 +563,52 @@ export const designExportTool = defineTool({
     });
     if (resolution.actionId !== "approve") {
       return { text: `${args.format} export declined by ${resolution.resolvedBy}` };
+    }
+
+    if (args.format === "project") {
+      // Project-directory export (the Claude Design layout): the artifact,
+      // the scratchpad, and the design system as a folder a person (or
+      // another agent) can pick up whole.
+      const dir = `/workspace/exports/${baseName}`;
+      const isDeck = (parseHeader(current.content)?.template ?? "") === "slides";
+      for (const d of ["/workspace/exports", dir, `${dir}/design-system`]) {
+        try {
+          await ctx.sandbox.mkdir(d);
+        } catch {
+          // Already exists — fine.
+        }
+      }
+      const written: string[] = [];
+      const deck = isDeck ? injectDeckRuntime(current.content) : current.content;
+      await ctx.sandbox.writeFile(`${dir}/${baseName}.dc.html`, deck);
+      written.push(`${baseName}.dc.html`);
+      if (current.scratchpad.trim()) {
+        await ctx.sandbox.writeFile(`${dir}/scratchpad.md`, current.scratchpad);
+        written.push("scratchpad.md");
+      }
+      const tokensRes = await fetch(designUrl(cfg, ctx, "tokens"), {
+        headers: designHeaders(cfg, ctx, false),
+        signal: ctx.signal,
+      });
+      if (tokensRes.ok) {
+        const { tokens } = (await tokensRes.json()) as { tokens: Record<string, string> };
+        const css = `:root {\n${Object.entries(tokens)
+          .map(([name, value]) => `  ${name}: ${value};`)
+          .join("\n")}\n}\n`;
+        await ctx.sandbox.writeFile(`${dir}/design-system/tokens.css`, css);
+        await ctx.sandbox.writeFile(
+          `${dir}/design-system/_ds_manifest.json`,
+          JSON.stringify(
+            { namespace: "valet", tokens: Object.entries(tokens).map(([name, value]) => ({ name, value })) },
+            null,
+            2,
+          ),
+        );
+        written.push("design-system/tokens.css", "design-system/_ds_manifest.json");
+      }
+      await ctx.sandbox.writeFile(`${dir}/design-system/README.md`, DESIGN_CRAFT_GUIDE);
+      written.push("design-system/README.md");
+      return { text: `exported revision ${current.revision} to ${dir}/ (${written.join(", ")})` };
     }
 
     if (args.format === "html") {
@@ -789,6 +883,7 @@ export function buildDesignTools(): ToolDef[] {
   return [
     designReadTool,
     designEditTool,
+    designScratchpadTool,
     designRenderTokenTool,
     designCommentResolveTool,
     designImportMarpTool,

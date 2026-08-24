@@ -301,6 +301,24 @@ export async function revertToRevision(
   });
 }
 
+/** Replace the design scratchpad — the agent's persistent working memory
+ * for this project (outline, decisions, placeholders). Free-form
+ * markdown; capped so a runaway agent cannot grow it unboundedly. */
+export async function updateScratchpad(
+  db: AppDb,
+  opts: { sessionId: string; content: string },
+): Promise<void> {
+  if (Buffer.byteLength(opts.content) > 64_000) {
+    throw new ValidationError("Scratchpad exceeds the 64 KB cap. Keep it to the durable outline and decisions.");
+  }
+  const artifact = await getArtifactRowBySession(db, opts.sessionId);
+  if (!artifact) throw new NotFoundError("design artifact");
+  await db
+    .update(designArtifacts)
+    .set({ scratchpad: opts.content, updatedAt: Date.now() })
+    .where(eq(designArtifacts.id, artifact.id));
+}
+
 // ── Comments ────────────────────────────────────────────────────────
 
 export async function addComment(
