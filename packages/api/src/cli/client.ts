@@ -28,6 +28,8 @@ import type {
   SendPromptRequest,
   SendPromptResponse,
 } from "../wire/types.js";
+import * as fs from "fs";
+import * as path from "path";
 
 export interface InstanceClientOpts {
   url: string;
@@ -182,5 +184,66 @@ export class InstanceClient {
       `/api/sessions/${encodeURIComponent(id)}/decisions/${encodeURIComponent(gateId)}/resolve`,
       body,
     );
+  }
+
+  // ── file uploads ───────────────────────────────────────────────────────
+
+  /**
+   * `POST /api/sessions/:id/files` — upload files to a session's sandbox.
+   * Accepts one file per request via multipart/form-data. Returns uploaded
+   * file metadata including the attachment ref.
+   */
+  async uploadFile(
+    sessionId: string,
+    sourcePath: string,
+    dest?: string,
+    extract?: "auto" | "true" | "false",
+    overwrite?: boolean,
+  ): Promise<unknown> {
+    const file = await fs.promises.readFile(sourcePath);
+    const filename = path.basename(sourcePath);
+
+    // Build the multipart body
+    const form = new FormData();
+    const blob = new Blob([file], { type: "application/octet-stream" });
+    form.append("file", blob, filename);
+
+    if (dest !== undefined) {
+      form.append("dest", dest);
+    }
+    if (extract !== undefined) {
+      form.append("extract", extract);
+    }
+    if (overwrite) {
+      form.append("overwrite", "true");
+    }
+
+    const headers: Record<string, string> = {};
+    if (this.apiKey) {
+      headers["x-api-key"] = this.apiKey;
+    }
+
+    const url = `${this.base}/api/sessions/${encodeURIComponent(sessionId)}/files`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: form,
+      });
+    } catch (err) {
+      throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+    }
+
+    if (res.status === 401) {
+      throw new AuthError(`authentication failed (401) for ${url}`);
+    }
+    if (!res.ok) {
+      throw new ApiError(res.status, await res.text());
+    }
+
+    const text = await res.text();
+    if (text === "") return undefined;
+    return JSON.parse(text) as unknown;
   }
 }

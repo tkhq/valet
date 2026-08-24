@@ -475,12 +475,21 @@ export interface PromptFileAttachment {
   name: string;
 }
 
+/** Ref to an uploaded file, used in requests to POST /messages. */
+export interface UploadedFileRef {
+  kind: "file_ref";
+  ref: string;
+}
+
 export interface SendPromptRequest {
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
-  /** Image attachments for the message. */
-  attachments?: PromptImageAttachment[];
+  /**
+   * Attachments for the message. Images as data URLs for backward
+   * compatibility. File refs for uploaded sandbox files.
+   */
+  attachments?: Array<PromptImageAttachment | UploadedFileRef>;
 }
 
 export interface SendPromptResponse {
