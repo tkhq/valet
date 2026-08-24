@@ -13,7 +13,7 @@
  */
 import { Hono, type Context } from "hono";
 import { eq, inArray } from "drizzle-orm";
-import { dispatchCommand } from "@valet/engine";
+import { dispatchCommand, formatFileAttachmentsNote } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -44,6 +44,7 @@ import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import type { Providers } from "../providers/types.js";
 import { canViewSession } from "../services/session-access.js";
+import { getAttachmentRefStore, type AttachmentInfo } from "../services/attachment-refs.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -425,6 +426,7 @@ export async function submitSessionPrompt(
   text: string,
   threadId?: string,
   attachments?: SendPromptRequest["attachments"],
+  fileRefs?: SendPromptRequest["fileRefs"],
 ): Promise<SendPromptResponse | null> {
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -436,6 +438,21 @@ export async function submitSessionPrompt(
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+
+  // Resolve file attachment refs
+  const attachmentRefStore = getAttachmentRefStore();
+  const resolvedFileAttachments: AttachmentInfo[] = [];
+
+  if (fileRefs && fileRefs.length > 0) {
+    for (const { ref } of fileRefs) {
+      const info = attachmentRefStore.consume(row.id, ref);
+      if (!info) {
+        // Ref not found, expired, or wrong session
+        throw new Error(`unknown attachment: ${ref}`);
+      }
+      resolvedFileAttachments.push(info);
+    }
+  }
 
   // Resolve "/"-text against the registry BEFORE choosing a path. Every
   // path targets the REQUESTED thread — never silently rerouted:
@@ -450,7 +467,10 @@ export async function submitSessionPrompt(
   // Build the prompt content once per text variant: plain text, or text +
   // attachments. The expand path swaps only the text; the attachment
   // mapping must stay identical on both paths.
-  const mappedAttachments =
+  //
+  // Image attachments map to the existing shape; file attachments add a
+  // system-authored note and persist on MessageEntry.attachments.
+  const imageAttachments =
     attachments && attachments.length > 0
       ? attachments.map((att) => ({
           type: "image" as const,
@@ -459,12 +479,37 @@ export async function submitSessionPrompt(
           name: att.name,
         }))
       : undefined;
-  const withAttachments = (t: string) => (mappedAttachments ? { text: t, attachments: mappedAttachments } : t);
+
+  // Build final attachment array: images + files
+  const allAttachments = [
+    ...(imageAttachments ?? []),
+    ...resolvedFileAttachments.map((info) => ({
+      type: "file" as const,
+      path: info.path,
+      bytes: info.bytes,
+      sha256: info.sha256,
+      mimeType: info.mimeType ?? "application/octet-stream",
+      markdownPath: info.markdownPath,
+      extractedTo: info.extractedTo,
+      extractedFiles: info.extractedFiles,
+      name: info.name,
+    })),
+  ];
+
+  // Wire the annotation: prepend file attachment note to content
+  let promptText = outcome?.kind === "expand" ? outcome.text : text;
+  if (resolvedFileAttachments.length > 0) {
+    const note = formatFileAttachmentsNote(resolvedFileAttachments);
+    promptText = `${note}\n\n${promptText}`;
+  }
+
+  const withAttachments = (t: string) =>
+    allAttachments.length > 0 ? { text: t, attachments: allAttachments } : t;
 
   const receipt =
     outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(withAttachments(text), { threadId: thread.id })
-      : await thread.submitPrompt(withAttachments(outcome?.kind === "expand" ? outcome.text : text), {});
+      ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
+      : await thread.submitPrompt(withAttachments(promptText), {});
 
   await db
     .update(agentSessions)
@@ -504,10 +549,41 @@ messagesRouter.post("/:id/messages", async (c) => {
       );
     }
   }
+  if (body.fileRefs !== undefined) {
+    const valid =
+      Array.isArray(body.fileRefs) &&
+      body.fileRefs.every((a) => a !== null && typeof a === "object" && typeof a.ref === "string");
+    if (!valid) {
+      return c.json(
+        { error: "fileRefs must be an array of { ref } objects. Re-upload the files and retry." },
+        400,
+      );
+    }
+  }
 
-  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId, body.attachments);
-  if (!resp) return c.json({ error: "thread not found" }, 404);
-  return c.json(resp, 202);
+  try {
+    const resp = await submitSessionPrompt(
+      c.var.providers,
+      row,
+      body.text,
+      body.threadId,
+      body.attachments,
+      body.fileRefs,
+    );
+    if (!resp) return c.json({ error: "thread not found" }, 404);
+    return c.json(resp, 202);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("unknown attachment:")) {
+      return c.json(
+        {
+          error: err.message,
+          corrective: "Re-upload the file and retry.",
+        },
+        400,
+      );
+    }
+    throw err;
+  }
 });
 
 // ── Thread abort ──────────────────────────────────────────────────────────

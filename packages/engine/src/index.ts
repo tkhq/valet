@@ -232,3 +232,4 @@ export {
   type Turn,
 } from "./compaction.js";
 export { entriesToAgentMessages } from "./thread.js";
+export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";

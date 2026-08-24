@@ -207,12 +207,17 @@ export interface EntryInsertRow {
 /**
  * Serializes message attachments for the `attachments` text column.
  * `data` bytes do not survive JSON.stringify (a Uint8Array becomes an index
- * map), so byte-backed attachments are normalized to a `data:` URL here and
- * the raw bytes are dropped.
+ * map), so byte-backed image attachments are normalized to a `data:` URL here and
+ * the raw bytes are dropped. File attachments are preserved as-is.
  */
 export function attachmentsToJson(attachments: MessageEntry["attachments"]): string | null {
   if (!attachments || attachments.length === 0) return null;
   const serializable = attachments.map((att) => {
+    if (att.type === "file") {
+      // File attachments: project through all fields
+      return att;
+    }
+    // Image attachments: normalize byte data to data: URL
     const { data, ...rest } = att;
     if (data && !rest.url) {
       return { ...rest, url: `data:${att.mimeType};base64,${Buffer.from(data).toString("base64")}` };

@@ -8,8 +8,16 @@
 
 import type { MessageEntry } from "./types.js";
 
-type FileAttachment = Extract<MessageEntry["attachments"], unknown[] | undefined>[number] & {
-  type: "file";
+// File attachment data for annotation — may come from MessageEntry.attachments or AttachmentInfo store
+type FileAttachment = {
+  path: string;
+  bytes: number;
+  sha256: string;
+  mimeType?: string;
+  markdownPath?: string;
+  extractedTo?: string;
+  extractedFiles?: string[];
+  name: string;
 };
 
 /**

@@ -481,7 +481,7 @@ export interface SendPromptRequest {
   threadId?: string;
   /** Image attachments for the message. */
   attachments?: PromptImageAttachment[];
-  /** File attachment refs (refs returned from POST /files uploads). */
+  /** File attachment refs (from POST /sessions/:id/files). Single-use. */
   fileRefs?: Array<{ ref: string }>;
 }
 
@@ -3263,4 +3263,27 @@ export interface GetSlackAppResponse {
   /** Requested scopes the installed app did not grant, from the scope list
    * recorded at connect time. Empty when nothing is missing. */
   missingScopes: string[];
+}
+
+// ── Sandbox file upload ──────────────────────────────────────────────────
+
+export interface PostSessionFileUploadPdfInfo {
+  type: "TextBased" | "Scanned" | "ImageBased" | "Mixed";
+  confidence: number;
+  pages: number;
+  pagesNeedingOcr: number[];
+  /** Path to markdown sidecar. Present only when PDF has extractable text. */
+  markdownPath?: string;
+  needsOcr: boolean;
+}
+
+export interface PostSessionFileUploadResponse {
+  path: string;
+  bytes: number;
+  sha256: string;
+  attachmentRef: string;
+  /** Extracted file paths. Present only when a zip was extracted. */
+  extracted?: string[];
+  /** PDF metadata. Present only when the upload is a PDF. */
+  pdf?: PostSessionFileUploadPdfInfo;
 }
