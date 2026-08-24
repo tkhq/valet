@@ -23,6 +23,22 @@ const external = [
   // Workers runtime; it's a virtual module that only exists on CF and is
   // guarded behind a runtime check on node.
   "cloudflare:sockets",
+  // @firecrawl/pdf-inspector and its platform-specific siblings ship native
+  // .node binaries that cannot be bundled by esbuild. The main package
+  // dispatches at runtime to the platform-suffixed variant; both the main
+  // and each platform sibling must be externalized.
+  "@firecrawl/pdf-inspector",
+  "@firecrawl/pdf-inspector-linux-x64-gnu",
+  "@firecrawl/pdf-inspector-linux-x64-musl",
+  "@firecrawl/pdf-inspector-linux-arm64-gnu",
+  "@firecrawl/pdf-inspector-linux-arm64-musl",
+  "@firecrawl/pdf-inspector-darwin-x64",
+  "@firecrawl/pdf-inspector-darwin-arm64",
+  "@firecrawl/pdf-inspector-win32-x64-msvc",
+  // yauzl is pure JS today but has an optional native accelerator
+  // (fd-slicer on some builds). Externalize to avoid bundling issues on
+  // future dep bumps if the optional accelerator is ever added as a default.
+  "yauzl",
 ];
 
 await build({
