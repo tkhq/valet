@@ -234,6 +234,18 @@ export function DesignRenderer({
     const measureHealth = () => {
       if (!healthRef.current) return;
       const sections = topLevelSections(shadow);
+      // The slide-toggle effect hides every non-active slide with an inline
+      // display:none (tagged data-vd-toggled-off). The post-load re-measures
+      // run after that effect, so lift OUR overrides for the measurement or
+      // every deck reports slides 2..n hidden — a false positive that sends
+      // the agent into rewrite loops. Artifact-authored hiding stays visible.
+      const restore: HTMLElement[] = [];
+      for (const el of sections) {
+        if (el.dataset.vdToggledOff === "1") {
+          el.style.removeProperty("display");
+          restore.push(el);
+        }
+      }
       const hiddenSlides: number[] = [];
       const overflowingSlides: number[] = [];
       const sparseSlides: number[] = [];
@@ -258,16 +270,20 @@ export function DesignRenderer({
         // Underfill lint (stage mode): content pinned to the top with dead
         // space below — the top-cram failure the craft guide forbids.
         // Centered content extends past the midline and passes.
-        if (slidesModeRef.current && el.children.length > 0) {
-          const top = el.getBoundingClientRect().top;
-          let maxBottom = top;
+        if (slidesModeRef.current && el.children.length > 0 && rect.height > 0) {
+          let maxBottom = rect.top;
           for (const child of Array.from(el.children)) {
             const r = child.getBoundingClientRect();
             if (r.bottom > maxBottom) maxBottom = r.bottom;
           }
-          if ((maxBottom - top) / STAGE_H < 0.5) sparseSlides.push(i);
+          // Normalize by the section's own rendered height, not STAGE_H:
+          // post-load re-measures run under the fit-scale transform, where
+          // every rect is scaled down and a STAGE_H denominator flags every
+          // slide as sparse.
+          if ((maxBottom - rect.top) / rect.height < 0.5) sparseSlides.push(i);
         }
       });
+      for (const el of restore) el.style.setProperty("display", "none");
       healthRef.current?.({
         totalSlides: sections.length,
         hiddenSlides,
@@ -313,6 +329,7 @@ export function DesignRenderer({
       for (const s of sections) {
         s.style.removeProperty("display");
         s.classList.remove("vd-active");
+        delete s.dataset.vdToggledOff;
       }
       return;
     }
@@ -321,8 +338,12 @@ export function DesignRenderer({
       if (i === activeSlideIndex) {
         s.style.removeProperty("display");
         s.classList.add("vd-active");
+        delete s.dataset.vdToggledOff;
       } else {
         s.style.setProperty("display", "none");
+        // Tag it as OUR hide so measureHealth can tell the toggle's
+        // display:none apart from artifact-authored hiding.
+        s.dataset.vdToggledOff = "1";
         s.classList.remove("vd-active");
       }
     });
