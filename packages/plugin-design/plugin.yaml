@@ -1,0 +1,6 @@
+name: design
+version: 0.0.1
+description: Valet Design — chat-driven authoring of pages, decks, and documents
+icon: "\U0001F3A8"
+
+v2: true

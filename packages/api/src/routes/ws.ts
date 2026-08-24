@@ -133,6 +133,8 @@ export function registerWsRoutes(
                 messageCount: 0,
                 profile: row.profile,
                 docker: row.docker,
+                kind: row.kind,
+                template: row.template,
               },
             });
 

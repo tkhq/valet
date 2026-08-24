@@ -14,6 +14,8 @@ const SUMMARY: SessionSummary = {
   updatedAt: 2,
   lastActivityAt: 2,
   owner: { type: "user", id: "u1" },
+  kind: "code",
+  template: null,
 };
 
 const DETAIL: GetSessionResponse = {

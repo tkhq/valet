@@ -10,6 +10,7 @@
   },
   "exports": {
     "./actions": "./src/actions/index.ts",
+    "./slides": "./src/actions/slides-transport.ts",
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"

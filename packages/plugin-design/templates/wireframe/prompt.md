@@ -1,0 +1,1 @@
+A low-fidelity wireframe. Gray boxes, dashed borders, placeholder labels — no real colors, no real copy beyond labels. One `.frame` per screen. Stay schematic; fidelity comes later in a document or in code.

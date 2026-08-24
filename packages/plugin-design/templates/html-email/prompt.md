@@ -1,0 +1,1 @@
+An HTML email. 600px max width, table-safe layout thinking, inline-friendly styles, Arial/Helvetica stack. One clear call to action. Keep images optional — the email must read fine with images blocked.

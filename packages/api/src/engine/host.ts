@@ -52,6 +52,26 @@ import {
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
+import { buildDesignTools } from "./design-tools.js";
+import { readTemplateStarter, DESIGN_CRAFT_GUIDE } from "@valet/plugin-design/lib";
+
+/**
+ * Standing instruction for kind='design' sessions (Valet Design spec,
+ * §Tools). Injected as system context by `buildSession`.
+ */
+const DESIGN_SESSION_PREAMBLE = [
+  "This is a DESIGN session. The deliverable is the design artifact the user sees rendered live in their canvas — not a file in the workspace.",
+  "Make every change to the design with the design_edit tool (kind='rewrite' for the whole document, kind='patch' to replace elements by data-vdid). Never write the deliverable to a workspace file with the write tool; the user cannot see workspace files in the canvas.",
+  "The artifact is one self-contained HTML document. Keep the required <meta name=\"valet-design\"> header. For slide decks, each slide is a top-level <section> authored on a fixed 1920x1080 stage (the canvas scales to fit — use absolute px sizes; content taller than 1080px gets clipped). Give every section data-label (short strip name) and data-speaker-notes. Do not add your own navigation buttons or scripts — the canvas provides slide navigation, and scripts are stripped.",
+  "When the user comments on an element, change that element (design_edit kind='patch'), then resolve the comment with design_comment_resolve. Apply the change BEFORE resolving.",
+  "Do not trust your memory of the artifact — the user can revert or edit the design from the canvas between your turns. Call design_read to see the current revision, the document, and any unresolved comments before you edit.",
+  "The canvas CANNOT run JavaScript. A deck that hides slides until a script reveals them (position:absolute + opacity:0 + an .active class) renders as blank slides. Keep every section statically visible; the canvas shows one slide at a time on its own.",
+  "design_read includes a canvas report measuring what actually renders for the user: hidden slides, CLIPPED (overflowing) slides, stripped scripts. Believe it over your reading of the markup. After finishing edits, call design_read once and keep fixing until the report is clean — do not tell the user the design is done while slides are hidden or clipped.",
+  "A default Valet design system is always available: var(--color-bg), var(--color-fg), var(--color-muted), var(--color-primary), var(--color-accent), var(--color-success/warning/danger), var(--color-bg-dark)/var(--color-fg-dark), var(--font-sans/serif/mono), var(--radius), var(--shadow). Prefer these tokens over hard-coded values; design_render_token lists everything.",
+  "After a handoff, the canvas artifact is STILL the design deliverable. Requests about the design (layout, clipping, styling) are design_edit work — never edit workspace copies of the design with write/edit/bash.",
+  "Files in /workspace are invisible to the user, with one exception: files in /workspace/exports appear in the canvas Export menu under \"Exported files\", where the user can download them. design_export pdf/pptx/html writes there. For everything else, point the user at the Export menu's instant downloads (standalone HTML, raw .dc.html, and PDF via the browser print view).",
+  "Keep design_scratchpad current: the outline, decisions (type scale, palette, structure), and placeholders to fix before presenting. design_read shows it back to you — it is how you avoid re-deriving the plan or contradicting earlier decisions.",
+].join("\n");
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -94,6 +114,10 @@ export interface EngineHostOpts {
   blobs?: BlobStore;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
+  /** Model fallback for kind='design' sessions when no user/org/session
+   * preference applies. Design quality tracks model strength; the cheap
+   * dogfooding default produces visibly worse output. */
+  designDefaultModelId?: string;
   /** pi-ai model id; defaults to claude-haiku-4-5 for fast dogfooding. */
   defaultModelId?: string;
   /** Default Docker image for new sandboxes. */
@@ -279,6 +303,13 @@ export interface SessionMeta {
   /** Request a rootless docker daemon inside this session's sandbox
    * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
   docker?: boolean;
+  /** Which authoring surface the session drives (Valet Design spec).
+   * "design" attaches the design_* ToolDefs + their toolConfig; absent or
+   * "code" changes nothing. */
+  kind?: "code" | "design";
+  /** Design template the session was minted from. Its prompt.md becomes
+   * the session's design-template system context. */
+  template?: string;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -587,7 +618,13 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(
+      existing,
+      meta.userId,
+      meta.orgId,
+      undefined,
+      meta.kind === "design" ? this.opts.designDefaultModelId : undefined,
+    );
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -647,6 +684,57 @@ export class EngineHost {
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    // Valet Design: a design session gets the design_* ToolDefs plus the
+    // apiBaseUrl/internalToken toolConfig they call back through (the same
+    // HTTP seam the orchestrator's mem_* tools use). Requires
+    // opts.apiBaseUrl — absent (some tests) the tools degrade to their
+    // [design_unavailable] answer.
+    const designTools = meta.kind === "design" ? buildDesignTools() : [];
+    // Per-template authoring guidance (templates/<t>/prompt.md, spec
+    // Decision 7) rides in as system context — the same seam the
+    // orchestrator's memory snapshot uses. Best-effort: a stale template
+    // name means no guidance, never a failed build.
+    let designSystemContext = {};
+    if (meta.kind === "design") {
+      // Without this preamble the model treats a design session like a
+      // coding session: it writes the deliverable to a workspace file with
+      // the `write` tool and the user's canvas never updates (observed in
+      // live verification). The artifact-is-the-deliverable framing must be
+      // in the system context, not only in the tool descriptions.
+      let content = DESIGN_SESSION_PREAMBLE;
+      if (meta.template) {
+        try {
+          const { prompt } = readTemplateStarter(meta.template);
+          content += `\n\nTemplate guidance (${meta.template}): ${prompt.trim()}`;
+        } catch {
+          // Unknown template — preamble alone still applies.
+        }
+      }
+      designSystemContext = {
+        systemContext: [
+          { name: "design-session", content, order: 20 },
+          // The craft briefing: composition, type scale, color discipline.
+          // This is what separates designed output from generated output —
+          // without it the model top-crams content and shrinks type to
+          // "fix" overflow (observed live).
+          { name: "design-craft", content: DESIGN_CRAFT_GUIDE, order: 21 },
+        ],
+      };
+    }
+    const designToolConfig =
+      meta.kind === "design" && this.opts.apiBaseUrl
+        ? {
+            toolConfig: {
+              apiBaseUrl: this.opts.apiBaseUrl,
+              internalToken: internalToken(),
+              // design_handoff spawns the coding child through the same
+              // spawner the orchestrator's task tool uses. Children still
+              // get no spawner of their own (depth limit unchanged).
+              ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
+            },
+          }
+        : {};
+    const sessionTools = [...designTools, ...extras.tools];
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
@@ -668,9 +756,11 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
-            tools: extras.tools.length ? extras.tools : undefined,
+            tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
+            ...designToolConfig,
+            ...designSystemContext,
             ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
@@ -689,9 +779,11 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
-          tools: extras.tools.length ? extras.tools : undefined,
+          tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
+          ...designToolConfig,
+          ...designSystemContext,
           ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
@@ -1986,12 +2078,18 @@ export class EngineHost {
     userId: string,
     orgId: string,
     overrideId?: string,
+    /** Session-shape fallback consulted BELOW user/org preferences and
+     * ABOVE the stock default (design sessions: visual quality tracks
+     * model strength, so they should not inherit the cheap dogfooding
+     * default unless explicitly chosen). */
+    shapeFallbackId?: string,
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       overrideId ??
       (await this.userDefaultModel(userId)) ??
       (await this.orgPreferredModel(orgId)) ??
+      shapeFallbackId ??
       this.opts.defaultModelId ??
       "claude-haiku-4-5";
     return this.resolveModelObject(orgId, id);

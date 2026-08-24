@@ -1426,9 +1426,12 @@ type EngineEvent =
   | { type: 'decision_gate_expired'; threadId: string; gateId: string }
   | { type: 'decision_gate_withdrawn'; threadId: string; gateId: string; reason: 'steer' | 'abort' | 'cancel' }
   | { type: 'model_switched'; threadId: string; fromModel: string; toModel: string; reason: string }
+  | { type: 'host_event'; name: string; payload?: Record<string, unknown> }
 ```
 
 The engine does not know about WebSockets, SSE, or any transport. It emits events; the adapter decides delivery.
+
+`host_event` is a host extension seam (added by the Valet Design spec, 2026-08-23): the ENGINE never constructs one. A host appends it to push app-level, session-scoped events through the same durable EventStream its transport layer already serves — same pass-through contract as `toolConfig`. Hosts that append `host_event`s from a turn's work MUST set `BusEvent.queueItemId` so the rows fall under submission retention; a host-appended event with no queueItemId is never retention-pruned.
 
 Durable emission is the engine's own job: the engine appends events to the EventStream itself, with idempotent eventKeys (see EventStream). `Engine.onEvent` is an in-process tap invoked AFTER the durable append, for host-local concerns — client fan-out, metrics, logging. Adapters MUST NOT append engine events to the stream themselves; a second appender would double-emit and break eventKey idempotency.
 

@@ -18,7 +18,21 @@ describe.skipIf(!bundleExists)("built bundle guards", () => {
     const src = readFileSync(bundlePath, "utf8");
     expect(src).not.toMatch(/from ["']tsx["']/);
     expect(src).not.toMatch(/require\(["']tsx["']\)/);
-    expect(src).not.toMatch(/["']tsx["']\s*,/); // spawn("tsx", ...) / execa
+    // Broad sweep, kept deliberately: it catches spawn("tsx", ...) under any
+    // callee name (esbuild renames collided imports to spawn2/spawn3, which
+    // a callee-name alternation can never track), mid-array forms like
+    // ["exec", "tsx", file], and option objects. Its one known false
+    // positive is a syntax-highlighter language-alias list ("ts", "tsx",
+    // "mts", "cts" — via marp-core); that exact context is excluded below.
+    // A new match means a runtime tsx dependency unless it is provably data;
+    // if so, extend the exclusion with its context, do not weaken the sweep.
+    const matches = [...src.matchAll(/["']tsx["']\s*,/g)].filter((m) => {
+      const before = src.slice(Math.max(0, m.index - 30), m.index);
+      return !/["']ts["']\s*,\s*$/.test(before); // highlighter alias list
+    });
+    expect(
+      matches.map((m) => src.slice(Math.max(0, m.index - 60), m.index + 40)),
+    ).toEqual([]);
   });
 
   it("inlined the engine + app migration SQL into the bundle", () => {

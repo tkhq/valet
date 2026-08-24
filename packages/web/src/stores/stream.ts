@@ -120,6 +120,17 @@ export interface SessionStreamState {
    * message_start / turn_end / abort-or-error message_end.
    */
   streamingArgs?: Record<string, { text: string; parsedLen: number }>;
+  /**
+   * Latest design.artifact.* metadata from the wire (Valet Design spec).
+   * Bytes never ride the wire — the canvas watches this field and refetches
+   * the artifact/revisions REST queries when it changes.
+   */
+  designArtifact?: { revision: string; summary: string };
+  /**
+   * Bumps on every design.comment.* frame. The canvas watches it and
+   * invalidates the comments query — the frame carries only ids.
+   */
+  designCommentsNonce?: number;
 }
 
 export interface StreamStore {
@@ -526,6 +537,32 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // Command results reach the message list through the REST refetch in
       // useSendPrompt's onSuccess, not through the stream store. The frame
       // still advances lastOffset via `next`.
+      return next;
+    }
+
+    case "design.artifact.created":
+    case "design.artifact.updated":
+    case "design.artifact.imported": {
+      // Metadata only — the canvas refetches artifact bytes over REST when
+      // this field changes (see the state doc comment).
+      const revision = typeof ev.payload.revision === "string" ? ev.payload.revision : "";
+      const summary = typeof ev.payload.summary === "string" ? ev.payload.summary : "";
+      next.designArtifact = { revision, summary };
+      return next;
+    }
+
+    case "design.comment.added":
+    case "design.comment.resolved": {
+      next.designCommentsNonce = (slice.designCommentsNonce ?? 0) + 1;
+      return next;
+    }
+
+    case "design.export.started":
+    case "design.export.completed":
+    case "design.export.failed":
+    case "design.handoff.spawned": {
+      // No client state for these yet; the frame still advances lastOffset
+      // via `next`.
       return next;
     }
   }

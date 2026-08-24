@@ -75,6 +75,15 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   "sandbox.status": true,
   command_result: true,
   ping: true,
+  "design.artifact.created": true,
+  "design.artifact.updated": true,
+  "design.artifact.imported": true,
+  "design.comment.added": true,
+  "design.comment.resolved": true,
+  "design.export.started": true,
+  "design.export.completed": true,
+  "design.export.failed": true,
+  "design.handoff.spawned": true,
 };
 
 /** Narrow an unknown parsed frame to `WireEvent` via its `type` discriminant. */

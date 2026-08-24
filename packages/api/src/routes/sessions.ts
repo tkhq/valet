@@ -15,6 +15,8 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { seedArtifact } from "../services/design-artifacts.js";
+import { DESIGN_TEMPLATES, isDesignTemplate } from "@valet/plugin-design/lib";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -117,6 +119,8 @@ function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFie
     updatedAt: row.updatedAt,
     lastActivityAt: run.lastActivityAt,
     owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
+    kind: row.kind,
+    template: row.template,
   };
 }
 
@@ -195,10 +199,17 @@ sessionsRouter.get("/", async (c) => {
   // unsettled submission (the same call the admin submissions route uses).
   // `groupSubmissionsBySession` then indexes it by session id. A per-row
   // query here would make an ordinary list cost one query per session.
-  const [standalone, unsettled] = await Promise.all([
+  // Optional surface filter (`?kind=design` — the design hub's list).
+  const kindFilter = c.req.query("kind");
+  if (kindFilter !== undefined && kindFilter !== "code" && kindFilter !== "design") {
+    return c.json({ error: "kind must be 'code' or 'design'." }, 400);
+  }
+
+  const [standaloneAll, unsettled] = await Promise.all([
     listStandaloneSessions(db, userId, owner),
     engineStore.listAllUnsettledSubmissions(),
   ]);
+  const standalone = kindFilter ? standaloneAll.filter((r) => r.kind === kindFilter) : standaloneAll;
   const bySession = groupSubmissionsBySession(unsettled);
 
   const body: ListSessionsResponse = {
@@ -239,6 +250,23 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "docker must be a boolean. Send true or false, or omit the field." }, 400);
   }
   const docker = body.docker === true;
+
+  // Valet Design (spec §Tools, "Session creation"): a design session names
+  // a template, whose starter seeds revision r-001 below.
+  if (body.kind !== undefined && body.kind !== "code" && body.kind !== "design") {
+    return c.json({ error: "kind must be 'code' or 'design'" }, 400);
+  }
+  const kind = body.kind ?? "code";
+  let template: string | null = null;
+  if (kind === "design") {
+    if (typeof body.template !== "string" || !isDesignTemplate(body.template)) {
+      return c.json(
+        { error: `template is required for design sessions. Valid templates: ${DESIGN_TEMPLATES.join(", ")}.` },
+        400,
+      );
+    }
+    template = body.template;
+  }
 
   // An explicit `teamId: null` from a client that always sends the field is
   // a real shape — the body is an unchecked cast — so it must fall through to
@@ -299,6 +327,8 @@ sessionsRouter.post("/", async (c) => {
         ownerId: owner.id,
         profile,
         docker,
+        kind,
+        template,
         createdAt: now,
         updatedAt: now,
       })
@@ -306,6 +336,12 @@ sessionsRouter.post("/", async (c) => {
       // the full row to assemble the session meta.
       .returning();
     created = inserted[0];
+
+    // Design sessions are born with their artifact: r-001 from the template
+    // starter, in the same transaction as the row (spec §Tools).
+    if (kind === "design" && template) {
+      await seedArtifact(tx, { sessionId: id, template });
+    }
 
     if (repos.length > 0) {
       // Compute target dirs once at bind time (spec decision 15): each binding
@@ -374,6 +410,8 @@ sessionsRouter.post("/", async (c) => {
     messageCount: 0,
     profile,
     docker,
+    kind,
+    template,
     ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail, 201);

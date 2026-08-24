@@ -11,11 +11,13 @@ import type {
   DecisionGate as WireDecisionGate,
   DecisionGateProvenance,
   DecisionResolution as WireDecisionResolution,
+  DesignWireEventType,
   Message,
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
   WireEvent,
 } from "../wire/types.js";
+import { DESIGN_WIRE_EVENT_TYPES } from "../wire/types.js";
 
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
@@ -422,5 +424,19 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           estimateMs: e.estimateMs,
         },
       ];
+
+    // Host extension events. The only host namespace today is Valet
+    // Design's `design.*` (services/design-artifacts.ts). Unknown names
+    // are dropped, same as engine events the loop UI doesn't render.
+    case "host_event": {
+      if (!(DESIGN_WIRE_EVENT_TYPES as readonly string[]).includes(e.name)) return [];
+      return [
+        {
+          type: e.name as DesignWireEventType,
+          sessionId: ev.sessionId,
+          payload: e.payload ?? {},
+        },
+      ];
+    }
   }
 }

@@ -76,7 +76,10 @@ export function SessionsPage() {
   const owner = useListOwner();
   const ws = useActiveWorkspace();
   const { data, isLoading, error, refetch } = useSessions(owner);
-  const sessions = sortByAttention(data?.sessions ?? []);
+  // Design sessions are a different kind of session with their own home
+  // (/design); listing them here would give them two homes and the wrong
+  // default click-through (the code session page, not the canvas).
+  const sessions = sortByAttention((data?.sessions ?? []).filter((s) => s.kind !== "design"));
 
   return (
     <div className="flex-1 flex flex-col min-h-0">

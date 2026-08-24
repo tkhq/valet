@@ -381,6 +381,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
+    // Design sessions fall back to a stronger model than the dogfooding
+    // default (user/org preferences still win) — visual quality tracks
+    // model strength. Override with VALET_DESIGN_MODEL.
+    designDefaultModelId: process.env.VALET_DESIGN_MODEL ?? "claude-sonnet-4-6",
     defaultImage: resolveDefaultImage(process.env),
     // Single image lineage: one stock image for every session shape.
     defaultImages: {

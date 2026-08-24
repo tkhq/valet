@@ -109,7 +109,7 @@ describe("TopNav", () => {
     expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
   });
 
-  // The six labelled links do not fit beside the logo and the icons on a
+  // The labelled links do not fit beside the logo and the icons on a
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
   // layout, so this guards the STRUCTURE that makes the CSS fix possible.
@@ -124,6 +124,7 @@ describe("TopNav", () => {
       "Chat",
       "Memory",
       "Sessions",
+      "Design",
       "Workflows",
       "Events",
       "Skills",

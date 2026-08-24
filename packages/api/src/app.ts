@@ -25,6 +25,7 @@ import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
 import { memoryRouter } from "./routes/memory.js";
+import { designRouter } from "./routes/design.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
@@ -233,6 +234,8 @@ export function createApp(
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
+  // Design artifact surface (/api/sessions/:id/design/*), same prefix.
+  app.route("/api/sessions", designRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);

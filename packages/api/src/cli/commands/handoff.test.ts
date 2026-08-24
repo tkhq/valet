@@ -56,6 +56,8 @@ function stubDeps(opts: StubOpts = {}): {
         runState: "idle",
         owner: { type: "user" as const, id: "u1" },
         workspace: body.workspace,
+        kind: "code" as const,
+        template: null,
         createdAt: 1,
         updatedAt: 1,
         lastActivityAt: 1,

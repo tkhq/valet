@@ -1,7 +1,8 @@
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Palette } from "lucide-react";
 import type { OrchestratorChildSummary } from "@valet/api/wire";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
+import { useSession } from "~/api/queries";
 import { SessionView } from "~/components/session/session-view";
 import type { SandboxTabId } from "~/components/session/sandbox-tabs";
 
@@ -39,6 +40,8 @@ function SessionPage() {
   const navigate = Route.useNavigate();
   const childrenQ = useOrchestratorChildren();
   const info = useOrchestratorInfo();
+  // Cache-shared with SessionView's own read — costs no extra request.
+  const sessionQ = useSession(sessionId);
 
   // The assistant's own session lives at `/chat`, not this standalone
   // session route. Notification/activity hrefs built server-side (see
@@ -58,6 +61,16 @@ function SessionPage() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {child && <ChildBreadcrumb name={info.data?.name ?? "your assistant"} />}
+      {sessionQ.data?.kind === "design" && (
+        <Link
+          to="/sessions/$sessionId/design"
+          params={{ sessionId }}
+          className="flex items-center gap-1.5 border-b border-line bg-moss-wash px-4 py-2 text-xs text-moss hover:underline"
+        >
+          <Palette className="h-3 w-3" aria-hidden />
+          This is a design session — open the canvas
+        </Link>
+      )}
       {/* Standalone page (decision 14): no thread sidebar, full header —
           the root layout hides the sidebar for this route (see
           `__root.tsx`). Children opened full-page render the same way, with
