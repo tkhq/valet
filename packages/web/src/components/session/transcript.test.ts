@@ -16,6 +16,8 @@ const session: SessionDetail = {
   model: "anthropic/claude-haiku-4-5",
   profile: "full",
   docker: false,
+  kind: "code",
+  template: null,
 };
 
 const messages: Message[] = [

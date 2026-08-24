@@ -17,7 +17,9 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { CreateScopeLine } from "~/components/workspace-clause";
 import { matchesNeedle } from "~/lib/text-match";
 
-const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
+/** The default in-sandbox working directory for web-created sessions.
+ * Exported so the design hub seeds its sessions with the same path. */
+export const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
 const MAX_REPOS = 5;
 
 type RepoOption = GetReposResponse["repos"][number];

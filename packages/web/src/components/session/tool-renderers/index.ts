@@ -10,6 +10,7 @@
  * first match wins. The fallback MUST stay last.
  */
 import { bashRenderer } from "./bash";
+import { designRenderer } from "./design";
 import { editRenderer } from "./edit";
 import { fallbackRenderer } from "./fallback";
 import { findReplaceRenderer } from "./find-replace";
@@ -35,6 +36,7 @@ const RENDERERS: ToolRenderer[] = [
   workflowRenderer,
   findReplaceRenderer,
   openaiMediaRenderer,
+  designRenderer,
   // … add plugin-specific renderers here as the ecosystem grows.
   fallbackRenderer,
 ];

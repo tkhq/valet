@@ -211,6 +211,7 @@ export function TopNav() {
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/memory">Memory</NavLink>
         <NavLink to="/sessions">Sessions</NavLink>
+        <NavLink to="/design">Design</NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
         <NavLink to="/events">Events</NavLink>
         <NavLink to="/skills">Skills</NavLink>

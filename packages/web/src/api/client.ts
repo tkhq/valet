@@ -43,6 +43,10 @@ import type {
   DeleteCredentialResponse,
   DeleteGrantRequest,
   DeleteGrantResponse,
+  DesignArtifactResponse,
+  DesignCommentsResponse,
+  DesignRevisionsResponse,
+  DesignTokensResponse,
   DeleteOrgPolicyResponse,
   DeletePolicyOverrideRequest,
   DeletePolicyOverrideResponse,
@@ -393,9 +397,14 @@ export const api = {
 
   // sessions
   /** Unscoped lists the caller's own sessions plus every team's they can
-   * reach. `owner` narrows it to one workspace. */
-  listSessions: (owner?: OwnerFilter) =>
-    request<ListSessionsResponse>("GET", `/sessions${ownerQuery(owner)}`),
+   * reach. `owner` narrows it to one workspace; `opts.kind` narrows to one
+   * authoring surface (`?kind=design` — the design hub's list). */
+  listSessions: (owner?: OwnerFilter, opts?: { kind?: "code" | "design" }) => {
+    const qs = new URLSearchParams(ownerParams(owner));
+    if (opts?.kind) qs.set("kind", opts.kind);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListSessionsResponse>("GET", `/sessions${tail}`);
+  },
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   createSession: (body: CreateSessionRequest) =>
@@ -576,6 +585,47 @@ export const api = {
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/withdraw`,
       body,
+    ),
+
+  // design artifacts (Valet Design spec, routes/design.ts). REST is the
+  // authoritative read path — design.* WS frames carry metadata only, and
+  // the canvas refetches these endpoints when one arrives.
+  getDesignArtifact: (sessionId: string) =>
+    request<DesignArtifactResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/design/artifact`,
+    ),
+  listDesignRevisions: (sessionId: string) =>
+    request<DesignRevisionsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/design/revisions`,
+    ),
+  getDesignRevision: (sessionId: string, revision: string) =>
+    request<{ revision: string; summary: string; createdAt: number; content: string }>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/design/revisions/${encodeURIComponent(revision)}`,
+    ),
+  revertDesignArtifact: (sessionId: string, revision: string) =>
+    request<{ revision: string; summary: string }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/design/revert`,
+      { revision },
+    ),
+  listDesignComments: (sessionId: string) =>
+    request<DesignCommentsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/design/comments`,
+    ),
+  addDesignComment: (sessionId: string, body: { vdid: string; body: string }) =>
+    request<{ id: string; vdid: string; createdAt: number }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/design/comments`,
+      body,
+    ),
+  getDesignTokens: (sessionId: string) =>
+    request<DesignTokensResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/design/tokens`,
     ),
 
   // notifications

@@ -59,6 +59,8 @@ function session(over: Partial<SessionSummary> & Pick<SessionSummary, "id">): Se
     updatedAt: 1,
     lastActivityAt: Date.now() - 5 * MINUTE,
     owner: { type: "user", id: "u1" },
+    kind: "code",
+    template: null,
     ...over,
   };
 }

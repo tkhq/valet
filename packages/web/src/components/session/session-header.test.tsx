@@ -87,6 +87,8 @@ function baseSession(): SessionDetail {
     messageCount: 3,
     profile: "headless",
     docker: false,
+    kind: "code",
+    template: null,
   };
 }
 
