@@ -15,9 +15,12 @@ import { createHash } from "node:crypto";
 import { parse, type HTMLElement } from "node-html-parser";
 
 /** Tags that receive a `data-vdid`. Deliberately coarse: slides, block
- * content, and media — not inline runs or list items. */
+ * content, containers, and media — not inline runs or list items. `div`
+ * is included because card/grid layouts are div-based and agents patch
+ * them; identical sibling wrappers get deterministic collision suffixes. */
 const ADDRESSABLE_TAGS = new Set([
   "section",
+  "div",
   "h1",
   "h2",
   "h3",

@@ -19,6 +19,7 @@ import { checkDesignVersion, sanitizeDesignHtml } from "./sanitize";
  * outline plus a count badge.
  */
 const OVERLAY_CSS = `
+  .vd-body { display: block; min-height: 100%; }
   .vd-hover-target { outline: 2px dashed #3b82f6; outline-offset: 2px; }
   [data-vd-comments] { position: relative; outline: 2px solid #f59e0b; outline-offset: 2px; }
   [data-vd-comments]::after {
@@ -49,6 +50,20 @@ export interface DesignRendererProps {
   /** Renders a crosshair cursor while comment mode is armed. */
   commentMode?: boolean;
   className?: string;
+}
+
+/**
+ * Rewrite document-level selectors in an artifact stylesheet to target the
+ * `.vd-body` mount wrapper. Textual heuristic, deliberately narrow: only
+ * `:root`, `html`, and `body` tokens in selector position. A descendant
+ * combination like `html body` collapses to a doubled class that no longer
+ * matches — acceptable for v1, and rarer than the plain `body {` /
+ * `:root {` rules every generated artifact carries.
+ */
+function remapDocumentSelectors(css: string): string {
+  return css
+    .replace(/:root\b/g, ".vd-body")
+    .replace(/(^|[\s,{}])(?:html|body)(?![\w-])/g, "$1.vd-body");
 }
 
 /** Outermost `<section>`s at any depth — agents often wrap slides in a
@@ -136,8 +151,17 @@ export function DesignRenderer({
     const shadow = shadowRef.current;
     if (!shadow || !version.ok) return;
     // Fragment parsing flattens the sanitized document's html/head/body
-    // wrappers; its <style> blocks and body content land in order.
-    shadow.innerHTML = `<style>${OVERLAY_CSS}</style>${sanitizeDesignHtml(content)}`;
+    // wrappers; its <style> blocks and body content land in order. The
+    // content mounts under a `.vd-body` wrapper, and document-level
+    // selectors in the artifact's stylesheets (`:root`, `html`, `body` —
+    // none of which exist or match inside a shadow root) are remapped onto
+    // it: artifacts routinely put their page background, base typography,
+    // and custom-property definitions there, and without the remap a
+    // "dark theme" deck renders washed-out on white.
+    shadow.innerHTML = `<style>${OVERLAY_CSS}</style><div class="vd-body">${sanitizeDesignHtml(content)}</div>`;
+    for (const styleEl of Array.from(shadow.querySelectorAll("style"))) {
+      styleEl.textContent = remapDocumentSelectors(styleEl.textContent ?? "");
+    }
     setDomVersion((v) => v + 1);
     // `version.ok` is derived from `content`; content is the real input.
     // eslint-disable-next-line react-hooks/exhaustive-deps

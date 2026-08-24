@@ -44,4 +44,19 @@ describe("applyElementPatches", () => {
   it("rejects an empty patch", () => {
     expect(() => applyElementPatches(DOC, "   ")).toThrow(/no elements/);
   });
+
+  it("elements sharing a target vdid replace it as a group, in order", () => {
+    // The live-verified footgun: an agent restoring a heading sent
+    // <h2 vdid=X> + <div vdid=X> to replace container X; sequential
+    // replacement made the div clobber the just-inserted h2.
+    const p = vdidOf(DOC, "p");
+    const { html, replaced } = applyElementPatches(
+      DOC,
+      `<h2 data-vdid="${p}">Restored Title</h2><p data-vdid="${p}">Go live with the new product.</p>`,
+    );
+    expect(replaced).toEqual([p]);
+    expect(html).toContain(">Restored Title</h2>");
+    expect(html).toContain("Go live with the new product.");
+    expect(html.indexOf("Restored Title")).toBeLessThan(html.indexOf("Go live"));
+  });
 });
