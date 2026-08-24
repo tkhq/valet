@@ -45,12 +45,12 @@ function withCronHint(error: string): string {
 
 workflowTriggersRouter.get("/triggers", async (c) => {
   const { db } = c.var.providers;
-  const orgId = c.var.user.orgId;
+  const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
   const workflowId = c.req.query("workflowId") || undefined;
 
   const [schedules, events] = await Promise.all([
-    listWorkflowSchedules(db, orgId, workflowId),
-    listWorkflowTriggers(db, orgId, workflowId),
+    listWorkflowSchedules(db, owner, workflowId),
+    listWorkflowTriggers(db, owner, workflowId),
   ]);
   const triggers: WorkflowTriggerItem[] = [
     ...schedules.map((s): WorkflowTriggerItem => ({
@@ -147,11 +147,12 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  const result = await updateWorkflowSchedule(db, c.var.user.orgId, c.req.param("id"), body);
+  const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
+  const result = await updateWorkflowSchedule(db, owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
-        ? `${result.error} Confirm the id and that it belongs to this org.`
+        ? `${result.error} Confirm the id and that you have access to it.`
         : withCronHint(result.error);
     return c.json({ error: msg }, result.status);
   }
@@ -161,18 +162,19 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
 
 workflowTriggersRouter.delete("/schedules/:id", async (c) => {
   const { db } = c.var.providers;
-  const result = await deleteWorkflowSchedule(db, c.var.user.orgId, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "schedule not found. Confirm the id and that it belongs to this org." }, 404);
+  const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
+  const result = await deleteWorkflowSchedule(db, owner, c.req.param("id"));
+  if (result === "not_found") return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
   return c.json({ ok: true });
 });
 
 workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
   const result = await c.var.providers.workflowScheduler.fireNow(
-    c.var.user.orgId,
+    { userId: c.var.user.id, orgId: c.var.user.orgId },
     c.req.param("id"),
   );
   if (result === "not_found")
-    return c.json({ error: "schedule not found. Confirm the id and that it belongs to this org." }, 404);
+    return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
   if (result !== "ok") return c.json({ error: result.error }, 400);
   return c.json({ ok: true });
 });
@@ -213,11 +215,12 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  const result = await updateWorkflowTrigger(db, plugins, c.var.user.orgId, c.req.param("id"), body);
+  const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
+  const result = await updateWorkflowTrigger(db, plugins, owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
-        ? `${result.error} Confirm the id and that it belongs to this org.`
+        ? `${result.error} Confirm the id and that you have access to it.`
         : result.error;
     return c.json({ error: msg }, result.status);
   }
@@ -227,9 +230,10 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
 
 workflowTriggersRouter.delete("/event-triggers/:id", async (c) => {
   const { db } = c.var.providers;
-  const result = await deleteWorkflowTrigger(db, c.var.user.orgId, c.req.param("id"));
+  const owner = { userId: c.var.user.id, orgId: c.var.user.orgId };
+  const result = await deleteWorkflowTrigger(db, owner, c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "trigger not found. Confirm the id and that it belongs to this org." }, 404);
+    return c.json({ error: "trigger not found. Confirm the id and that you have access to it." }, 404);
   return c.json({ ok: true });
 });
 

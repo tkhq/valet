@@ -9,7 +9,12 @@ import { and, eq } from "drizzle-orm";
 import { CronExpressionParser } from "cron-parser";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowSchedules } from "../schema/index.js";
-import { ownedDefinitionRow } from "./service.js";
+import {
+  canAccessTriggerRow,
+  ownedDefinitionRow,
+  triggerAccessSets,
+  type WorkflowOwner,
+} from "./service.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
@@ -153,13 +158,42 @@ export async function createWorkflowSchedule(
 
 export async function listWorkflowSchedules(
   db: AppDb,
-  orgId: string,
+  owner: WorkflowOwner,
   workflowId?: string,
 ): Promise<WorkflowScheduleSummary[]> {
-  const rows = await db.select().from(workflowSchedules).where(eq(workflowSchedules.orgId, orgId));
+  const [rows, sets] = await Promise.all([
+    db.select().from(workflowSchedules).where(eq(workflowSchedules.orgId, owner.orgId)),
+    triggerAccessSets(db, owner),
+  ]);
   return rows
+    .filter((row) => canAccessTriggerRow(owner, sets, row))
     .map(rowToSummary)
     .filter((s) => workflowId === undefined || s.workflowId === workflowId);
+}
+
+/**
+ * Loads one schedule the caller may act on. Returns null for a missing row
+ * AND for a row the caller cannot access — the two must answer identically
+ * (the same 404) so a schedule id never confirms another member's
+ * automation exists. Shared by update/delete here and `fireNow` in
+ * `scheduler.ts`.
+ */
+export async function accessibleScheduleRow(
+  db: AppDb,
+  owner: WorkflowOwner,
+  scheduleId: string,
+  workflowId?: string,
+): Promise<typeof workflowSchedules.$inferSelect | null> {
+  const conditions = [eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)];
+  if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
+  const rows = await db
+    .select()
+    .from(workflowSchedules)
+    .where(and(...conditions))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return canAccessTriggerRow(owner, await triggerAccessSets(db, owner), row) ? row : null;
 }
 
 export interface WorkflowSchedulePatch {
@@ -178,7 +212,7 @@ export interface WorkflowSchedulePatch {
  */
 export async function updateWorkflowSchedule(
   db: AppDb,
-  orgId: string,
+  owner: WorkflowOwner,
   scheduleId: string,
   patch: WorkflowSchedulePatch,
   now = Date.now(),
@@ -186,12 +220,7 @@ export async function updateWorkflowSchedule(
   | { ok: true; schedule: WorkflowScheduleSummary }
   | { ok: false; status: 400 | 404; error: string }
 > {
-  const rows = await db
-    .select()
-    .from(workflowSchedules)
-    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
-    .limit(1);
-  const row = rows[0];
+  const row = await accessibleScheduleRow(db, owner, scheduleId);
   if (!row) return { ok: false, status: 404, error: "schedule not found" };
 
   if (patch.prompt !== undefined && row.targetKind !== "orchestrator") {
@@ -236,14 +265,14 @@ export async function updateWorkflowSchedule(
       nextFireAt: nextAt,
       updatedAt: now,
     })
-    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)))
     .returning();
   return { ok: true, schedule: rowToSummary(updated[0]!) };
 }
 
 export async function deleteWorkflowSchedule(
   db: AppDb,
-  orgId: string,
+  owner: WorkflowOwner,
   scheduleId: string,
   /** Scopes the delete to a schedule owned by THIS workflow when passed —
    * the HTTP management routes are mounted under `/:id/schedules`, and
@@ -251,20 +280,16 @@ export async function deleteWorkflowSchedule(
    * a different workflow's row through the wrong path. */
   workflowId?: string,
 ): Promise<"ok" | "not_found"> {
-  const conditions = [eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)];
-  if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
-  const rows = await db
-    .select({ id: workflowSchedules.id })
-    .from(workflowSchedules)
-    .where(and(...conditions))
-    .limit(1);
-  if (rows.length === 0) return "not_found";
+  const row = await accessibleScheduleRow(db, owner, scheduleId, workflowId);
+  if (!row) return "not_found";
   // Delete under the same predicate the check used, not `id` alone. The
   // scoping is unreachable-by-luck otherwise: ids are UUID primary keys and
   // no code path reassigns `workflow_id` or `org_id`, so today the select
   // and the delete cannot resolve to different rows. Repeating the
   // conditions makes the constraint a property of the statement instead of
   // an invariant a later change could break without touching this file.
+  const conditions = [eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)];
+  if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
   await db.delete(workflowSchedules).where(and(...conditions));
   return "ok";
 }

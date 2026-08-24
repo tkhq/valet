@@ -22,6 +22,7 @@ let pgdb: PgDb;
 let cleanup: () => Promise<void>;
 
 const USER = { id: "user_1", orgId: "org_1" };
+const OWNER = { userId: "user_1", orgId: "org_1" };
 const FIXED_NOW = Date.UTC(2026, 0, 20, 10, 0, 0); // 2026-01-20T10:00:00Z
 
 beforeAll(async () => {
@@ -82,12 +83,12 @@ describe("WorkflowScheduler.fireNow", () => {
     const { host } = makeRunHost();
     const scheduler = buildScheduler(host, deliver);
 
-    const result = await scheduler.fireNow("org_1", scheduleId);
+    const result = await scheduler.fireNow(OWNER, scheduleId);
     expect(result).toBe("ok");
     expect(calls).toHaveBeenCalledTimes(1);
     expect(calls.mock.calls[0][0].dispatchId).toBe(`schedule:${scheduleId}:${FIXED_NOW}`);
 
-    const schedules = await listWorkflowSchedules(db, "org_1");
+    const schedules = await listWorkflowSchedules(db, OWNER);
     const after = schedules.find((s) => s.scheduleId === scheduleId)!;
     expect(after.nextFireAt).toBe(before); // nextFireAt must not change
     expect(after.lastFiredAt).toBe(FIXED_NOW);
@@ -118,7 +119,7 @@ describe("WorkflowScheduler.fireNow", () => {
     const { host, start } = makeRunHost();
     const scheduler = buildScheduler(host, deliver);
 
-    const result = await scheduler.fireNow("org_1", scheduleId);
+    const result = await scheduler.fireNow(OWNER, scheduleId);
     expect(result).toBe("ok");
     expect(start).toHaveBeenCalledTimes(1);
     expect(start.mock.calls[0][0]).toBe(scheduledRunId(scheduleId, FIXED_NOW));
@@ -138,8 +139,8 @@ describe("WorkflowScheduler.fireNow", () => {
     const { host } = makeRunHost();
     const scheduler = buildScheduler(host, deliver);
 
-    expect(await scheduler.fireNow("org_other", scheduleId)).toBe("not_found");
-    expect(await scheduler.fireNow("org_1", "nope")).toBe("not_found");
+    expect(await scheduler.fireNow({ userId: USER.id, orgId: "org_other" }, scheduleId)).toBe("not_found");
+    expect(await scheduler.fireNow(OWNER, "nope")).toBe("not_found");
   });
 
   it("fires a disabled schedule (manual fire is the test path)", async () => {
@@ -152,17 +153,17 @@ describe("WorkflowScheduler.fireNow", () => {
     if (!created.ok) throw new Error(created.error);
     const scheduleId = created.schedule.scheduleId;
 
-    await updateWorkflowSchedule(db, USER.orgId, scheduleId, { enabled: false }, FIXED_NOW - 500);
+    await updateWorkflowSchedule(db, OWNER, scheduleId, { enabled: false }, FIXED_NOW - 500);
 
     const { deliver, calls } = makeDeliver();
     const { host } = makeRunHost();
     const scheduler = buildScheduler(host, deliver);
 
-    const result = await scheduler.fireNow("org_1", scheduleId);
+    const result = await scheduler.fireNow(OWNER, scheduleId);
     expect(result).toBe("ok");
     expect(calls).toHaveBeenCalledTimes(1);
 
-    const schedules = await listWorkflowSchedules(db, "org_1");
+    const schedules = await listWorkflowSchedules(db, OWNER);
     const after = schedules.find((s) => s.scheduleId === scheduleId)!;
     // Still disabled — fireNow must not re-enable.
     expect(after.enabled).toBe(false);

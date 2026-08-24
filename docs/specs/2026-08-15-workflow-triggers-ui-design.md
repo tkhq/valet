@@ -205,6 +205,21 @@ aggregate list.
   TypeScript directly via tsx, so dist-pointing exports failed to resolve
   in fresh worktrees.
 
+- **Owner scoping shipped late (TKAI-227, fixed 2026-08-24).** As built,
+  every route in `workflow-triggers.ts` and both list functions checked
+  `orgId` alone. Every org member could read, edit, delete, and fire every
+  trigger in the org — including the prompt text of other members'
+  personal orchestrator schedules. The routes now follow the rule this
+  spec named: a caller may act on a schedule or event trigger when they
+  own the row, are a member of the owning team, or can reach the target
+  workflow (`canAccessTriggerRow` in `workflows/service.ts`). The
+  workflow-reach arm matters because event-trigger rows record their
+  CREATOR as owner, so a teammate's access comes through the team-owned
+  target workflow. Cross-owner access answers the same 404 as a missing
+  id. The sibling `/api/event-subscriptions` surface keeps its own
+  documented org-wide read; only this workflow-trigger surface is
+  owner-scoped.
+
 ## Known gap: a template cannot arm an event trigger
 
 `WorkflowTemplate` (`@valet/engine`) declares a `schedule`, and

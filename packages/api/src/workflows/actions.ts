@@ -776,7 +776,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const triggers = await listWorkflowTriggers(getDeps().db, owner.orgId, workflow_id);
+      const triggers = await listWorkflowTriggers(getDeps().db, owner, workflow_id);
       return { success: true, data: { triggers } };
     },
   });
@@ -839,7 +839,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const schedules = await listWorkflowSchedules(getDeps().db, owner.orgId, workflow_id);
+      const schedules = await listWorkflowSchedules(getDeps().db, owner, workflow_id);
       return { success: true, data: { schedules } };
     },
   });
@@ -852,7 +852,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ schedule_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const result = await deleteWorkflowSchedule(getDeps().db, owner.orgId, schedule_id);
+      const result = await deleteWorkflowSchedule(getDeps().db, owner, schedule_id);
       if (result === "not_found") return { success: false, error: `schedule not found: ${schedule_id}` };
       return { success: true, data: { scheduleId: schedule_id, deleted: true } };
     },
@@ -866,7 +866,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ trigger_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const result = await deleteWorkflowTrigger(getDeps().db, owner.orgId, trigger_id);
+      const result = await deleteWorkflowTrigger(getDeps().db, owner, trigger_id);
       if (result === "not_found") return { success: false, error: `trigger not found: ${trigger_id}` };
       return { success: true, data: { triggerId: trigger_id, deleted: true } };
     },
@@ -907,7 +907,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const result = await updateWorkflowSchedule(
         getDeps().db,
-        owner.orgId,
+        owner,
         schedule_id,
         { name, cron, timezone, enabled, prompt, input },
       );
@@ -955,7 +955,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await updateWorkflowTrigger(
         deps.db,
         deps.plugins ?? [],
-        owner.orgId,
+        owner,
         trigger_id,
         { name, eventKeys: event_keys, filters, enabled },
       );

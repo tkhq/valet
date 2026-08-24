@@ -211,6 +211,48 @@ export async function ownedWorkflowIds(db: AppDb, owner: WorkflowOwner): Promise
   return rows.map((r) => r.id);
 }
 
+/** The two sets `canAccessTriggerRow` checks against, loaded once per
+ * request so a list filter does not re-query per row. */
+export interface TriggerAccessSets {
+  teamIds: Set<string>;
+  workflowIds: Set<string>;
+}
+
+export async function triggerAccessSets(db: AppDb, owner: WorkflowOwner): Promise<TriggerAccessSets> {
+  const [myTeams, workflowIds] = await Promise.all([
+    listTeamsForUser(db, owner.userId),
+    ownedWorkflowIds(db, owner),
+  ]);
+  return { teamIds: new Set(myTeams.map((t) => t.id)), workflowIds: new Set(workflowIds) };
+}
+
+/**
+ * The one access rule for schedule and event-trigger rows (the Triggers
+ * surface): the caller may see and change a row when they own it, are a
+ * member of the owning team, or may reach its target workflow.
+ *
+ * The workflow-reach arm is not redundant with the owner arms. Event
+ * triggers are created with the CREATOR as row owner even on a team
+ * workflow, and rows that pre-date the team owner column were widened to
+ * the org — for both, the target workflow is the accurate authority. The
+ * owner arms mirror `isAuthorizedForOwner` (user match, live team
+ * membership, org admits nobody); they exist here in set form so list
+ * filtering stays O(rows), not O(rows × queries).
+ *
+ * Checking `orgId` alone here was TKAI-227: every org member could read,
+ * edit, delete, and fire everyone's personal triggers — including the
+ * prompt text of personal orchestrator schedules.
+ */
+export function canAccessTriggerRow(
+  owner: WorkflowOwner,
+  sets: TriggerAccessSets,
+  row: { ownerType: string; ownerId: string; workflowId?: string | null },
+): boolean {
+  if (row.ownerType === "user" && row.ownerId === owner.userId) return true;
+  if (row.ownerType === "team" && sets.teamIds.has(row.ownerId)) return true;
+  return row.workflowId != null && sets.workflowIds.has(row.workflowId);
+}
+
 /** The same read as `ownedWorkflowIds`, with the display name each id needs
  * when the rows leave their own workflow's page. */
 async function ownedWorkflowNames(db: AppDb, owner: WorkflowOwner): Promise<Map<string, string>> {
