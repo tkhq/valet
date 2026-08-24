@@ -35,6 +35,7 @@
     { "path": "./packages/plugin-openai" },
     { "path": "./packages/plugin-stripe" },
     { "path": "./packages/plugin-cloudflare" },
+    { "path": "./packages/plugin-design" },
     { "path": "./packages/plugin-figma" },
     { "path": "./packages/plugin-sentry" },
     { "path": "./packages/plugin-deepwiki" },

@@ -52,6 +52,7 @@
     "@valet/plugin-browser": "workspace:*",
     "@valet/plugin-cloudflare": "workspace:*",
     "@valet/plugin-deepwiki": "workspace:*",
+    "@valet/plugin-design": "workspace:*",
     "@valet/plugin-github": "workspace:*",
     "@valet/plugin-gmail": "workspace:*",
     "@valet/plugin-google-calendar": "workspace:*",

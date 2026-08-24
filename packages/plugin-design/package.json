@@ -1,0 +1,36 @@
+{
+  "name": "@valet/plugin-design",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/lib/index.js",
+  "types": "./dist/lib/index.d.ts",
+  "valet": {
+    "plugin": "./dist/plugin.js"
+  },
+  "exports": {
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    },
+    "./lib": {
+      "types": "./dist/lib/index.d.ts",
+      "default": "./dist/lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@marp-team/marp-core": "^4.1.0",
+    "@valet/engine": "workspace:*",
+    "node-html-parser": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
+  }
+}
