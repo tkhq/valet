@@ -284,6 +284,28 @@ Final integration and validation.
 - Web app boots, `/design` accessible, template grid visible.
 - One end-to-end user flow (create → edit → export → handoff) succeeds.
 
+## Implementation Status (2026-08-23)
+
+All milestones landed on this branch. Deltas from the plan as written:
+
+| Milestone | Status | Notes |
+|---|---|---|
+| M0 schema | done | `kind` column (not `purpose`), repair statements included |
+| M1 plugin | done | plugin ships skill + templates + library; tools moved API-side (spec §Tools) |
+| M2 design system | done | `loadDesignSystem` port in the library; tokens route reads the repo binding |
+| M3 write path | done | events ride the engine's new generic `host_event` variant |
+| M4 core tools | done | engine ToolDefs over the internal HTTP seam; REST session minting |
+| M5 canvas | done | DOMPurify + shadow root; slide strip; history/revert; comments |
+| M6 hub | done | six templates; no design-system/model pickers in v1 (spec Decision 4/7) |
+| M7 sandbox image | done | `docker/Dockerfile.sandbox-design`; stock image covers html/gslides |
+| M8 imports | done | marp + image + gslides; reports print in the tool result |
+| M9 slides actions | done | `slides.*` (sibling naming), fenced chunked batch_update, resumable |
+| M10 serializers | done | marp + gslides; existing vdids preserved on re-address (Scenario C) |
+| M11 export | done | html/pdf/pptx to `/workspace/exports/`; gslides via fenced chunks |
+| M12 handoff | done | artifact embedded in the child brief; repo binding passed through; no git commit in v1 |
+| M13 tests | done | API-level scenarios A/B; serializer round-trip units for C |
+| M14 sweep | done | registry regenerated, typecheck green, e2e scorecard run |
+
 ## Cross-Cutting Risks and Call-Outs
 
 1. **Node 20 vs. 22 trap:** `@marp-team/marp-cli` and `ws` modules may trigger Node version issues. Verify under Node 22.
