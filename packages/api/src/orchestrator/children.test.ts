@@ -24,6 +24,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildFilePusher,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -35,7 +36,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, sessionStagedFiles } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -2335,5 +2336,142 @@ describe("child sandbox retention", () => {
     const tokens = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "child-cold"));
     expect(tokens[0]?.revokedAt).not.toBeNull();
     expect((await watchRow(api, "child-cold"))?.sandboxReclaimedAt).not.toBeNull();
+  });
+});
+
+function parentSandboxWithFile(path: string, content: string): Sandbox {
+  const abs = `/workspace/${path}`;
+  return {
+    id: "sb-parent-share",
+    readFile: async () => content,
+    readBinary: async (p: string) => {
+      if (p === abs) return new TextEncoder().encode(content);
+      throw new Error(`ENOENT: ${p}`);
+    },
+    writeFile: async () => {},
+    writeBinary: async () => {},
+    readdir: async () => [],
+    stat: async (p: string) => {
+      if (p === abs) return { isFile: true, isDirectory: false, size: content.length };
+      throw new Error(`ENOENT: ${p}`);
+    },
+    mkdir: async () => {},
+    rm: async () => {},
+    exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+  };
+}
+
+describe("spawn-time file shares", () => {
+  it("stages each files[] entry for the child before it runs, defaulting to .valet/shared/", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+
+    const parent = await api.providers.engineHost.sessionFor("parent-share", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+
+    const result = await spawner(
+      {
+        prompt: "read the report",
+        files: [
+          { from: "report.md" },
+          { from: "report.md", to: "input/copy.md" },
+        ],
+      },
+      {
+        parentSessionId: "parent-share",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+        sandbox: parentSandboxWithFile("report.md", "the report\n"),
+      },
+    );
+
+    const staged = await api.providers.db
+      .select()
+      .from(sessionStagedFiles)
+      .where(eq(sessionStagedFiles.sessionId, result.childSessionId));
+    const targets = staged.map((r) => r.targetPath).sort();
+    expect(targets).toEqual([".valet/shared/report.md", "input/copy.md"]);
+    expect(staged.every((r) => r.origin === "share")).toBe(true);
+    expect(staged.every((r) => r.originKey === "parent-share")).toBe(true);
+  });
+
+  it("fails the spawn with the missing path named when a files[] source does not exist", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+
+    const parent = await api.providers.engineHost.sessionFor("parent-share-miss", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+
+    await expect(
+      spawner(
+        { prompt: "x", files: [{ from: "missing.bin" }] },
+        {
+          parentSessionId: "parent-share-miss",
+          parentThreadId: parentThread.id,
+          actorUserId: "local-user",
+          owner: { type: "user", id: "local-user" },
+          sandbox: parentSandboxWithFile("report.md", "irrelevant"),
+        },
+      ),
+    ).rejects.toThrow(/missing\.bin/);
+  });
+});
+
+describe("buildChildFilePusher", () => {
+  it("stages a push for an owned child and answers null for a non-child", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const pusher = buildChildFilePusher(deps);
+
+    const parent = await api.providers.engineHost.sessionFor("parent-push", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    const spawned = await spawner(
+      { prompt: "wait for files" },
+      {
+        parentSessionId: "parent-push",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    const sandbox = parentSandboxWithFile("notes.md", "v2 notes\n");
+    const pushed = await pusher(
+      { childSessionId: spawned.childSessionId, from: "notes.md" },
+      { parentSessionId: "parent-push", sandbox },
+    );
+    expect(pushed?.targetPath).toBe(".valet/shared/notes.md");
+
+    const staged = await api.providers.db
+      .select()
+      .from(sessionStagedFiles)
+      .where(eq(sessionStagedFiles.sessionId, spawned.childSessionId));
+    expect(staged).toHaveLength(1);
+    expect(staged[0].inlineContent).toBe("v2 notes\n");
+
+    const denied = await pusher(
+      { childSessionId: spawned.childSessionId, from: "notes.md" },
+      { parentSessionId: "somebody-else", sandbox },
+    );
+    expect(denied).toBeNull();
   });
 });

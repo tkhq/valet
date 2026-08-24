@@ -16,16 +16,19 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { and, count, eq, isNull, lte, ne, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
   ValidationError as EngineValidationError,
+  type BlobStore,
+  type ChildFilePusher,
   type ChildReader,
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
   type Principal,
+  type Sandbox,
   type SessionStore,
   type SpawnChildRequest,
   type SpawnChildResult,
@@ -33,6 +36,13 @@ import {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
+import {
+  SHARE_MAX_BYTES,
+  SHARED_DIR,
+  snapshotFromSandbox,
+  stageForSession,
+  validateTargetPath,
+} from "../engine/staged-files.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -79,6 +89,11 @@ export interface ChildrenDeps {
   retentionMs?: number;
   /** Override for the retention sweep cadence. Tests only. */
   retentionSweepIntervalMs?: number;
+  /**
+   * Blob store for staged file shares (staged-files design, 2026-08-23).
+   * Absent: only payloads small enough to stage inline can be shared.
+   */
+  blobs?: BlobStore;
 }
 
 /** Thrown when a spawn would exceed a decision-21 limit. Message is what the `task` tool surfaces verbatim as error text. */
@@ -190,6 +205,46 @@ function watchRowToArgs(row: ChildWatchRow): ArmArgs {
 }
 
 /**
+ * Snapshots one `files[]` entry (or a `child_push_file` request) out of the
+ * parent's sandbox and stages it for the target session (staged-files
+ * design, decision 8). Returns the workspace-relative target the file will
+ * materialize at. The default target keeps the source's base name under
+ * `.valet/shared/`.
+ */
+async function stageShare(
+  deps: Pick<ChildrenDeps, "db" | "blobs">,
+  args: {
+    parentSessionId: string;
+    parentSandbox: Sandbox;
+    targetSessionId: string;
+    from: string;
+    to?: string;
+  },
+): Promise<string> {
+  const snap = await snapshotFromSandbox(args.parentSandbox, args.from);
+  if (snap.payload.byteLength > SHARE_MAX_BYTES) {
+    throw new Error(
+      `"${args.from}" is ${snap.payload.byteLength} bytes; the share cap is ${SHARE_MAX_BYTES} bytes (256 MiB). Share a smaller file or directory.`,
+    );
+  }
+  const targetPath = validateTargetPath(
+    args.to ?? `${SHARED_DIR}/${posix.basename(validateTargetPath(args.from))}`,
+  );
+  await stageForSession(
+    { db: deps.db, blobs: deps.blobs },
+    {
+      sessionId: args.targetSessionId,
+      origin: "share",
+      originKey: args.parentSessionId,
+      targetPath,
+      kind: snap.kind,
+      payload: snap.payload,
+    },
+  );
+  return targetPath;
+}
+
+/**
  * Builds the `ChildSpawner` handed to orchestrator sessions via
  * `toolConfig.childSpawner`. `watcher.arm` is called (never awaited) once
  * the `child_watches` row is durably inserted — decision 11's "insert
@@ -199,7 +254,13 @@ function watchRowToArgs(row: ChildWatchRow): ArmArgs {
 export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): ChildSpawner {
   return async (
     req: SpawnChildRequest,
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
+    ctx: {
+      parentSessionId: string;
+      parentThreadId: string;
+      actorUserId: string;
+      owner: Principal;
+      sandbox?: Sandbox;
+    },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
     if (!parentData) {
@@ -246,6 +307,29 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         fullName: binding.fullName,
         cloneUrl: binding.cloneUrl,
       });
+    }
+
+    // Spawn-time file shares (staged-files design, decision 8): snapshot
+    // each files[] entry out of the parent's sandbox and stage it BEFORE
+    // the child is built, so the child's first run-start materializes the
+    // files before the agent sees the prompt. A failed snapshot fails the
+    // spawn — the file is why the child exists, and the row cleanup below
+    // is the same "orphaned rows are harmless" story as session_repos.
+    if (req.files && req.files.length > 0) {
+      if (!ctx.sandbox) {
+        throw new Error(
+          "files[] needs the parent session's sandbox, and this host did not supply one. Spawn without files, or write the content into the prompt.",
+        );
+      }
+      for (const share of req.files) {
+        await stageShare(deps, {
+          parentSessionId: ctx.parentSessionId,
+          parentSandbox: ctx.sandbox,
+          targetSessionId: childSessionId,
+          from: share.from,
+          to: share.to,
+        });
+      }
     }
 
     const childSession = await deps.engineHost.childSessionFor(childSessionId, {
@@ -814,6 +898,50 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
       limit: req.limit ?? CHILD_READ_DEFAULT_LIMIT,
       includeCompacted: true,
     });
+  };
+}
+
+/**
+ * Builds the `ChildFilePusher` injected into every orchestrator's
+ * `toolConfig.childFilePusher` — the backend of the engine's
+ * `child_push_file` built-in (staged-files design, decision 8). Authority
+ * is the same `child_watches` edge as `buildChildReader`, with the same
+ * null for "not yours" and "does not exist". The push stages only: the
+ * file materializes at the child's next run-start window, so a push never
+ * wakes the child by itself.
+ */
+export function buildChildFilePusher(deps: ChildrenDeps): ChildFilePusher {
+  return async (req, ctx) => {
+    const rows = await deps.db
+      .select({ childSessionId: childWatches.childSessionId })
+      .from(childWatches)
+      .where(
+        and(
+          eq(childWatches.childSessionId, req.childSessionId),
+          eq(childWatches.parentSessionId, ctx.parentSessionId),
+        ),
+      )
+      .limit(1);
+    if (rows.length === 0) return null;
+
+    const childRows = await deps.db
+      .select({ status: agentSessions.status })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, req.childSessionId))
+      .limit(1);
+    const child = childRows[0];
+    // A deleted child answers the same null as a missing one, matching
+    // `buildChildReader`.
+    if (!child || child.status === "deleted") return null;
+
+    const targetPath = await stageShare(deps, {
+      parentSessionId: ctx.parentSessionId,
+      parentSandbox: ctx.sandbox,
+      targetSessionId: req.childSessionId,
+      from: req.from,
+      to: req.to,
+    });
+    return { targetPath };
   };
 }
 

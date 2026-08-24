@@ -13,6 +13,7 @@ import {
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
+  type ChildFilePusher,
   type CredentialStore,
   type EventStream,
   type Principal,
@@ -167,6 +168,13 @@ export interface EngineHostOpts {
    * session that may check on them.
    */
   childStatusReader?: ChildStatusReader;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childFilePusher`,
+   * the backend of the `child_push_file` built-in (staged-files design,
+   * 2026-08-23). Same authority note as `childReader`; children never get
+   * it, so files only flow parent to child.
+   */
+  childFilePusher?: ChildFilePusher;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -1502,6 +1510,7 @@ export class EngineHost {
         ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
         ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
         ...(this.opts.childStatusReader ? { childStatusReader: this.opts.childStatusReader } : {}),
+        ...(this.opts.childFilePusher ? { childFilePusher: this.opts.childFilePusher } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a

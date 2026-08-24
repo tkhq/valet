@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
+import type { ChildFilePusher, ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -20,6 +20,7 @@ import { writeExecutionGrant, updateInvocationOutcome } from "../policies/servic
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
+  buildChildFilePusher,
   buildChildReader,
   buildChildSender,
   buildChildSpawner,
@@ -342,6 +343,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let pusherRef: ChildFilePusher | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -383,6 +385,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childFilePusher: (req, ctx) => {
+      if (!pusherRef) throw new Error("childFilePusher invoked before provider wiring completed");
+      return pusherRef(req, ctx);
+    },
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
@@ -402,12 +408,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
+    // Staged file shares (2026-08-23 design): large payloads go through
+    // the same blob store the host uses for staged-step materialization.
+    blobs,
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  pusherRef = buildChildFilePusher(childrenDeps);
 
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
