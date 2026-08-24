@@ -323,6 +323,42 @@ describe("design tools", () => {
     expect(written[0]).not.toContain(";");
   });
 
+  it("design_export pdf keeps every intermediate file under /workspace", async () => {
+    // The docker provider's writeFile lands on the HOST filesystem; only the
+    // /workspace bind mount is shared with exec() inside the container. An
+    // intermediate written anywhere else (we shipped /tmp once) is invisible
+    // to marp and the export fails with a usage dump.
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const written: string[] = [];
+    const commands: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = stubSandbox({
+      mkdir: () => Promise.resolve(),
+      writeFile: (path: string) => {
+        written.push(path);
+        return Promise.resolve();
+      },
+      exec: (command: string) => {
+        commands.push(command);
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+      },
+    });
+
+    const result = await designExportTool.execute({ format: "pdf", filename: "deck" }, ctx);
+    expect(result.text).toContain("exported revision r-002 to /workspace/exports/deck.pdf");
+    for (const path of written) {
+      expect(path.startsWith("/workspace/")).toBe(true);
+    }
+    // marp reads the same markdown path the tool wrote.
+    const mdPath = written.find((p) => p.endsWith(".md"));
+    expect(mdPath).toBeDefined();
+    expect(commands[0]).toContain(`marp ${mdPath}`);
+    expect(commands[0]).toContain("--pdf");
+  });
+
   it("design_export declined gate writes nothing", async () => {
     vi.stubGlobal("fetch", () =>
       Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),

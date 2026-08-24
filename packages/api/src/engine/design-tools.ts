@@ -688,7 +688,11 @@ export const designExportTool = defineTool({
 
     if (args.format === "pdf" || args.format === "pptx") {
       const { output: markdown, report } = dcHtmlToMarp(current.content);
-      const mdPath = `/tmp/valet-design-export.md`;
+      // The intermediate markdown must live under /workspace: on the docker
+      // provider, writeFile lands on the HOST filesystem and only the
+      // workspace bind mount is visible to exec() inside the container. A
+      // /tmp path writes to the host and marp then can't find its input.
+      const mdPath = `/workspace/exports/.valet-design-export.md`;
       const outPath = `/workspace/exports/${baseName}.${args.format}`;
       try {
         await ctx.sandbox.mkdir("/workspace/exports");
@@ -697,8 +701,9 @@ export const designExportTool = defineTool({
       }
       await ctx.sandbox.writeFile(mdPath, markdown);
       const flag = args.format === "pdf" ? "--pdf" : "--pptx";
-      // Prefer the globally installed `marp` binary (Dockerfile.sandbox-design
-      // bakes marp-cli@4 exactly so exports work with registry egress denied).
+      // Prefer the globally installed `marp` binary (the stock image,
+      // docker/Dockerfile.sandbox-k8s, bakes marp-cli@4 exactly so exports
+      // work with registry egress denied).
       // The npx fallback pins @4 to match the baked major — an unpinned
       // `@latest` always consults the registry, defeating the offline install.
       const result = await ctx.sandbox.exec(
@@ -707,9 +712,12 @@ export const designExportTool = defineTool({
       );
       if (result.exitCode !== 0) {
         return {
-          text: `[design_export failed] marp-cli exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-800)}. PDF/PPTX rendering needs Chromium in the sandbox image (docker/Dockerfile.sandbox-design). For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity. Do NOT export html to /workspace as a substitute — the user cannot reach files in the sandbox.`,
+          text: `[design_export failed] marp-cli exited ${result.exitCode}: ${(result.stderr || result.stdout).slice(-800)}. PDF/PPTX rendering needs marp-cli + Chromium, which the stock sandbox image ships (docker/Dockerfile.sandbox-k8s) — this sandbox is running an older or minimal image. For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity. Do NOT export html to /workspace as a substitute — the user cannot reach files in the sandbox.`,
         };
       }
+      await ctx.sandbox.exec(`rm -f ${mdPath}`, { timeout: 10_000 }).catch(() => {
+        // Leftover intermediate file is harmless (dotfile in exports/).
+      });
       const reportText = report.length > 0 ? `\nexport report:\n- ${report.join("\n- ")}` : "";
       return { text: `exported revision ${current.revision} to ${outPath}${reportText}` };
     }

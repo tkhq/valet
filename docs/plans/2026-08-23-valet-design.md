@@ -297,7 +297,7 @@ All milestones landed on this branch. Deltas from the plan as written:
 | M4 core tools | done | engine ToolDefs over the internal HTTP seam; REST session minting |
 | M5 canvas | done | DOMPurify + shadow root; slide strip; history/revert; comments |
 | M6 hub | done | six templates; no design-system/model pickers in v1 (spec Decision 4/7) |
-| M7 sandbox image | done | `docker/Dockerfile.sandbox-design`; stock image covers html/gslides |
+| M7 sandbox image | done | folded into the stock image (single lineage): marp-cli + `CHROME_PATH` beside the existing chromium; no variant image |
 | M8 imports | done | marp + image + gslides; reports print in the tool result |
 | M9 slides actions | done | `slides.*` (sibling naming), fenced chunked batch_update, resumable |
 | M10 serializers | done | marp + gslides; existing vdids preserved on re-address (Scenario C) |

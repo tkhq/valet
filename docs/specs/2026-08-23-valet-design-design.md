@@ -528,11 +528,16 @@ Spawn a child coding session with the artifact as the starting point.
 
 ## Sandbox Image
 
-A new variant `docker/Dockerfile.sandbox-design` extends the base `k8s` image to include:
+No variant image. The repo's single-image lineage is locked (one stock
+image for every session shape; profile/docker are runtime switches, never
+image selectors), so the design export dependencies ship in the stock
+image (`docker/Dockerfile.sandbox-k8s`):
 
-- `@marp-team/marp-cli` (npm package)
-- Chromium (for exporting PDF via headless browser)
-- `google-api-nodejs-client` for Slides integration
+- `@marp-team/marp-cli` (npm, pinned) for PDF/PPTX rendering
+- Chromium — already present for agent-browser; marp reuses it via
+  `CHROME_PATH` (no second browser)
+- Slides API calls use plain `fetch` from the API process, not a sandbox
+  client library
 
 **Egress policy during export:** exports run against `file://` inputs only. The sandbox's egress policy denies connections to link-local and cluster-internal IP ranges during export operations (egress firewall rules applied at tool invocation).
 
