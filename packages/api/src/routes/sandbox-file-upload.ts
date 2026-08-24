@@ -216,22 +216,23 @@ fileUploadRouter.post("/:id/files", async (c) => {
   const totalBytes: Uint8Array = Buffer.concat(chunks);
   const sha256Hex = sha256.digest("hex");
 
+  // extract=true on a file that is neither a zip nor a PDF: nothing to
+  // extract. Checked before the write, so the failed request leaves no
+  // file behind and a retry with extract=false does not hit the 409
+  // destination-exists check.
+  if (forceExtract && detectedType === "other") {
+    return c.json(
+      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
+      415,
+    );
+  }
+
   try {
     await sandbox.writeBinary(uploadPath, totalBytes);
   } catch (err) {
     return c.json(
       { error: "Failed to write file to sandbox", corrective: "Try uploading again." },
       500,
-    );
-  }
-
-  // extract=true on a file that is neither a zip nor a PDF: nothing to
-  // extract. The file is already written; the client asked for an
-  // extraction that cannot happen, so report it.
-  if (forceExtract && detectedType === "other") {
-    return c.json(
-      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
-      415,
     );
   }
 
