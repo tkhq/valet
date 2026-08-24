@@ -319,6 +319,57 @@ export async function deleteStagedForSession(
 }
 
 /**
+ * Writes a skill's bundled resources into the session's sandbox (so the
+ * files exist this turn) and stages one row per resource (so reconcile
+ * re-materializes them after a sandbox replacement). Returns the absolute
+ * in-sandbox skill root. Sessions without a db get the write-through only
+ * (design decision 7's exception).
+ *
+ * Resource paths run through validateTargetPath, so a path that escapes
+ * the workspace throws even though plugin skills are trusted input.
+ */
+export async function materializeSkillResources(
+  deps: { db?: AppDb; blobs?: BlobStore; now?: () => number },
+  skill: { name: string; resources?: Array<{ path: string; data: Uint8Array }> },
+  ctx: { sessionId: string; sandbox: Sandbox },
+): Promise<string> {
+  const rootRel = `${SKILLS_DIR}/${skill.name}`;
+  const rootAbs = posix.join(WORKSPACE_ROOT, rootRel);
+  let hasScripts = false;
+  for (const resource of skill.resources ?? []) {
+    const rel = validateTargetPath(`${rootRel}/${resource.path}`);
+    if (!rel.startsWith(`${rootRel}/`)) {
+      throw new Error(
+        `Skill resource path "${resource.path}" escapes the workspace skill root. Use a path relative to the skill directory.`,
+      );
+    }
+    if (resource.path.startsWith("scripts/")) hasScripts = true;
+    const abs = posix.join(WORKSPACE_ROOT, rel);
+    await ctx.sandbox.mkdir(posix.dirname(abs));
+    await ctx.sandbox.writeBinary(abs, resource.data);
+    if (deps.db) {
+      await stageForSession(
+        { db: deps.db, blobs: deps.blobs, now: deps.now },
+        {
+          sessionId: ctx.sessionId,
+          origin: "skill",
+          originKey: skill.name,
+          targetPath: rel,
+          kind: "file",
+          payload: resource.data,
+        },
+      );
+    }
+  }
+  // Best-effort executable bit for scripts/ — some providers' writeBinary
+  // lands 0644, and "run scripts/x.sh" is the whole point of the bundle.
+  if (hasScripts) {
+    await ctx.sandbox.exec(`chmod -R a+rx '${rootAbs}/scripts'`).catch(() => {});
+  }
+  return rootAbs;
+}
+
+/**
  * Reads one path out of a sandbox for staging (the parent side of a
  * share). A file comes back as its bytes; a directory becomes a gzipped
  * tarball, built through the workspace tmp dir so the docker provider's

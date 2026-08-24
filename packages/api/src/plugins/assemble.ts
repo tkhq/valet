@@ -30,7 +30,7 @@
  */
 import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
 import type { PinnedActionSpec, RoleSpec, SkillSource, ToolDef } from "@valet/engine";
-import { buildSkillTool, SKILL_TOOL_NAME } from "./skill-tool.js";
+import { buildSkillTool, SKILL_TOOL_NAME, type SkillToolOpts } from "./skill-tool.js";
 
 export interface AssembledPlugins {
   plugins: ValetPlugin[];
@@ -170,6 +170,7 @@ export function pluginSessionExtras(
   plugins: ValetPlugin[],
   extraSkills: SkillSource[] = [],
   pins: readonly PinnedActionSpec[] = [],
+  skillToolOpts?: SkillToolOpts,
 ): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
   const tools =
@@ -190,7 +191,7 @@ export function pluginSessionExtras(
   // The `skill` tool is what makes these skills reachable — without it the
   // markdown is inert. Appended after the catalog tools so `list_tools`/
   // `call_tool` keep their positions.
-  const skillTool = buildSkillTool(skills);
+  const skillTool = buildSkillTool(skills, skillToolOpts);
   if (skillTool) tools.push(skillTool);
 
   return { tools, skills, roles, shadowedSkills: shadowed };

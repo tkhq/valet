@@ -19,7 +19,7 @@
 import { Type, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { renderTemplate } from "@valet/engine";
-import type { SkillSource, ToolDef, ToolResult } from "@valet/engine";
+import type { SkillSource, ToolContext, ToolDef, ToolResult } from "@valet/engine";
 
 export const SKILL_TOOL_NAME = "skill";
 
@@ -102,7 +102,19 @@ export function renderSkill(
  * quietly keep the last one — serving one skill's body under another's
  * name. It throws instead.
  */
-export function buildSkillTool(skills: SkillSource[]): ToolDef | null {
+export interface SkillToolOpts {
+  /**
+   * Writes a skill's bundled resources into the session's sandbox and
+   * stages them for reconcile (staged-files design, 2026-08-23), returning
+   * the absolute in-sandbox root they landed under. Called only for a
+   * skill that ships resources. A throw degrades to a warning line in the
+   * tool result — the body still arrives, with its file references marked
+   * unavailable.
+   */
+  materializeResources?: (skill: SkillSource, ctx: ToolContext) => Promise<string>;
+}
+
+export function buildSkillTool(skills: SkillSource[], opts?: SkillToolOpts): ToolDef | null {
   if (skills.length === 0) return null;
   const byName = new Map<string, SkillSource>();
   for (const skill of skills) {
@@ -120,8 +132,24 @@ export function buildSkillTool(skills: SkillSource[]): ToolDef | null {
     parameters: skillParameters,
     riskLevel: "low",
     protectedFromPruning: true,
-    execute: async (args): Promise<ToolResult> => ({
-      text: renderSkill(byName, args.name, args.args ?? {}),
-    }),
+    execute: async (args, ctx): Promise<ToolResult> => {
+      const rendered = renderSkill(byName, args.name, args.args ?? {});
+      const skill = byName.get(args.name);
+      if (!skill || !skill.resources?.length || !opts?.materializeResources) {
+        return { text: rendered };
+      }
+      try {
+        const root = await opts.materializeResources(skill, ctx);
+        return { text: `Files for this skill are in ${root}/.\n\n${rendered}` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          text:
+            `[skill_resources_unavailable] This skill's bundled files could not be written ` +
+            `to the workspace: ${message}. File references in the body (scripts/, references/, ` +
+            `assets/) are unavailable this turn.\n\n${rendered}`,
+        };
+      }
+    },
   });
 }

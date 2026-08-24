@@ -12,6 +12,7 @@ import { sessionStagedFiles } from "../schema/index.js";
 import {
   INLINE_MAX_BYTES,
   loadStagedFiles,
+  materializeSkillResources,
   snapshotFromSandbox,
   stageForSession,
 } from "./staged-files.js";
@@ -225,5 +226,95 @@ describe("snapshotFromSandbox", () => {
   it("names the missing path when it is neither file nor directory", async () => {
     const sandbox = fakeSandbox({});
     await expect(snapshotFromSandbox(sandbox, "missing.txt")).rejects.toThrow(/missing\.txt/);
+  });
+});
+
+describe("materializeSkillResources", () => {
+  function recordingSandbox(): Sandbox & {
+    writes: Map<string, Uint8Array>;
+    mkdirs: string[];
+    execCalls: string[];
+  } {
+    const writes = new Map<string, Uint8Array>();
+    const mkdirs: string[] = [];
+    const execCalls: string[] = [];
+    return {
+      id: "sb-skill",
+      writes,
+      mkdirs,
+      execCalls,
+      async readFile() {
+        throw new Error("not implemented");
+      },
+      async readBinary() {
+        throw new Error("not implemented");
+      },
+      async writeFile() {},
+      async writeBinary(path: string, data: Uint8Array) {
+        writes.set(path, data);
+      },
+      async readdir() {
+        return [];
+      },
+      async stat() {
+        throw new Error("ENOENT");
+      },
+      async mkdir(path: string) {
+        mkdirs.push(path);
+      },
+      async rm() {},
+      async exec(command: string): Promise<ExecResult> {
+        execCalls.push(command);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+  }
+
+  const skill = {
+    name: "pdf-tools",
+    resources: [
+      { path: "scripts/extract.py", data: new TextEncoder().encode("print('hi')\n") },
+      { path: "references/REF.md", data: new TextEncoder().encode("ref\n") },
+    ],
+  };
+
+  it("writes every resource under the skill root, stages rows, and returns the root", async () => {
+    const sandbox = recordingSandbox();
+    const root = await materializeSkillResources(
+      { db, blobs: new MemoryBlobStore() },
+      skill,
+      { sessionId: "sess-skill", sandbox },
+    );
+    expect(root).toBe("/workspace/.valet/skills/pdf-tools");
+    expect(sandbox.writes.has("/workspace/.valet/skills/pdf-tools/scripts/extract.py")).toBe(true);
+    expect(sandbox.writes.has("/workspace/.valet/skills/pdf-tools/references/REF.md")).toBe(true);
+    const rows = await loadStagedFiles(db, "sess-skill");
+    expect(rows.map((r) => r.targetPath).sort()).toEqual([
+      ".valet/skills/pdf-tools/references/REF.md",
+      ".valet/skills/pdf-tools/scripts/extract.py",
+    ]);
+    expect(rows.every((r) => r.origin === "skill")).toBe(true);
+    const chmod = sandbox.execCalls.find((c) => c.includes("chmod"));
+    expect(chmod).toContain("/workspace/.valet/skills/pdf-tools/scripts");
+  });
+
+  it("write-through still succeeds without a db (no rows, no throw)", async () => {
+    const sandbox = recordingSandbox();
+    const root = await materializeSkillResources({}, skill, {
+      sessionId: "sess-nodb",
+      sandbox,
+    });
+    expect(root).toBe("/workspace/.valet/skills/pdf-tools");
+    expect(sandbox.writes.size).toBe(2);
+  });
+
+  it("rejects a resource whose path escapes the skill root", async () => {
+    const evil = {
+      name: "evil",
+      resources: [{ path: "../../outside.sh", data: new Uint8Array([1]) }],
+    };
+    await expect(
+      materializeSkillResources({ db }, evil, { sessionId: "sess-evil", sandbox: recordingSandbox() }),
+    ).rejects.toThrow(/workspace/i);
   });
 });

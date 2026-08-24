@@ -21,6 +21,7 @@ import { imageSources, bakes } from "../schema/index.js";
 import type { SessionMeta } from "./host.js";
 import type { RepoBinding } from "../wire/types.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
+import { stageForSession } from "./staged-files.js";
 import { computeSpec } from "./sandbox-spec.js";
 
 const ORG = "org1";
@@ -553,5 +554,67 @@ describe("resolveSnapshot", () => {
       const spec = computeSpec(snap);
       expect(spec.image).toBe(DEFAULT_IMAGE);
     });
+  });
+});
+
+describe("resolveSnapshot staged files", () => {
+  let harness: TestPgDb;
+  let db: AppDb;
+
+  beforeEach(async () => {
+    harness = await freshTestPgDb();
+    db = harness.appDb;
+  });
+  afterEach(async () => {
+    await harness.cleanup();
+  });
+
+  it("loads the session's staged rows into stagedFiles, and computeSpec emits their steps", async () => {
+    await stageForSession(
+      { db },
+      {
+        sessionId: "sess-staged",
+        origin: "share",
+        originKey: "parent-1",
+        targetPath: "report.md",
+        kind: "file",
+        payload: new TextEncoder().encode("hello\n"),
+      },
+    );
+
+    const snap = await resolveSnapshot({
+      db,
+      provider: fakeProvider(true),
+      meta: meta(),
+      apiUrl: API_URL,
+      stockImage: STOCK_IMAGE,
+      sessionId: "sess-staged",
+    });
+
+    expect(snap.stagedFiles).toHaveLength(1);
+    expect(snap.stagedFiles?.[0]?.targetPath).toBe("report.md");
+    const spec = computeSpec(snap);
+    expect(spec.steps.some((s) => s.id.startsWith("staged:"))).toBe(true);
+  });
+
+  it("leaves stagedFiles empty when the session has no rows or no sessionId is given", async () => {
+    const withId = await resolveSnapshot({
+      db,
+      provider: fakeProvider(true),
+      meta: meta(),
+      apiUrl: API_URL,
+      stockImage: STOCK_IMAGE,
+      sessionId: "sess-none",
+    });
+    expect(withId.stagedFiles ?? []).toHaveLength(0);
+
+    const withoutId = await resolveSnapshot({
+      db,
+      provider: fakeProvider(true),
+      meta: meta(),
+      apiUrl: API_URL,
+      stockImage: STOCK_IMAGE,
+    });
+    expect(withoutId.stagedFiles ?? []).toHaveLength(0);
   });
 });

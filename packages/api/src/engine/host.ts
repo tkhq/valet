@@ -37,6 +37,7 @@ import {
   type RepoInstructions,
   type Sandbox,
   type SkillSource,
+  type ToolContext,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import { identityForUser } from "../channels/identity-links.js";
@@ -52,6 +53,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
+import { materializeSkillResources } from "./staged-files.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
@@ -758,11 +760,22 @@ export class EngineHost {
         env: process.env,
       }),
     );
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
+    // Skill resource materialization (staged-files design, decision 7):
+    // write-through into the live sandbox at activation, plus staged rows
+    // (db present) so reconcile re-materializes after a sandbox replacement.
+    const skillToolOpts = {
+      materializeResources: (skill: SkillSource, ctx: ToolContext) =>
+        materializeSkillResources({ db: this.opts.db, blobs: this.opts.blobs }, skill, {
+          sessionId: ctx.sessionId,
+          sandbox: ctx.sandbox,
+        }),
+    };
+    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins, skillToolOpts);
     return pluginSessionExtras(
       plugins,
       await listSkillSourcesFor(this.opts.db, owner, orgId),
       pins,
+      skillToolOpts,
     );
   }
 
@@ -896,6 +909,10 @@ export class EngineHost {
         apiUrl,
         stockImage,
         preflight: host.opts.prebuildPreflight,
+        // Staged files (2026-08-23 design): the session's rows become
+        // staged:<id> steps, so shares and skill resources re-materialize
+        // at every reconcile window.
+        sessionId,
       });
 
       // Best-effort prebuild-id recording — same as the old eager path.
@@ -904,7 +921,7 @@ export class EngineHost {
       }
 
       const spec = computeSpec(snap);
-      const steps = buildPrepSteps(snap, spec.steps, onStartRef);
+      const steps = buildPrepSteps(snap, spec.steps, onStartRef, { blobs: host.opts.blobs });
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
