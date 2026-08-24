@@ -226,6 +226,7 @@ by hand as each user signs in. No wipe and no re-import is needed.
 
 | Variable | Description |
 |----------|-------------|
+| `VALET_MAX_UPLOAD_BYTES` | Per-upload size cap in bytes (default 52428800 = 50 MB). Streamed and counted; payloads larger than this return 413 without buffering. |
 | `VALET_SANDBOX_BACKEND` | `docker` (default) \| `local` \| `kubernetes` |
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
 | `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |
