@@ -1243,6 +1243,20 @@ export type EngineEvent =
       state: "provisioning" | "ready" | "idle" | "snapshotting" | "suspended" | "released" | "error";
       epoch: number;
       estimateMs?: number;
+    }
+  | {
+      /**
+       * Host extension event. The ENGINE NEVER emits this — it exists so a
+       * host can push app-level, session-scoped events through the same
+       * durable EventStream its WebSocket layer already subscribes to
+       * (first consumer: Valet Design's `design.artifact.updated`). `name`
+       * is namespaced by the host; `payload` is host-opaque JSON. The
+       * engine treats the variant as pass-through data, same contract as
+       * `toolConfig`.
+       */
+      type: "host_event";
+      name: string;
+      payload?: Record<string, unknown>;
     };
 
 export interface BusEvent {

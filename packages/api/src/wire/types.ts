@@ -711,9 +711,90 @@ export type WireEvent =
       /** The completed command as a wire `Message` (role "system", content = output). */
       message: Message;
     }
-  | { seq: number; ts: number; offset?: string; type: "ping" };
+  | { seq: number; ts: number; offset?: string; type: "ping" }
+  // Valet Design events (docs/specs/2026-08-23-valet-design-design.md).
+  // Metadata only — the canvas refetches artifact bytes over REST
+  // (`GET /api/sessions/:id/design/artifact`); bytes never ride the wire.
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type:
+        | "design.artifact.created"
+        | "design.artifact.updated"
+        | "design.artifact.imported"
+        | "design.comment.added"
+        | "design.comment.resolved"
+        | "design.export.started"
+        | "design.export.completed"
+        | "design.export.failed"
+        | "design.handoff.spawned";
+      sessionId: string;
+      /** Host-defined event payload (revision id, comment id, format, ...). */
+      payload: Record<string, unknown>;
+    };
 
 export type WireEventType = WireEvent["type"];
+
+/** The design.* wire type names, for the bridge's host_event mapping. */
+export const DESIGN_WIRE_EVENT_TYPES = [
+  "design.artifact.created",
+  "design.artifact.updated",
+  "design.artifact.imported",
+  "design.comment.added",
+  "design.comment.resolved",
+  "design.export.started",
+  "design.export.completed",
+  "design.export.failed",
+  "design.handoff.spawned",
+] as const;
+
+export type DesignWireEventType = (typeof DESIGN_WIRE_EVENT_TYPES)[number];
+
+// ── Valet Design REST shapes (routes/design.ts) ─────────────────────────────
+
+export interface DesignArtifactResponse {
+  artifactId: string;
+  sessionId: string;
+  /** The template the session was minted from; null for pre-design rows. */
+  template: string | null;
+  /** Current revision id (`r-NNN`). */
+  revision: string;
+  sizeBytes: number;
+  updatedAt: number;
+  /** The full .dc.html document. */
+  content: string;
+}
+
+export interface DesignRevisionSummary {
+  revision: string;
+  summary: string;
+  turnId: string | null;
+  createdAt: number;
+}
+
+export interface DesignRevisionsResponse {
+  revisions: DesignRevisionSummary[];
+  current: string;
+}
+
+export interface DesignCommentWire {
+  id: string;
+  vdid: string;
+  revision: string;
+  body: string;
+  authorUserId: string;
+  resolvedAt: number | null;
+  createdAt: number;
+}
+
+export interface DesignCommentsResponse {
+  comments: DesignCommentWire[];
+}
+
+export interface DesignTokensResponse {
+  tokens: Record<string, string>;
+}
 
 /**
  * Thin projection of the engine's `QueueState` for the wire. The full items

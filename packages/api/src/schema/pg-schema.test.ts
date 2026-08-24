@@ -76,6 +76,9 @@ const APP_TABLES = [
   "event_subscriptions",
   "event_deliveries",
   "linear_installations",
+  "design_artifacts",
+  "design_artifact_revisions",
+  "design_comments",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
