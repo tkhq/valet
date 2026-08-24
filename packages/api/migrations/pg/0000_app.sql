@@ -226,6 +226,8 @@ CREATE TABLE "agent_sessions" (
 	"bake_id" text,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
+	"kind" text DEFAULT 'code' NOT NULL,
+	"template" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -495,6 +497,42 @@ CREATE TABLE "artifacts" (
 CREATE UNIQUE INDEX "artifacts_token_unique" ON "artifacts" ("token");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path");
+--> statement-breakpoint
+CREATE TABLE "design_artifacts" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"current_revision" text NOT NULL,
+	"size_bytes" bigint NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "design_artifacts_session_unique" ON "design_artifacts" ("session_id");
+--> statement-breakpoint
+CREATE TABLE "design_artifact_revisions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"artifact_id" text NOT NULL,
+	"revision" text NOT NULL,
+	"turn_id" text,
+	"summary" text DEFAULT '' NOT NULL,
+	"content" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "design_artifact_revisions_unique" ON "design_artifact_revisions" ("artifact_id","revision");
+--> statement-breakpoint
+CREATE TABLE "design_comments" (
+	"id" text PRIMARY KEY NOT NULL,
+	"artifact_id" text NOT NULL,
+	"revision" text NOT NULL,
+	"vdid" text NOT NULL,
+	"body" text NOT NULL,
+	"author_user_id" text NOT NULL,
+	"resolved_at" bigint,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "design_comments_artifact" ON "design_comments" ("artifact_id");
 --> statement-breakpoint
 CREATE TABLE "skills" (
 	"id" text PRIMARY KEY NOT NULL,

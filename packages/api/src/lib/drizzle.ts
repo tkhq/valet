@@ -200,4 +200,56 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // Null on every run settled before the column existed — exactly the rows
   // the reclaim sweep must pick up.
   await db.query('ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint');
+
+  // Valet Design (2026-08-23 design spec): which authoring surface a session
+  // drives. The DEFAULT backfills every pre-existing session to 'code' —
+  // the same answer a fresh database gets.
+  await db.query(`ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "kind" text NOT NULL DEFAULT 'code'`);
+  await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "template" text');
+
+  // Design artifact tables (Valet Design) — whole-table siblings of the
+  // artifacts repair above. Keep the definitions in lockstep with
+  // `0000_app.sql`.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS "design_artifacts" (
+      "id" text PRIMARY KEY NOT NULL,
+      "session_id" text NOT NULL,
+      "current_revision" text NOT NULL,
+      "size_bytes" bigint NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )
+  `);
+  await db.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "design_artifacts_session_unique" ON "design_artifacts" ("session_id")',
+  );
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS "design_artifact_revisions" (
+      "id" text PRIMARY KEY NOT NULL,
+      "artifact_id" text NOT NULL,
+      "revision" text NOT NULL,
+      "turn_id" text,
+      "summary" text DEFAULT '' NOT NULL,
+      "content" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )
+  `);
+  await db.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "design_artifact_revisions_unique" ON "design_artifact_revisions" ("artifact_id","revision")',
+  );
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS "design_comments" (
+      "id" text PRIMARY KEY NOT NULL,
+      "artifact_id" text NOT NULL,
+      "revision" text NOT NULL,
+      "vdid" text NOT NULL,
+      "body" text NOT NULL,
+      "author_user_id" text NOT NULL,
+      "resolved_at" bigint,
+      "created_at" bigint NOT NULL
+    )
+  `);
+  await db.query(
+    'CREATE INDEX IF NOT EXISTS "design_comments_artifact" ON "design_comments" ("artifact_id")',
+  );
 }

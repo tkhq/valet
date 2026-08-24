@@ -360,6 +360,15 @@ export const agentSessions = pgTable(
     // Stamped once the reaper has destroyed the hibernated sandbox, so the
     // row stops sweeping. Cleared by the next hibernate write.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // Which authoring surface the session drives (Valet Design spec).
+    // 'code' is every pre-design session; 'design' sessions carry a
+    // design_artifacts row and get the design_* tools. NOT the engine's
+    // `purpose` (interactive/orchestrator/workflow/child) — that is the
+    // lifecycle role, this is the surface.
+    kind: text("kind", { enum: ["code", "design"] }).notNull().default("code"),
+    // Design template the session was minted from ('slides', 'document',
+    // ...). Null for kind='code'.
+    template: text("template"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -821,6 +830,71 @@ export const artifacts = pgTable(
     uniqueIndex("artifacts_owner_path_unique").on(t.ownerType, t.ownerId, t.sourceMemoryPath),
   ],
 );
+
+// ─── Valet Design ───────────────────────────────────────────────────────────
+//
+// Design artifact storage (docs/specs/2026-08-23-valet-design-design.md).
+// One artifact per kind='design' session; every mutation appends a
+// design_artifact_revisions row holding the full .dc.html bytes inline
+// (the artifacts-table precedent — no blob store, no storage_ref).
+// `currentRevision` names the live revision; revert rewrites it to an
+// older revision id without deleting history. Session/turn edges are
+// id-string references, never SQL constraints (turn_id crosses into the
+// engine schema).
+export const designArtifacts = pgTable(
+  "design_artifacts",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    currentRevision: text("current_revision").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("design_artifacts_session_unique").on(t.sessionId)],
+);
+
+export const designArtifactRevisions = pgTable(
+  "design_artifact_revisions",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    // Monotonic per-artifact id, formatted `r-NNN`. Unique with artifactId.
+    revision: text("revision").notNull(),
+    // Engine entry id of the turn that wrote this revision. Null for the
+    // seeded r-001 (written by session create, not by a turn).
+    turnId: text("turn_id"),
+    summary: text("summary").notNull().default(""),
+    // Full .dc.html document for this revision.
+    content: text("content").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("design_artifact_revisions_unique").on(t.artifactId, t.revision)],
+);
+
+// Element-anchored comments. `vdid` is the content-hashed element id in the
+// artifact (`data-vdid`); the anchor survives revisions because the hash is
+// derived from stable element attributes, not document position.
+export const designComments = pgTable(
+  "design_comments",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    // Revision the comment was placed against (context, not a constraint —
+    // the comment stays visible on later revisions while the vdid exists).
+    revision: text("revision").notNull(),
+    vdid: text("vdid").notNull(),
+    body: text("body").notNull(),
+    authorUserId: text("author_user_id").notNull(),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("design_comments_artifact").on(t.artifactId)],
+);
+
+export type DesignArtifactRow = typeof designArtifacts.$inferSelect;
+export type DesignArtifactRevisionRow = typeof designArtifactRevisions.$inferSelect;
+export type DesignCommentRow = typeof designComments.$inferSelect;
 
 // ─── Skills ─────────────────────────────────────────────────────────────────
 //
