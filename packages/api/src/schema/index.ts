@@ -1290,6 +1290,40 @@ export const sessionRepos = pgTable(
   ],
 );
 
+// ─── Staged files (staged-files design, 2026-08-23) ────────────────────────
+//
+// One row binds a session to a payload and a workspace-relative target
+// path. The reconcile loop materializes each row as a `staged:<id>` prep
+// step, so the file survives sandbox replacement. Producers: skill
+// activation (`origin: skill`) and parent-to-child shares (`origin:
+// share`). Exactly one of `blobKey` / `inlineContent` is set.
+export const sessionStagedFiles = pgTable(
+  "session_staged_files",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    origin: text("origin", { enum: ["skill", "share"] }).notNull(),
+    // The skill name, or the parent session id — where the payload came from.
+    originKey: text("origin_key").notNull(),
+    // Workspace-relative target, validated by validateTargetPath at insert.
+    // For a bundle, the directory the tarball unpacks into.
+    targetPath: text("target_path").notNull(),
+    kind: text("kind", { enum: ["file", "bundle"] }).notNull(),
+    blobKey: text("blob_key"),
+    inlineContent: text("inline_content"),
+    contentHash: text("content_hash").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("session_staged_files_session").on(t.sessionId),
+    // A re-push of the same target is an upsert: the newest payload owns
+    // the path.
+    uniqueIndex("session_staged_files_session_target").on(t.sessionId, t.targetPath),
+  ],
+);
+
 // ─── GitHub App installations (GitHub/repo integration plan, Task 2) ───────
 //
 // One row per org-linked GitHub App installation. `cachedToken` /

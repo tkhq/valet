@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
+import type { StagedFileSnap } from "./staged-files.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 
 // Increment when the prep logic changes in a way that requires re-running all
@@ -40,6 +41,11 @@ export interface ResolveSnapshot {
   repos: Array<RepoBinding & { targetDir: string }>;
   userName?: string;
   userEmail?: string;
+  /**
+   * `session_staged_files` rows for this session (staged-files design,
+   * 2026-08-23). Absent means none. Each becomes a `staged:<id>` step.
+   */
+  stagedFiles?: StagedFileSnap[];
 }
 
 export interface StepSpec {
@@ -93,6 +99,20 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     const { fullName, cloneUrl, ref, auth, targetDir } = binding;
     const cloneInput = `${fullName}|${cloneUrl}|${ref ?? ""}|${auth ?? ""}|${targetDir}|${PREP_VERSION}`;
     steps.push({ id: `clone:${fullName}`, hash: sha256(cloneInput), critical: true });
+  }
+
+  // Step 4: one staged-file step per row. The hash covers the payload
+  // (contentHash, INV-4) and the target, so a re-pushed file or a moved
+  // target always re-applies. Shares are critical (the file is often why
+  // the child exists); skill resources degrade loudly at activation
+  // instead (design decision 5).
+  for (const staged of snap.stagedFiles ?? []) {
+    const input = `${staged.contentHash}|${staged.targetPath}|${staged.kind}|${PREP_VERSION}`;
+    steps.push({
+      id: `staged:${staged.id}`,
+      hash: sha256(input),
+      critical: staged.origin === "share",
+    });
   }
 
   return { image, steps };

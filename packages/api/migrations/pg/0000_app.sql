@@ -740,6 +740,25 @@ CREATE INDEX "session_repos_session" ON "session_repos" ("session_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "session_repos_session_position" ON "session_repos" ("session_id","position");
 --> statement-breakpoint
+CREATE TABLE "session_staged_files" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"origin" text NOT NULL,
+	"origin_key" text NOT NULL,
+	"target_path" text NOT NULL,
+	"kind" text NOT NULL,
+	"blob_key" text,
+	"inline_content" text,
+	"content_hash" text NOT NULL,
+	"size_bytes" bigint NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "session_staged_files_session" ON "session_staged_files" ("session_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "session_staged_files_session_target" ON "session_staged_files" ("session_id","target_path");
+--> statement-breakpoint
 CREATE TABLE "github_installations" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

@@ -153,4 +153,28 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // column existed, which the sync and Settings read as "never set" —
   // fail-closed, same as an empty list.
   await db.query('ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb');
+
+  // Staged files (2026-08-23 design). A whole table, so the same in-place
+  // problem as a column: a database that already applied 0000_app.sql
+  // never sees the CREATE there. All three statements are idempotent.
+  await db.query(`CREATE TABLE IF NOT EXISTS "session_staged_files" (
+    "id" text PRIMARY KEY NOT NULL,
+    "session_id" text NOT NULL,
+    "origin" text NOT NULL,
+    "origin_key" text NOT NULL,
+    "target_path" text NOT NULL,
+    "kind" text NOT NULL,
+    "blob_key" text,
+    "inline_content" text,
+    "content_hash" text NOT NULL,
+    "size_bytes" bigint NOT NULL,
+    "created_at" bigint NOT NULL,
+    "updated_at" bigint NOT NULL
+  )`);
+  await db.query(
+    'CREATE INDEX IF NOT EXISTS "session_staged_files_session" ON "session_staged_files" ("session_id")',
+  );
+  await db.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "session_staged_files_session_target" ON "session_staged_files" ("session_id","target_path")',
+  );
 }

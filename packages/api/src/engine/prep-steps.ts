@@ -23,6 +23,7 @@ import {
   prepPrebuiltBinding,
   resolveStartRef,
 } from "./workspace-prep.js";
+import { buildStagedStep } from "./staged-files.js";
 
 /**
  * Pairs each `StepSpec` in `specs` with an `apply` closure drawn from the
@@ -41,6 +42,7 @@ export function buildPrepSteps(
   snap: ResolveSnapshot,
   specs: StepSpec[],
   onStartRef?: (ref: import("@valet/engine").SessionStartRef) => void | Promise<void>,
+  deps?: { blobs?: import("@valet/engine").BlobStore },
 ): PrepStep[] {
   const steps: PrepStep[] = [];
 
@@ -111,6 +113,18 @@ export function buildPrepSteps(
           }
         },
       });
+      continue;
+    }
+
+    if (spec.id.startsWith("staged:")) {
+      const rowId = spec.id.slice("staged:".length);
+      const row = (snap.stagedFiles ?? []).find((s) => s.id === rowId);
+      if (!row) {
+        throw new Error(
+          `prep-steps: unknown staged step id "${spec.id}" — no matching row in snapshot (programmer error)`,
+        );
+      }
+      steps.push(buildStagedStep(spec, row, { blobs: deps?.blobs }));
       continue;
     }
 
