@@ -89,6 +89,22 @@ export function loadSkillFromMarkdown(
   };
 }
 
+/**
+ * The note appended when a resource-bearing skill's body is delivered
+ * WITHOUT going through the `skill` tool (slash-command expansion,
+ * `Thread.skill()`). Only the tool materializes bundled files into the
+ * sandbox, so those paths must tell the model how to get them
+ * (staged-files design, 2026-08-23). Empty for a skill with no resources.
+ */
+export function skillResourceNote(skill: Pick<SkillSource, "name" | "resources">): string {
+  if (!skill.resources || skill.resources.length === 0) return "";
+  return (
+    `\n\nThis skill ships bundled files (scripts/, references/, assets/). ` +
+    `Call the \`skill\` tool with name "${skill.name}" before you use them — ` +
+    `it writes the files into the workspace and reports where they are.`
+  );
+}
+
 function asString(value: FrontmatterValue | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
 }

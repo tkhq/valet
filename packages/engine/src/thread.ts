@@ -13,7 +13,7 @@ import {
   isDecisionGateWithdrawn,
   shouldShortCircuit,
 } from "./decision-gate.js";
-import { renderTemplate } from "./roles-skills/index.js";
+import { renderTemplate, skillResourceNote } from "./roles-skills/index.js";
 import {
   deriveQueueState,
   MAX_PENDING_PER_THREAD,
@@ -679,7 +679,9 @@ export class Thread {
         throw new Error(`skill "${name}" args failed validation:\n${errors}`);
       }
     }
-    const rendered = renderTemplate(skill.content, args);
+    // Host-side invocation bypasses the skill tool, so a resource-bearing
+    // skill needs the same pointer the slash-command expansion adds.
+    const rendered = renderTemplate(skill.content, args) + skillResourceNote(skill);
     return this.submitPrompt(rendered, {
       author: opts.author,
       channel: opts.channel,

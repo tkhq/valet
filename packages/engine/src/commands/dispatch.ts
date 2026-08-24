@@ -1,4 +1,5 @@
 import { parseCommandArgs, substituteArgs } from "./args.js";
+import { skillResourceNote } from "../roles-skills/loader.js";
 import type { CommandRegistry } from "./registry.js";
 import type { ResolvedCommand } from "./types.js";
 
@@ -40,11 +41,15 @@ export function dispatchCommand(text: string, registry: CommandRegistry): Dispat
   switch (resolved.source) {
     case "skill": {
       const { skill } = resolved;
+      // Expansion delivers the body WITHOUT the skill tool, so a skill
+      // that ships files needs the model pointed at the tool that
+      // materializes them (staged-files design).
+      const note = skillResourceNote(skill);
       if (skill.invocation === "prompt") {
         const args = parseCommandArgs(raw);
-        return { kind: "expand", text: substituteArgs(skill.content, args) };
+        return { kind: "expand", text: substituteArgs(skill.content, args) + note };
       }
-      const block = `<skill name="${skill.name}">\n${skill.content.trim()}\n</skill>`;
+      const block = `<skill name="${skill.name}">\n${skill.content.trim()}${note}\n</skill>`;
       return { kind: "expand", text: raw ? `${block}\n\n${raw}` : block };
     }
 

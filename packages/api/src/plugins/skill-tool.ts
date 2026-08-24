@@ -135,7 +135,11 @@ export function buildSkillTool(skills: SkillSource[], opts?: SkillToolOpts): Too
     execute: async (args, ctx): Promise<ToolResult> => {
       const rendered = renderSkill(byName, args.name, args.args ?? {});
       const skill = byName.get(args.name);
-      if (!skill || !skill.resources?.length || !opts?.materializeResources) {
+      // A failed invocation ([skill_not_found]/[skill_bad_args]) must not
+      // materialize anything: the model is being asked to retry, and a
+      // success-shaped "Files are in ..." preamble on an error is a lie.
+      const failed = rendered.startsWith("[skill_");
+      if (failed || !skill || !skill.resources?.length || !opts?.materializeResources) {
         return { text: rendered };
       }
       try {

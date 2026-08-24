@@ -6,6 +6,7 @@
  * never calls the hook.
  */
 import { describe, expect, it } from "vitest";
+import { Type } from "typebox";
 import type { Credential, CredentialProvider, Sandbox, SkillSource, ToolContext } from "@valet/engine";
 import { buildSkillTool } from "./skill-tool.js";
 
@@ -109,5 +110,25 @@ describe("skill tool resource materialization", () => {
     const tool = buildSkillTool([bundledSkill]);
     const result = await tool!.execute({ name: "pdf-tools" }, makeCtx());
     expect(result.text).toBe("Run scripts/extract.py.");
+  });
+});
+
+describe("skill tool does not materialize failed invocations", () => {
+  it("skips materialization and the root line when args fail validation", async () => {
+    const calls: string[] = [];
+    const skillWithArgs: SkillSource = {
+      ...bundledSkill,
+      argsSchema: Type.Object({ topic: Type.String() }),
+    };
+    const tool = buildSkillTool([skillWithArgs], {
+      materializeResources: async (skill) => {
+        calls.push(skill.name);
+        return "/workspace/.valet/skills/pdf-tools";
+      },
+    });
+    const result = await tool!.execute({ name: "pdf-tools", args: {} }, makeCtx());
+    expect(result.text).toContain("[skill_bad_args]");
+    expect(result.text).not.toContain("Files for this skill");
+    expect(calls).toEqual([]);
   });
 });

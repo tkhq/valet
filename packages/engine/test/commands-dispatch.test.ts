@@ -91,3 +91,40 @@ describe("dispatchCommand", () => {
     if (o.kind === "execute") expect(o.raw).toBe("claude-opus-4-8");
   });
 });
+
+describe("resource-bearing skill expansion", () => {
+  const bundledSkill = {
+    name: "pdf-tools",
+    description: "Ships a script",
+    content: "Run scripts/extract.py.",
+    resources: [{ path: "scripts/extract.py", data: new TextEncoder().encode("x") }],
+  };
+  const regWithBundled = buildCommandRegistry({
+    skills: [bundledSkill],
+    pluginCommands: [],
+    bareSkillNames: false,
+  });
+
+  it("context expansion tells the model to fetch the bundled files via the skill tool", () => {
+    const o = dispatchCommand("/skill:pdf-tools", regWithBundled);
+    expect(o.kind).toBe("expand");
+    if (o.kind === "expand") {
+      expect(o.text).toContain("bundled files");
+      expect(o.text).toContain('`skill` tool');
+    }
+  });
+
+  it("prompt-invocation expansion carries the same note", () => {
+    const promptBundled = { ...bundledSkill, name: "pdf-prompt", invocation: "prompt" as const };
+    const reg = buildCommandRegistry({ skills: [promptBundled], pluginCommands: [], bareSkillNames: false });
+    const o = dispatchCommand("/skill:pdf-prompt", reg);
+    expect(o.kind).toBe("expand");
+    if (o.kind === "expand") expect(o.text).toContain("bundled files");
+  });
+
+  it("a skill without resources gets no note", () => {
+    const o = dispatchCommand("/skill:review src/", regWithSkill);
+    expect(o.kind).toBe("expand");
+    if (o.kind === "expand") expect(o.text).not.toContain("bundled files");
+  });
+});
