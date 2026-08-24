@@ -30,7 +30,7 @@ const FORBID_TAGS = ["script", "iframe", "object", "embed", "base", "form"];
  * attributes survive because DOMPurify allows `data-*` by default
  * (`ALLOW_DATA_ATTR: true`); `on*` event handlers are stripped by default.
  */
-export function sanitizeDesignHtml(content: string): string {
+function sanitizeDesignHtmlUncached(content: string): string {
   return DOMPurify.sanitize(content, {
     WHOLE_DOCUMENT: true,
     FORBID_TAGS,
@@ -95,4 +95,23 @@ export function parseSlides(sanitizedHtml: string): SlideInfo[] {
         (aside?.textContent?.trim() ?? ""),
     };
   });
+}
+
+/**
+ * Memoized sanitize: the canvas plus every slide thumbnail sanitize the
+ * SAME document per revision (N+1 DOMPurify passes). Keyed by string
+ * identity with a small LRU — one artifact per canvas, a few revisions in
+ * flight at most.
+ */
+const sanitizeCache = new Map<string, string>();
+export function sanitizeDesignHtml(html: string): string {
+  const hit = sanitizeCache.get(html);
+  if (hit !== undefined) return hit;
+  const out = sanitizeDesignHtmlUncached(html);
+  sanitizeCache.set(html, out);
+  if (sanitizeCache.size > 4) {
+    const oldest = sanitizeCache.keys().next().value;
+    if (oldest !== undefined) sanitizeCache.delete(oldest);
+  }
+  return out;
 }

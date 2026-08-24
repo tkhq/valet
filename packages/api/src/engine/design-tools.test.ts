@@ -85,7 +85,14 @@ describe("design tools", () => {
   it("design_edit rewrite POSTs the document with internal auth", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     vi.stubGlobal("fetch", (url: URL | string, init?: RequestInit) => {
-      calls.push({ url: String(url), init: init ?? {} });
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        // The rewrite-shrink guard reads the current artifact first.
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-001", content: DOC }), { status: 200 }),
+        );
+      }
+      calls.push({ url: u, init: init ?? {} });
       return Promise.resolve(
         new Response(JSON.stringify({ revision: "r-002", sizeBytes: 123 }), { status: 200 }),
       );
@@ -101,6 +108,24 @@ describe("design tools", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["x-valet-internal"]).toBe("tok");
     expect(headers["x-valet-actor"]).toBe("u1");
+  });
+
+  it("design_edit rewrite warns when the document shrinks by more than half", async () => {
+    const big = DOC.replace("<h1", `<p>${"x".repeat(30_000)}</p><h1`);
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-004", content: big }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ revision: "r-005", sizeBytes: 100 }), { status: 200 }),
+      );
+    });
+    const result = await designEditTool.execute({ kind: "rewrite", content: DOC }, ctxWith(CFG));
+    expect(result.text).toContain("smaller than the previous revision");
+    expect(result.text).toContain("revert if unintended");
   });
 
   it("design_edit patch reads, replaces by vdid, and writes fenced on the read revision", async () => {
@@ -427,8 +452,14 @@ describe("design tools", () => {
   });
 
   it("design_edit relays server notes (header normalization, staleness)", async () => {
-    vi.stubGlobal("fetch", () =>
-      Promise.resolve(
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-003", content: DOC }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
         new Response(
           JSON.stringify({
             revision: "r-004",
@@ -437,8 +468,8 @@ describe("design tools", () => {
           }),
           { status: 200 },
         ),
-      ),
-    );
+      );
+    });
     const result = await designEditTool.execute({ kind: "rewrite", content: DOC }, ctxWith(CFG));
     expect(result.text).toContain("wrote revision r-004");
     expect(result.text).toContain("note: added the missing");

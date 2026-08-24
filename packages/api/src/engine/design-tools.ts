@@ -129,6 +129,21 @@ export const designEditTool = defineTool({
       }
     }
 
+    // Rewrite-shrink guard: a rewrite built from a truncated design_read
+    // (or a stale memory) can silently drop most of the document. The
+    // write proceeds — revert exists — but the shrink is named.
+    let shrinkNote = "";
+    if (args.kind === "rewrite") {
+      const before = await readArtifact(cfg, ctx);
+      if (!("error" in before) && typeof before.content === "string") {
+        const prevLen = Buffer.byteLength(before.content);
+        const nextLen = Buffer.byteLength(content);
+        if (prevLen > 20_000 && nextLen < prevLen * 0.5) {
+          shrinkNote = `\nnote: this rewrite is ${Math.round((1 - nextLen / prevLen) * 100)}% smaller than the previous revision — if you rewrote from a truncated design_read, content was lost; check with design_read and revert if unintended`;
+        }
+      }
+    }
+
     const res = await fetch(designUrl(cfg, ctx, "edit"), {
       method: "POST",
       headers: designHeaders(cfg, ctx, true),
@@ -143,7 +158,7 @@ export const designEditTool = defineTool({
     if (!res.ok) return { text: `[design_edit failed] ${await readError(res)}` };
     const body = (await res.json()) as { revision: string; sizeBytes: number; notes?: string[] };
     const noteText = body.notes?.length ? `\n${body.notes.map((n) => `note: ${n}`).join("\n")}` : "";
-    return { text: `wrote revision ${body.revision} (${body.sizeBytes} bytes)${patchNote}${noteText}` };
+    return { text: `wrote revision ${body.revision} (${body.sizeBytes} bytes)${patchNote}${noteText}${shrinkNote}` };
   },
 });
 
@@ -364,6 +379,13 @@ export const designImportMarpTool = defineTool({
     } catch (err) {
       return {
         text: `[design_import_marp failed] cannot read ${args.file_path}: ${err instanceof Error ? err.message : String(err)}. Check the path with the read tool.`,
+      };
+    }
+    // Guard: an HTML file fed to the Markdown importer silently produced an
+    // empty deck (observed live). Marp input is Markdown.
+    if (/^\s*(?:<!DOCTYPE|<html|<x-dc)/i.test(markdown)) {
+      return {
+        text: `[design_import_marp failed] ${args.file_path} is an HTML document, not Marp Markdown. To use an HTML deck as the artifact, pass its full contents to design_edit kind='rewrite' instead.`,
       };
     }
 

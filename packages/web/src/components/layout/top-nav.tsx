@@ -34,14 +34,36 @@ import { NotificationsBell } from "./notifications-bell";
  * which was added last (the old `text-muted` base + `text-ink` active pair
  * rendered no visible active state at all).
  */
-function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
+function NavLink({
+  to,
+  children,
+  active,
+}: {
+  to: string;
+  children: React.ReactNode;
+  /** Overrides the router's own path matching. Needed where path nesting
+   * lies about ownership: a design canvas lives under /sessions/:id/design
+   * but belongs to the Design tab, not Sessions. */
+  active?: boolean;
+}) {
+  // `shrink-0` + `whitespace-nowrap`: the row scrolls when it does not
+  // fit, so a link must keep its own width instead of being squeezed
+  // into a wrapped two-line label.
+  const base = "shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash";
+  if (active !== undefined) {
+    return (
+      <Link
+        to={to}
+        className={`${base} ${active ? "text-ink font-medium bg-ink-wash" : "text-muted hover:text-ink"}`}
+      >
+        {children}
+      </Link>
+    );
+  }
   return (
     <Link
       to={to}
-      // `shrink-0` + `whitespace-nowrap`: the row scrolls when it does not
-      // fit, so a link must keep its own width instead of being squeezed
-      // into a wrapped two-line label.
-      className="shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash"
+      className={base}
       activeProps={{ className: "text-ink font-medium bg-ink-wash" }}
       inactiveProps={{ className: "text-muted hover:text-ink" }}
     >
@@ -118,6 +140,10 @@ export function TopNav() {
   // still lets the open assistant win — see `workspace-scope.tsx`.
   const scope = useWorkspaceScope();
   const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
+  const pathname = useRouterState({ select: (st) => st.location.pathname });
+  // A design canvas is a DESIGN surface that happens to nest under
+  // /sessions/:id in the URL — the Design tab owns it.
+  const onDesignCanvas = /^\/sessions\/[^/]+\/design/.test(pathname);
   const navigate = useNavigate();
   const createAssistant = useCreateAssistant();
 
@@ -210,8 +236,12 @@ export function TopNav() {
       >
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/memory">Memory</NavLink>
-        <NavLink to="/sessions">Sessions</NavLink>
-        <NavLink to="/design">Design</NavLink>
+        <NavLink to="/sessions" active={pathname.startsWith("/sessions") && !onDesignCanvas}>
+          Sessions
+        </NavLink>
+        <NavLink to="/design" active={pathname.startsWith("/design") || onDesignCanvas}>
+          Design
+        </NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
         <NavLink to="/events">Events</NavLink>
         <NavLink to="/skills">Skills</NavLink>

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  Download,
+  FileOutput,
   History,
   Maximize,
   MessageSquarePlus,
@@ -45,6 +47,17 @@ export const Route = createFileRoute("/sessions/$sessionId_/design")({
 });
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
+
+/** Export menu entries. Each sends the agent the design_export request —
+ * the agent owns the ExportManifest approval gate, so the flow stays
+ * user-approved even when started from a button. */
+const EXPORT_OPTIONS = [
+  { format: "html", label: "HTML (standalone viewer)", prompt: "Export the design as html." },
+  { format: "project", label: "Project folder", prompt: "Export the design as a project folder." },
+  { format: "pdf", label: "PDF", prompt: "Export the design as pdf." },
+  { format: "pptx", label: "PowerPoint (pptx)", prompt: "Export the design as pptx." },
+  { format: "gslides", label: "Google Slides", prompt: "Export the design to Google Slides." },
+] as const;
 
 /**
  * Pointer-drag panel resizing (the Claude Design slider). `invert` is for
@@ -125,6 +138,7 @@ function DesignCanvasPage() {
 
   const [zoomIdx, setZoomIdx] = useState(ZOOM_STEPS.indexOf(1));
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [commentMode, setCommentMode] = useState(false);
   const [commentVdid, setCommentVdid] = useState<string | null>(null);
   const [activeSlide, setActiveSlide] = useState(0);
@@ -226,13 +240,9 @@ function DesignCanvasPage() {
     undefined,
   )?.id;
 
-  /**
-   * Post the comment, then say it in the chat so the agent sees it — the
-   * comment row alone never reaches the model.
-   */
-  async function submitComment(vdid: string, body: string) {
-    const created = await addComment.mutateAsync({ vdid, body });
-    const text = `Comment on element [data-vdid=${vdid}] (comment id ${created.id}): ${body}`;
+  /** Send a message into the session thread (optimistic, same path the
+   * chat input uses) — how canvas controls talk to the agent. */
+  async function sendToAgent(text: string) {
     if (newestThreadId) {
       const optimisticId = addUserMessage(sessionId, text, newestThreadId);
       const res = await sendPrompt.mutateAsync({ text, threadId: newestThreadId });
@@ -240,8 +250,31 @@ function DesignCanvasPage() {
     } else {
       await sendPrompt.mutateAsync({ text });
     }
+  }
+
+  /**
+   * Post the comment, then say it in the chat so the agent sees it — the
+   * comment row alone never reaches the model.
+   */
+  async function submitComment(vdid: string, body: string) {
+    const created = await addComment.mutateAsync({ vdid, body });
+    await sendToAgent(`Comment on element [data-vdid=${vdid}] (comment id ${created.id}): ${body}`);
     setCommentVdid(null);
     setCommentMode(false);
+  }
+
+  /** Download the current artifact as a .dc.html file, client-side. */
+  function downloadArtifact() {
+    const content = artifactQ.data?.content;
+    if (!content) return;
+    const name = (session.data?.title || "design").replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const blob = new Blob([content], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${name}.dc.html`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   if (session.isLoading || artifactQ.isLoading) {
@@ -337,6 +370,41 @@ function DesignCanvasPage() {
           >
             <ZoomIn className="h-4 w-4" />
           </Button>
+        </div>
+        <Button variant="ghost" size="sm" onClick={downloadArtifact} title="Download the .dc.html file">
+          <Download className="h-4 w-4" aria-hidden />
+          <span>Download</span>
+        </Button>
+        <div className="relative">
+          <Button
+            variant={exportMenuOpen ? "secondary" : "ghost"}
+            size="sm"
+            aria-expanded={exportMenuOpen}
+            onClick={() => setExportMenuOpen((v) => !v)}
+          >
+            <FileOutput className="h-4 w-4" aria-hidden />
+            <span>Export</span>
+          </Button>
+          {exportMenuOpen && (
+            <div className="absolute right-0 top-full z-20 mt-1 w-52 rounded border border-line bg-paper py-1 shadow-lg">
+              {EXPORT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.format}
+                  type="button"
+                  className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-ink-wash"
+                  onClick={() => {
+                    setExportMenuOpen(false);
+                    void sendToAgent(opt.prompt);
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+              <div className="border-t border-line/60 px-3 py-1.5 text-[10px] text-muted">
+                Runs through the agent; approve the export gate in chat.
+              </div>
+            </div>
+          )}
         </div>
         <Button
           variant={commentMode ? "secondary" : "ghost"}
