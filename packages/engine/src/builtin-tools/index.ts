@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import type {
+  ChildFilePusher,
   ChildReader,
   ChildSender,
   ChildSpawner,
@@ -625,6 +626,28 @@ export const taskTool = defineTool({
         description: "Provision the child's sandbox with a rootless docker daemon (docker-in-sandbox).",
       }),
     ),
+    files: Type.Optional(
+      Type.Array(
+        Type.Object({
+          from: Type.String({
+            minLength: 1,
+            description: "File or directory under this session's /workspace to copy into the child.",
+          }),
+          to: Type.Optional(
+            Type.String({
+              description:
+                "Target path under the child's /workspace. Default: .valet/shared/<basename>.",
+            }),
+          ),
+        }),
+        {
+          maxItems: 16,
+          description:
+            "Files or directories to snapshot from this session's workspace into the child's, " +
+            "before the child starts. A directory is copied recursively.",
+        },
+      ),
+    ),
   }),
   execute: async (args, ctx) => {
     // ctx.config is `Record<string, unknown>` (verbatim toolConfig
@@ -645,6 +668,7 @@ export const taskTool = defineTool({
       model: args.model,
       profile: args.profile,
       docker: args.docker,
+      files: args.files,
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
     const result = await spawner(req, {
@@ -652,9 +676,61 @@ export const taskTool = defineTool({
       parentThreadId: ctx.threadId,
       actorUserId: ctx.userId,
       owner,
+      sandbox: ctx.sandbox,
     });
     return {
       text: `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+    };
+  },
+});
+
+export const childPushFileTool = defineTool({
+  name: "child_push_file",
+  description:
+    "Copy a file or directory from this session's workspace into a child " +
+    "session's workspace. The copy is a snapshot: later edits here do not " +
+    "propagate; push again to update. The file lands at the child's next " +
+    "run-start, so pair this with child_send to make the child act on it.",
+  parameters: Type.Object({
+    child_session_id: Type.String({
+      description: "The child session to push into, as returned by `task` or named in a child.settled signal.",
+    }),
+    from: Type.String({
+      minLength: 1,
+      description: "File or directory under this session's /workspace to copy.",
+    }),
+    to: Type.Optional(
+      Type.String({
+        description: "Target path under the child's /workspace. Default: .valet/shared/<basename>.",
+      }),
+    ),
+  }),
+  execute: async (args, ctx) => {
+    // Same `toolConfig` passthrough convention as `child_send`'s
+    // childSender: `ctx.config` is verbatim `Record<string, unknown>`, so a
+    // pusher-shaped value is known only by convention.
+    const rawPusher = ctx.config?.childFilePusher;
+    if (typeof rawPusher !== "function") {
+      return { text: "[child_push_file_unavailable] this session cannot push files to child sessions" };
+    }
+    const pusher = rawPusher as ChildFilePusher; // narrowed by typeof check above
+
+    const result = await pusher(
+      { childSessionId: args.child_session_id, from: args.from, to: args.to },
+      { parentSessionId: ctx.sessionId, sandbox: ctx.sandbox },
+    );
+    if (result === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    return {
+      text:
+        `pushed ${args.from} to child ${args.child_session_id}. It materializes at ` +
+        `/workspace/${result.targetPath} at the child's next run-start — send the child a ` +
+        `message (child_send) to have it act on the file.`,
     };
   },
 });
@@ -672,4 +748,5 @@ export const builtinTools: ToolDef[] = [
   childReadTool,
   childSendTool,
   childStatusTool,
+  childPushFileTool,
 ];

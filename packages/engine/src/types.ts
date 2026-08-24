@@ -1936,6 +1936,13 @@ export interface SpawnChildRequest {
   /** Request a rootless docker daemon inside the child's sandbox
    * (docker-in-sandbox, `SandboxCreateOpts.docker`). */
   docker?: boolean;
+  /**
+   * Files or directories to copy from the parent's workspace into the
+   * child's, snapshot at spawn time (staged-files design, 2026-08-23).
+   * `from` is a path under the parent's /workspace. `to` is the target
+   * under the child's /workspace; the host picks a default when omitted.
+   */
+  files?: Array<{ from: string; to?: string }>;
 }
 
 export interface SpawnChildResult {
@@ -1951,7 +1958,19 @@ export interface SpawnChildResult {
  */
 export type ChildSpawner = (
   req: SpawnChildRequest,
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
+  ctx: {
+    parentSessionId: string;
+    parentThreadId: string;
+    actorUserId: string;
+    owner: Principal;
+    /**
+     * The parent session's sandbox handle, for snapshotting
+     * `SpawnChildRequest.files` out of the parent workspace. Reading
+     * through it warms a cold sandbox (normal first-touch). Absent on
+     * pre-staged-files hosts.
+     */
+    sandbox?: Sandbox;
+  },
 ) => Promise<SpawnChildResult>;
 
 /**
@@ -2008,6 +2027,23 @@ export type ChildSender = (
   req: { childSessionId: string; message: string; interrupt?: boolean },
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
 ) => Promise<{ queueItemId: string } | null>;
+
+/**
+ * Copies one file or directory from the parent's workspace into a child
+ * session, on behalf of the parent (staged-files design, 2026-08-23). The
+ * host snapshots `from` out of `ctx.sandbox`, stages it for the child, and
+ * returns the child-workspace-relative target it will land at. The file
+ * materializes at the child's next run-start window; pair with
+ * `child_send` to make the child act on it.
+ *
+ * Returns `null` when `childSessionId` is not a child of
+ * `parentSessionId`, with the same "not yours" / "does not exist"
+ * ambiguity as `ChildReader`.
+ */
+export type ChildFilePusher = (
+  req: { childSessionId: string; from: string; to?: string },
+  ctx: { parentSessionId: string; sandbox: Sandbox },
+) => Promise<{ targetPath: string } | null>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,
