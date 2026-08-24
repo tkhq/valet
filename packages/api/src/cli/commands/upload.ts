@@ -236,14 +236,13 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
 
   // If `--message` was set, send a follow-up with the uploaded refs.
   if (args.message !== undefined && uploadedFiles.length > 0) {
-    const attachments = uploadedFiles.map((f) => ({
-      kind: "file_ref" as const,
+    const fileRefs = uploadedFiles.map((f) => ({
       ref: f.attachmentRef,
     }));
     try {
       const sent = await deps.client.sendPrompt(args.sessionId, {
         text: args.message,
-        attachments,
+        fileRefs,
       });
 
       if (sent.messageId === null) {

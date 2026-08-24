@@ -3,7 +3,7 @@ import {
   acceptFiles,
   createComposerFile,
   formatSize,
-  toPromptAttachments,
+  toFileRefs,
   type ComposerFile,
 } from "./composer-files";
 
@@ -77,25 +77,25 @@ describe("composer-files", () => {
     });
   });
 
-  describe("toPromptAttachments", () => {
+  describe("toFileRefs", () => {
     it("extracts refs from uploaded files", () => {
       const files: ComposerFile[] = [
         { id: "1", name: "a.pdf", bytes: 100, uploadProgress: null, attachmentRef: "att_abc" },
         { id: "2", name: "b.txt", bytes: 50, uploadProgress: null }, // no ref
         { id: "3", name: "c.zip", bytes: 200, uploadProgress: null, attachmentRef: "att_def" },
       ];
-      const attachments = toPromptAttachments(files);
-      expect(attachments).toHaveLength(2);
-      expect(attachments[0]).toEqual({ kind: "file_ref", ref: "att_abc" });
-      expect(attachments[1]).toEqual({ kind: "file_ref", ref: "att_def" });
+      const refs = toFileRefs(files);
+      expect(refs).toHaveLength(2);
+      expect(refs[0]).toEqual({ ref: "att_abc" });
+      expect(refs[1]).toEqual({ ref: "att_def" });
     });
 
     it("returns empty array when no files have refs", () => {
       const files: ComposerFile[] = [
         { id: "1", name: "a.pdf", bytes: 100, uploadProgress: null },
       ];
-      const attachments = toPromptAttachments(files);
-      expect(attachments).toHaveLength(0);
+      const refs = toFileRefs(files);
+      expect(refs).toHaveLength(0);
     });
   });
 });

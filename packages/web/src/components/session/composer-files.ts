@@ -9,8 +9,6 @@
  * Everything here is pure or DOM-agnostic, so it's testable without a browser.
  */
 
-import type { UploadedFileRef } from "@valet/api/wire";
-
 /** Master switch for file upload affordances in the composer. */
 export const FILE_UPLOADS_ENABLED: boolean = true;
 
@@ -164,11 +162,14 @@ export function createComposerFile(file: File): ComposerFile {
  * Payload builder for the send request — extract refs from files that have
  * completed upload successfully.
  */
-export function toPromptAttachments(files: readonly ComposerFile[]): UploadedFileRef[] {
+/**
+ * Payload builder for the send request — extract refs from files that have
+ * completed upload successfully.
+ */
+export function toFileRefs(files: readonly ComposerFile[]): Array<{ ref: string }> {
   return files
     .filter((f) => f.attachmentRef)
     .map((f) => ({
-      kind: "file_ref" as const,
       ref: f.attachmentRef!,
     }));
 }
