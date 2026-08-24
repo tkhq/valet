@@ -186,7 +186,11 @@ designRouter.post("/:id/design/edit", async (c) => {
       sessionId: access.row.id,
       content: body.content,
       summary: body.summary ?? "",
-      turnId: body.turnId ?? null,
+      // The turn linkage: tools send their queue item id; an explicit
+      // turnId (tests) wins. UI callers send neither -> null, which is
+      // what marks a revision agent-invisible for staleness detection.
+      turnId: body.turnId ?? body.queueItemId ?? null,
+      template: access.row.template,
       ...(body.parentRevision ? { parentRevision: body.parentRevision } : {}),
     });
     await emitDesignEvent(eventStream, {
@@ -205,7 +209,15 @@ designRouter.post("/:id/design/edit", async (c) => {
         sizeBytes: result.artifact.sizeBytes,
       },
     });
-    return c.json({ revision: result.revision.revision, sizeBytes: result.artifact.sizeBytes });
+    const notes = [
+      ...result.notes,
+      ...(result.interleaved
+        ? [
+            `the artifact had been changed outside this conversation before your edit (${result.interleaved.revision}: "${result.interleaved.summary}") — your view of the document may have been stale; use design_read to see the current state`,
+          ]
+        : []),
+    ];
+    return c.json({ revision: result.revision.revision, sizeBytes: result.artifact.sizeBytes, notes });
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);

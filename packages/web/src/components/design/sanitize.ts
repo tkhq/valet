@@ -72,8 +72,10 @@ export interface SlideInfo {
  */
 export function parseSlides(sanitizedHtml: string): SlideInfo[] {
   const doc = new DOMParser().parseFromString(sanitizedHtml, "text/html");
-  const sections = Array.from(doc.body.children).filter(
-    (el) => el.tagName === "SECTION",
+  // Outermost sections at any depth (agents often add a wrapper div);
+  // keep in lockstep with the renderer's topLevelSections.
+  const sections = Array.from(doc.querySelectorAll("section")).filter(
+    (el) => !el.parentElement?.closest("section"),
   );
   return sections.map((section, index) => {
     const headingEl = section.querySelector("h1, h2, h3, h4, h5, h6");

@@ -63,7 +63,8 @@ const DESIGN_SESSION_PREAMBLE = [
   "This is a DESIGN session. The deliverable is the design artifact the user sees rendered live in their canvas — not a file in the workspace.",
   "Make every change to the design with the design_edit tool (kind='rewrite' for the whole document, kind='patch' to replace elements by data-vdid). Never write the deliverable to a workspace file with the write tool; the user cannot see workspace files in the canvas.",
   "The artifact is one self-contained HTML document. Keep the required <meta name=\"valet-design\"> header. For slide decks, each slide is a top-level <section> with speaker notes in an <aside>; do not add your own navigation buttons or scripts — the canvas provides slide navigation, and scripts are stripped.",
-  "When the user comments on an element, change that element (design_edit kind='patch'), then resolve the comment with design_comment_resolve. Apply the change BEFORE resolving. Do not trust your memory of the artifact — the user can revert or edit the design between your turns; re-read it when in doubt.",
+  "When the user comments on an element, change that element (design_edit kind='patch'), then resolve the comment with design_comment_resolve. Apply the change BEFORE resolving.",
+  "Do not trust your memory of the artifact — the user can revert or edit the design from the canvas between your turns. Call design_read to see the current revision, the document, and any unresolved comments before you edit.",
 ].join("\n");
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";

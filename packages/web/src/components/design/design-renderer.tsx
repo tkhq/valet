@@ -19,6 +19,7 @@ import { checkDesignVersion, sanitizeDesignHtml } from "./sanitize";
  * outline plus a count badge.
  */
 const OVERLAY_CSS = `
+  .vd-hover-target { outline: 2px dashed #3b82f6; outline-offset: 2px; }
   [data-vd-comments] { position: relative; outline: 2px solid #f59e0b; outline-offset: 2px; }
   [data-vd-comments]::after {
     content: attr(data-vd-comments);
@@ -50,9 +51,12 @@ export interface DesignRendererProps {
   className?: string;
 }
 
+/** Outermost `<section>`s at any depth — agents often wrap slides in a
+ * container div, and a strict children-only read blanked the slide strip
+ * and active-slide toggling for those documents. */
 function topLevelSections(shadow: ShadowRoot): HTMLElement[] {
-  return Array.from(shadow.children).filter(
-    (el): el is HTMLElement => el.tagName === "SECTION",
+  return Array.from(shadow.querySelectorAll("section")).filter(
+    (el): el is HTMLElement => !(el.parentElement?.closest("section")),
   );
 }
 
@@ -96,6 +100,36 @@ export function DesignRenderer({
     shadow.addEventListener("click", onClick);
     return () => shadow.removeEventListener("click", onClick);
   }, []);
+
+  // Comment-mode hover highlight: outline the element a click would anchor
+  // to, so the user sees the comment target (heading vs whole slide) BEFORE
+  // committing — a click a few pixels off the text otherwise anchors to the
+  // enclosing section with no feedback.
+  useEffect(() => {
+    const shadow = shadowRef.current;
+    if (!shadow || !commentMode) return;
+    let marked: Element | null = null;
+    const clear = () => {
+      marked?.classList.remove("vd-hover-target");
+      marked = null;
+    };
+    const onOver = (e: Event) => {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const el = target.closest("[data-vdid]");
+      if (el === marked) return;
+      clear();
+      if (el) {
+        el.classList.add("vd-hover-target");
+        marked = el;
+      }
+    };
+    shadow.addEventListener("mouseover", onOver);
+    return () => {
+      shadow.removeEventListener("mouseover", onOver);
+      clear();
+    };
+  }, [commentMode]);
 
   // Sanitize + mount whenever the artifact bytes change.
   useEffect(() => {

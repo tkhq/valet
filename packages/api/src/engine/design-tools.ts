@@ -139,8 +139,59 @@ export const designEditTool = defineTool({
       signal: ctx.signal,
     });
     if (!res.ok) return { text: `[design_edit failed] ${await readError(res)}` };
-    const body = (await res.json()) as { revision: string; sizeBytes: number };
-    return { text: `wrote revision ${body.revision} (${body.sizeBytes} bytes)${patchNote}` };
+    const body = (await res.json()) as { revision: string; sizeBytes: number; notes?: string[] };
+    const noteText = body.notes?.length ? `\n${body.notes.map((n) => `note: ${n}`).join("\n")}` : "";
+    return { text: `wrote revision ${body.revision} (${body.sizeBytes} bytes)${patchNote}${noteText}` };
+  },
+});
+
+// ─── design_read ───────────────────────────────────────────────────────
+
+/** Embedded base64 payloads are useless to the model and can be ~2 MB;
+ * replace them with short markers before the document enters context. */
+function elideDataUrls(html: string): string {
+  return html.replace(/src="data:[^"]*"/g, 'src="[embedded image]"');
+}
+
+const READ_CONTENT_CAP = 100_000;
+
+export const designReadTool = defineTool({
+  name: "design_read",
+  description:
+    "Read the current design artifact: revision, unresolved comments, and the full document. Use it before editing when the user may have changed or reverted the design (they can do both from the canvas), and to find an element's data-vdid for a patch.",
+  parameters: Type.Object({}),
+  execute: async (_args, ctx): Promise<ToolResult> => {
+    const cfg = resolveDesignConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const current = await readArtifact(cfg, ctx);
+    if ("error" in current) return { text: `[design_read failed] ${current.error}` };
+
+    let commentLines = "no unresolved comments";
+    const commentsRes = await fetch(designUrl(cfg, ctx, "comments"), {
+      headers: designHeaders(cfg, ctx, false),
+      signal: ctx.signal,
+    });
+    if (commentsRes.ok) {
+      const { comments } = (await commentsRes.json()) as {
+        comments: Array<{ id: string; vdid: string; body: string; resolvedAt: number | null }>;
+      };
+      const open = comments.filter((cm) => cm.resolvedAt === null);
+      if (open.length > 0) {
+        commentLines = `unresolved comments:\n${open
+          .map((cm) => `- ${cm.id} on [data-vdid=${cm.vdid}]: ${cm.body}`)
+          .join("\n")}`;
+      }
+    }
+
+    let doc = elideDataUrls(current.content);
+    let truncationNote = "";
+    if (doc.length > READ_CONTENT_CAP) {
+      doc = doc.slice(0, READ_CONTENT_CAP);
+      truncationNote = "\n[document truncated — use design_edit kind='patch' for targeted changes]";
+    }
+    return {
+      text: `revision ${current.revision}\n${commentLines}\n---- current artifact ----\n${doc}${truncationNote}`,
+    };
   },
 });
 
@@ -390,12 +441,29 @@ export const designExportTool = defineTool({
     const current = await readArtifact(cfg, ctx);
     if ("error" in current) return { text: `[design_export failed] ${current.error}` };
 
+    // The filename reaches a `sh -c` command line and a workspace path.
+    // Reduce it to a safe charset — no separators, no shell metacharacters —
+    // so it can neither escape /workspace/exports nor inject into the
+    // marp-cli invocation below. Computed BEFORE the gate so the user
+    // approves the actual output destination.
+    const baseName =
+      (args.filename ?? `design-${current.revision}`)
+        .replace(/\.(html|pdf|pptx)$/, "")
+        .replace(/[^a-zA-Z0-9._-]+/g, "-")
+        .replace(/^[.-]+/, "")
+        .slice(0, 100) || `design-${current.revision}`;
+    const destination =
+      args.format === "gslides"
+        ? `a new Google Slides presentation titled "${args.filename ?? "from the deck's own title"}" in the connected Google Drive`
+        : `/workspace/exports/${baseName}.${args.format}`;
+
     // ExportManifest gate (spec §design_export + threat 8): the user
-    // approves the scope of what leaves — every referenced file named.
+    // approves the scope of what leaves — every referenced file named,
+    // plus the output destination.
     const resolution = await ctx.requestDecision({
       type: "approval",
       title: `Export design as ${args.format}?`,
-      body: `This export includes:\n${exportManifest(current.content)}${args.format === "gslides" ? "\n\nA new presentation will be created in the connected Google Drive." : ""}`,
+      body: `This export includes:\n${exportManifest(current.content)}\n- output: ${destination}`,
       actions: [
         { id: "approve", label: "Export", style: "primary" },
         { id: "deny", label: "Cancel", style: "danger" },
@@ -405,17 +473,6 @@ export const designExportTool = defineTool({
     if (resolution.actionId !== "approve") {
       return { text: `${args.format} export declined by ${resolution.resolvedBy}` };
     }
-
-    // The filename reaches a `sh -c` command line and a workspace path.
-    // Reduce it to a safe charset — no separators, no shell metacharacters —
-    // so it can neither escape /workspace/exports nor inject into the
-    // marp-cli invocation below.
-    const baseName =
-      (args.filename ?? `design-${current.revision}`)
-        .replace(/\.(html|pdf|pptx)$/, "")
-        .replace(/[^a-zA-Z0-9._-]+/g, "-")
-        .replace(/^[.-]+/, "")
-        .slice(0, 100) || `design-${current.revision}`;
 
     if (args.format === "html") {
       const path = `/workspace/exports/${baseName}.html`;
@@ -617,6 +674,7 @@ export const designHandoffTool = defineTool({
 /** The design ToolDefs a `kind='design'` session gets, in registration order. */
 export function buildDesignTools(): ToolDef[] {
   return [
+    designReadTool,
     designEditTool,
     designRenderTokenTool,
     designCommentResolveTool,

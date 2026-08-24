@@ -102,10 +102,11 @@ describe("design artifact service", () => {
     ).rejects.toThrow(/Stale edit.*r-002/);
   });
 
-  it("rejects content that is not valid .dc.html", async () => {
-    await expect(
-      updateArtifact(db, { sessionId: SESSION_ID, content: "<html><body>no header</body></html>", summary: "x" }),
-    ).rejects.toThrow(/valet-design/);
+  it("rejects an explicit unknown format version (no silent migration)", async () => {
+    const doc = editDoc("VersionTest").replace("v=1", "v=9");
+    await expect(updateArtifact(db, { sessionId: SESSION_ID, content: doc, summary: "x" })).rejects.toThrow(
+      /v=9/,
+    );
   });
 
   it("revert appends a new revision with the old content", async () => {
@@ -132,6 +133,44 @@ describe("design artifact service", () => {
 
     const resolved = await resolveComment(db, { sessionId: SESSION_ID, commentId: comment.id });
     expect(resolved.resolvedAt).not.toBeNull();
+  });
+
+  it("normalizes a missing valet-design header with an explicit note", async () => {
+    const result = await updateArtifact(db, {
+      sessionId: SESSION_ID,
+      content: "<html><head><meta charset=\"utf-8\"></head><body><h1>No Header</h1></body></html>",
+      summary: "headerless write",
+      template: "document",
+    });
+    expect(result.revision.revision).toBe("r-004");
+    expect(result.notes[0]).toContain("added the missing");
+    expect(result.revision.content).toContain('name="valet-design"');
+    expect(result.revision.content).toContain("template=document");
+  });
+
+  it("flags an interleaved UI revision to the next agent edit, once", async () => {
+    // A UI revert writes a turnId-null revision the agent never saw...
+    const reverted = await revertToRevision(db, { sessionId: SESSION_ID, revision: "r-001" });
+    expect(reverted.revision.revision).toBe("r-005");
+
+    // ...so the next AGENT edit (turnId set) is told its view was stale.
+    const first = await updateArtifact(db, {
+      sessionId: SESSION_ID,
+      content: editDoc("PostRevert"),
+      summary: "agent edit after revert",
+      turnId: "q-99",
+    });
+    expect(first.revision.revision).toBe("r-006");
+    expect(first.interleaved).toEqual({ revision: "r-005", summary: "Reverted to r-001" });
+
+    // A follow-up agent edit replaces an agent-authored revision — no flag.
+    const second = await updateArtifact(db, {
+      sessionId: SESSION_ID,
+      content: editDoc("SecondAgentEdit"),
+      summary: "consecutive agent edit",
+      turnId: "q-100",
+    });
+    expect(second.interleaved).toBeUndefined();
   });
 
   it("emitDesignEvent appends a host_event the bridge maps to a design.* wire frame", async () => {

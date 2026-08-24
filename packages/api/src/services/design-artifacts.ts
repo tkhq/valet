@@ -14,8 +14,10 @@ import { and, desc, eq } from "drizzle-orm";
 import type { EventStream } from "@valet/engine";
 import {
   applyVdids,
+  parseHeader,
   readTemplateStarter,
   validateDcHtml,
+  DC_HTML_VERSION,
   MAX_ARTIFACT_BYTES,
 } from "@valet/plugin-design/lib";
 import {
@@ -161,16 +163,47 @@ export interface UpdateArtifactOpts {
   /** The full next document. Callers apply patches before calling in. */
   content: string;
   summary: string;
-  /** Engine entry id of the turn that made the edit; null for UI actions. */
+  /** The agent turn (queue item id) that made the edit. Null for
+   * UI-driven mutations (revert) and the r-001 seed — that null is what
+   * lets the next agent edit detect a change it did not see. */
   turnId?: string | null;
   /** Optimistic-concurrency fence: reject when the artifact has moved past
    * this revision (durable-submission parentRevision fence). */
   parentRevision?: string;
+  /** Session template, used to normalize a missing valet-design header. */
+  template?: string | null;
 }
 
 export interface UpdateArtifactResult {
   artifact: DesignArtifactRow;
   revision: DesignArtifactRevisionRow;
+  /** Write-boundary normalizations, surfaced to the caller (never silent). */
+  notes: string[];
+  /** Set when the revision REPLACED was authored outside an agent turn
+   * (a UI revert) — the agent's memory of the artifact was stale. */
+  interleaved?: { revision: string; summary: string };
+}
+
+/**
+ * Normalize a document that is merely MISSING the valet-design header —
+ * the one mistake every fresh agent makes once. Injection is explicit
+ * (returned as a note, and visible in the stored artifact), never silent;
+ * a PRESENT header with an unknown version still rejects.
+ */
+export function ensureHeader(content: string, template: string | null | undefined): { content: string; injected: boolean } {
+  if (parseHeader(content) !== null) return { content, injected: false };
+  const tag = `<meta name="valet-design" content="v=${DC_HTML_VERSION}; template=${template ?? "document"}">`;
+  const headMatch = /<head[^>]*>/i.exec(content);
+  if (headMatch) {
+    const at = headMatch.index + headMatch[0].length;
+    return { content: `${content.slice(0, at)}\n  ${tag}${content.slice(at)}`, injected: true };
+  }
+  const htmlMatch = /<html[^>]*>/i.exec(content);
+  if (htmlMatch) {
+    const at = htmlMatch.index + htmlMatch[0].length;
+    return { content: `${content.slice(0, at)}\n<head>${tag}</head>${content.slice(at)}`, injected: true };
+  }
+  return { content: `<head>${tag}</head>\n${content}`, injected: true };
 }
 
 export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promise<UpdateArtifactResult> {
@@ -179,12 +212,19 @@ export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promi
       `Artifact exceeds the ${MAX_ARTIFACT_BYTES}-byte cap. Remove embedded images or split the document.`,
     );
   }
-  const validation = validateDcHtml(opts.content);
+  const notes: string[] = [];
+  const ensured = ensureHeader(opts.content, opts.template);
+  if (ensured.injected) {
+    notes.push(
+      `added the missing <meta name="valet-design"> header (v=${DC_HTML_VERSION}; template=${opts.template ?? "document"}) — include it next time`,
+    );
+  }
+  const validation = validateDcHtml(ensured.content);
   if (!validation.ok) {
     throw new ValidationError(`Not a valid .dc.html document: ${validation.errors.join(" ")}`);
   }
 
-  const { html } = applyVdids(opts.content);
+  const { html } = applyVdids(ensured.content);
 
   return db.transaction(async (tx) => {
     // Row lock: two concurrent writers (a UI revert racing a design_edit,
@@ -206,6 +246,18 @@ export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promi
       );
     }
 
+    // Staleness detection: when an AGENT edit (turnId set) replaces a
+    // revision that no agent turn wrote (a UI revert), the agent could not
+    // have seen it — surface that so the tool can tell the model instead
+    // of letting it act on a stale memory of the document.
+    let interleaved: { revision: string; summary: string } | undefined;
+    if (opts.turnId && artifact.currentRevision !== "r-001") {
+      const prev = await getRevision(tx, artifact.id, artifact.currentRevision);
+      if (prev && prev.turnId === null) {
+        interleaved = { revision: prev.revision, summary: prev.summary };
+      }
+    }
+
     const revisionId = nextRevisionId(artifact.currentRevision);
     const now = Date.now();
     const [revision] = await tx
@@ -225,7 +277,7 @@ export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promi
       .set({ currentRevision: revisionId, sizeBytes: Buffer.byteLength(html), updatedAt: now })
       .where(eq(designArtifacts.id, artifact.id))
       .returning();
-    return { artifact: updated, revision };
+    return { artifact: updated, revision, notes, ...(interleaved ? { interleaved } : {}) };
   });
 }
 

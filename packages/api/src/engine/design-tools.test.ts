@@ -13,6 +13,7 @@ import {
   designExportTool,
   designHandoffTool,
   designImportMarpTool,
+  designReadTool,
   designRenderTokenTool,
 } from "./design-tools.js";
 
@@ -258,6 +259,7 @@ describe("design tools", () => {
     const result = await designExportTool.execute({ format: "html", filename: "launch" }, ctx);
     expect(result.text).toBe("exported revision r-002 to /workspace/exports/launch.html");
     expect(gateBodies[0]).toContain("artifact document");
+    expect(gateBodies[0]).toContain("output: /workspace/exports/launch.html");
     expect(written[0].path).toBe("/workspace/exports/launch.html");
     expect(written[0].content).toBe(DOC);
   });
@@ -344,6 +346,57 @@ describe("design tools", () => {
     ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
     const result = await designExportTool.execute({ format: "gslides" }, ctx);
     expect(result.text).toContain("Connect Google Workspace in Settings");
+  });
+
+  it("design_read reports revision, unresolved comments, and the elided document", async () => {
+    const docWithImage = DOC.replace(
+      "<h1",
+      '<img src="data:image/png;base64,AAAAAAAA" alt="big"><h1',
+    );
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-007", content: docWithImage }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            comments: [
+              { id: "dc_1", vdid: "abc123", body: "Make it pop", resolvedAt: null },
+              { id: "dc_2", vdid: "def456", body: "done already", resolvedAt: 5 },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    });
+    const result = await designReadTool.execute({}, ctxWith(CFG));
+    expect(result.text).toContain("revision r-007");
+    expect(result.text).toContain("dc_1 on [data-vdid=abc123]: Make it pop");
+    expect(result.text).not.toContain("dc_2");
+    expect(result.text).toContain('src="[embedded image]"');
+    expect(result.text).not.toContain("base64");
+  });
+
+  it("design_edit relays server notes (header normalization, staleness)", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            revision: "r-004",
+            sizeBytes: 50,
+            notes: ["added the missing <meta> header", "the artifact had been changed outside this conversation"],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const result = await designEditTool.execute({ kind: "rewrite", content: DOC }, ctxWith(CFG));
+    expect(result.text).toContain("wrote revision r-004");
+    expect(result.text).toContain("note: added the missing");
+    expect(result.text).toContain("note: the artifact had been changed outside this conversation");
   });
 
   it("design_comment_resolve POSTs the resolve route", async () => {

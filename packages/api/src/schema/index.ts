@@ -861,8 +861,9 @@ export const designArtifactRevisions = pgTable(
     artifactId: text("artifact_id").notNull(),
     // Monotonic per-artifact id, formatted `r-NNN`. Unique with artifactId.
     revision: text("revision").notNull(),
-    // Engine entry id of the turn that wrote this revision. Null for the
-    // seeded r-001 (written by session create, not by a turn).
+    // The agent turn (engine queue item id) that wrote this revision.
+    // Null for the seeded r-001 and for UI-driven mutations (revert) —
+    // that null is the staleness discriminator updateArtifact uses.
     turnId: text("turn_id"),
     summary: text("summary").notNull().default(""),
     // Full .dc.html document for this revision.

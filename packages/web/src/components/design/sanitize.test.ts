@@ -112,3 +112,20 @@ describe("parseSlides", () => {
     expect(slides[0].heading).toBe("Slide 1");
   });
 });
+
+describe("parseSlides wrapper tolerance", () => {
+  it("finds outermost sections nested inside a wrapper div", () => {
+    const html = `<div class="deck"><section data-vdid="aaa"><h2>One</h2><aside>n1</aside></section><section data-vdid="bbb"><h2>Two</h2></section></div>`;
+    const slides = parseSlides(html);
+    expect(slides).toHaveLength(2);
+    expect(slides[0]).toMatchObject({ vdid: "aaa", heading: "One", notes: "n1" });
+    expect(slides[1]).toMatchObject({ vdid: "bbb", heading: "Two" });
+  });
+
+  it("ignores sections nested inside other sections", () => {
+    const html = `<section data-vdid="outer"><h2>Outer</h2><section data-vdid="inner"><h3>Inner</h3></section></section>`;
+    const slides = parseSlides(html);
+    expect(slides).toHaveLength(1);
+    expect(slides[0].vdid).toBe("outer");
+  });
+});
