@@ -1,7 +1,7 @@
 # Valet Design — Design Spec
 
 **Date:** 2026-08-23
-**Status:** draft
+**Status:** accepted — open questions resolved 2026-08-23
 **Owner:** Applied AI
 
 ## Summary
@@ -16,7 +16,7 @@ The thesis: **design and code share one workspace, one policy engine, and one au
 
 ## The Move: Render in the Client
 
-Claude Design proxies a preview URL served from the sandbox. Valet Design does not. The web client fetches the artifact bytes — a self-contained `.dc.html` document — parses it with a whitelist HTML sanitizer, renders it to a DOM under a shadow root with strict CSP, and shows it directly to the user. No iframe, no sandbox involvement. The artifact is authoritative; the client is a viewer.
+Claude Design proxies a preview URL served from the sandbox. Valet Design does not. The web client fetches the artifact bytes — a self-contained `.dc.html` document — sanitizes it with DOMPurify, renders it to a DOM under a shadow root, and shows it directly to the user. No iframe, no sandbox involvement. The artifact is authoritative; the client is a viewer.
 
 This move changes two key properties:
 
@@ -27,7 +27,7 @@ Mapping to Valet v2 primitives:
 
 | Claude Design | Valet Design |
 |---|---|
-| Standalone application | Engine session with `purpose='design'` |
+| Standalone application | App session with `kind='design'` |
 | Artifact + version history | `DesignArtifact` row holding current bytes + `design_artifact_revisions` history |
 | Canvas | React component in web rendering artifact bytes to DOM |
 | Every turn wraps a tool-call block | Session's thread. Tools are design-specific. |
@@ -37,7 +37,7 @@ Mapping to Valet v2 primitives:
 | Design system → app library | `DesignSystemProvider` port with `codebase` impl only |
 | Export to PDF/PPTX | `marp-cli` run against `file://` inputs in sandbox |
 | Export to Google Slides | Transpiler + chunked `batchUpdate` via Slides API |
-| Handoff to implementation | `design.handoff` spawns a child session whose `startRef` is the artifact's git commit |
+| Handoff to implementation | `design_handoff` spawns a child session whose `startRef` is the artifact's git commit |
 
 ## Architecture Overview
 
@@ -59,61 +59,66 @@ What Valet already knows about sessions ports over. New things:
 
 ## Data Model
 
-All app-side. Edit `packages/api/migrations/pg/0000_app.sql` in place. When the schema changes, delete `~/.valet/pg` and restart the dev stack (`make dev-local`).
+All app-side. Edit `packages/api/migrations/pg/0000_app.sql` in place. Every column and table added to the already-applied `0000` migration must also get a repair statement in `addColumnsMissingFromAppliedMigrations` (`packages/api/src/lib/drizzle.ts`), or a deployed database never picks up the change. When the schema changes locally, delete `~/.valet/pg` and restart the dev stack (`make dev-local`).
+
+Storage follows the `artifacts` table precedent: bytes live inline in a `text` column, timestamps are `bigint` epoch milliseconds. There is no `storage_ref` indirection and no blob store in v1. `design_edit` rejects artifacts over 2 MB; large embedded images are the only way to get near that.
 
 ### New Tables
 
 ```sql
 CREATE TABLE "design_artifacts" (
   "id" text PRIMARY KEY NOT NULL,
-  "session_id" text NOT NULL UNIQUE,
+  "session_id" text NOT NULL,
   "current_revision" text NOT NULL,
-  "mime_type" text DEFAULT 'text/html' NOT NULL,
   "size_bytes" bigint NOT NULL,
-  "storage_ref" text NOT NULL,
-  "updated_at" timestamp DEFAULT now() NOT NULL,
-  FOREIGN KEY ("session_id") REFERENCES "agent_sessions"("id") ON DELETE CASCADE
+  "created_at" bigint NOT NULL,
+  "updated_at" bigint NOT NULL
 );
+CREATE UNIQUE INDEX "design_artifacts_session_unique" ON "design_artifacts" ("session_id");
 
 CREATE TABLE "design_artifact_revisions" (
   "id" text PRIMARY KEY NOT NULL,
   "artifact_id" text NOT NULL,
   "revision" text NOT NULL,
   "turn_id" text,
-  "storage_ref" text NOT NULL,
-  "created_at" timestamp DEFAULT now() NOT NULL,
-  UNIQUE("artifact_id", "revision"),
-  FOREIGN KEY ("artifact_id") REFERENCES "design_artifacts"("id") ON DELETE CASCADE,
-  FOREIGN KEY ("turn_id") REFERENCES "engine_entries"("id")
+  "summary" text DEFAULT '' NOT NULL,
+  "content" text NOT NULL,
+  "created_at" bigint NOT NULL
 );
+CREATE UNIQUE INDEX "design_artifact_revisions_unique" ON "design_artifact_revisions" ("artifact_id", "revision");
 
 CREATE TABLE "design_comments" (
   "id" text PRIMARY KEY NOT NULL,
   "artifact_id" text NOT NULL,
   "revision" text NOT NULL,
   "vdid" text NOT NULL,
-  "thread_message_id" text NOT NULL,
-  "resolved_at" timestamp,
-  "created_at" timestamp DEFAULT now() NOT NULL,
-  FOREIGN KEY ("artifact_id") REFERENCES "design_artifacts"("id") ON DELETE CASCADE
+  "body" text NOT NULL,
+  "author_user_id" text NOT NULL,
+  "resolved_at" bigint,
+  "created_at" bigint NOT NULL
 );
+CREATE INDEX "design_comments_artifact" ON "design_comments" ("artifact_id");
 ```
+
+Foreign keys are by id-string convention, not SQL constraints — `agent_sessions` itself declares no FK edges, and `turn_id` points into the engine schema, which the app schema never references with constraints.
 
 ### Column Changes to `agent_sessions`
 
 Add two columns:
 
 ```sql
-ALTER TABLE "agent_sessions" ADD COLUMN "purpose" text DEFAULT 'code';
+ALTER TABLE "agent_sessions" ADD COLUMN "kind" text DEFAULT 'code' NOT NULL;
 ALTER TABLE "agent_sessions" ADD COLUMN "template" text;
 ```
 
-Valid values for `purpose`: `'code'` (default, existing sessions), `'design'`.
+Valid values for `kind`: `'code'` (default, existing sessions), `'design'`.
 `template`: nullable string, e.g., `'slides'`, `'document'`, `'wireframe'`.
+
+The draft named this column `purpose`. The engine schema already has `engine_sessions.purpose` (`interactive` / `orchestrator` / `workflow` / `child`) — a second `purpose` column with a different value set in the same database is a trap, so the app column is `kind`. One name for one thing: "purpose" is the engine lifecycle role; "kind" is which authoring surface the session drives.
 
 ### Drizzle Schema
 
-Update `packages/api/src/schema/index.ts` with tables `designArtifacts`, `designArtifactRevisions`, `designComments` and the `purpose` and `template` columns on `agentSessions`. See store-postgres convention: each row interface lives near its table definition, with a `rawTo*Row` mapper for any computed columns.
+Update `packages/api/src/schema/index.ts` with tables `designArtifacts`, `designArtifactRevisions`, `designComments` and the `kind` and `template` columns on `agentSessions`. Row types come from `$inferSelect`, same as every other app table.
 
 ## The Artifact Format: `.dc.html`
 
@@ -284,37 +289,23 @@ v1 implementations:
 
 ## Tools
 
-All tools live under the `design.*` namespace. A tool carries approval routing through the session's decision-gate machinery.
+Design tools are engine `ToolDef`s named `design_*` (the Anthropic tool-name charset forbids dots), built in `packages/api/src/engine/design-tools.ts` and attached only to sessions with `kind='design'`. This follows the `mem_*` precedent (`packages/api/src/orchestrator/memory-tools.ts`): the tool's `execute` calls internal design routes over `ctx.config.apiBaseUrl` with the `x-valet-internal` token, never a service module directly. The HTTP seam is the portability contract. Plugin actions were the draft's shape, but a `PluginActionContext` has no database handle and plugin actions surface in every session — design tools are session-kind-scoped and database-backed, which is exactly what per-session `ToolDef`s are for.
 
-### design.create
+`packages/plugin-design` still exists as a plugin: it ships the design skill, the template starter files, and the pure library code (vdid computation, `.dc.html` parse/validate, serializers) that the API imports.
 
-Create a new design session with an initial artifact.
+A tool carries approval routing through the session's decision-gate machinery (`ctx.requestDecision`).
 
-**Signature:**
-```typescript
-{
-  template: string;  // e.g., 'slides', 'document', 'wireframe'
-  prompt?: string;   // optional user direction
-}
-```
+### Session creation (REST, not a tool)
 
-**Semantics:**
-1. Mint a new session with `purpose='design'` and `template=<param>`.
-2. Read the template starter file from `packages/plugin-design/templates/<template>/starter.dc.html`.
-3. If `prompt` is provided, run one turn of LLM over the starter artifact to refine it.
-4. Write the initial `DesignArtifact` row with revision `r-001`.
-5. Emit `design.artifact.created` on the session WebSocket.
+The draft defined a `design.create` tool. Creation is not a tool: the hub UI mints sessions, and session minting is a REST concern. `POST /api/sessions` accepts `kind: 'design'` and `template: <name>`; when `kind='design'`, the route seeds the initial artifact:
 
-**Decision gates:**
-- None for creation.
+1. Read the template starter file from `packages/plugin-design/templates/<template>/starter.dc.html`.
+2. Write the `DesignArtifact` row with revision `r-001` in the same transaction as the session row.
+3. The hub's prompt (if any) becomes the session's first message; the agent refines the starter through `design_edit` like any other turn.
 
-**Revisions written:**
-- `r-001`: the initial or refined artifact.
+An agent-driven creation path (orchestrator minting design sessions) can reuse the same route later; it is not in v1.
 
-**WebSocket events:**
-- `design.artifact.created`: new artifact id, initial revision id.
-
-### design.edit
+### design_edit
 
 Edit the current artifact: patch or full rewrite. Every edit writes a new revision.
 
@@ -345,7 +336,7 @@ Edit the current artifact: patch or full rewrite. Every edit writes a new revisi
 **WebSocket events:**
 - `design.artifact.updated`: revision id, size bytes, change summary, revert payload (previous revision).
 
-### design.render.token
+### design_render_token
 
 Fetch a design-system token by name.
 
@@ -368,7 +359,7 @@ Fetch a design-system token by name.
 **WebSocket events:**
 - None; the result is returned inline.
 
-### design.comment.resolve
+### design_comment_resolve
 
 Mark a comment thread on an artifact element as resolved.
 
@@ -383,15 +374,15 @@ Mark a comment thread on an artifact element as resolved.
 **Semantics:**
 1. Look up the comment in `design_comments`.
 2. Set `resolved_at` to now.
-3. Emit `design.comment.resolved` with the vdid and comment id.
+3. Emit `design_comment_resolved` with the vdid and comment id.
 
 **Decision gates:**
 - None.
 
 **WebSocket events:**
-- `design.comment.resolved`: vdid, comment id.
+- `design_comment_resolved`: vdid, comment id.
 
-### design.import.marp
+### design_import_marp
 
 Import a Markdown file (Marp format) as a new design artifact.
 
@@ -411,7 +402,7 @@ Import a Markdown file (Marp format) as a new design artifact.
 6. Emit `design.artifact.imported` with format `marp`.
 
 **Decision gates:**
-- `artifact_import`: first-use gate on `design.import.marp`, naming the file path and any content categories detected.
+- `artifact_import`: first-use gate on `design_import_marp`, naming the file path and any content categories detected.
 
 **Revisions written:**
 - `r-001`: imported artifact.
@@ -419,7 +410,7 @@ Import a Markdown file (Marp format) as a new design artifact.
 **WebSocket events:**
 - `design.artifact.imported`: format, report.
 
-### design.import.gslides
+### design_import_gslides
 
 Import a Google Slides presentation as a new design artifact.
 
@@ -431,7 +422,7 @@ Import a Google Slides presentation as a new design artifact.
 ```
 
 **Semantics:**
-1. Call `google.slides.get` (via `plugin-google-workspace` action group) to fetch the presentation.
+1. Call `slides.get_presentation` (via `plugin-google-workspace` action group) to fetch the presentation.
 2. Pass the element tree to `DeckSerializer.deserialize(bytes, 'gslides')`.
 3. Map Slides `objectId`s to artifact `data-vdid`s (stored in a mapping table for later export).
 4. Write a new `DesignArtifact` with revision `r-001`.
@@ -447,7 +438,7 @@ Import a Google Slides presentation as a new design artifact.
 **WebSocket events:**
 - `design.artifact.imported`: format, report, presentation_url.
 
-### design.import.image
+### design_import_image
 
 Import an image file (PNG, JPG, SVG) into the artifact as a new element.
 
@@ -476,7 +467,7 @@ Import an image file (PNG, JPG, SVG) into the artifact as a new element.
 **WebSocket events:**
 - `design.artifact.updated`: revision id, change summary.
 
-### design.export
+### design_export
 
 Export the artifact to an external format: HTML, PDF, PPTX, Google Slides.
 
@@ -504,11 +495,11 @@ For `gslides`: delegate to the sandbox. Transpile the artifact to Slides `batchU
 - None; exports do not mutate the artifact.
 
 **WebSocket events:**
-- `design.export.started`: format.
-- `design.export.completed`: format, download_url or presentation_url.
-- `design.export.failed`: error reason.
+- `design_export.started`: format.
+- `design_export.completed`: format, download_url or presentation_url.
+- `design_export.failed`: error reason.
 
-### design.handoff
+### design_handoff
 
 Spawn a child coding session with the artifact as the starting point.
 
@@ -522,9 +513,9 @@ Spawn a child coding session with the artifact as the starting point.
 **Semantics:**
 1. Get the artifact's current revision.
 2. Commit the artifact to the session's git repo (if one is set), capturing the commit hash as `startRef`.
-3. Spawn a child session with `purpose='code'`, `startRef=<commit>`, and the session thread transcript as a read-only tool.
+3. Spawn a child session with `kind='code'`, `startRef=<commit>`, and the session thread transcript as a read-only tool.
 4. The child's session title is auto-filled: `<parent session title> → code`.
-5. Emit `design.handoff.spawned` with the child session id.
+5. Emit `design_handoff.spawned` with the child session id.
 
 **Decision gates:**
 - None; handoff is a straightforward delegation.
@@ -533,7 +524,7 @@ Spawn a child coding session with the artifact as the starting point.
 - None.
 
 **WebSocket events:**
-- `design.handoff.spawned`: child_session_id.
+- `design_handoff.spawned`: child_session_id.
 
 ## Sandbox Image
 
@@ -547,13 +538,13 @@ A new variant `docker/Dockerfile.sandbox-design` extends the base `k8s` image to
 
 ## Google Slides Integration
 
-A new action group `google.slides.*` is added to `plugin-google-workspace`. These actions are internal to Valet; plugins do not import `slides.googleapis.com` directly.
+A new action group `slides.*` is added to `plugin-google-workspace`. These actions are internal to Valet; plugins do not import `slides.googleapis.com` directly.
 
 **Actions:**
 
-- `google.slides.get`: fetch a presentation by id, return element tree and metadata.
-- `google.slides.create`: create a new empty presentation, return presentation id and URL.
-- `google.slides.batch_update`: apply a batch of mutations (text, shapes, images, layout) to a presentation, chunked per slide.
+- `slides.get_presentation`: fetch a presentation by id, return element tree and metadata.
+- `slides.create_presentation`: create a new empty presentation, return presentation id and URL.
+- `slides.batch_update`: apply a batch of mutations (text, shapes, images, layout) to a presentation, chunked per slide.
 
 **Scope:**
 - OAuth scope: `drive.file` only. Foreign presentations (not owned by the user) are imported only via a shared link, surfaced as a decision gate.
@@ -577,10 +568,10 @@ Landing page for creating or opening design documents.
 - Top bar: "What should we create?" prompt input box.
 - Design system picker: dropdown to select the team's design system (loads from `DesignSystemProvider`).
 - Model picker: dropdown to select reasoning model (default: Sonnet 4.6; vision: Opus 4.6 if image in prompt).
-- Template grid: visual cards for each template (slides, document, wireframe, etc.), each clicking to `design.create(template)`.
+- Template grid: visual cards for each template (slides, document, wireframe, etc.), each clicking sends `POST /api/sessions` with `kind='design'` and the template name.
 - Projects list: recent design sessions, sortable by date, filterable by template.
 
-**TanStack Router pattern:** nested route under `/design`, uses the existing session list from `GET /api/sessions?purpose=design`.
+**TanStack Router pattern:** nested route under `/design`, uses the existing session list from `GET /api/sessions?kind=design`.
 
 ### `/sessions/$id/design` — Canvas
 
@@ -621,7 +612,7 @@ The design spec names fourteen threat categories. Mitigations are normative in t
 
 4. **Two design systems drift.** Mitigation: exactly one active `DesignSystemProvider` per session; conflicts surface at session creation as a decision gate.
 
-5. **Handoff to code carries too much.** Mitigation: §"design.handoff" spawns a fresh child whose `startRef` is the artifact's git commit; brief is the design thread as read-only tool. No sandbox state copied.
+5. **Handoff to code carries too much.** Mitigation: §"design_handoff" spawns a fresh child whose `startRef` is the artifact's git commit; brief is the design thread as read-only tool. No sandbox state copied.
 
 6. **Multi-user chat race.** Mitigation: thread queue mode is `steer`. Every applied edit is a durable submission with `parentRevision` fence.
 
@@ -669,20 +660,20 @@ Three scenarios, each observable at API/WebSocket level with integration tests u
 **Path:** `tests/design/acceptance/document-page.test.ts`
 
 1. User opens `/design`, picks Document template, prompts "landing page for a product launch".
-2. Session created with `purpose='design'`, `template='document'`.
+2. Session created with `kind='design'`, `template='document'`.
 3. Initial `.dc.html` renders in client within 3 seconds.
 4. User clicks on the headline, posts a comment: "Make it shorter".
-5. `design.edit` tool runs, artifact mutates (text shortened).
+5. `design_edit` tool runs, artifact mutates (text shortened).
 6. New revision written, canvas re-renders in place.
 7. Tool-call block shows revert option; user clicks it.
 8. Artifact reverts to previous revision, canvas updates.
 9. User clicks Share, receives a read-only URL.
 10. User opens link in private window (same org), canvas renders with design-system tokens subset only (no full system exported).
-11. User exports to PDF: `design.export` with `format='pdf'`.
+11. User exports to PDF: `design_export` with `format='pdf'`.
 12. `ExportManifest` decision gate opens, listing every referenced file (images, stylesheets).
 13. User approves, `marp-cli` runs against `file://` input, signed download URL returned within 10 seconds.
 14. User posts "ship this".
-15. `design.handoff` spawns child session, GitHub App opens PR against marketing repo, attributed to user with `Co-authored-by: user@org.com`.
+15. `design_handoff` spawns child session, GitHub App opens PR against marketing repo, attributed to user with `Co-authored-by: user@org.com`.
 
 ### Scenario B: Slide Deck
 
@@ -693,7 +684,7 @@ Three scenarios, each observable at API/WebSocket level with integration tests u
 3. Speaker-notes pane visible at bottom.
 4. 10-section artifact renders in 5 seconds.
 5. User clicks slide 4 title, posts: "Change this to a case study".
-6. `design.edit` runs, slide 4 mutates.
+6. `design_edit` runs, slide 4 mutates.
 7. New revision written, canvas re-renders slide 4 only (not full reload).
 8. Slide-strip updates thumbnail.
 9. User posts "insert a workflow-engine slide after slide 10, renumber the rest".
@@ -707,7 +698,7 @@ Three scenarios, each observable at API/WebSocket level with integration tests u
 **Path:** `tests/design/acceptance/gslides-roundtrip.test.ts`
 
 1. From the deck in Scenario B, user posts "push to Google Slides".
-2. `design.export` with `format=gslides`.
+2. `design_export` with `format=gslides`.
 3. First-use `ExportManifest` gate opens, naming target file, content categories, OAuth scope (`drive.file`).
 4. User approves.
 5. Exporter calls `presentations.create`, then chunked `batchUpdate` (one per slide) with `writeControl.requiredRevisionId` fencing.
@@ -715,8 +706,8 @@ Three scenarios, each observable at API/WebSocket level with integration tests u
 7. Tool result returns Slides URL and report.
 8. External human edits slide 3 title in Google Slides (via browser).
 9. User posts "pull those changes back".
-10. `design.import.gslides` runs with recorded presentation id.
-11. Calls `google.slides.get`, transpiles back to `.dc.html`.
+10. `design_import_gslides` runs with recorded presentation id.
+11. Calls `slides.get_presentation`, transpiles back to `.dc.html`.
 12. `import-report.md` written into artifact, naming any differences from export.
 13. New artifact revision written.
 14. Canvas re-renders. `data-vdid` on slide 3's title unchanged because `gslides` serializer preserved it in Slides' `objectId`.
@@ -816,32 +807,37 @@ Normative mapping table for round-trip fidelity. Columns: element kind, MUST rou
 </html>
 ```
 
-## Open Questions: Seven Rulings
+## Resolved Decisions
 
-**Decision 1: Renderer sandboxing details.**
-Belt and suspenders: strip `<script>` AND strip inline event handlers (`on*` attributes) at parse time, in addition to shadow root + CSP. Client parses artifact with a whitelist HTML sanitizer.
-**Decision, open to review challenge:** is whitelist HTML sanitization the right tool, or should we use a hardened parser like `DOMPurify`?
+All seven open questions from the draft are now ruled. The rulings below are final for v1; reopening one requires a spec revision.
 
-**Decision 2: `.dc.html` schema versioning.**
-Header shape: `<meta name="valet-design" content="v=1; template=slides">` in `<head>`. The renderer refuses documents with unknown `v=` values.
-**Decision, open to review challenge:** version in meta tag (chosen) vs. URL scheme or JSON block. Meta tag is simplest and Valet-specific.
+**Decision 1: Renderer sanitization — DOMPurify, not a hand-rolled whitelist. RESOLVED.**
+The client sanitizes artifact bytes with `DOMPurify` before mounting: `FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'base', 'form']`, all `on*` attributes stripped (DOMPurify default), and a URI allowlist that permits only `data:` and same-document fragment URLs. The sanitized tree mounts in a shadow root. A hand-rolled whitelist sanitizer is how XSS ships; DOMPurify is maintained against browser parser quirks (mXSS) that a bespoke parser will miss. Note: CSP is a document-level control, so the draft's "strict CSP in the shadow root" is not enforceable per-artifact — the sanitizer is the load-bearing control, and the app's own CSP is the backstop.
 
-**Decision 3: Design-system token subset for shared links.**
-Stripping rule: scan the artifact bytes for CSS custom-property references (`var(--*)`), `data-token=` attributes, and known component-name references from the design system's component index. Ship only the intersection.
-**Decision, open to review challenge:** exact scan regex and whether component references should be included or require explicit opt-in.
+**Decision 2: `.dc.html` schema versioning — meta tag. RESOLVED.**
+`<meta name="valet-design" content="v=1; template=slides">` in `<head>`. The renderer refuses documents with unknown `v=` values. A URL scheme or JSON block adds indirection without adding capability.
 
-**Decision 4: Vision-model routing.**
-The routing rule ("prompt or last tool result contains an image → vision-tag → provider picks Opus 4.6 or closest") is a **plugin** concern, not engine. The plugin declares `default_model` and `vision_model`; the org's `llm_providers` policy sets the ceiling.
-**Decision, open to review challenge:** should design sessions always use vision-capable models, or only when image input is present?
+**Decision 3: Token subset for shared links — `var(--*)` references only. RESOLVED.**
+The share endpoint scans artifact bytes for `var(--token-name)` references and ships only those tokens. Component references are **never** included: the component index maps names to source paths in the customer's codebase, which is exactly the exfiltration surface the share link must not carry. False negatives degrade styling; false positives leak the design system. Tokens only.
 
-**Decision 5: HTML-to-Google-Slides mapping.**
-Mapping table is Appendix A (normative). Columns: Element / MUST round-trip / MAY round-trip / UNREPRESENTABLE.
-**Decision, open to review challenge:** what element types are missing from the table? What new rows should we add?
+**Decision 4: Vision-model routing — deferred; no special routing in v1. RESOLVED.**
+Design sessions use the same model resolution as every other session (org `llm_providers` policy, session model picker). Image input flows through existing attachment support, and the org's chosen models are already vision-capable in practice. A `vision_model` plumbing layer solves a problem v1 does not have; the re-entry seam is the existing `resolveModel` hook.
 
-**Decision 6: `plugin-google-workspace` surface.**
-Add a `google.slides.*` action group to `plugin-google-workspace`. `plugin-design` calls through it. NO direct reach to `slides.googleapis.com` from `plugin-design`.
-**Decision, open to review challenge:** should this be its own plugin instead of expanding google-workspace?
+**Decision 5: HTML-to-Google-Slides mapping — Appendix A as written. RESOLVED.**
+The table ships as-is for v1. Anything not in the table is UNREPRESENTABLE by default and surfaces in `export-report.md`. New rows land with serializer changes, not ahead of them.
 
-**Decision 7: Template starter files.**
-Live at `packages/plugin-design/templates/<template>/starter.dc.html` plus `packages/plugin-design/templates/<template>/prompt.md`. Ship as static assets in the package. `design.create` reads them at session-mint time.
-**Decision, open to review challenge:** should starters be configurable per team (via database), or remain fixed in the package?
+**Decision 6: Slides surface lives in `plugin-google-workspace`. RESOLVED.**
+A `slides.*` action group joins the existing `drive.*` / `docs.*` / `sheets.*` groups — same credential (`google_workspace`), same fetch-based client, same plugin. A separate plugin would mean a second Google OAuth connection for the same account. Action ids follow the sibling convention: `slides.get_presentation`, `slides.create_presentation`, `slides.batch_update` (the draft's `google.slides.*` prefix does not match how workspace actions are named).
+
+**Decision 7: Template starters are fixed in the package. RESOLVED.**
+`packages/plugin-design/templates/<template>/starter.dc.html` plus `prompt.md`, shipped as static assets. Per-team template configuration is a re-entry seam (a `design_templates` table keyed by org), not v1. v1 ships six templates: `blank`, `document`, `slides`, `wireframe`, `resume`, `html-email` — the draft's twelve-template list front-loads starter-file authoring that teaches us nothing about the subsystem.
+
+## Deviations from the Draft (Codebase Review)
+
+Implementation review against the v2 codebase forced five corrections. Each is normative and already folded into the sections above:
+
+1. **`agent_sessions.kind`, not `purpose`.** The engine schema already owns `purpose` (`engine_sessions.purpose`: `interactive`/`orchestrator`/`workflow`/`child`). See §Data Model.
+2. **Design tools are engine `ToolDef`s, not plugin actions.** Plugin actions have no database handle and surface in every session. Design tools follow the `mem_*` pattern: API-built `ToolDef`s attached to `kind='design'` sessions, calling internal design routes over the `apiBaseUrl` + internal-token HTTP seam. Names use underscores (`design_edit`) — the Anthropic tool-name charset forbids dots. See §Tools.
+3. **Session creation is REST, not a `design.create` tool.** `POST /api/sessions` with `kind`/`template` seeds revision `r-001` from the template starter. See §Tools.
+4. **Bytes live inline.** Revisions store content in a `text` column (the `artifacts` table precedent); `storage_ref` is dropped. Timestamps are `bigint` epoch ms. See §Data Model.
+5. **In-place migration repair.** Every new table/column added to the applied `0000_app.sql` needs a matching statement in `addColumnsMissingFromAppliedMigrations`, or deployed databases silently miss it. See §Data Model.
