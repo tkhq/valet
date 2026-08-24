@@ -254,7 +254,27 @@ export type PromptContent =
 
 export type PromptAttachment =
   | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
-  | { type: "file"; url?: string; data?: Uint8Array; mimeType: string; name: string }
+  | {
+      /**
+       * A file attachment. Two producer shapes share this variant:
+       * - Channel media (`data` + `mimeType`): raw bytes fetched from a
+       *   channel transport.
+       * - Sandbox files (`path` + `bytes` + `sha256`): a file that already
+       *   lives in the session sandbox (upload subsystem). These persist as
+       *   the `type: "file"` variant of `MessageEntry.attachments`.
+       */
+      type: "file";
+      url?: string;
+      data?: Uint8Array;
+      mimeType?: string;
+      path?: string; // absolute path inside the sandbox
+      bytes?: number;
+      sha256?: string;
+      markdownPath?: string; // for PDFs with a text sidecar
+      extractedTo?: string; // extract root for a zip that was extracted
+      extractedFiles?: string[]; // full listing of extracted files
+      name: string;
+    }
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {

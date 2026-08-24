@@ -28,6 +28,7 @@ import {
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { buildRepoInstructionsFragment } from "./repo-instructions.js";
+import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import { recordSettlement, recordTurn } from "./metrics.js";
 import {
@@ -2096,7 +2097,30 @@ export class Thread {
       // Runtime validation of each attachment element to guard against malformed wire data
       const validated: MessageEntry["attachments"] = [];
       for (const att of item.content.attachments) {
-        if (typeof att === "object" && att !== null && typeof att.mimeType === "string") {
+        if (typeof att !== "object" || att === null) continue;
+        if (
+          att.type === "file" &&
+          typeof att.path === "string" &&
+          typeof att.bytes === "number" &&
+          typeof att.sha256 === "string" &&
+          typeof att.name === "string"
+        ) {
+          // Sandbox file (upload subsystem): persist path/size/hash so the
+          // REST projection and the transcript note survive reload.
+          validated.push({
+            type: "file" as const,
+            path: att.path,
+            bytes: att.bytes,
+            sha256: att.sha256,
+            mimeType: att.mimeType,
+            markdownPath: att.markdownPath,
+            extractedTo: att.extractedTo,
+            extractedFiles: att.extractedFiles,
+            name: att.name,
+          });
+        } else if (typeof att.mimeType === "string") {
+          // Data/url-carrying media (images; channel audio/file bytes keep
+          // their long-standing image-shaped persistence).
           validated.push({
             type: "image" as const,
             url: att.url,
@@ -2442,10 +2466,7 @@ export class Thread {
     text: string,
     attachments?: MessageEntry["attachments"],
   ): Promise<void> {
-    const content = [
-      { type: "text" as const, text },
-      ...attachmentsToImageBlocks(attachments),
-    ];
+    const content = userContentBlocks(text, attachments);
     await this.agent.prompt({
       role: "user",
       content,
@@ -3731,6 +3752,31 @@ function findMostRecentCompaction(
  * that is not a base64 `data:` URL is dropped with a warning (the model
  * cannot fetch remote URLs from here).
  */
+/**
+ * Build the content blocks for a user message from its text and persisted
+ * attachments. Single source of truth for BOTH `entriesToAgentMessages`
+ * (historical entries on rehydrate / resume / compaction) AND
+ * `Thread.runAgent` (the current turn), so hot and cold transcripts agree.
+ *
+ * File attachments (sandbox uploads) render as a system-authored note
+ * prepended to the text — the model reads paths, not bytes. Image
+ * attachments render as image content blocks.
+ */
+export function userContentBlocks(
+  text: string,
+  attachments: MessageEntry["attachments"] | undefined,
+): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
+  const files = (attachments ?? []).filter(
+    (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
+      a.type === "file",
+  );
+  const note = formatFileAttachmentsNote(files);
+  return [
+    { type: "text" as const, text: note ? `${note}\n\n${text}` : text },
+    ...attachmentsToImageBlocks(attachments),
+  ];
+}
+
 export function attachmentsToImageBlocks(
   attachments: MessageEntry["attachments"] | undefined,
 ): Array<{ type: "image"; data: string; mimeType: string }> {
@@ -3794,10 +3840,7 @@ export function entriesToAgentMessages(
 
     if (e.role === "user") {
       const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
-      const contentBlocks: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
-        { type: "text", text },
-        ...attachmentsToImageBlocks(e.attachments),
-      ];
+      const contentBlocks = userContentBlocks(text, e.attachments);
       out.push({
         role: "user",
         content: contentBlocks,

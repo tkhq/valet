@@ -13,7 +13,7 @@ describe("formatFileAttachmentsNote", () => {
   });
 
   it("returns empty string for undefined", () => {
-    const result = formatFileAttachmentsNote(undefined as any);
+    const result = formatFileAttachmentsNote(undefined);
     expect(result).toBe("");
   });
 

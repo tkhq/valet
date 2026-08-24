@@ -129,6 +129,9 @@ function runAttachmentSuite(label: string, getDb: () => PgDb) {
       if (retrieved.type !== "message") throw new Error("expected message entry");
       expect(retrieved.attachments).toHaveLength(1);
       const att = retrieved.attachments?.[0];
+      // The discriminant must survive: a guard alone would silently skip
+      // the round-trip assertions if persistence mangled the type.
+      expect(att?.type).toBe("image");
       if (att?.type === "image") {
         expect(att.url).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
         // The raw bytes do not survive JSON persistence; the data: URL replaces them.

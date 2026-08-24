@@ -40,7 +40,7 @@ type FileAttachment = {
  * @param files Array of file attachments to format.
  * @returns Formatted note string, or empty string if no files.
  */
-export function formatFileAttachmentsNote(files: FileAttachment[]): string {
+export function formatFileAttachmentsNote(files: FileAttachment[] | undefined): string {
   if (!files || files.length === 0) {
     return "";
   }
