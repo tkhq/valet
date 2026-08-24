@@ -135,6 +135,13 @@ describe("design artifact service", () => {
     expect(resolved.resolvedAt).not.toBeNull();
   });
 
+  it("rejects a rewrite that echoes design_read's image-elision placeholder", async () => {
+    const echoed = editDoc("Echo").replace("<p>Body.</p>", '<img src="[embedded image]" alt="x"><p>Body.</p>');
+    await expect(
+      updateArtifact(db, { sessionId: SESSION_ID, content: echoed, summary: "echo write" }),
+    ).rejects.toThrow(/destroy the embedded images/);
+  });
+
   it("normalizes a missing valet-design header with an explicit note", async () => {
     const result = await updateArtifact(db, {
       sessionId: SESSION_ID,

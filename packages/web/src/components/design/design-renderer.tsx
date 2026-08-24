@@ -228,8 +228,11 @@ export function DesignRenderer({
       applyStageSizing(topLevelSections(shadow));
     }
     // Measure artifact-intrinsic visibility HERE, before the slide-toggle
-    // effect adds its own inline display/vd-active overrides.
-    if (healthRef.current) {
+    // effect adds its own inline display/vd-active overrides — then once
+    // more after fonts load and images decode (a slide that is one big
+    // image measures empty at mount and would falsely report sparse).
+    const measureHealth = () => {
+      if (!healthRef.current) return;
       const sections = topLevelSections(shadow);
       const hiddenSlides: number[] = [];
       const overflowingSlides: number[] = [];
@@ -265,15 +268,21 @@ export function DesignRenderer({
           if ((maxBottom - top) / STAGE_H < 0.5) sparseSlides.push(i);
         }
       });
-      healthRef.current({
+      healthRef.current?.({
         totalSlides: sections.length,
         hiddenSlides,
         overflowingSlides,
         sparseSlides,
         scriptsStripped: (content.match(/<script\b/gi) ?? []).length,
       });
-    }
+    };
+    measureHealth();
+    // Post-load re-measure: fonts.ready settles webfont reflow; the timer
+    // catches image decode. The canvas dedupes identical reports.
+    void document.fonts?.ready.then(() => measureHealth()).catch(() => {});
+    const remeasure = window.setTimeout(measureHealth, 1200);
     setDomVersion((v) => v + 1);
+    return () => window.clearTimeout(remeasure);
     // `version.ok` is derived from `content`; content is the real input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content]);

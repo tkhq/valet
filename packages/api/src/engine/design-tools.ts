@@ -136,6 +136,10 @@ export const designEditTool = defineTool({
     if (args.kind === "rewrite") {
       const before = await readArtifact(cfg, ctx);
       if (!("error" in before) && typeof before.content === "string") {
+        // Fence the rewrite on the revision it replaces: a user revert
+        // that lands mid-turn rejects this write (with the corrective
+        // stale-edit message) instead of being silently clobbered.
+        parentRevision = before.revision;
         const prevLen = Buffer.byteLength(before.content);
         const nextLen = Buffer.byteLength(content);
         if (prevLen > 20_000 && nextLen < prevLen * 0.5) {
@@ -390,12 +394,16 @@ export const designImportMarpTool = defineTool({
     }
 
     const { output, report } = marpToDcHtml(markdown, { createdBy: `user:${ctx.userId}` });
+    const beforeImport = await readArtifact(cfg, ctx);
     const res = await fetch(designUrl(cfg, ctx, "edit"), {
       method: "POST",
       headers: designHeaders(cfg, ctx, true),
       body: JSON.stringify({
         content: output,
         summary: `Imported Marp deck from ${args.file_path}`,
+        // Fence on the revision current at import time — a user revert
+        // during the approval gate rejects instead of being clobbered.
+        ...("error" in beforeImport ? {} : { parentRevision: beforeImport.revision }),
         ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
       }),
       signal: ctx.signal,
@@ -557,12 +565,37 @@ export const designExportTool = defineTool({
     // so it can neither escape /workspace/exports nor inject into the
     // marp-cli invocation below. Computed BEFORE the gate so the user
     // approves the actual output destination.
-    const baseName =
+    let baseName =
       (args.filename ?? `design-${current.revision}`)
         .replace(/\.(html|pdf|pptx)$/, "")
         .replace(/[^a-zA-Z0-9._-]+/g, "-")
         .replace(/^[.-]+/, "")
         .slice(0, 100) || `design-${current.revision}`;
+    // Never overwrite a previous export: probe for a free name (a prior
+    // approved deliverable disappearing silently is worse than a suffix).
+    if (args.format !== "gslides") {
+      const probe = async (candidate: string): Promise<boolean> => {
+        try {
+          await ctx.sandbox.stat(
+            args.format === "project"
+              ? `/workspace/exports/${candidate}`
+              : `/workspace/exports/${candidate}.${args.format}`,
+          );
+          return true; // exists
+        } catch {
+          return false;
+        }
+      };
+      if (await probe(baseName)) {
+        for (let n = 2; n <= 20; n++) {
+          if (!(await probe(`${baseName}-${n}`))) {
+            baseName = `${baseName}-${n}`;
+            break;
+          }
+        }
+      }
+    }
+
     const destination =
       args.format === "gslides"
         ? `a new Google Slides presentation titled "${args.filename ?? "from the deck's own title"}" in the connected Google Drive`
@@ -807,12 +840,14 @@ export const designImportGslidesTool = defineTool({
     try {
       const presentation: MinimalPresentation = await getPresentation(args.presentation_id, token);
       const { output, report } = slidesToDcHtml(presentation);
+      const beforeImport = await readArtifact(cfg, ctx);
       const res = await fetch(designUrl(cfg, ctx, "edit"), {
         method: "POST",
         headers: designHeaders(cfg, ctx, true),
         body: JSON.stringify({
           content: output,
           summary: `Imported Google Slides presentation ${args.presentation_id}`,
+          ...("error" in beforeImport ? {} : { parentRevision: beforeImport.revision }),
           ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
         }),
         signal: ctx.signal,

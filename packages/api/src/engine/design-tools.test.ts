@@ -199,9 +199,16 @@ describe("design tools", () => {
   });
 
   it("design_import_marp gates, reads the workspace file, and writes the converted deck", async () => {
-    const writes: Array<{ url: string; body: { content: string; summary: string } }> = [];
+    const writes: Array<{ url: string; body: { content: string; summary: string; parentRevision?: string } }> = [];
     vi.stubGlobal("fetch", (url: URL | string, init?: RequestInit) => {
-      writes.push({ url: String(url), body: JSON.parse(String(init?.body)) as (typeof writes)[0]["body"] });
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        // The import fence pre-reads the current revision.
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-001", content: DOC }), { status: 200 }),
+        );
+      }
+      writes.push({ url: u, body: JSON.parse(String(init?.body)) as (typeof writes)[0]["body"] });
       return Promise.resolve(new Response(JSON.stringify({ revision: "r-002" }), { status: 200 }));
     });
 
@@ -220,6 +227,7 @@ describe("design tools", () => {
     expect(result.text).toContain("imported /workspace/deck.md as revision r-002");
     expect(writes[0].body.content).toContain("valet-design");
     expect(writes[0].body.content).toContain("Deck from /workspace/deck.md");
+    expect(writes[0].body.parentRevision).toBe("r-001"); // fenced on the pre-read
   });
 
   it("design_import_marp declined gate imports nothing", async () => {

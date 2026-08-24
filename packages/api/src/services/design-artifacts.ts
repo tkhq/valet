@@ -213,6 +213,14 @@ export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promi
       `Artifact exceeds the ${MAX_ARTIFACT_BYTES}-byte cap. Remove embedded images or split the document.`,
     );
   }
+  // A rewrite that contains design_read's elision marker is definitively
+  // an echo of the lossy read — persisting it would replace real embedded
+  // images with a broken placeholder. Reject with the way out.
+  if (opts.content.includes('src="[embedded image]"')) {
+    throw new ValidationError(
+      'The content contains design_read\'s "[embedded image]" placeholder — data URLs are elided in reads, so this rewrite would destroy the embedded images. Use design_edit kind=\'patch\' to edit around embedded images instead of rewriting the whole document.',
+    );
+  }
   const notes: string[] = [];
   const ensured = ensureHeader(opts.content, opts.template);
   if (ensured.injected) {

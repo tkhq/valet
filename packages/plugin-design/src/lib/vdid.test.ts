@@ -43,6 +43,18 @@ describe("vdid addressing", () => {
     expect(html.match(/data-vdid=/g)).toHaveLength(2);
   });
 
+  it("re-stamps a DUPLICATED existing id — first claim wins", () => {
+    // A copy-pasted slide keeps its source's ids; the copy must get fresh
+    // ones or patches and comment anchors silently hit the original.
+    const { html } = applyVdids(
+      '<body><section data-vdid="aaaa111122223333"><h2>Src</h2></section><section data-vdid="aaaa111122223333"><h2>Copy</h2></section></body>',
+    );
+    const ids = [...html.matchAll(/<section data-vdid="([0-9a-f_]+)"/g)].map((m) => m[1]);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe("aaaa111122223333");
+    expect(ids[1]).not.toBe("aaaa111122223333");
+  });
+
   it("findByVdid returns the element outer HTML", () => {
     const { html } = applyVdids("<body><h1>Find Me</h1></body>");
     const vdid = /data-vdid="([0-9a-f_]+)"/.exec(html)?.[1] ?? "";

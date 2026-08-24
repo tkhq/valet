@@ -79,7 +79,13 @@ export function applyVdids(html: string): { html: string; report: VdidReport } {
     if (!ADDRESSABLE_TAGS.has(el.tagName.toLowerCase())) continue;
     addressable.push(el);
     const existing = el.getAttribute("data-vdid");
-    if (existing) taken.add(existing);
+    if (!existing) continue;
+    // First claim wins. A LATER element carrying an already-taken id (a
+    // copy-pasted slide keeps its source's ids) is stripped and re-stamped
+    // below — duplicate ids make patches and comment anchors hit the
+    // first match and silently miss the copy.
+    if (taken.has(existing)) el.removeAttribute("data-vdid");
+    else taken.add(existing);
   }
   report.addressable = addressable.length;
 

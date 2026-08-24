@@ -220,6 +220,20 @@ describe("design acceptance (API-level)", () => {
     expect(artifact.status).toBe(404);
   });
 
+  it("a deleted design session's canvas surface 404s", async () => {
+    const sessionId = await createDesignSession("blank");
+    const del = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    const artifact = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/artifact`);
+    expect(artifact.status).toBe(404);
+    const edit = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/edit`, {
+      method: "POST",
+      headers: INTERNAL_HEADERS,
+      body: JSON.stringify({ content: editedDoc("Zombie"), summary: "post-delete write" }),
+    });
+    expect(edit.status).toBe(404);
+  });
+
   it("design session create rejects a missing or unknown template with the valid list", async () => {
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST",

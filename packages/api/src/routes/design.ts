@@ -20,7 +20,13 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
-import { extractTokenRefs, parseDesignTokens, DEFAULT_DESIGN_TOKENS } from "@valet/plugin-design/lib";
+import {
+  extractTokenRefs,
+  isDesignTemplate,
+  parseDesignTokens,
+  parseHeader,
+  DEFAULT_DESIGN_TOKENS,
+} from "@valet/plugin-design/lib";
 import { handleServiceError } from "./memory.js";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionRepos, type AgentSessionRow } from "../schema/index.js";
@@ -77,6 +83,7 @@ interface RenderHealthReport {
   reportedAt: number;
 }
 const healthReports = new Map<string, RenderHealthReport>();
+const HEALTH_REPORT_CAP = 500;
 
 interface DesignAccess {
   row: AgentSessionRow;
@@ -94,6 +101,10 @@ async function resolveAccess(c: Context<AppEnv>): Promise<DesignAccess | null> {
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
+  // A deleted session's design surface goes with it (soft delete keeps the
+  // rows for audit, not for continued use) — 404, same existence-hiding
+  // shape as a missing session.
+  if (row.status === "deleted") return null;
 
   if (isValidInternalToken(c.req.header("x-valet-internal"))) {
     return { row, actorUserId: c.req.header("x-valet-actor") ?? row.userId };
@@ -231,6 +242,17 @@ designRouter.post("/:id/design/edit", async (c) => {
         sizeBytes: result.artifact.sizeBytes,
       },
     });
+    // Heal template drift: an import can legitimately change the artifact's
+    // template (document -> slides via a Marp import). The canvas trusts
+    // the session row; keep it in lockstep with the stored header.
+    const header = parseHeader(result.revision.content);
+    if (header && header.template !== access.row.template && isDesignTemplate(header.template)) {
+      await db
+        .update(agentSessions)
+        .set({ template: header.template, updatedAt: Date.now() })
+        .where(eq(agentSessions.id, access.row.id));
+    }
+
     const notes = [
       ...result.notes,
       ...(result.interleaved
@@ -410,6 +432,11 @@ designRouter.post("/:id/design/health", async (c) => {
   }
   if (typeof body.revision !== "string" || typeof body.totalSlides !== "number") {
     return c.json({ error: "revision and totalSlides are required" }, 400);
+  }
+  // Bounded: evict the oldest report past the cap (insertion order).
+  if (!healthReports.has(access.row.id) && healthReports.size >= HEALTH_REPORT_CAP) {
+    const oldest = healthReports.keys().next().value;
+    if (oldest !== undefined) healthReports.delete(oldest);
   }
   healthReports.set(access.row.id, {
     revision: body.revision,
