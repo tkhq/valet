@@ -154,7 +154,15 @@ export function dcHtmlToSlidesChunks(dcHtml: string, fallbackTitle = "Valet Desi
     const flushBody = (bullets: boolean) => {
       if (bodyLines.length === 0) return;
       const id = `${slideId}_b${bodyCounter++}`;
-      const height = Math.min(SLIDE_H - cursor - MARGIN, 500000 * bodyLines.length + 200000);
+      // Clamp: a content-dense slide can push the cursor past the slide
+      // bottom, and `SLIDE_H - cursor - MARGIN` then goes negative — an
+      // invalid createShape size the Slides API rejects. Off-slide overflow
+      // (positive height below the bottom edge) is legal, so clamp to a
+      // minimum box instead of failing the chunk.
+      const height = Math.max(
+        Math.min(SLIDE_H - cursor - MARGIN, 500000 * bodyLines.length + 200000),
+        300000,
+      );
       requests.push(
         ...textBoxRequests(id, slideId, bodyLines.join("\n"), {
           top: cursor,
@@ -168,6 +176,8 @@ export function dcHtmlToSlidesChunks(dcHtml: string, fallbackTitle = "Valet Desi
     };
 
     for (const child of section.childNodes) {
+      // node-html-parser Node-union narrowing: tagName is undefined on
+      // text nodes (bad third-party types).
       const el = child as HTMLElement;
       if (!el.tagName) continue;
       const tag = el.tagName.toLowerCase();
@@ -257,11 +267,22 @@ export interface GslidesImport {
   report: string[];
 }
 
+function escapeAttr(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
 function pageElementToHtml(el: MinimalPageElement, report: string[]): string | null {
   if (el.image) {
     const src = el.image.sourceUrl ?? el.image.contentUrl;
     if (!src) return null;
-    return `<img src="${src}" alt="">`;
+    // The canvas renderer blocks external URLs (sanitizer ruling, spec
+    // Decision 1), so a Google-hosted image will not render in the canvas —
+    // say so in the report instead of dropping it silently. The URL stays
+    // in the artifact: a later export to Slides can still use it.
+    report.push(
+      `image ${el.objectId} kept as an external URL; it will not render in the canvas (external URLs are blocked) but survives re-export`,
+    );
+    return `<img src="${escapeAttr(src)}" alt="">`;
   }
   const textElements = el.shape?.text?.textElements ?? [];
   if (textElements.length === 0) {

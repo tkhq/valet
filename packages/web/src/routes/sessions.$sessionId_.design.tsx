@@ -170,9 +170,20 @@ function DesignCanvasPage() {
 
   if (artifactQ.error || !artifactQ.data) {
     return (
-      <div className="flex-1 grid place-items-center text-center text-sm text-danger-500 p-8">
-        The design did not load.
-        <div className="text-xs text-muted mt-1">{(artifactQ.error as Error)?.message}</div>
+      <div className="flex-1 grid place-items-center text-center text-sm p-8">
+        <div>
+          <div className="text-danger-500">The design did not load. Retry, or reload the page.</div>
+          <div className="text-xs text-muted mt-1">
+            {artifactQ.error instanceof Error ? artifactQ.error.message : null}
+          </div>
+          <button
+            type="button"
+            className="mt-3 rounded border border-line px-3 py-1 text-xs hover:bg-ink-wash"
+            onClick={() => void artifactQ.refetch()}
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }

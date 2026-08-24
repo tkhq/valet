@@ -83,16 +83,27 @@ export async function seedArtifact(
   return artifact;
 }
 
-export async function getArtifactBySession(
+/** The artifact row alone — no revision content. The right lookup for
+ * every path that needs only ids/metadata: the current revision's content
+ * can be MAX_ARTIFACT_BYTES, and hauling it to read `artifact.id` is the
+ * dominant per-request cost on the comment and revision-list routes. */
+export async function getArtifactRowBySession(
   db: AppDb,
   sessionId: string,
-): Promise<DesignArtifactDetail | null> {
+): Promise<DesignArtifactRow | null> {
   const rows = await db
     .select()
     .from(designArtifacts)
     .where(eq(designArtifacts.sessionId, sessionId))
     .limit(1);
-  const artifact = rows[0];
+  return rows[0] ?? null;
+}
+
+export async function getArtifactBySession(
+  db: AppDb,
+  sessionId: string,
+): Promise<DesignArtifactDetail | null> {
+  const artifact = await getArtifactRowBySession(db, sessionId);
   if (!artifact) return null;
   const revision = await getRevision(db, artifact.id, artifact.currentRevision);
   if (!revision) return null;
@@ -176,11 +187,17 @@ export async function updateArtifact(db: AppDb, opts: UpdateArtifactOpts): Promi
   const { html } = applyVdids(opts.content);
 
   return db.transaction(async (tx) => {
+    // Row lock: two concurrent writers (a UI revert racing a design_edit,
+    // neither carrying parentRevision) would otherwise both read the same
+    // currentRevision, compute the same next id, and the loser would hit
+    // the (artifact_id, revision) unique index as a raw 500. FOR UPDATE
+    // serializes them; the second writer re-reads the moved pointer.
     const rows = await tx
       .select()
       .from(designArtifacts)
       .where(eq(designArtifacts.sessionId, opts.sessionId))
-      .limit(1);
+      .limit(1)
+      .for("update");
     const artifact = rows[0];
     if (!artifact) throw new NotFoundError("design artifact");
     if (opts.parentRevision && opts.parentRevision !== artifact.currentRevision) {
@@ -217,9 +234,9 @@ export async function revertToRevision(
   db: AppDb,
   opts: { sessionId: string; revision: string },
 ): Promise<UpdateArtifactResult> {
-  const detail = await getArtifactBySession(db, opts.sessionId);
-  if (!detail) throw new NotFoundError("design artifact");
-  const target = await getRevision(db, detail.artifact.id, opts.revision);
+  const artifact = await getArtifactRowBySession(db, opts.sessionId);
+  if (!artifact) throw new NotFoundError("design artifact");
+  const target = await getRevision(db, artifact.id, opts.revision);
   if (!target) throw new NotFoundError(`revision ${opts.revision}`);
   return updateArtifact(db, {
     sessionId: opts.sessionId,
@@ -234,15 +251,15 @@ export async function addComment(
   db: AppDb,
   opts: { sessionId: string; vdid: string; body: string; authorUserId: string },
 ): Promise<DesignCommentRow> {
-  const detail = await getArtifactBySession(db, opts.sessionId);
-  if (!detail) throw new NotFoundError("design artifact");
+  const artifact = await getArtifactRowBySession(db, opts.sessionId);
+  if (!artifact) throw new NotFoundError("design artifact");
   if (!opts.body.trim()) throw new ValidationError("Comment body is empty. Write the comment text.");
   const [row] = await db
     .insert(designComments)
     .values({
       id: newId("dc"),
-      artifactId: detail.artifact.id,
-      revision: detail.artifact.currentRevision,
+      artifactId: artifact.id,
+      revision: artifact.currentRevision,
       vdid: opts.vdid,
       body: opts.body,
       authorUserId: opts.authorUserId,
@@ -253,12 +270,12 @@ export async function addComment(
 }
 
 export async function listComments(db: AppDb, sessionId: string): Promise<DesignCommentRow[]> {
-  const detail = await getArtifactBySession(db, sessionId);
-  if (!detail) return [];
+  const artifact = await getArtifactRowBySession(db, sessionId);
+  if (!artifact) return [];
   return db
     .select()
     .from(designComments)
-    .where(eq(designComments.artifactId, detail.artifact.id))
+    .where(eq(designComments.artifactId, artifact.id))
     .orderBy(desc(designComments.createdAt));
 }
 
@@ -266,13 +283,13 @@ export async function resolveComment(
   db: AppDb,
   opts: { sessionId: string; commentId: string },
 ): Promise<DesignCommentRow> {
-  const detail = await getArtifactBySession(db, opts.sessionId);
-  if (!detail) throw new NotFoundError("design artifact");
+  const artifact = await getArtifactRowBySession(db, opts.sessionId);
+  if (!artifact) throw new NotFoundError("design artifact");
   const [row] = await db
     .update(designComments)
     .set({ resolvedAt: Date.now() })
     .where(
-      and(eq(designComments.id, opts.commentId), eq(designComments.artifactId, detail.artifact.id)),
+      and(eq(designComments.id, opts.commentId), eq(designComments.artifactId, artifact.id)),
     )
     .returning();
   if (!row) throw new NotFoundError(`comment ${opts.commentId}`);
@@ -300,12 +317,24 @@ export type DesignEventName =
  */
 export async function emitDesignEvent(
   stream: EventStream,
-  opts: { sessionId: string; name: DesignEventName; payload: Record<string, unknown>; eventKey: string },
+  opts: {
+    sessionId: string;
+    name: DesignEventName;
+    payload: Record<string, unknown>;
+    eventKey: string;
+    /** The submission whose turn produced this event. Retention prunes
+     * durable events by settled queueItemId, so tool-driven mutations MUST
+     * pass it or their rows outlive every retention window. UI-driven
+     * mutations (revert, comments) have no turn and stay unpruned — a
+     * human-scale volume. */
+    queueItemId?: string;
+  },
 ): Promise<void> {
   try {
     await stream.append(
       {
         sessionId: opts.sessionId,
+        ...(opts.queueItemId ? { queueItemId: opts.queueItemId } : {}),
         event: { type: "host_event", name: opts.name, payload: opts.payload },
         timestamp: Date.now(),
       },

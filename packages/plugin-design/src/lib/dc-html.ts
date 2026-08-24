@@ -74,6 +74,9 @@ export function parseMetaBlock(html: string): DcHtmlMetaBlock | null {
   try {
     const parsed: unknown = JSON.parse(match[1]);
     if (typeof parsed !== "object" || parsed === null) return null;
+    // The block is advisory metadata with an open index signature; every
+    // declared field is optional, so a non-null object IS the type — a
+    // field-by-field narrowing would just restate `unknown` per key.
     return parsed as DcHtmlMetaBlock;
   } catch {
     return null;

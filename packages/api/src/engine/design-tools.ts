@@ -134,6 +134,7 @@ export const designEditTool = defineTool({
         content,
         summary: args.summary ?? "",
         ...(parentRevision ? { parentRevision } : {}),
+        ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
       }),
       signal: ctx.signal,
     });
@@ -239,7 +240,11 @@ export const designImportMarpTool = defineTool({
     const res = await fetch(designUrl(cfg, ctx, "edit"), {
       method: "POST",
       headers: designHeaders(cfg, ctx, true),
-      body: JSON.stringify({ content: output, summary: `Imported Marp deck from ${args.file_path}` }),
+      body: JSON.stringify({
+        content: output,
+        summary: `Imported Marp deck from ${args.file_path}`,
+        ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
+      }),
       signal: ctx.signal,
     });
     if (!res.ok) return { text: `[design_import_marp failed] ${await readError(res)}` };
@@ -278,7 +283,13 @@ export const designImportImageTool = defineTool({
     let element: string;
     try {
       if (ext === "svg") {
-        element = await ctx.sandbox.readFile(args.file_path);
+        // Strip the XML prolog, comments, and DOCTYPE that most SVG
+        // exporters (Inkscape, Illustrator) prepend — the vdid stamp below
+        // and the element patcher both need <svg> as the first element.
+        element = (await ctx.sandbox.readFile(args.file_path)).replace(
+          /^\s*(?:<\?[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*/i,
+          "",
+        );
       } else {
         const mime = IMAGE_MIME[ext];
         if (!mime) {
@@ -327,6 +338,7 @@ export const designImportImageTool = defineTool({
         content,
         summary: `Embedded image ${args.file_path}`,
         parentRevision: current.revision,
+        ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
       }),
       signal: ctx.signal,
     });
@@ -394,7 +406,16 @@ export const designExportTool = defineTool({
       return { text: `${args.format} export declined by ${resolution.resolvedBy}` };
     }
 
-    const baseName = (args.filename ?? `design-${current.revision}`).replace(/\.(html|pdf|pptx)$/, "");
+    // The filename reaches a `sh -c` command line and a workspace path.
+    // Reduce it to a safe charset — no separators, no shell metacharacters —
+    // so it can neither escape /workspace/exports nor inject into the
+    // marp-cli invocation below.
+    const baseName =
+      (args.filename ?? `design-${current.revision}`)
+        .replace(/\.(html|pdf|pptx)$/, "")
+        .replace(/[^a-zA-Z0-9._-]+/g, "-")
+        .replace(/^[.-]+/, "")
+        .slice(0, 100) || `design-${current.revision}`;
 
     if (args.format === "html") {
       const path = `/workspace/exports/${baseName}.html`;
@@ -418,8 +439,12 @@ export const designExportTool = defineTool({
       }
       await ctx.sandbox.writeFile(mdPath, markdown);
       const flag = args.format === "pdf" ? "--pdf" : "--pptx";
+      // Prefer the globally installed `marp` binary (Dockerfile.sandbox-design
+      // bakes marp-cli@4 exactly so exports work with registry egress denied).
+      // The npx fallback pins @4 to match the baked major — an unpinned
+      // `@latest` always consults the registry, defeating the offline install.
       const result = await ctx.sandbox.exec(
-        `npx -y @marp-team/marp-cli@latest ${mdPath} ${flag} --allow-local-files -o ${outPath}`,
+        `if command -v marp >/dev/null 2>&1; then marp ${mdPath} ${flag} --allow-local-files -o ${outPath}; else npx -y @marp-team/marp-cli@4 ${mdPath} ${flag} --allow-local-files -o ${outPath}; fi`,
         { timeout: 180_000 },
       );
       if (result.exitCode !== 0) {
@@ -502,6 +527,7 @@ export const designImportGslidesTool = defineTool({
         body: JSON.stringify({
           content: output,
           summary: `Imported Google Slides presentation ${args.presentation_id}`,
+          ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
         }),
         signal: ctx.signal,
       });
@@ -540,6 +566,23 @@ export const designHandoffTool = defineTool({
     if ("error" in current) return { text: `[design_handoff failed] ${current.error}` };
     const template = parseHeader(current.content)?.template ?? "document";
 
+    // The artifact rides in the child's prompt, so its size is prompt
+    // tokens. Embedded base64 images are useless to the model and can be
+    // ~2 MB alone — replace them with a marker. If the document is still
+    // huge after that, truncate with a notice rather than blowing the
+    // child's context window.
+    const HANDOFF_CONTENT_CAP = 150_000;
+    let embedded = current.content.replace(
+      /src="data:[^"]*"/g,
+      'src="[embedded image omitted from handoff brief]"',
+    );
+    let truncationNote = "";
+    if (embedded.length > HANDOFF_CONTENT_CAP) {
+      embedded = embedded.slice(0, HANDOFF_CONTENT_CAP);
+      truncationNote =
+        "\n[artifact truncated for the handoff brief — ask the user for the full document if the tail matters]";
+    }
+
     const prompt = [
       "You are implementing a design produced in a Valet Design session.",
       args.implementation_task
@@ -549,7 +592,7 @@ export const designHandoffTool = defineTool({
       "Treat the artifact below as the source of truth for layout, copy, and styling intent; adapt it to the project's stack and design system.",
       "",
       "---- design artifact (.dc.html) ----",
-      current.content,
+      embedded + truncationNote,
       "---- end artifact ----",
     ].join("\n");
 

@@ -20,8 +20,8 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
-import { NotFoundError, ValidationError } from "@valet/shared";
 import { extractTokenRefs, parseDesignTokens } from "@valet/plugin-design/lib";
+import { handleServiceError } from "./memory.js";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionRepos, type AgentSessionRow } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
@@ -33,6 +33,7 @@ import {
   addComment,
   emitDesignEvent,
   getArtifactBySession,
+  getArtifactRowBySession,
   getRevision,
   listComments,
   listRevisions,
@@ -47,6 +48,14 @@ import type {
 } from "../wire/types.js";
 
 export const designRouter = new Hono<AppEnv>();
+
+/** Per-process cache of parsed design-tokens.json, keyed by repo@ref:user.
+ * design_render_token hits the tokens route once per lookup; without this,
+ * every lookup is a credential resolve plus a GitHub contents round trip
+ * inside the agent loop. 60s TTL: a pushed token change shows up within a
+ * minute, which matches how often design systems actually change. */
+const TOKEN_CACHE_TTL_MS = 60_000;
+const tokenCache = new Map<string, { tokens: Record<string, string>; at: number }>();
 
 interface DesignAccess {
   row: AgentSessionRow;
@@ -73,12 +82,6 @@ async function resolveAccess(c: Context<AppEnv>): Promise<DesignAccess | null> {
   return { row, actorUserId: user.id };
 }
 
-function serviceErrorBody(err: unknown): { body: { error: string }; status: 400 | 404 } | null {
-  if (err instanceof NotFoundError) return { body: { error: err.message }, status: 404 };
-  if (err instanceof ValidationError) return { body: { error: err.message }, status: 400 };
-  return null;
-}
-
 designRouter.get("/:id/design/artifact", async (c) => {
   const access = await resolveAccess(c);
   if (!access) return c.json({ error: "session not found" }, 404);
@@ -100,24 +103,24 @@ designRouter.get("/:id/design/revisions", async (c) => {
   const access = await resolveAccess(c);
   if (!access) return c.json({ error: "session not found" }, 404);
   const { db } = c.var.providers;
-  const detail = await getArtifactBySession(db, access.row.id);
-  if (!detail) return c.json({ error: "this session has no design artifact" }, 404);
-  const revisions: DesignRevisionSummary[] = (await listRevisions(db, detail.artifact.id)).map((r) => ({
+  const artifact = await getArtifactRowBySession(db, access.row.id);
+  if (!artifact) return c.json({ error: "this session has no design artifact" }, 404);
+  const revisions: DesignRevisionSummary[] = (await listRevisions(db, artifact.id)).map((r) => ({
     revision: r.revision,
     summary: r.summary,
     turnId: r.turnId,
     createdAt: r.createdAt,
   }));
-  return c.json({ revisions, current: detail.artifact.currentRevision });
+  return c.json({ revisions, current: artifact.currentRevision });
 });
 
 designRouter.get("/:id/design/revisions/:rev", async (c) => {
   const access = await resolveAccess(c);
   if (!access) return c.json({ error: "session not found" }, 404);
   const { db } = c.var.providers;
-  const detail = await getArtifactBySession(db, access.row.id);
-  if (!detail) return c.json({ error: "this session has no design artifact" }, 404);
-  const revision = await getRevision(db, detail.artifact.id, c.req.param("rev"));
+  const artifact = await getArtifactRowBySession(db, access.row.id);
+  if (!artifact) return c.json({ error: "this session has no design artifact" }, 404);
+  const revision = await getRevision(db, artifact.id, c.req.param("rev"));
   if (!revision) return c.json({ error: `no revision ${c.req.param("rev")}` }, 404);
   return c.json({
     revision: revision.revision,
@@ -153,7 +156,7 @@ designRouter.post("/:id/design/revert", async (c) => {
     });
     return c.json({ revision: result.revision.revision, summary: result.revision.summary });
   } catch (err) {
-    const mapped = serviceErrorBody(err);
+    const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
@@ -163,7 +166,13 @@ designRouter.post("/:id/design/edit", async (c) => {
   const access = await resolveAccess(c);
   if (!access) return c.json({ error: "session not found" }, 404);
   const { db, eventStream } = c.var.providers;
-  let body: { content?: string; summary?: string; turnId?: string; parentRevision?: string };
+  let body: {
+    content?: string;
+    summary?: string;
+    turnId?: string;
+    parentRevision?: string;
+    queueItemId?: string;
+  };
   try {
     body = (await c.req.json()) as typeof body;
   } catch {
@@ -184,6 +193,11 @@ designRouter.post("/:id/design/edit", async (c) => {
       sessionId: access.row.id,
       name: "design.artifact.updated",
       eventKey: `${result.artifact.id}:${result.revision.revision}`,
+      // Ties the durable event row to the submission's retention window
+      // (design_* tools pass their turn's queueItemId through).
+      ...(typeof body.queueItemId === "string" && body.queueItemId
+        ? { queueItemId: body.queueItemId }
+        : {}),
       payload: {
         artifactId: result.artifact.id,
         revision: result.revision.revision,
@@ -193,7 +207,7 @@ designRouter.post("/:id/design/edit", async (c) => {
     });
     return c.json({ revision: result.revision.revision, sizeBytes: result.artifact.sizeBytes });
   } catch (err) {
-    const mapped = serviceErrorBody(err);
+    const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
@@ -243,7 +257,7 @@ designRouter.post("/:id/design/comments", async (c) => {
     });
     return c.json({ id: row.id, vdid: row.vdid, createdAt: row.createdAt }, 201);
   } catch (err) {
-    const mapped = serviceErrorBody(err);
+    const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
@@ -263,7 +277,7 @@ designRouter.post("/:id/design/comments/:cid/resolve", async (c) => {
     });
     return c.json({ id: row.id, resolvedAt: row.resolvedAt });
   } catch (err) {
-    const mapped = serviceErrorBody(err);
+    const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
@@ -290,19 +304,31 @@ designRouter.get("/:id/design/tokens", async (c) => {
     .limit(1);
   const repo = repoRows[0];
   if (repo) {
-    const deps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
-    const userToken = await resolveUserApiToken(deps, access.row.orgId, access.row.userId);
-    const reader = new GitHubSkillRepoReader({
-      credential: userToken
-        ? { kind: "user", token: userToken.token, ownerScope: "user" }
-        : { kind: "none" },
-    });
-    try {
-      const file = await reader.readFile(repo.fullName, "design-tokens.json", repo.ref ?? "");
-      if (file) tokens = parseDesignTokens(file.text);
-    } catch {
-      // Unreachable repo degrades to no tokens; the canvas renders with
-      // the artifact's own fallback values.
+    const cacheKey = `${repo.fullName}@${repo.ref ?? ""}:${access.row.userId}`;
+    const cached = tokenCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < TOKEN_CACHE_TTL_MS) {
+      tokens = cached.tokens;
+    } else {
+      const deps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+      const userToken = await resolveUserApiToken(deps, access.row.orgId, access.row.userId);
+      const reader = new GitHubSkillRepoReader({
+        credential: userToken
+          ? { kind: "user", token: userToken.token, ownerScope: "user" }
+          : { kind: "none" },
+      });
+      try {
+        const file = await reader.readFile(repo.fullName, "design-tokens.json", repo.ref ?? "");
+        if (file) tokens = parseDesignTokens(file.text);
+      } catch {
+        // Unreachable repo degrades to no tokens; the canvas renders with
+        // the artifact's own fallback values.
+      }
+      tokenCache.set(cacheKey, { tokens, at: Date.now() });
+      // Bound the map: evict the oldest entries past the cap.
+      if (tokenCache.size > 500) {
+        const oldest = [...tokenCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) tokenCache.delete(oldest[0]);
+      }
     }
   }
 

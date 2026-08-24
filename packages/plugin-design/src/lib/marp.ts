@@ -84,6 +84,9 @@ function escapeHtml(text: string): string {
 function childMarkdown(el: HTMLElement, report: string[]): string {
   const parts: string[] = [];
   for (const child of el.childNodes) {
+    // node-html-parser types childNodes as bare Node without a
+    // discriminant; tagName is undefined on text nodes, which the checks
+    // below rely on (bad third-party types).
     const node = child as HTMLElement;
     if (node.nodeType === 3) {
       parts.push(node.rawText);
@@ -179,6 +182,7 @@ export function dcHtmlToMarp(dcHtml: string): MarpConversion {
   const slides = sections.map((section) => {
     const blocks: string[] = [];
     for (const child of section.childNodes) {
+      // Same node-html-parser Node-union narrowing as childMarkdown above.
       const el = child as HTMLElement;
       if (!el.tagName) continue;
       const md = blockToMarkdown(el, report);

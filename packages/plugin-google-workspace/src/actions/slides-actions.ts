@@ -13,7 +13,6 @@ import {
   createPresentation,
   getPresentation,
   SlidesApiError,
-  type BatchUpdateChunk,
 } from './slides-transport.js';
 
 function action<TParams extends TSchema>(parameters: TParams) {
@@ -120,7 +119,7 @@ const batchUpdateAction = action(
   execute: async ({ presentationId, chunks, requiredRevisionId, startAt }, ctx) => {
     try {
       const token = await getAccessToken(ctx);
-      const result = await batchUpdateChunked(presentationId, chunks as BatchUpdateChunk[], token, {
+      const result = await batchUpdateChunked(presentationId, chunks, token, {
         ...(startAt !== undefined ? { startAt } : {}),
         ...(requiredRevisionId ? { initialRevisionId: requiredRevisionId } : {}),
       });

@@ -53,6 +53,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { buildDesignTools } from "./design-tools.js";
+import { readTemplateStarter } from "@valet/plugin-design/lib";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
@@ -284,6 +285,9 @@ export interface SessionMeta {
    * "design" attaches the design_* ToolDefs + their toolConfig; absent or
    * "code" changes nothing. */
   kind?: "code" | "design";
+  /** Design template the session was minted from. Its prompt.md becomes
+   * the session's design-template system context. */
+  template?: string;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -658,6 +662,21 @@ export class EngineHost {
     // opts.apiBaseUrl — absent (some tests) the tools degrade to their
     // [design_unavailable] answer.
     const designTools = meta.kind === "design" ? buildDesignTools() : [];
+    // Per-template authoring guidance (templates/<t>/prompt.md, spec
+    // Decision 7) rides in as system context — the same seam the
+    // orchestrator's memory snapshot uses. Best-effort: a stale template
+    // name means no guidance, never a failed build.
+    let designSystemContext = {};
+    if (meta.kind === "design" && meta.template) {
+      try {
+        const { prompt } = readTemplateStarter(meta.template);
+        designSystemContext = {
+          systemContext: [{ name: "design-template", content: prompt.trim(), order: 20 }],
+        };
+      } catch {
+        // Unknown template — proceed without guidance.
+      }
+    }
     const designToolConfig =
       meta.kind === "design" && this.opts.apiBaseUrl
         ? {
@@ -697,6 +716,7 @@ export class EngineHost {
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
             ...designToolConfig,
+            ...designSystemContext,
             ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
@@ -719,6 +739,7 @@ export class EngineHost {
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
           ...designToolConfig,
+          ...designSystemContext,
           ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),

