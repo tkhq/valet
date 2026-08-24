@@ -613,7 +613,13 @@ export const api = {
     ),
   postDesignHealth: (
     sessionId: string,
-    body: { revision: string; totalSlides: number; hiddenSlides: number[]; scriptsStripped: number },
+    body: {
+      revision: string;
+      totalSlides: number;
+      hiddenSlides: number[];
+      overflowingSlides: number[];
+      scriptsStripped: number;
+    },
   ) =>
     request<{ ok: boolean }>(
       "POST",

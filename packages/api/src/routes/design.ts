@@ -20,7 +20,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
-import { extractTokenRefs, parseDesignTokens } from "@valet/plugin-design/lib";
+import { extractTokenRefs, parseDesignTokens, DEFAULT_DESIGN_TOKENS } from "@valet/plugin-design/lib";
 import { handleServiceError } from "./memory.js";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionRepos, type AgentSessionRow } from "../schema/index.js";
@@ -70,6 +70,7 @@ interface RenderHealthReport {
   revision: string;
   totalSlides: number;
   hiddenSlides: number[];
+  overflowingSlides: number[];
   scriptsStripped: number;
   reportedAt: number;
 }
@@ -326,7 +327,10 @@ designRouter.get("/:id/design/tokens", async (c) => {
   if (!access) return c.json({ error: "session not found" }, 404);
   const { db, engineCredentials, encryptionKey } = c.var.providers;
 
-  let tokens: Record<string, string> = {};
+  // The Valet default design system is always present; repository tokens
+  // overlay it (same-name wins), so a team system replaces defaults
+  // token-by-token instead of all-or-nothing.
+  let tokens: Record<string, string> = { ...DEFAULT_DESIGN_TOKENS };
   const repoRows = await db
     .select()
     .from(sessionRepos)
@@ -348,7 +352,7 @@ designRouter.get("/:id/design/tokens", async (c) => {
       });
       try {
         const file = await reader.readFile(repo.fullName, "design-tokens.json", repo.ref ?? "");
-        if (file) tokens = parseDesignTokens(file.text);
+        if (file) tokens = { ...tokens, ...parseDesignTokens(file.text) };
       } catch {
         // Unreachable repo degrades to no tokens; the canvas renders with
         // the artifact's own fallback values.
@@ -373,7 +377,13 @@ designRouter.get("/:id/design/tokens", async (c) => {
 designRouter.post("/:id/design/health", async (c) => {
   const access = await resolveAccess(c);
   if (!access) return c.json({ error: "session not found" }, 404);
-  let body: { revision?: string; totalSlides?: number; hiddenSlides?: number[]; scriptsStripped?: number };
+  let body: {
+    revision?: string;
+    totalSlides?: number;
+    hiddenSlides?: number[];
+    overflowingSlides?: number[];
+    scriptsStripped?: number;
+  };
   try {
     body = (await c.req.json()) as typeof body;
   } catch {
@@ -386,6 +396,9 @@ designRouter.post("/:id/design/health", async (c) => {
     revision: body.revision,
     totalSlides: body.totalSlides,
     hiddenSlides: (body.hiddenSlides ?? []).filter((n): n is number => typeof n === "number").slice(0, 200),
+    overflowingSlides: (body.overflowingSlides ?? [])
+      .filter((n): n is number => typeof n === "number")
+      .slice(0, 200),
     scriptsStripped: typeof body.scriptsStripped === "number" ? body.scriptsStripped : 0,
     reportedAt: Date.now(),
   });

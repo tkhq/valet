@@ -198,6 +198,7 @@ export const designReadTool = defineTool({
           revision: string;
           totalSlides: number;
           hiddenSlides: number[];
+          overflowingSlides?: number[];
           scriptsStripped: number;
         } | null;
       };
@@ -207,6 +208,12 @@ export const designReadTool = defineTool({
         if (report.hiddenSlides.length > 0) {
           parts.push(
             `${report.hiddenSlides.length} of ${report.totalSlides} slides render hidden or blank in the user's canvas (slides ${report.hiddenSlides.map((i) => i + 1).join(", ")}) — usually CSS that hides sections by default, relying on scripts that never run`,
+          );
+        }
+        const overflowing = report.overflowingSlides ?? [];
+        if (overflowing.length > 0) {
+          parts.push(
+            `slide${overflowing.length === 1 ? "" : "s"} ${overflowing.map((i) => i + 1).join(", ")} overflow the slide box — the content is taller than the slide and gets CLIPPED; cut content or reduce sizes until it fits`,
           );
         }
         if (report.scriptsStripped > 0) {

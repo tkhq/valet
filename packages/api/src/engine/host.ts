@@ -66,7 +66,8 @@ const DESIGN_SESSION_PREAMBLE = [
   "When the user comments on an element, change that element (design_edit kind='patch'), then resolve the comment with design_comment_resolve. Apply the change BEFORE resolving.",
   "Do not trust your memory of the artifact — the user can revert or edit the design from the canvas between your turns. Call design_read to see the current revision, the document, and any unresolved comments before you edit.",
   "The canvas CANNOT run JavaScript. A deck that hides slides until a script reveals them (position:absolute + opacity:0 + an .active class) renders as blank slides. Keep every section statically visible; the canvas shows one slide at a time on its own.",
-  "design_read includes a canvas report measuring what actually renders for the user. When it says slides are hidden or blank, believe it over your reading of the markup, and fix the document until the report is clean.",
+  "design_read includes a canvas report measuring what actually renders for the user: hidden slides, CLIPPED (overflowing) slides, stripped scripts. Believe it over your reading of the markup. After finishing edits, call design_read once and keep fixing until the report is clean — do not tell the user the design is done while slides are hidden or clipped.",
+  "A default Valet design system is always available: var(--color-bg), var(--color-fg), var(--color-muted), var(--color-primary), var(--color-accent), var(--color-success/warning/danger), var(--color-bg-dark)/var(--color-fg-dark), var(--font-sans/serif/mono), var(--radius), var(--shadow). Prefer these tokens over hard-coded values; design_render_token lists everything.",
   "After a handoff, the canvas artifact is STILL the design deliverable. Requests about the design (layout, clipping, styling) are design_edit work — never edit workspace copies of the design with write/edit/bash.",
 ].join("\n");
 import { resolveSnapshot } from "./resolve-snapshot.js";

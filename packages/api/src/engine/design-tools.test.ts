@@ -364,7 +364,13 @@ describe("design tools", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              report: { revision: "r-007", totalSlides: 6, hiddenSlides: [1, 2, 3, 4, 5], scriptsStripped: 1 },
+              report: {
+                revision: "r-007",
+                totalSlides: 6,
+                hiddenSlides: [1, 2, 3, 4, 5],
+                overflowingSlides: [0],
+                scriptsStripped: 1,
+              },
             }),
             { status: 200 },
           ),
@@ -386,6 +392,8 @@ describe("design tools", () => {
     expect(result.text).toContain("revision r-007");
     expect(result.text).toContain("5 of 6 slides render hidden or blank");
     expect(result.text).toContain("slides 2, 3, 4, 5, 6");
+    expect(result.text).toContain("slide 1 overflow the slide box");
+    expect(result.text).toContain("CLIPPED");
     expect(result.text).toContain("1 script tag(s) were stripped");
     expect(result.text).toContain("dc_1 on [data-vdid=abc123]: Make it pop");
     expect(result.text).not.toContain("dc_2");

@@ -140,6 +140,8 @@ function DesignCanvasPage() {
   const canvasRef = useRef<HTMLDivElement>(null);
   // Dedupe render-health posts: one report per (revision, measurement).
   const lastHealthKey = useRef("");
+  // Slide count for the keyboard-navigation listener (bound once).
+  const slidesRef = useRef(0);
   const chatPanel = useDragResize({
     storageKey: "vd.chatWidth",
     initial: 340,
@@ -171,12 +173,39 @@ function DesignCanvasPage() {
     void qc.invalidateQueries({ queryKey: qkDesign.comments(sessionId) });
   }, [commentsNonce, sessionId, qc]);
 
+  // Keyboard slide navigation (Claude Design parity): arrows and page keys
+  // move between slides. Never while typing — the chat input and the
+  // comment form own their own keys.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const total = slidesRef.current;
+      if (total === 0) return;
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowRight" || e.key === "PageDown") {
+        e.preventDefault();
+        setActiveSlide((i) => Math.min(total - 1, i + 1));
+      } else if (e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "PageUp") {
+        e.preventDefault();
+        setActiveSlide((i) => Math.max(0, i - 1));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const content = artifactQ.data?.content;
   const isSlides = artifactQ.data?.template === "slides";
   const slides = useMemo<SlideInfo[]>(
     () => (isSlides && content ? parseSlides(sanitizeDesignHtml(content)) : []),
     [isSlides, content],
   );
+  slidesRef.current = slides.length;
   // A revision can add or drop slides — keep the selection in range.
   useEffect(() => {
     if (slides.length > 0 && activeSlide >= slides.length) {

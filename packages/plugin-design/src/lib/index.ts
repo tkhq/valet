@@ -31,3 +31,4 @@ export type {
   SlidesRequestChunk,
 } from "./gslides.js";
 export { staticRenderChecks, hidesSectionsByDefault } from "./render-checks.js";
+export { DEFAULT_DESIGN_TOKENS } from "./default-design-system.js";

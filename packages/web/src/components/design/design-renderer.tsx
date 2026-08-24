@@ -49,6 +49,9 @@ export interface DesignRenderHealth {
    * (display:none / visibility:hidden / opacity≈0 / zero-height) —
    * measured before the canvas applies its slide toggling. */
   hiddenSlides: number[];
+  /** 0-based indexes of sections whose content is taller than the slide
+   * box (scrollHeight > clientHeight) — the content gets clipped. */
+  overflowingSlides: number[];
   /** `<script>` tags in the raw document; all of them are stripped. */
   scriptsStripped: number;
 }
@@ -195,6 +198,7 @@ export function DesignRenderer({
     if (healthRef.current) {
       const sections = topLevelSections(shadow);
       const hiddenSlides: number[] = [];
+      const overflowingSlides: number[] = [];
       sections.forEach((el, i) => {
         const cs = getComputedStyle(el);
         const rect = el.getBoundingClientRect();
@@ -205,11 +209,18 @@ export function DesignRenderer({
           rect.height < 8
         ) {
           hiddenSlides.push(i);
+          return;
+        }
+        // Clipping lint: content taller than the slide box. The 12px slack
+        // forgives rounding; a real overflow is tens to hundreds of px.
+        if (el.scrollHeight > el.clientHeight + 12) {
+          overflowingSlides.push(i);
         }
       });
       healthRef.current({
         totalSlides: sections.length,
         hiddenSlides,
+        overflowingSlides,
         scriptsStripped: (content.match(/<script\b/gi) ?? []).length,
       });
     }
