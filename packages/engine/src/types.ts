@@ -363,10 +363,22 @@ export interface MessageEntry extends BaseEntry {
   /** Present only when the model is in pi-ai's pricing registry; unpriced turns omit. */
   cost?: MessageCost;
   /**
-   * Image attachments on a user message. Only present on user entries with
-   * attached images; never on assistant, tool, or system entries.
+   * Attachments on a user message (images or files). Only present on user
+   * entries with attached content; never on assistant, tool, or system entries.
+   * File attachments carry sandbox paths; image attachments carry URLs or data.
    */
-  attachments?: Array<{ type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }>;
+  attachments?: Array<
+    | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
+    | {
+        type: "file";
+        path: string; // absolute path inside the sandbox
+        bytes: number;
+        sha256: string;
+        mimeType?: string;
+        markdownPath?: string; // for PDFs with a text sidecar
+        name: string; // display name (basename of path)
+      }
+  >;
   /**
    * Present when this user entry originated from a `SignalContent` prompt.
    * `content` holds the raw (unescaped) body; rendering into LLM context

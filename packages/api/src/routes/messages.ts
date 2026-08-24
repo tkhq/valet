@@ -30,6 +30,7 @@ import type {
   MessagePart,
   MessageRole,
   PatchThreadRequest,
+  PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
   SendPromptRequest,
@@ -100,31 +101,45 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
  * accepts today) or `{ data: Uint8Array }` (some day, when a plugin drops a
  * raw buffer in). The wire ships one canonical string per attachment; if
  * neither field is set, drop the entry rather than emit an empty img.
+ *
+ * File attachments (type: "file") are projected as `PromptFileAttachment`
+ * carrying the absolute sandbox path, size, hash, and optional markdown sidecar.
  */
 function projectAttachments(
   attachments: NonNullable<Extract<SessionEntry, { type: "message" }>["attachments"]> | undefined,
-): PromptImageAttachment[] {
+): Array<PromptImageAttachment | PromptFileAttachment> {
   if (!attachments || attachments.length === 0) return [];
-  const out: PromptImageAttachment[] = [];
+  const out: Array<PromptImageAttachment | PromptFileAttachment> = [];
   for (const att of attachments) {
-    if (att.type !== "image") continue;
-    let url: string | undefined;
-    if (typeof att.url === "string" && att.url.startsWith("data:")) {
-      url = att.url;
-    } else if (att.data) {
-      url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
-    } else if (typeof att.url === "string") {
-      // Non-data URL (e.g. an http url) is passed through as-is; harmless
-      // if the client happens to already resolve it.
-      url = att.url;
+    if (att.type === "image") {
+      let url: string | undefined;
+      if (typeof att.url === "string" && att.url.startsWith("data:")) {
+        url = att.url;
+      } else if (att.data) {
+        url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
+      } else if (typeof att.url === "string") {
+        // Non-data URL (e.g. an http url) is passed through as-is; harmless
+        // if the client happens to already resolve it.
+        url = att.url;
+      }
+      if (!url) continue;
+      out.push({
+        kind: "image",
+        url,
+        mimeType: att.mimeType,
+        name: att.name ?? "image",
+      });
+    } else if (att.type === "file") {
+      out.push({
+        kind: "file",
+        path: att.path,
+        bytes: att.bytes,
+        sha256: att.sha256,
+        mimeType: att.mimeType,
+        markdownPath: att.markdownPath,
+        name: att.name,
+      });
     }
-    if (!url) continue;
-    out.push({
-      kind: "image",
-      url,
-      mimeType: att.mimeType,
-      name: att.name ?? "image",
-    });
   }
   return out;
 }

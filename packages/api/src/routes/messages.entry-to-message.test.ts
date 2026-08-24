@@ -98,4 +98,106 @@ describe("entryToMessage — attachments projection", () => {
     const msg = entryToMessage(entry, "sess", "th");
     expect(msg && "attachments" in msg).toBe(false);
   });
+
+  it("projects file attachments to the wire format", () => {
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "file",
+          path: "/workspace/uploads/report.pdf",
+          bytes: 843 * 1024,
+          sha256: "abc123def456",
+          mimeType: "application/pdf",
+          markdownPath: "/workspace/uploads/report.pdf.md",
+          name: "report.pdf",
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments).toEqual([
+      {
+        kind: "file",
+        path: "/workspace/uploads/report.pdf",
+        bytes: 843 * 1024,
+        sha256: "abc123def456",
+        mimeType: "application/pdf",
+        markdownPath: "/workspace/uploads/report.pdf.md",
+        name: "report.pdf",
+      },
+    ]);
+  });
+
+  it("handles mixed image and file attachments", () => {
+    const entry = baseEntry({
+      attachments: [
+        { type: "image", url: "data:image/png;base64,AAAA", mimeType: "image/png", name: "img.png" },
+        {
+          type: "file",
+          path: "/workspace/uploads/data.zip",
+          bytes: 2048000,
+          sha256: "xyz789",
+          mimeType: "application/zip",
+          name: "data.zip",
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments).toHaveLength(2);
+    expect(msg?.attachments?.[0].kind).toBe("image");
+    expect(msg?.attachments?.[1].kind).toBe("file");
+  });
+
+  it("preserves optional file fields (mimeType, markdownPath)", () => {
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "file",
+          path: "/workspace/uploads/plain.txt",
+          bytes: 1024,
+          sha256: "txt123",
+          name: "plain.txt",
+          // mimeType and markdownPath omitted
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments?.[0]).toEqual({
+      kind: "file",
+      path: "/workspace/uploads/plain.txt",
+      bytes: 1024,
+      sha256: "txt123",
+      name: "plain.txt",
+      // mimeType and markdownPath not present
+    });
+  });
+
+  it("filters out non-image, non-file attachments if any appear", () => {
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "image",
+          url: "data:image/png;base64,AAAA",
+          mimeType: "image/png",
+          name: "img.png",
+        },
+        {
+          type: "file",
+          path: "/workspace/uploads/file.txt",
+          bytes: 512,
+          sha256: "file123",
+          name: "file.txt",
+        },
+        // audio attachments are skipped (not implemented on wire)
+        {
+          type: "audio" as any,
+          url: "data:audio/wav;base64,BBBB",
+          mimeType: "audio/wav",
+          name: "sound.wav",
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments).toHaveLength(2);
+    expect(msg?.attachments?.every((a) => a.kind === "image" || a.kind === "file")).toBe(true);
+  });
 });

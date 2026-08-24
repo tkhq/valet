@@ -441,12 +441,12 @@ export interface Message {
    */
   model?: string;
   /**
-   * Image attachments on a user message. Populated for user entries with
-   * attached images; never on assistant, tool, or system entries. The
+   * Attachments on a user message (images or files). Populated for user entries
+   * with attached content; never on assistant, tool, or system entries. The
    * engine's `MessageEntry.attachments` is the source of truth; this is
    * the wire projection.
    */
-  attachments?: PromptImageAttachment[];
+  attachments?: Array<PromptImageAttachment | PromptFileAttachment>;
 }
 
 export interface ListMessagesResponse {
@@ -460,6 +460,16 @@ export interface PromptImageAttachment {
   /** `data:<mime>;base64,<payload>`. */
   url: string;
   mimeType: string;
+  name: string;
+}
+
+export interface PromptFileAttachment {
+  kind: "file";
+  path: string;
+  bytes: number;
+  sha256: string;
+  mimeType?: string;
+  markdownPath?: string;
   name: string;
 }
 
