@@ -39,6 +39,7 @@ import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from
 import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, sessionStagedFiles } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
+import { stageForSession } from "../engine/staged-files.js";
 
 let api: TestApi | undefined;
 
@@ -2363,7 +2364,7 @@ function parentSandboxWithFile(path: string, content: string): Sandbox {
 
 describe("spawn-time file shares", () => {
   it("stages each files[] entry for the child before it runs, defaulting to .valet/shared/", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider() });
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
     const spawner = buildChildSpawner(deps, watcher);
@@ -2403,7 +2404,7 @@ describe("spawn-time file shares", () => {
   });
 
   it("fails the spawn with the missing path named when a files[] source does not exist", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider() });
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
     const spawner = buildChildSpawner(deps, watcher);
@@ -2432,7 +2433,9 @@ describe("spawn-time file shares", () => {
 
 describe("buildChildFilePusher", () => {
   it("stages a push for an owned child and answers null for a non-child", async () => {
-    api = await bootTestApi();
+    // Isolated provider: the materialization guard refuses pushes to
+    // repo-less children on non-isolated backends (see share guardrails).
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider() });
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
     const spawner = buildChildSpawner(deps, watcher);
@@ -2473,5 +2476,104 @@ describe("buildChildFilePusher", () => {
       { parentSessionId: "somebody-else", sandbox },
     );
     expect(denied).toBeNull();
+  });
+});
+
+describe("share guardrails", () => {
+  it("rejects files[] loudly when no SpecProvider will materialize them (non-isolated backend, no repo)", async () => {
+    api = await bootTestApi(); // default VirtualSandboxProvider: not isolated
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-guard", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await expect(
+      spawner(
+        { prompt: "x", files: [{ from: "report.md" }] },
+        {
+          parentSessionId: "parent-guard",
+          parentThreadId: parent.thread("web:default").id,
+          actorUserId: "local-user",
+          owner: { type: "user", id: "local-user" },
+          sandbox: parentSandboxWithFile("report.md", "content"),
+        },
+      ),
+    ).rejects.toThrow(/docker|kubernetes|repo/i);
+    // Nothing staged for a spawn that was refused.
+    const rows = await api.providers.db.select().from(sessionStagedFiles);
+    expect(rows.filter((r) => r.originKey === "parent-guard")).toHaveLength(0);
+  });
+
+  it("rejects two files[] entries that resolve to the same target, naming both sources", async () => {
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider() });
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-dup", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await expect(
+      spawner(
+        { prompt: "x", files: [{ from: "a/config.json" }, { from: "b/config.json" }] },
+        {
+          parentSessionId: "parent-dup",
+          parentThreadId: parent.thread("web:default").id,
+          actorUserId: "local-user",
+          owner: { type: "user", id: "local-user" },
+          sandbox: parentSandboxWithFile("a/config.json", "{}"),
+        },
+      ),
+    ).rejects.toThrow(/a\/config\.json.*b\/config\.json|b\/config\.json.*a\/config\.json/s);
+  });
+
+  it("cleans up already-staged rows when a later files[] entry fails the spawn", async () => {
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider() });
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-clean", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await expect(
+      spawner(
+        { prompt: "x", files: [{ from: "report.md" }, { from: "missing.bin" }] },
+        {
+          parentSessionId: "parent-clean",
+          parentThreadId: parent.thread("web:default").id,
+          actorUserId: "local-user",
+          owner: { type: "user", id: "local-user" },
+          sandbox: parentSandboxWithFile("report.md", "the report\n"),
+        },
+      ),
+    ).rejects.toThrow(/missing\.bin/);
+    const rows = await api.providers.db.select().from(sessionStagedFiles);
+    expect(rows.filter((r) => r.originKey === "parent-clean")).toHaveLength(0);
+  });
+
+  it("destroying an UNCACHED session still deletes its staged rows", async () => {
+    api = await bootTestApi();
+    const sessionId = "sess-uncached-destroy";
+    await stageForSession(
+      { db: api.providers.db },
+      {
+        sessionId,
+        origin: "share",
+        originKey: "parent-x",
+        targetPath: "report.md",
+        kind: "file",
+        payload: new TextEncoder().encode("bytes\n"),
+      },
+    );
+    // Never cached in the engine host — destroy must still clean the rows.
+    await api.providers.engineHost.destroy(sessionId);
+    const rows = await api.providers.db
+      .select()
+      .from(sessionStagedFiles)
+      .where(eq(sessionStagedFiles.sessionId, sessionId));
+    expect(rows).toHaveLength(0);
   });
 });

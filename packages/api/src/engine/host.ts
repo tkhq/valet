@@ -1590,9 +1590,31 @@ export class EngineHost {
    * back into the API with a token minted for a build that no longer
    * exists.
    */
+  /**
+   * Whether the sandbox backend isolates sandboxes from the host process.
+   * Share staging refuses shares that nothing will materialize: a
+   * repo-less session on a non-isolated backend gets no SpecProvider
+   * (see `buildSpecProvider`'s guard), so its staged rows would be dead.
+   */
+  sandboxIsolated(): boolean {
+    return this.opts.sandboxProvider.capabilities().isolated === true;
+  }
+
   async destroy(sessionId: string): Promise<void> {
     const entry = this.cache.get(sessionId);
-    if (!entry) return;
+    if (!entry) {
+      // An uncached session (api restart, eviction) still owns staged
+      // rows and blobs — the delete route soft-deletes the session row
+      // regardless, so this is the last chance to reclaim them.
+      if (this.opts.db) {
+        try {
+          await deleteStagedForSession(this.opts.db, this.opts.blobs, sessionId);
+        } catch (err) {
+          console.error(`EngineHost: deleting staged files for ${sessionId} failed:`, err);
+        }
+      }
+      return;
+    }
     try {
       await entry.session.destroy();
     } finally {

@@ -390,6 +390,15 @@ export async function materializeSkillResources(
 }
 
 /**
+ * The workspace-relative target a share lands at: the caller's `to`, or
+ * `.valet/shared/<basename of from>`. One definition, so the spawner's
+ * duplicate-target check and stageShare's staging cannot drift.
+ */
+export function resolveShareTarget(from: string, to?: string): string {
+  return validateTargetPath(to ?? `${SHARED_DIR}/${posix.basename(validateTargetPath(from))}`);
+}
+
+/**
  * Reads one path out of a sandbox for staging (the parent side of a
  * share). A file comes back as its bytes; a directory becomes a gzipped
  * tarball, built through the workspace tmp dir so the docker provider's

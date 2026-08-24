@@ -38,10 +38,10 @@ import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import {
   SHARE_MAX_BYTES,
-  SHARED_DIR,
+  deleteStagedForSession,
+  resolveShareTarget,
   snapshotFromSandbox,
   stageForSession,
-  validateTargetPath,
 } from "../engine/staged-files.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
@@ -221,15 +221,12 @@ async function stageShare(
     to?: string;
   },
 ): Promise<string> {
-  const snap = await snapshotFromSandbox(args.parentSandbox, args.from);
-  if (snap.payload.byteLength > SHARE_MAX_BYTES) {
-    throw new Error(
-      `"${args.from}" is ${snap.payload.byteLength} bytes; the share cap is ${SHARE_MAX_BYTES} bytes (256 MiB). Share a smaller file or directory.`,
-    );
-  }
-  const targetPath = validateTargetPath(
-    args.to ?? `${SHARED_DIR}/${posix.basename(validateTargetPath(args.from))}`,
-  );
+  // The cap is enforced inside the snapshot, BEFORE the payload is read
+  // into API memory (staged-files design, decision 8).
+  const snap = await snapshotFromSandbox(args.parentSandbox, args.from, {
+    maxBytes: SHARE_MAX_BYTES,
+  });
+  const targetPath = resolveShareTarget(args.from, args.to);
   await stageForSession(
     { db: deps.db, blobs: deps.blobs },
     {
@@ -313,84 +310,124 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // each files[] entry out of the parent's sandbox and stage it BEFORE
     // the child is built, so the child's first run-start materializes the
     // files before the agent sees the prompt. A failed snapshot fails the
-    // spawn — the file is why the child exists, and the row cleanup below
-    // is the same "orphaned rows are harmless" story as session_repos.
-    if (req.files && req.files.length > 0) {
+    // spawn — the file is why the child exists. Unlike session_repos
+    // orphans, staged rows anchor blob payloads, so a failure AFTER
+    // staging compensates with deleteStagedForSession (catch below).
+    const hasFiles = req.files !== undefined && req.files.length > 0;
+    if (hasFiles && req.files) {
       if (!ctx.sandbox) {
         throw new Error(
           "files[] needs the parent session's sandbox, and this host did not supply one. Spawn without files, or write the content into the prompt.",
         );
       }
+      // Refuse shares nothing will materialize: a repo-less child on a
+      // non-isolated backend gets no SpecProvider (host.buildSpecProvider),
+      // so its staged rows would be dead and the child would start without
+      // the files while the spawn reports success.
+      if (binding === undefined && !deps.engineHost.sandboxIsolated()) {
+        throw new Error(
+          "This sandbox backend cannot materialize file shares into a child without a repository. " +
+            "Pass `repo` so the child gets workspace prep, run a docker or kubernetes sandbox backend, " +
+            "or send the content in the prompt instead.",
+        );
+      }
+      // Two entries that resolve to one target would silently upsert onto
+      // each other and the child would only receive the last one.
+      const targets = new Map<string, string>();
       for (const share of req.files) {
-        await stageShare(deps, {
-          parentSessionId: ctx.parentSessionId,
-          parentSandbox: ctx.sandbox,
-          targetSessionId: childSessionId,
-          from: share.from,
-          to: share.to,
-        });
+        const target = resolveShareTarget(share.from, share.to);
+        const priorFrom = targets.get(target);
+        if (priorFrom !== undefined) {
+          throw new Error(
+            `files[] entries "${priorFrom}" and "${share.from}" both resolve to target "${target}". ` +
+              `Give one of them an explicit \`to\` path.`,
+          );
+        }
+        targets.set(target, share.from);
       }
     }
 
-    const childSession = await deps.engineHost.childSessionFor(childSessionId, {
-      parentSessionId: ctx.parentSessionId,
-      parentThreadId: ctx.parentThreadId,
-      actorUserId: ctx.actorUserId,
-      orgId,
-      owner: ctx.owner,
-      workspace,
-      modelId: req.model,
-      profile: req.profile,
-      docker: req.docker,
-    });
+    try {
+      if (hasFiles && req.files && ctx.sandbox) {
+        for (const share of req.files) {
+          await stageShare(deps, {
+            parentSessionId: ctx.parentSessionId,
+            parentSandbox: ctx.sandbox,
+            targetSessionId: childSessionId,
+            from: share.from,
+            to: share.to,
+          });
+        }
+      }
 
-    const now = Date.now();
-    await deps.db
-      .insert(agentSessions)
-      .values({
-        id: childSessionId,
-        userId: ctx.actorUserId,
+      const childSession = await deps.engineHost.childSessionFor(childSessionId, {
+        parentSessionId: ctx.parentSessionId,
+        parentThreadId: ctx.parentThreadId,
+        actorUserId: ctx.actorUserId,
         orgId,
+        owner: ctx.owner,
         workspace,
-        title: req.title ?? null,
-        // Persisted so a post-restart rebuild through the generic
-        // `sessionFor` (which reads the row) keeps the same sandbox shape.
-        profile: req.profile ?? "headless",
-        docker: req.docker === true,
-        status: "active",
-        ownerType: ctx.owner.type,
-        ownerId: ctx.owner.id,
-        createdAt: now,
-        updatedAt: now,
+        modelId: req.model,
+        profile: req.profile,
+        docker: req.docker,
       });
 
-    const receipt = await childSession.prompt(req.prompt, {
-      author: { id: ctx.actorUserId },
-    });
+      const now = Date.now();
+      await deps.db
+        .insert(agentSessions)
+        .values({
+          id: childSessionId,
+          userId: ctx.actorUserId,
+          orgId,
+          workspace,
+          title: req.title ?? null,
+          // Persisted so a post-restart rebuild through the generic
+          // `sessionFor` (which reads the row) keeps the same sandbox shape.
+          profile: req.profile ?? "headless",
+          docker: req.docker === true,
+          status: "active",
+          ownerType: ctx.owner.type,
+          ownerId: ctx.owner.id,
+          createdAt: now,
+          updatedAt: now,
+        });
 
-    await deps.db
-      .insert(childWatches)
-      .values({
+      const receipt = await childSession.prompt(req.prompt, {
+        author: { id: ctx.actorUserId },
+      });
+
+      await deps.db
+        .insert(childWatches)
+        .values({
+          childSessionId,
+          queueItemId: receipt.queueItemId,
+          parentSessionId: ctx.parentSessionId,
+          parentThreadId: ctx.parentThreadId,
+          actorUserId: ctx.actorUserId,
+          orgId,
+          settled: false,
+          createdAt: now,
+        });
+
+      watcher.arm({
         childSessionId,
         queueItemId: receipt.queueItemId,
         parentSessionId: ctx.parentSessionId,
         parentThreadId: ctx.parentThreadId,
         actorUserId: ctx.actorUserId,
         orgId,
-        settled: false,
-        createdAt: now,
       });
 
-    watcher.arm({
-      childSessionId,
-      queueItemId: receipt.queueItemId,
-      parentSessionId: ctx.parentSessionId,
-      parentThreadId: ctx.parentThreadId,
-      actorUserId: ctx.actorUserId,
-      orgId,
-    });
-
-    return { childSessionId, queueItemId: receipt.queueItemId };
+      return { childSessionId, queueItemId: receipt.queueItemId };
+    } catch (err) {
+      // A failed spawn must not strand staged blobs under a session id
+      // that never comes to exist — no delete route or sweep could ever
+      // reach them. Best-effort; the spawn error is what the caller needs.
+      if (hasFiles) {
+        await deleteStagedForSession(deps.db, deps.blobs, childSessionId).catch(() => {});
+      }
+      throw err;
+    }
   };
 }
 
@@ -933,6 +970,23 @@ export function buildChildFilePusher(deps: ChildrenDeps): ChildFilePusher {
     // A deleted child answers the same null as a missing one, matching
     // `buildChildReader`.
     if (!child || child.status === "deleted") return null;
+
+    // Same materialization guard as spawn-time shares: a repo-less child
+    // on a non-isolated backend has no SpecProvider, so the pushed file
+    // would stage into rows nothing ever applies.
+    if (!deps.engineHost.sandboxIsolated()) {
+      const repoRows = await deps.db
+        .select({ sessionId: sessionRepos.sessionId })
+        .from(sessionRepos)
+        .where(eq(sessionRepos.sessionId, req.childSessionId))
+        .limit(1);
+      if (repoRows.length === 0) {
+        throw new Error(
+          "This sandbox backend cannot materialize a pushed file into a child without a repository. " +
+            "Run a docker or kubernetes sandbox backend, or send the content in a child_send message instead.",
+        );
+      }
+    }
 
     const targetPath = await stageShare(deps, {
       parentSessionId: ctx.parentSessionId,
