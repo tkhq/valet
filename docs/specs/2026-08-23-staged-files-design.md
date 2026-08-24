@@ -85,7 +85,7 @@ Conventional locations, following the existing `/workspace/.valet/prompts` prece
 
 A UNIQUE index on `(session_id, target_path)` makes a re-push an upsert: the newest payload owns the path.
 
-Blob keys are namespaced `staged/<session_id>/<row_id>`. Session deletion removes the rows and their blobs.
+Blob keys are namespaced `staged/<session_id>/<row_id>/<first 16 hex of content_hash>`. The hash suffix ties a row to exactly the payload its `content_hash` describes: two racing pushes to one target cannot leave the surviving row pointing at the other push's bytes. A superseded key's blob is deleted best-effort. Session deletion removes the rows and their blobs, including for a session that is not in the process cache at delete time.
 
 ## Decision 5: materialization is part of the sandbox spec
 
@@ -103,7 +103,7 @@ Shares are critical because the file is often the reason the child exists; a chi
 - `kind: file`, blob: read the blob, `sandbox.writeBinary`.
 - `kind: bundle`: write the tar blob to `/workspace/.valet/tmp/<row_id>.tgz`, `exec` `mkdir -p <target> && tar xzf <tmp> -C <target> && rm <tmp>`. The tmp path is inside the workspace so the docker provider's host-side write and the container-side exec see the same file.
 
-After a skill-resource step applies, one best-effort `exec` marks files under the skill's `scripts/` directory executable.
+Every path in an exec command goes through `shellQuote` (INV-5). After a skill script file applies (a `skill` row under a `scripts/` directory), one best-effort `exec` restores its executable bit, so a script survives sandbox replacement with the mode the skill body relies on.
 
 ## Decision 6: skill resources load from the plugin package, eagerly
 
@@ -123,8 +123,12 @@ Stored skills (`skills` table) and repo-synced skills carry no resources in this
 Resources reach the sandbox on demand, honoring the spec's progressive disclosure. When the model calls the `skill` tool for a skill with resources, the tool:
 
 1. Writes the resources into `/workspace/.valet/skills/<name>/` through `ToolContext.sandbox` (write-through, so the files exist in the same turn). Touching the sandbox warms it if it was cold, which is the normal first-touch path for orchestrators.
-2. Upserts the session's `session_staged_files` rows for the skill (one bundle row), so every later reconcile re-materializes them after a sandbox replacement.
+2. Upserts the session's `session_staged_files` rows for the skill, one `file` row per resource, so every later reconcile re-materializes them after a sandbox replacement.
 3. Prefixes the rendered body with one line: `Files for this skill are in /workspace/.valet/skills/<name>/.` Relative references in the body (`scripts/extract.py`) resolve against that root.
+
+A failed invocation (`[skill_not_found]`, `[skill_bad_args]`) materializes nothing: the model is being asked to retry, so a success-shaped root line on an error text would mislead it.
+
+The `skill` tool is the ONLY materializing path. The other two delivery paths — slash-command expansion and `Thread.skill()` — append a note to a resource-bearing skill's body that tells the model to call the `skill` tool for the files.
 
 If the write-through fails, the tool returns the skill body with a warning line instead of the root line, and does not insert rows. The model learns the scripts are unavailable in the same tool result.
 
@@ -135,11 +139,13 @@ Sessions without a `SpecProvider` (orchestrators, and repo-less sessions on non-
 Two producers on the parent side:
 
 - **`task` gains `files`**: `SpawnChildRequest.files?: Array<{ from: string; to?: string }>`. Before the child session is built, the spawner reads each `from` path out of the parent's sandbox. A directory becomes a bundle: `exec` `tar czf /workspace/.valet/tmp/<id>.tgz -C <from> .` in the parent, then `readBinary` of that tmp file, then cleanup. The payload lands in the blob store and a row lands in `session_staged_files` for the child, exactly like the repo binding row that already precedes `buildChildSession`. The child's first run-start materializes everything before the agent sees the prompt.
+
+  Three refusals keep a spawn honest. Two `files[]` entries that resolve to one target fail the spawn (the second would silently overwrite the first). A share into a child that will get no `SpecProvider` (a repo-less child on a non-isolated backend) fails the spawn with the fix named, because nothing would ever materialize the rows. A spawn that fails after staging deletes the staged rows and blobs before the error returns, so a session id that never exists cannot strand payloads.
 - **`child_push_file`**: same snapshot and upsert, against a running child. No write-through and no wake: the file materializes at the child's next run-start window. The tool result says so, and the normal pairing is `child_push_file` then `child_send` ("I put the updated config at ..."), which triggers exactly that run-start.
 
 The parent must have a sandbox to share from. When the orchestrator's sandbox is cold, reading `from` warms it through the same first-touch path as any tool.
 
-Limits: 256 MiB per share, 16 files per spawn. A share over the cap fails the tool call with the size and the cap in the message.
+Limits: 256 MiB per share, 16 files per spawn. The cap is enforced from `stat` BEFORE the payload is read into API memory, for both a file and the tarball an in-sandbox `tar` just produced — an oversized share is rejected without buffering it. The error names the size and the cap. Sandbox-backend failures during the snapshot surface as themselves; only a real missing path reports "not found".
 
 Depth stays 1 (engine rule: children get no `childSpawner`), so shares only flow parent to child. Nothing flows child to parent in this design; see Not implemented.
 
@@ -148,7 +154,8 @@ Depth stays 1 (engine rule: children get no `childSpawner`), so shares only flow
 - **INV-1 — no sandbox reaches another sandbox.** Every copy is mediated by the API process using the `Sandbox` interface. The in-sandbox gateway's `sid === VALET_SESSION_ID` JWT check is untouched. Enforced by construction: no new network path exists between sandboxes.
 - **INV-2 — staged writes stay inside the workspace.** `target_path` validation rejects absolute paths outside `/workspace` and any path containing `..`. Enforced at row insert (one shared validator), and covered by a unit test per producer.
 - **INV-3 — a staged file survives sandbox replacement.** The row, not the sandbox, is the source of truth; reconcile re-applies from the row. Enforced by the `staged:` prep steps and covered by a reconcile test that replaces the sandbox and asserts the file returns. Exception: sessions without a SpecProvider (decision 7).
-- **INV-4 — payloads are content-addressed into the step hash.** A payload change always changes the step hash, so reconcile can never skip a stale file. Enforced by `content_hash` in the step-hash input.
+- **INV-4 — payloads are content-addressed into the step hash.** A payload change always changes the step hash, so reconcile can never skip a stale file. Enforced by `content_hash` in the step-hash input, and by the content-hash suffix in the blob key (a row can only reference the payload its hash describes).
+- **INV-5 — every path in an exec command is shell-quoted.** Providers run `exec` through `sh -c`, and share paths are model-written strings. Enforced by `shellQuote` at every exec call site in the staged-files module, covered by a quoting test.
 
 ## Acceptance scenario
 

@@ -155,3 +155,7 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 **Seeded headless bases reconcile to the current defaults.** The spec seeds `default-headless` once per org, so a change to the default setup commands reached new orgs only — the constant could claim tooling that no existing org's image carried. `seedDefaultBasesIfMissing`, which already runs at boot for every org, now compares an existing row against the current defaults and against `PREVIOUS_HEADLESS_SETUP_COMMANDS`. A row still holding a known former default is upgraded and re-baked; a row matching neither is treated as an operator edit (`PATCH /api/sources/:id`) and left alone, with a log line naming how to opt back in.
 
 **Deferred items still open.** Cascade + scheduler double-dispatch guard landed (I3). The `packages/web` package is not yet in the root `tsc --build` graph (CI follow-up tracked separately). The manual-rebuild path uses the stock ref as FROM when no base bake exists — documented escape hatch, not a spec violation.
+
+### Deviation: staged-file steps (2026-08-23)
+
+`computeSpec` now emits one `staged:<row_id>` step per `session_staged_files` row, after the clone steps. The step hash covers the payload's content hash and the target path. Criticality is per-origin: a parent-to-child share is `critical: true`, a skill resource bundle is `critical: false`. The staged-files design (`2026-08-23-staged-files-design.md`) owns the mechanism; this note keeps the step catalog here accurate.
