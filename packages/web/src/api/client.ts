@@ -639,6 +639,11 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/design/comments`,
       body,
     ),
+  resolveDesignComment: (sessionId: string, commentId: string) =>
+    request<{ id: string; resolvedAt: number }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/design/comments/${encodeURIComponent(commentId)}/resolve`,
+    ),
   listDesignExports: (sessionId: string) =>
     request<DesignExportsResponse>(
       "GET",

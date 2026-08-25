@@ -90,6 +90,31 @@ export function useDesignComments(
   });
 }
 
+/** One revision with its full content (`GET /design/revisions/:rev`).
+ * Backs the revert-confirm preview. */
+export interface DesignRevisionDetail {
+  revision: string;
+  summary: string;
+  createdAt: number;
+  content: string;
+}
+
+export function useDesignRevision(
+  sessionId: string,
+  revision: string | undefined,
+  opts?: Partial<UseQueryOptions<DesignRevisionDetail>>,
+) {
+  return useQuery<DesignRevisionDetail>({
+    queryKey: qkDesign.revision(sessionId, revision ?? ""),
+    queryFn: () => {
+      if (!revision) throw new Error("No revision selected.");
+      return api.getDesignRevision(sessionId, revision);
+    },
+    enabled: !!sessionId && !!revision,
+    ...opts,
+  });
+}
+
 export function useDesignTokens(
   sessionId: string,
   opts?: Partial<UseQueryOptions<DesignTokensResponse>>,
@@ -104,7 +129,11 @@ export function useDesignTokens(
 
 /** Files the agent exported to the sandbox's /workspace/exports — the
  * Export modal's "Exported files" list. Polled while the modal is open so
- * an agent export that finishes mid-look appears without a reopen. */
+ * an agent export that finishes mid-look appears without a reopen. The
+ * response's `sandbox` field says how fresh the listing is: "live" = an
+ * attached sandbox; "cold" = hibernated (`files` is the last-known cached
+ * listing; the listing never wakes it); "none" = no sandbox; missing =
+ * "live". */
 export function useDesignExports(
   sessionId: string,
   opts?: Partial<UseQueryOptions<DesignExportsResponse>>,
@@ -139,6 +168,19 @@ export function useAddComment(sessionId: string) {
     { vdid: string; body: string }
   >({
     mutationFn: (body) => api.addDesignComment(sessionId, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkDesign.comments(sessionId) });
+    },
+  });
+}
+
+/** POST /design/comments/:cid/resolve — marks a comment resolved. The
+ * server emits `design.comment.resolved`, but this invalidates too so the
+ * comments panel updates even if the WS frame is dropped. */
+export function useResolveComment(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<{ id: string; resolvedAt: number }, Error, { commentId: string }>({
+    mutationFn: ({ commentId }) => api.resolveDesignComment(sessionId, commentId),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkDesign.comments(sessionId) });
     },

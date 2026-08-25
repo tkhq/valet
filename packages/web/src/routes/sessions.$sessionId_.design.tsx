@@ -6,6 +6,7 @@ import {
   History,
   Maximize,
   MessageSquarePlus,
+  MessagesSquare,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -18,13 +19,21 @@ import {
   useDesignArtifact,
   useDesignComments,
   useDesignExports,
+  useDesignRevision,
   useDesignRevisions,
   useDesignTokens,
+  useResolveComment,
   useRevertRevision,
 } from "~/api/design";
 import { useSessionStream, useStreamStore } from "~/stores/stream";
-import { formatBytes } from "~/lib/format-bytes";
-import { DesignRenderer } from "~/components/design/design-renderer";
+import {
+  DesignRenderer,
+  createHealthPostGate,
+  healthReportKey,
+} from "~/components/design/design-renderer";
+import { DesignPanelComments } from "~/components/design/design-panel-comments";
+import { DesignPanelExports } from "~/components/design/design-panel-exports";
+import { DesignPanelRevertConfirm } from "~/components/design/design-panel-revert-confirm";
 import { parseSlides, sanitizeDesignHtml, type SlideInfo } from "~/components/design/sanitize";
 import { SessionView } from "~/components/session/session-view";
 import { Button, Dialog, DialogContent, DialogFooter, Spinner } from "~/components/primitives";
@@ -107,7 +116,7 @@ const EXPORT_OPTIONS: ExportOption[] = [
     label: "PowerPoint (.pptx)",
     badge: "agent",
     description:
-      "The agent renders editable slides in its sandbox; the file then appears under “Exported files” below for download.",
+      "The agent renders editable slides in its sandbox. The finished file appears under Exported files in this dialog.",
     action: { kind: "agent", prompt: "Export the design as pptx." },
     slidesOnly: true,
   },
@@ -121,6 +130,20 @@ const EXPORT_OPTIONS: ExportOption[] = [
     slidesOnly: true,
   },
 ];
+
+/** Pull the api's `{ error }` message out of a failed response body. The
+ * api's error copy names the corrective action, so it is shown verbatim. */
+function serverErrorText(body: unknown): string | null {
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    "error" in body &&
+    typeof body.error === "string"
+  ) {
+    return body.error;
+  }
+  return null;
+}
 
 /**
  * Pointer-drag panel resizing (the Claude Design slider). `invert` is for
@@ -195,12 +218,14 @@ function DesignCanvasPage() {
   const stream = useSessionStream(sessionId);
   const revert = useRevertRevision(sessionId);
   const addComment = useAddComment(sessionId);
+  const resolveComment = useResolveComment(sessionId);
   const sendPrompt = useSendPrompt(sessionId);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
 
   const [zoomIdx, setZoomIdx] = useState(ZOOM_STEPS.indexOf(1));
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   // Only fetch/poll while the modal is open — the list reads the sandbox.
   const exportsQ = useDesignExports(sessionId, {
@@ -208,12 +233,31 @@ function DesignCanvasPage() {
     refetchInterval: exportOpen ? 4000 : false,
   });
   const [exportChoice, setExportChoice] = useState<string>("html");
+  // Agent-export request: the modal stays open, this drives the status
+  // line, and the 4s exports poll surfaces the finished file in place.
+  const [agentExportRequested, setAgentExportRequested] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadingName, setDownloadingName] = useState<string | null>(null);
   const [commentMode, setCommentMode] = useState(false);
   const [commentVdid, setCommentVdid] = useState<string | null>(null);
   const [activeSlide, setActiveSlide] = useState(0);
+  // Below md the chat and the canvas share the screen one at a time.
+  const [mobilePane, setMobilePane] = useState<"chat" | "canvas">("canvas");
+  const [chatUnread, setChatUnread] = useState(false);
+  const seenMsgCountRef = useRef(0);
+  // The revision a revert-confirm dialog is open for (null = closed).
+  const [revertTarget, setRevertTarget] = useState<DesignRevisionSummary | null>(null);
+  const revisionPreviewQ = useDesignRevision(sessionId, revertTarget?.revision);
+  // Present mode: true while canvasRef is the fullscreen element.
+  const [presenting, setPresenting] = useState(false);
+  const [presentNotes, setPresentNotes] = useState(false);
+  const presentingRef = useRef(false);
+  presentingRef.current = presenting;
   const canvasRef = useRef<HTMLDivElement>(null);
-  // Dedupe render-health posts: one report per (revision, measurement).
-  const lastHealthKey = useRef("");
+  // Dedupe render-health posts: one report per (revision, measurement),
+  // re-admitted on age so the 60s heartbeat survives an api restart that
+  // wiped the server-side report.
+  const healthPostGate = useRef(createHealthPostGate());
   // Slide count for the keyboard-navigation listener (bound once).
   const slidesRef = useRef(0);
   const chatPanel = useDragResize({
@@ -247,6 +291,39 @@ function DesignCanvasPage() {
     void qc.invalidateQueries({ queryKey: qkDesign.comments(sessionId) });
   }, [commentsNonce, sessionId, qc]);
 
+  // Mobile chat-tab indicator: an agent message that arrives while the
+  // canvas tab is active is otherwise invisible. Opening the chat tab
+  // clears it. Desktop always shows the chat, so the flag is harmless there.
+  const streamMessages = stream.messages;
+  useEffect(() => {
+    if (mobilePane === "chat") {
+      seenMsgCountRef.current = streamMessages.length;
+      setChatUnread(false);
+      return;
+    }
+    if (streamMessages.length > seenMsgCountRef.current) {
+      const last = streamMessages[streamMessages.length - 1];
+      if (last && last.role !== "user") setChatUnread(true);
+      seenMsgCountRef.current = streamMessages.length;
+    }
+  }, [streamMessages, mobilePane]);
+  const hasPendingGate = Object.keys(stream.pendingGates).length > 0;
+  const chatAttention = hasPendingGate || chatUnread;
+
+  // Present mode tracks the REAL fullscreen state (Esc exits without
+  // telling React otherwise); the notes overlay never outlives it.
+  useEffect(() => {
+    const onChange = () => {
+      const active =
+        document.fullscreenElement !== null &&
+        document.fullscreenElement === canvasRef.current;
+      setPresenting(active);
+      if (!active) setPresentNotes(false);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
   // Keyboard slide navigation (Claude Design parity): arrows and page keys
   // move between slides. Never while typing — the chat input and the
   // comment form own their own keys.
@@ -267,6 +344,11 @@ function DesignCanvasPage() {
       } else if (e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "PageUp") {
         e.preventDefault();
         setActiveSlide((i) => Math.max(0, i - 1));
+      } else if ((e.key === "s" || e.key === "S") && presentingRef.current) {
+        // Present mode only: toggle the in-fullscreen speaker-notes
+        // overlay (the export viewer binds the same key).
+        e.preventDefault();
+        setPresentNotes((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -296,6 +378,23 @@ function DesignCanvasPage() {
     }
     return counts;
   }, [commentsQ.data]);
+  const openCommentCount = useMemo(
+    () => (commentsQ.data?.comments ?? []).filter((c) => c.resolvedAt === null).length,
+    [commentsQ.data],
+  );
+
+  // vdids in the CURRENT revision — the comments panel flags a comment
+  // whose anchor the agent rewrote away instead of leaving it unpinnable.
+  const existingVdids = useMemo(() => {
+    const set = new Set<string>();
+    if (!content) return set;
+    const doc = new DOMParser().parseFromString(sanitizeDesignHtml(content), "text/html");
+    for (const el of Array.from(doc.querySelectorAll("[data-vdid]"))) {
+      const vdid = el.getAttribute("data-vdid");
+      if (vdid) set.add(vdid);
+    }
+    return set;
+  }, [content]);
 
   // The newest thread — same rule `SessionView` applies — so the comment
   // chat message lands in the thread the sidebar shows.
@@ -332,16 +431,76 @@ function DesignCanvasPage() {
     setCommentMode(false);
   }
 
+  /**
+   * Download a design URL without navigating the tab. A bare `<a href>` or
+   * `window.location.href` sends the tab to raw error JSON on a 4xx; this
+   * checks `res.ok` and shows the server's message inline in the modal.
+   */
+  async function downloadViaFetch(url: string, filename: string): Promise<boolean> {
+    setDownloadError(null);
+    setDownloadingName(filename);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        let body: unknown = null;
+        try {
+          body = await res.json();
+        } catch {
+          // Non-JSON error body — fall through to the generic message.
+        }
+        setDownloadError(
+          serverErrorText(body) ??
+            `The download failed (HTTP ${res.status}). Retry, or reload the page.`,
+        );
+        return false;
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+      return true;
+    } catch {
+      setDownloadError("The download did not reach the server. Check your connection, then retry.");
+      return false;
+    } finally {
+      setDownloadingName(null);
+    }
+  }
+
+  /** Open/close the export modal; closing clears its transient state. */
+  function onExportOpenChange(open: boolean) {
+    setExportOpen(open);
+    if (!open) {
+      setAgentExportRequested(false);
+      setDownloadError(null);
+    }
+  }
+
   /** Run the chosen export: instant options download from the API;
    * agent options run in chat behind the ExportManifest gate. */
   function runExport(option: ExportOption) {
-    setExportOpen(false);
     const base = `/api/sessions/${encodeURIComponent(sessionId)}/design/download`;
     if (option.action.kind === "download") {
-      window.location.href = `${base}?format=${option.action.format}`;
+      // Mirror the server's Content-Disposition filename (routes/design.ts).
+      const stem =
+        (session.data?.title ?? "design").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) ||
+        "design";
+      const filename = option.action.format === "html" ? `${stem}.html` : `${stem}.dc.html`;
+      void downloadViaFetch(`${base}?format=${option.action.format}`, filename).then((ok) => {
+        if (ok) onExportOpenChange(false);
+      });
     } else if (option.action.kind === "print") {
+      onExportOpenChange(false);
       window.open(`${base}?format=html&vd-print=1`, "_blank", "noopener");
     } else {
+      // Keep the modal open: the exports poll surfaces the finished file
+      // right here. Closing it made agent exports fire-and-forget.
+      setAgentExportRequested(true);
       void sendToAgent(option.action.prompt);
     }
   }
@@ -457,6 +616,15 @@ function DesignCanvasPage() {
           <span>Comment</span>
         </Button>
         <Button
+          variant={commentsOpen ? "secondary" : "ghost"}
+          size="sm"
+          aria-pressed={commentsOpen}
+          onClick={() => setCommentsOpen((v) => !v)}
+        >
+          <MessagesSquare className="h-4 w-4" aria-hidden />
+          <span>Comments{openCommentCount > 0 ? ` (${openCommentCount})` : ""}</span>
+        </Button>
+        <Button
           variant={historyOpen ? "secondary" : "ghost"}
           size="sm"
           aria-pressed={historyOpen}
@@ -475,11 +643,53 @@ function DesignCanvasPage() {
         </Button>
       </header>
 
+      {/* Mobile pane toggle: below md, the chat and the canvas share the
+          screen one at a time. The dot marks a pending approval gate or an
+          agent message that arrived while the canvas tab was active. */}
+      <div role="tablist" aria-label="Design panes" className="flex shrink-0 border-b border-line md:hidden">
+        {(["chat", "canvas"] as const).map((pane) => (
+          <button
+            key={pane}
+            type="button"
+            role="tab"
+            aria-selected={mobilePane === pane}
+            onClick={() => setMobilePane(pane)}
+            className={cn(
+              "flex-1 border-b-2 px-3 py-2 text-sm touch-manipulation",
+              mobilePane === pane
+                ? "border-ink font-medium text-ink"
+                : "border-transparent text-muted",
+            )}
+          >
+            {pane === "chat" ? "Chat" : "Canvas"}
+            {pane === "chat" && chatAttention && (
+              <>
+                <span className="sr-only">
+                  {hasPendingGate ? " (approval pending)" : " (new activity)"}
+                </span>
+                <span
+                  aria-hidden
+                  className={cn(
+                    "ml-1.5 inline-block h-2 w-2 rounded-full align-middle",
+                    hasPendingGate ? "bg-danger-500" : "bg-moss",
+                  )}
+                />
+              </>
+            )}
+          </button>
+        ))}
+      </div>
+
       <div className="flex flex-1 min-h-0">
         {/* Session chat — the same view every other surface uses. */}
         <aside
           style={{ width: chatPanel.size }}
-          className="hidden shrink-0 border-r border-line md:flex md:flex-col md:min-h-0"
+          className={cn(
+            // The inline width is the desktop drag size; on mobile the pane
+            // must fill the screen, and the !important class outranks it.
+            "shrink-0 flex-col border-r border-line max-md:!w-full md:flex md:min-h-0",
+            mobilePane === "chat" ? "flex min-h-0" : "hidden",
+          )}
         >
           <SessionView sessionId={sessionId} panel />
         </aside>
@@ -495,7 +705,10 @@ function DesignCanvasPage() {
         {isSlides && (
           <nav
             aria-label="Slides"
-            className="w-44 shrink-0 overflow-y-auto border-r border-line bg-neutral-100 p-3 space-y-3 dark:bg-neutral-900"
+            className={cn(
+              "w-44 shrink-0 overflow-y-auto border-r border-line bg-neutral-100 p-3 space-y-3 dark:bg-neutral-900",
+              mobilePane === "chat" && "hidden md:block",
+            )}
           >
             {slides.map((slide) => (
               <button
@@ -535,10 +748,20 @@ function DesignCanvasPage() {
         )}
 
         {/* Canvas */}
-        <div className="relative flex flex-1 flex-col min-h-0 min-w-0">
+        <div
+          className={cn(
+            "relative flex-1 flex-col min-h-0 min-w-0",
+            mobilePane === "chat" ? "hidden md:flex" : "flex",
+          )}
+        >
           <div
             ref={canvasRef}
-            className="flex-1 overflow-auto bg-neutral-100 p-6 dark:bg-neutral-900"
+            className={cn(
+              "flex-1 overflow-auto",
+              // Present mode: no padding, no gray gutter — the fullscreen
+              // viewport belongs to the deck.
+              presenting ? "bg-black" : "bg-neutral-100 p-6 dark:bg-neutral-900",
+            )}
           >
             <DesignRenderer
               content={artifactQ.data.content}
@@ -553,15 +776,36 @@ function DesignCanvasPage() {
               onRenderHealth={(health) => {
                 const revision = artifactQ.data?.revision;
                 if (!revision) return;
-                const key = `${revision}:${JSON.stringify(health)}`;
-                if (key === lastHealthKey.current) return;
-                lastHealthKey.current = key;
+                if (!healthPostGate.current(healthReportKey(revision, health))) return;
                 // Fire-and-forget: the report is a freshness signal for
                 // design_read, never worth blocking the canvas over.
                 void api.postDesignHealth(sessionId, { revision, ...health }).catch(() => {});
               }}
-              className="mx-auto max-w-4xl rounded bg-white shadow dark:bg-neutral-950"
+              className={cn(
+                "mx-auto bg-white dark:bg-neutral-950",
+                // The width cap is for the normal layout. In present mode it
+                // shrank a 1920px projector to a half-scale slide in gray
+                // padding — the deck's runtime scales to fit, so let it fill.
+                presenting ? "max-w-none" : "max-w-4xl rounded shadow",
+              )}
             />
+            {/* Present-mode overlays live INSIDE the fullscreened element —
+                anything outside it is invisible while fullscreen. */}
+            {presenting && isSlides && !presentNotes && (
+              <div className="fixed bottom-3 right-3 z-10 rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] text-white">
+                {activeSlide + 1}/{slides.length} · press S for notes
+              </div>
+            )}
+            {presenting && isSlides && presentNotes && (
+              <div className="fixed inset-x-0 bottom-0 z-10 max-h-[35vh] overflow-y-auto bg-neutral-900/85 px-6 py-3 text-white">
+                <div className="text-[10px] uppercase tracking-wider text-neutral-300">
+                  Speaker notes — slide {activeSlide + 1}/{slides.length} · press S to hide
+                </div>
+                <p className="mt-0.5 whitespace-pre-wrap text-sm">
+                  {slides[activeSlide]?.notes || "No notes for this slide."}
+                </p>
+              </div>
+            )}
           </div>
 
           {commentMode && !commentVdid && (
@@ -606,7 +850,7 @@ function DesignCanvasPage() {
         </div>
 
         {/* Export modal: one entry point, every option described. */}
-        <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+        <Dialog open={exportOpen} onOpenChange={onExportOpenChange}>
           <DialogContent title="Export design">
             <div className="space-y-1" role="radiogroup" aria-label="Export format">
               {EXPORT_OPTIONS.filter((o) => isSlides || !o.slidesOnly).map((opt) => (
@@ -646,29 +890,30 @@ function DesignCanvasPage() {
             <p className="mt-3 text-[11px] text-muted">
               Agent exports run in the chat and open an approval gate naming everything that leaves.
             </p>
-            {(exportsQ.data?.files.length ?? 0) > 0 && (
-              <div className="mt-3 border-t border-line pt-3">
-                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
-                  Exported files
-                </p>
-                <ul className="space-y-1">
-                  {exportsQ.data?.files.map((f) => (
-                    <li key={f.name} className="flex items-center justify-between gap-3 text-sm">
-                      <span className="min-w-0 truncate text-ink">{f.name}</span>
-                      <a
-                        className="shrink-0 text-xs font-medium text-moss hover:underline"
-                        href={`/api/sessions/${encodeURIComponent(sessionId)}/design/exports/${encodeURIComponent(f.name)}`}
-                        download={f.name}
-                      >
-                        Download ({formatBytes(f.size)})
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            {agentExportRequested && (
+              <p role="status" className="mt-2 text-xs text-moss">
+                Export requested — the file appears under Exported files when the agent finishes.
+              </p>
+            )}
+            <DesignPanelExports
+              files={exportsQ.data?.files ?? []}
+              sandbox={exportsQ.data?.sandbox ?? "live"}
+              loading={exportsQ.isLoading}
+              downloadingName={downloadingName}
+              onDownload={(f) =>
+                void downloadViaFetch(
+                  `/api/sessions/${encodeURIComponent(sessionId)}/design/exports/${encodeURIComponent(f.name)}`,
+                  f.name,
+                )
+              }
+            />
+            {downloadError && (
+              <p role="alert" className="mt-2 text-xs text-danger-600">
+                {downloadError}
+              </p>
             )}
             <DialogFooter>
-              <Button variant="ghost" size="sm" onClick={() => setExportOpen(false)}>
+              <Button variant="ghost" size="sm" onClick={() => onExportOpenChange(false)}>
                 Cancel
               </Button>
               <Button
@@ -684,14 +929,51 @@ function DesignCanvasPage() {
           </DialogContent>
         </Dialog>
 
+        {/* Comments panel: list + resolve for the comments the form creates. */}
+        {commentsOpen && (
+          <DesignPanelComments
+            comments={commentsQ.data?.comments ?? []}
+            existingVdids={existingVdids}
+            resolvingId={
+              resolveComment.isPending ? (resolveComment.variables?.commentId ?? null) : null
+            }
+            error={resolveComment.error?.message}
+            onResolve={(commentId) => resolveComment.mutate({ commentId })}
+          />
+        )}
+
         {/* History panel */}
         {historyOpen && (
           <HistoryPanel
             revisions={revisionsQ.data?.revisions ?? []}
             current={revisionsQ.data?.current}
+            onRequestRevert={(rev) => {
+              revert.reset();
+              setRevertTarget(rev);
+            }}
+          />
+        )}
+
+        {/* Revert confirm: names the target and previews it before acting. */}
+        {revertTarget && (
+          <DesignPanelRevertConfirm
+            target={revertTarget}
+            previewContent={revisionPreviewQ.data?.content}
+            previewLoading={revisionPreviewQ.isLoading}
+            tokens={tokensQ.data?.tokens ?? {}}
+            isSlides={isSlides}
             pending={revert.isPending}
             error={revert.error?.message}
-            onRevert={(revision) => revert.mutate({ revision })}
+            onCancel={() => {
+              setRevertTarget(null);
+              revert.reset();
+            }}
+            onConfirm={() =>
+              revert.mutate(
+                { revision: revertTarget.revision },
+                { onSuccess: () => setRevertTarget(null) },
+              )
+            }
           />
         )}
       </div>
@@ -743,15 +1025,12 @@ function CommentForm({
 function HistoryPanel({
   revisions,
   current,
-  pending,
-  error,
-  onRevert,
+  onRequestRevert,
 }: {
   revisions: DesignRevisionSummary[];
   current: string | undefined;
-  pending: boolean;
-  error?: string;
-  onRevert: (revision: string) => void;
+  /** Opens the revert-confirm dialog — the button never reverts directly. */
+  onRequestRevert: (revision: DesignRevisionSummary) => void;
 }) {
   // Newest first — the list answers "what changed lately".
   const ordered = [...revisions].sort((a, b) => b.createdAt - a.createdAt);
@@ -760,7 +1039,6 @@ function HistoryPanel({
       <div className="border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted">
         History
       </div>
-      {error && <div className="px-3 py-2 text-xs text-danger-600">{error}</div>}
       <ul className="flex-1 overflow-y-auto">
         {ordered.length === 0 && (
           <li className="px-3 py-2 text-xs text-muted">No revisions yet.</li>
@@ -786,10 +1064,9 @@ function HistoryPanel({
                   variant="secondary"
                   size="sm"
                   className="mt-1.5"
-                  disabled={pending}
-                  onClick={() => onRevert(rev.revision)}
+                  onClick={() => onRequestRevert(rev)}
                 >
-                  Revert to this
+                  Revert to this…
                 </Button>
               )}
             </li>

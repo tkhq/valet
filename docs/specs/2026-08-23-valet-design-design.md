@@ -502,21 +502,35 @@ For `gslides`: delegate to the sandbox. Transpile the artifact to Slides `batchU
 - `design_export.failed`: error reason.
 
 **Download path (as built):** pdf/pptx/html exports land in the sandbox's
-`/workspace/exports`. Two session-scoped routes make them reachable — the
-signed-URL service from the draft is not v1:
+`/workspace/exports`; a `project` export archives its directory into a
+top-level `<name>.tar.gz` there, so the flat listing can show it. Two
+session-scoped routes make them reachable — the signed-URL service from
+the draft is not v1:
 
-- `GET /api/sessions/:id/design/exports` — list `{name, size}`. Returns
-  `{files: []}` when the session has no live engine entry (a listing must
-  not start a sandbox). Dotfiles and names outside `[A-Za-z0-9][A-Za-z0-9._ -]*`
-  are hidden — this also hides the marp intermediate.
+- `GET /api/sessions/:id/design/exports` — list `{name, size}` plus a
+  `sandbox` state: `"live"` (listing read from the attached sandbox),
+  `"cold"` (a sandbox exists but is hibernated or unattached — the
+  response serves the last-known listing from a per-session LRU cache),
+  or `"none"`. The listing NEVER wakes, resumes, or provisions a sandbox;
+  it reads only through the already-attached handle. Dotfiles and names
+  outside `[A-Za-z0-9][A-Za-z0-9._ -]*` are hidden — this also hides the
+  `.vd-*` intermediates.
 - `GET /api/sessions/:id/design/exports/:name` — stream one file with an
-  attachment disposition. Hostile names 404 before any sandbox read; a
-  well-formed name without a live sandbox 409s and names the fix (wake the
-  session).
+  attachment disposition. Hostile names 404 before any sandbox read. Before
+  the read, an in-sandbox guard rejects symlinks and any path whose
+  `realpath` leaves `/workspace/exports/` (404 — on the docker provider the
+  host-side read would otherwise follow a sandbox-created symlink out of
+  the mount), and caps files at 100 MB (413 naming the limit). A
+  well-formed name without an attached sandbox 409s: "Send the session a
+  message to reconnect, then retry the download."
 
-The canvas Export modal renders this list as "Exported files" with download
-links, polling while the modal is open so an agent export that finishes
-mid-look appears without a reopen.
+The canvas Export modal always renders the "Exported files" section: live
+and empty says "No exported files yet.", cold shows the cached names greyed
+with reconnect copy, and none explains that exports appear after the agent
+runs one. Downloads go through a fetch-based handler that surfaces the
+server's error inline — a bare `<a href>` navigated the tab to raw JSON on
+4xx. The list polls while the modal is open, and agent-export requests keep
+the modal open with a status line instead of closing it.
 
 ### design_handoff
 
@@ -613,6 +627,31 @@ The design authoring surface.
 - Hover over thread message: shows "Edited <filename>" badge with revert option.
 - Share button: copies a signed, read-only link to clipboard.
 
+**As built, beyond the draft:**
+- Below the `md` breakpoint the page shows a Chat | Canvas tab toggle —
+  the chat pane holds approval gates, and a hidden chat pane deadlocked
+  every gated action on mobile. The Chat tab shows a dot when a gate is
+  pending or an agent message arrived while Canvas was active.
+- Present mode fullscreens the canvas container, lifts the normal-layout
+  width cap so the deck fills the projector, and keeps the slide counter
+  and S-toggled speaker notes INSIDE the fullscreened element.
+- A comments panel lists open comments with target, age, and a Resolve
+  button; a comment whose `data-vdid` no longer exists in the current
+  revision is flagged instead of silently unpinnable.
+- Revert asks for confirmation and previews the target revision through
+  the renderer before it mutates.
+- Revert, rename, delete, and scratchpad writes require session-admin
+  rights (`canAdministerSession`); comment create/resolve stay view-gated
+  for collaboration.
+- The canvas posts render-health reports attributed to the reporting
+  user, re-posted on a 60 s heartbeat so an api restart cannot strand the
+  agent on "no canvas has rendered this artifact". The server caps report
+  size (50 issues, 500-char strings); `design_read` shows the report's
+  age and treats reports older than 10 minutes as expired. Hidden-element
+  lint skips elements with running animations (reveal-on-scroll decks
+  false-positived), and the agent preamble caps fix attempts at two
+  rounds per reported issue before asking the user.
+
 **React patterns:** uses TanStack Router and Query for thread/artifact state (same as `/sessions/$id/thread`). Real-time updates via WebSocket `design.artifact.updated` event.
 
 ### `/sessions/$id/design/share?token=...` — Shared View (Read-Only)
@@ -628,7 +667,7 @@ Renders the artifact in the same canvas, but:
 
 The design spec names fourteen threat categories. Mitigations are normative in the sections where they live:
 
-1. **Rendered artifact escapes the client.** Mitigation: §"Artifact Format" specifies whitelist HTML sanitization (no `<script>`, no `on*` attributes) at parse time; shadow root + strict CSP in `DesignRenderer`.
+1. **Rendered artifact escapes the client.** Mitigation: §"Artifact Format" specifies whitelist HTML sanitization (no `<script>`, no `on*` attributes) at parse time; shadow root + strict CSP in `DesignRenderer`. CSS is sanitized too (`sanitizeCssText`): `@import` is stripped, and `url()`/`src()`/`image-set()` targets allow only `data:`, fragment, and schemeless relative references — external CSS fetches (fonts, trackers) were an exfiltration channel the attribute-level filter did not cover.
 
 2. **Design system exfiltration through a share link.** Mitigation: §"Web Surfaces" / Share endpoint returns only derived token subset, scanning the artifact for CSS custom-property references.
 
@@ -871,3 +910,10 @@ Three more landed during implementation:
 6. **vdid stability beats content-hash recomputation.** `applyVdids` preserves an element's EXISTING id and only content-hashes elements without one. Recomputing on every edit would detach comment anchors whenever text changed — including Scenario C's externally edited slide title, whose id must ride home in the Slides objectId. The `vdid_stability_report` reduces to collision/new-id accounting.
 7. **Export artifacts land in the workspace; reports land in the tool result.** `design_export` writes html/pdf/pptx to `/workspace/exports/` and returns the path — no signed-URL service in v1. The user downloads them through `GET /design/exports[/:name]` (surfaced as "Exported files" in the canvas Export modal); without that surface the agent's "grab it from the Export menu" advice looped back to another agent export. Import/export reports for Marp and Slides print in the tool result (visible in the thread, durable in the transcript) instead of being written into artifact metadata: an export must not mutate the artifact, and a metadata write is a mutation.
 8. **Handoff embeds the artifact; no git commit in v1.** `design_handoff` spawns the child with the artifact inline in its brief and passes the parent's repo binding through, so the child clones the same repository. The embedded copy strips `data:` image payloads and caps at 150 KB — a near-cap artifact would otherwise exceed the child's context window. Committing the artifact to the repo (and pinning `startRef` to that commit) is a re-entry seam — it needs a sandbox with a clone and a commit-authorship decision v1 does not force.
+
+An adversarial review pass (2026-08-24) forced four more:
+
+9. **Edits never write unfenced.** `design_edit`'s pre-read failure used to fall back to an unfenced write, which could clobber a concurrent user revert. Now every write carries `parentRevision`; a failed pre-read fails the tool call and tells the agent to re-read and retry.
+10. **Large and image-bearing documents stay editable.** `design_read` takes an `offset` parameter to continue past the 100 KB truncation (the notice names the exact continuation call). Elided image payloads (`src="[embedded image]"`) echoed back in an edit are restored from the current document by `data-vdid` (positionally when counts match) instead of rejecting the write — the rejection's advice used to re-trigger the rejection.
+11. **Export pipeline hygiene.** `.vd-*` intermediates are cleaned BEFORE and after (finally) each export run — stale `.vd-slide-*.png` from a failed run used to ride into the next pptx as ghost slides. Speaker notes fall back to a slide's first `<aside>` when `data-speaker-notes` is absent (marp/gslides imports).
+12. **Caches are honest.** The design-token cache stores successes only (a GitHub hiccup no longer shows "no design system" for 60 s); the health-report, token, and export-listing caches evict LRU, not insertion-order.
