@@ -325,13 +325,13 @@ describe("design tools", () => {
   /** Sandbox stub for the chromium export pipeline: probe answers with the
    * binary, prints "succeed" by making stat(outPdf) resolve after the print
    * command ran, and every command + write is recorded. */
-  function chromiumSandbox(written: string[], commands: string[]) {
+  function chromiumSandbox(written: string[], commands: string[], contents?: Map<string, string>) {
     let printed = false;
     return stubSandbox({
       mkdir: () => Promise.resolve(),
       writeFile: (path: string, content: string) => {
         written.push(path);
-        void content;
+        contents?.set(path, content);
         return Promise.resolve();
       },
       stat: (path: string) =>
@@ -584,6 +584,244 @@ describe("design tools", () => {
     expect(result.text).toContain("wrote revision r-004");
     expect(result.text).toContain("note: added the missing");
     expect(result.text).toContain("note: the artifact had been changed outside this conversation");
+  });
+
+  it("design_edit fails without writing when the fencing pre-read fails", async () => {
+    // Regression: the rewrite path used to fall through to an UNFENCED
+    // write when the pre-read failed, clobbering concurrent user reverts.
+    const writes: string[] = [];
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: "store unavailable" }), { status: 500 }),
+        );
+      }
+      writes.push(u);
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+    const result = await designEditTool.execute({ kind: "rewrite", content: DOC }, ctxWith(CFG));
+    expect(result.text).toContain("[design_edit failed]");
+    expect(result.text).toContain("Read the design again with design_read, then retry the edit.");
+    expect(writes).toEqual([]);
+  });
+
+  it("design_read truncation names the continuation offset, and offset reads return the tail", async () => {
+    const big = DOC.replace("<h1", `<p>${"x".repeat(150_000)}</p><h1`);
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-009", content: big }), { status: 200 }),
+        );
+      }
+      if (u.endsWith("/design/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ report: null }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ comments: [] }), { status: 200 }));
+    });
+
+    const first = await designReadTool.execute({}, ctxWith(CFG));
+    expect(first.text).toContain(
+      `Truncated at 100000 of ${big.length} characters. Call design_read again with offset: 100000 to continue.`,
+    );
+
+    urls.length = 0;
+    const rest = await designReadTool.execute({ offset: 100_000 }, ctxWith(CFG));
+    expect(rest.text).toContain(`characters 100000-${big.length} of ${big.length}`);
+    expect(rest.text).toContain(big.slice(big.length - 40)); // the tail is reachable
+    // Health report and comments ride only the offset-0 read.
+    expect(urls.every((u) => u.endsWith("/design/artifact"))).toBe(true);
+    expect(rest.text).not.toContain("unresolved comments");
+    expect(rest.text).not.toContain("canvas report");
+
+    const past = await designReadTool.execute({ offset: big.length + 5 }, ctxWith(CFG));
+    expect(past.text).toContain("past the end of the document");
+  });
+
+  it("design_edit restores an echoed elision marker from the current document", async () => {
+    const imgDoc = applyVdids(
+      `<!DOCTYPE html><html><head><meta name="valet-design" content="v=1; template=document"></head><body><img src="data:image/png;base64,AAAABBBB" alt="hero"><h1>Old</h1></body></html>`,
+    ).html;
+    const imgVdid = /<img[^>]*data-vdid="([0-9a-f_]+)"/.exec(imgDoc)?.[1] ?? "";
+    expect(imgVdid).not.toBe("");
+    const writes: Array<{ content: string }> = [];
+    vi.stubGlobal("fetch", (url: URL | string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-010", content: imgDoc }), { status: 200 }),
+        );
+      }
+      writes.push(JSON.parse(String(init?.body)) as { content: string });
+      return Promise.resolve(
+        new Response(JSON.stringify({ revision: "r-011", sizeBytes: 500 }), { status: 200 }),
+      );
+    });
+
+    // The agent echoes the element the way design_read showed it: with
+    // the elided marker instead of the data: payload.
+    const result = await designEditTool.execute(
+      {
+        kind: "patch",
+        content: `<img data-vdid="${imgVdid}" src="[embedded image]" alt="hero, larger">`,
+        summary: "resize hero",
+      },
+      ctxWith(CFG),
+    );
+    expect(result.text).toContain("wrote revision r-011");
+    expect(result.text).toContain("restored 1 elided image src");
+    expect(writes).toHaveLength(1);
+    expect(writes[0].content).toContain("data:image/png;base64,AAAABBBB");
+    expect(writes[0].content).not.toContain("[embedded image]");
+    expect(writes[0].content).toContain("hero, larger");
+  });
+
+  it("design_edit rejects a marker with no recoverable original and names the fix", async () => {
+    const writes: string[] = [];
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        // The current document has NO embedded images to restore from.
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-012", content: DOC }), { status: 200 }),
+        );
+      }
+      writes.push(u);
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+    const marked = DOC.replace("<h1", '<img src="[embedded image]" alt="ghost"><h1');
+    const result = await designEditTool.execute({ kind: "rewrite", content: marked }, ctxWith(CFG));
+    expect(result.text).toContain("[design_edit failed]");
+    expect(result.text).toContain(
+      "Keep the original <img> element unchanged, or supply a real data: URI src.",
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("design_export project lands one tar.gz at the top of /workspace/exports", async () => {
+    vi.stubGlobal("fetch", (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ tokens: { "--color-primary": "#0066cc" } }), { status: 200 }),
+      );
+    });
+    const written: string[] = [];
+    const commands: string[] = [];
+    const gateBodies: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = (gate) => {
+      gateBodies.push(gate.body ?? "");
+      return Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    };
+    ctx.sandbox = stubSandbox({
+      mkdir: () => Promise.resolve(),
+      stat: () => Promise.reject(new Error("not found")),
+      writeFile: (path: string) => {
+        written.push(path);
+        return Promise.resolve();
+      },
+      exec: (command: string) => {
+        commands.push(command);
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+      },
+    });
+
+    const result = await designExportTool.execute({ format: "project", filename: "kit" }, ctx);
+    expect(result.text).toContain("exported revision r-002 to /workspace/exports/kit.tar.gz");
+    expect(result.text).toContain('Export menu under "Exported files"');
+    expect(gateBodies[0]).toContain("output: /workspace/exports/kit.tar.gz");
+    // The archive is built from a hidden staging dir, then the stage is removed.
+    expect(commands).toContain("tar -czf /workspace/exports/kit.tar.gz -C /workspace/exports/.vd-project-kit kit");
+    expect(commands).toContain("rm -rf /workspace/exports/.vd-project-kit");
+    for (const path of written) {
+      expect(path.startsWith("/workspace/exports/.vd-project-kit/kit/")).toBe(true);
+    }
+  });
+
+  it("design_export pptx pre-cleans stale .vd-slide pages before pdftoppm", async () => {
+    // Regression: a failed run's leftover .vd-slide-*.png pages were
+    // appended to the NEXT export's pptx by the build script's glob.
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: DOC }), { status: 200 })),
+    );
+    const written: string[] = [];
+    const commands: string[] = [];
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = chromiumSandbox(written, commands);
+
+    await designExportTool.execute({ format: "pptx", filename: "deck" }, ctx);
+    const precleanIdx = commands.findIndex((cmd) => cmd.startsWith("rm -f") && cmd.includes(".vd-slide"));
+    const ppmIdx = commands.findIndex((cmd) => cmd.startsWith("pdftoppm "));
+    expect(precleanIdx).toBeGreaterThanOrEqual(0);
+    expect(ppmIdx).toBeGreaterThan(precleanIdx);
+    // The cleanup also runs after the pipeline (finally-equivalent).
+    expect(commands.filter((cmd) => cmd.startsWith("rm -f") && cmd.includes(".vd-slide")).length).toBe(2);
+  });
+
+  it("design_export pptx falls back to a slide's <aside> for speaker notes", async () => {
+    const deck = `<!DOCTYPE html><html><head><meta name="valet-design" content="v=1; template=slides"></head><body><section data-label="one" data-speaker-notes="Attr note"><h1>A</h1></section><section data-label="two"><h1>B</h1><aside>Imported <b>aside</b> note</aside></section></body></html>`;
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ revision: "r-002", content: deck }), { status: 200 })),
+    );
+    const written: string[] = [];
+    const commands: string[] = [];
+    const contents = new Map<string, string>();
+    const ctx = ctxWith(CFG);
+    ctx.requestDecision = () => Promise.resolve({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 });
+    ctx.sandbox = chromiumSandbox(written, commands, contents);
+
+    const result = await designExportTool.execute({ format: "pptx", filename: "deck" }, ctx);
+    expect(result.text).toContain("exported revision r-002");
+    const cfgJson = contents.get("/workspace/exports/.vd-pptx.json");
+    expect(cfgJson).toBeDefined();
+    const { notes } = JSON.parse(cfgJson ?? "{}") as { notes: string[] };
+    expect(notes).toEqual(["Attr note", "Imported aside note"]);
+  });
+
+  it("design_read reports canvas-report age: fresh with reporter, EXPIRED past 10 minutes", async () => {
+    const healthStub = (reportedAt: number) => (url: URL | string) => {
+      const u = String(url);
+      if (u.endsWith("/design/artifact")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ revision: "r-007", content: DOC }), { status: 200 }),
+        );
+      }
+      if (u.endsWith("/design/health")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              report: { revision: "r-007", totalSlides: 3, hiddenSlides: [], scriptsStripped: 0 },
+              reportedAt,
+              reporterId: "canvas-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify({ comments: [] }), { status: 200 }));
+    };
+
+    vi.stubGlobal("fetch", healthStub(Date.now() - 40_000));
+    const fresh = await designReadTool.execute({}, ctxWith(CFG));
+    expect(fresh.text).toContain("reported 40s ago by canvas-1");
+    expect(fresh.text).toContain("all 3 slides render visibly");
+    expect(fresh.text).not.toContain("EXPIRED");
+
+    vi.stubGlobal("fetch", healthStub(Date.now() - 11 * 60_000));
+    const expired = await designReadTool.execute({}, ctxWith(CFG));
+    expect(expired.text).toContain("EXPIRED");
+    expect(expired.text).toContain("reported 11m ago by canvas-1");
+    expect(expired.text).toContain("the canvas is likely closed");
+    expect(expired.text).toContain("do not treat it as current");
   });
 
   it("design_comment_resolve POSTs the resolve route", async () => {

@@ -122,14 +122,33 @@ function decodeAttrEntities(s: string): string {
     .replace(/&amp;/g, "&");
 }
 
-/** Per-slide speaker notes in document order, or null when any top-level
- * structure is ambiguous (the pptx build then skips notes rather than
- * mis-assigning them). */
+/** Per-slide speaker notes in document order. Primary source is the
+ * slide's data-speaker-notes attribute; decks imported from marp or
+ * Google Slides carry notes in an <aside> element instead, so the first
+ * <aside> in the slide is the fallback. */
 function extractSpeakerNotes(dcHtml: string): string[] {
   const notes: string[] = [];
-  for (const m of dcHtml.matchAll(/<section\b([^>]*)>/g)) {
+  const sections = [...dcHtml.matchAll(/<section\b([^>]*)>/g)];
+  for (let i = 0; i < sections.length; i++) {
+    const m = sections[i];
     const attr = /data-speaker-notes="([^"]*)"/.exec(m[1] ?? "");
-    notes.push(attr ? decodeAttrEntities(attr[1]) : "");
+    if (attr) {
+      notes.push(decodeAttrEntities(attr[1]));
+      continue;
+    }
+    // Slides are top-level <section>s, so this slide's markup ends where
+    // the next section opens.
+    const start = (m.index ?? 0) + m[0].length;
+    const next = sections[i + 1];
+    const body = dcHtml.slice(start, next?.index ?? dcHtml.length);
+    const aside = /<aside\b[^>]*>([\s\S]*?)<\/aside>/i.exec(body);
+    notes.push(
+      aside
+        ? decodeAttrEntities(aside[1].replace(/<[^>]+>/g, " "))
+            .replace(/\s+/g, " ")
+            .trim()
+        : "",
+    );
   }
   return notes;
 }
@@ -193,6 +212,63 @@ p.writeFile({ fileName: cfg.out }).then(() => console.log("ok")).catch((e) => { 
 
 // ─── design_edit ───────────────────────────────────────────────────────
 
+/** design_read replaces embedded data: URI payloads with this marker
+ * before the document enters the model's context (see elideDataUrls). */
+const ELISION_MARKER = "[embedded image]";
+const ELISION_ATTR = `src="${ELISION_MARKER}"`;
+
+interface RestoredImages {
+  html: string;
+  restored: number;
+}
+
+/**
+ * Restore elided image payloads in an incoming design_edit write. An agent
+ * that echoes an element from design_read naturally echoes the elision
+ * marker; the artifact service rejects that marker, and the rejection sent
+ * the agent back to design_read — which produced the marker again (a loop).
+ * Instead, substitute the ORIGINAL data: URI from the current document:
+ * by data-vdid first, by document position when every elided image is
+ * echoed. When no original can be found, error with the concrete fix.
+ */
+function restoreElidedImages(nextHtml: string, currentHtml: string): RestoredImages | { error: string } {
+  // Original data: srcs in the current document, by vdid and in order.
+  const byVdid = new Map<string, string>();
+  const ordered: string[] = [];
+  for (const m of currentHtml.matchAll(/<[a-zA-Z][^>]*\bsrc="(data:[^"]*)"[^>]*>/g)) {
+    ordered.push(m[1]);
+    const vdid = /data-vdid="([^"]+)"/.exec(m[0]);
+    if (vdid) byVdid.set(vdid[1], m[1]);
+  }
+  const markerTagRe = /<[a-zA-Z][^>]*\bsrc="\[embedded image\]"[^>]*>/g;
+  const markerCount = [...nextHtml.matchAll(markerTagRe)].length;
+  let index = -1;
+  let failed = false;
+  let restored = 0;
+  const html = nextHtml.replace(markerTagRe, (tag) => {
+    index++;
+    const vdid = /data-vdid="([^"]+)"/.exec(tag);
+    const original =
+      (vdid ? byVdid.get(vdid[1]) : undefined) ??
+      // Positional fallback: when the write echoes every elided image, the
+      // Nth marker is the Nth data: image of the current document.
+      (markerCount === ordered.length ? ordered[index] : undefined);
+    if (original === undefined) {
+      failed = true;
+      return tag;
+    }
+    restored++;
+    return tag.replace(ELISION_ATTR, `src="${original}"`);
+  });
+  if (failed || html.includes(ELISION_ATTR)) {
+    return {
+      error:
+        "The image placeholder cannot be written back. Keep the original <img> element unchanged, or supply a real data: URI src.",
+    };
+  }
+  return { html, restored };
+}
+
 export const designEditTool = defineTool({
   name: "design_edit",
   description:
@@ -213,20 +289,39 @@ export const designEditTool = defineTool({
     const cfg = resolveDesignConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
 
+    // Every write is fenced on the revision read here (parentRevision): a
+    // concurrent user edit or revert rejects instead of being silently
+    // clobbered. When the pre-read fails there is no safe fence, so the
+    // edit fails — never write unfenced.
+    const current = await readArtifact(cfg, ctx);
+    if ("error" in current) {
+      return {
+        text: `[design_edit failed] cannot read the current revision to fence this edit (${current.error}). Read the design again with design_read, then retry the edit.`,
+      };
+    }
+    const parentRevision = current.revision;
+
     let content = args.content;
-    let parentRevision: string | undefined;
     let patchNote = "";
     if (args.kind === "patch") {
-      const current = await readArtifact(cfg, ctx);
-      if ("error" in current) return { text: `[design_edit failed] ${current.error}` };
       try {
         const patched = applyElementPatches(current.content, args.content);
         content = patched.html;
-        parentRevision = current.revision;
         patchNote = ` (replaced ${patched.replaced.length} element${patched.replaced.length === 1 ? "" : "s"})`;
       } catch (err) {
         return { text: `[design_edit failed] ${err instanceof Error ? err.message : String(err)}` };
       }
+    }
+
+    // Echoed elision markers get the original payloads back (see
+    // restoreElidedImages) — for a patch this runs on the patched full
+    // document, so markers inside replaced elements are covered too.
+    let restoreNote = "";
+    if (content.includes(ELISION_ATTR)) {
+      const restoredResult = restoreElidedImages(content, current.content);
+      if ("error" in restoredResult) return { text: `[design_edit failed] ${restoredResult.error}` };
+      content = restoredResult.html;
+      restoreNote = ` (restored ${restoredResult.restored} elided image src${restoredResult.restored === 1 ? "" : "s"} from the current document)`;
     }
 
     // Rewrite-shrink guard: a rewrite built from a truncated design_read
@@ -234,17 +329,10 @@ export const designEditTool = defineTool({
     // write proceeds — revert exists — but the shrink is named.
     let shrinkNote = "";
     if (args.kind === "rewrite") {
-      const before = await readArtifact(cfg, ctx);
-      if (!("error" in before) && typeof before.content === "string") {
-        // Fence the rewrite on the revision it replaces: a user revert
-        // that lands mid-turn rejects this write (with the corrective
-        // stale-edit message) instead of being silently clobbered.
-        parentRevision = before.revision;
-        const prevLen = Buffer.byteLength(before.content);
-        const nextLen = Buffer.byteLength(content);
-        if (prevLen > 20_000 && nextLen < prevLen * 0.5) {
-          shrinkNote = `\nnote: this rewrite is ${Math.round((1 - nextLen / prevLen) * 100)}% smaller than the previous revision — if you rewrote from a truncated design_read, content was lost; check with design_read and revert if unintended`;
-        }
+      const prevLen = Buffer.byteLength(current.content);
+      const nextLen = Buffer.byteLength(content);
+      if (prevLen > 20_000 && nextLen < prevLen * 0.5) {
+        shrinkNote = `\nnote: this rewrite is ${Math.round((1 - nextLen / prevLen) * 100)}% smaller than the previous revision — if you rewrote from a truncated design_read, content was lost; check with design_read and revert if unintended`;
       }
     }
 
@@ -254,7 +342,7 @@ export const designEditTool = defineTool({
       body: JSON.stringify({
         content,
         summary: args.summary ?? "",
-        ...(parentRevision ? { parentRevision } : {}),
+        parentRevision,
         ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
       }),
       signal: ctx.signal,
@@ -262,7 +350,9 @@ export const designEditTool = defineTool({
     if (!res.ok) return { text: `[design_edit failed] ${await readError(res)}` };
     const body = (await res.json()) as { revision: string; sizeBytes: number; notes?: string[] };
     const noteText = body.notes?.length ? `\n${body.notes.map((n) => `note: ${n}`).join("\n")}` : "";
-    return { text: `wrote revision ${body.revision} (${body.sizeBytes} bytes)${patchNote}${noteText}${shrinkNote}` };
+    return {
+      text: `wrote revision ${body.revision} (${body.sizeBytes} bytes)${patchNote}${restoreNote}${noteText}${shrinkNote}`,
+    };
   },
 });
 
@@ -271,21 +361,58 @@ export const designEditTool = defineTool({
 /** Embedded base64 payloads are useless to the model and can be ~2 MB;
  * replace them with short markers before the document enters context. */
 function elideDataUrls(html: string): string {
-  return html.replace(/src="data:[^"]*"/g, 'src="[embedded image]"');
+  return html.replace(/src="data:[^"]*"/g, ELISION_ATTR);
 }
 
 const READ_CONTENT_CAP = 100_000;
+
+/** A canvas report older than this is EXPIRED: the reporting canvas is
+ * likely closed, so the measurement no longer tracks the live render. */
+const HEALTH_REPORT_FRESH_MS = 10 * 60_000;
+
+function formatAge(ageMs: number): string {
+  return ageMs < 120_000 ? `${Math.round(ageMs / 1000)}s` : `${Math.round(ageMs / 60_000)}m`;
+}
 
 export const designReadTool = defineTool({
   name: "design_read",
   description:
     "Read the current design artifact: revision, unresolved comments, and the full document. Use it before editing when the user may have changed or reverted the design (they can do both from the canvas), and to find an element's data-vdid for a patch.",
-  parameters: Type.Object({}),
-  execute: async (_args, ctx): Promise<ToolResult> => {
+  parameters: Type.Object({
+    offset: Type.Optional(
+      Type.Number({
+        description:
+          "Character offset into the document, to continue a truncated read. Default 0. Use the offset named in the previous read's truncation notice.",
+      }),
+    ),
+  }),
+  execute: async (args, ctx): Promise<ToolResult> => {
     const cfg = resolveDesignConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     const current = await readArtifact(cfg, ctx);
     if ("error" in current) return { text: `[design_read failed] ${current.error}` };
+
+    const offset = Math.max(0, Math.floor(args.offset ?? 0));
+    const full = elideDataUrls(current.content);
+
+    // Continuation reads return only the document window — the canvas
+    // report, comments, and scratchpad ride the offset-0 read.
+    if (offset > 0) {
+      if (offset >= full.length) {
+        return {
+          text: `revision ${current.revision}\noffset ${offset} is past the end of the document (${full.length} characters). Call design_read again with a smaller offset, or omit offset to read from the start.`,
+        };
+      }
+      const slice = full.slice(offset, offset + READ_CONTENT_CAP);
+      const end = offset + slice.length;
+      const note =
+        end < full.length
+          ? `\nTruncated at ${end} of ${full.length} characters. Call design_read again with offset: ${end} to continue.`
+          : "";
+      return {
+        text: `revision ${current.revision}\n---- current artifact (characters ${offset}-${end} of ${full.length}) ----\n${slice}${note}`,
+      };
+    }
 
     let commentLines = "no unresolved comments";
     const commentsRes = await fetch(designUrl(cfg, ctx, "comments"), {
@@ -314,7 +441,7 @@ export const designReadTool = defineTool({
       signal: ctx.signal,
     });
     if (healthRes.ok) {
-      const { report } = (await healthRes.json()) as {
+      const healthBody = (await healthRes.json()) as {
         report: {
           revision: string;
           totalSlides: number;
@@ -323,7 +450,12 @@ export const designReadTool = defineTool({
           sparseSlides?: number[];
           scriptsStripped: number;
         } | null;
-      };
+        /** Server epoch ms of the report. Absent on the older route shape
+         * — treat those reports as fresh. */
+        reportedAt?: number;
+        reporterId?: string;
+      } | null;
+      const report = healthBody?.report ?? null;
       if (report) {
         const stale = report.revision !== current.revision ? ` (STALE: measured at ${report.revision})` : "";
         const parts: string[] = [];
@@ -347,18 +479,30 @@ export const designReadTool = defineTool({
         if (report.scriptsStripped > 0) {
           parts.push(`${report.scriptsStripped} script tag(s) were stripped before rendering`);
         }
-        canvasReport =
-          parts.length > 0
-            ? `canvas report${stale}: ${parts.join("; ")}`
-            : `canvas report${stale}: all ${report.totalSlides} slides render visibly`;
+        const summary =
+          parts.length > 0 ? parts.join("; ") : `all ${report.totalSlides} slides render visibly`;
+        const reportedAt = typeof healthBody?.reportedAt === "number" ? healthBody.reportedAt : null;
+        const reporter =
+          typeof healthBody?.reporterId === "string" && healthBody.reporterId.length > 0
+            ? healthBody.reporterId
+            : "an unknown canvas";
+        if (reportedAt === null) {
+          canvasReport = `canvas report${stale}: ${summary}`;
+        } else {
+          const ageMs = Math.max(0, Date.now() - reportedAt);
+          canvasReport =
+            ageMs > HEALTH_REPORT_FRESH_MS
+              ? `canvas report${stale} is EXPIRED (reported ${formatAge(ageMs)} ago by ${reporter}; the canvas is likely closed) — do not treat it as current. Last measurement: ${summary}`
+              : `canvas report${stale} (reported ${formatAge(ageMs)} ago by ${reporter}): ${summary}`;
+        }
       }
     }
 
-    let doc = elideDataUrls(current.content);
+    let doc = full;
     let truncationNote = "";
-    if (doc.length > READ_CONTENT_CAP) {
-      doc = doc.slice(0, READ_CONTENT_CAP);
-      truncationNote = "\n[document truncated — use design_edit kind='patch' for targeted changes]";
+    if (full.length > READ_CONTENT_CAP) {
+      doc = full.slice(0, READ_CONTENT_CAP);
+      truncationNote = `\nTruncated at ${READ_CONTENT_CAP} of ${full.length} characters. Call design_read again with offset: ${READ_CONTENT_CAP} to continue. For targeted changes, design_edit kind='patch' works without reading the whole document.`;
     }
     const scratchpadBlock = current.scratchpad.trim()
       ? `\n---- scratchpad (your project notes) ----\n${current.scratchpad.trim()}`
@@ -635,7 +779,7 @@ async function getGoogleToken(ctx: ToolContext): Promise<string | null> {
 export const designExportTool = defineTool({
   name: "design_export",
   description:
-    "Export the artifact to html, pdf, pptx, or gslides. html/pdf/pptx land in /workspace/exports/; gslides creates a Google Slides presentation and returns its URL. Exports never mutate the artifact. Opens an export-manifest approval gate naming everything that leaves.",
+    "Export the artifact to html, pdf, pptx, project, or gslides. html/pdf/pptx/project land in /workspace/exports/; gslides creates a Google Slides presentation and returns its URL. Exports never mutate the artifact. Opens an export-manifest approval gate naming everything that leaves.",
   parameters: Type.Object({
     format: Type.Union(
       [
@@ -647,7 +791,7 @@ export const designExportTool = defineTool({
       ],
       {
         description:
-          "Target format. 'project' exports a directory: the deck (with the standalone viewer), scratchpad.md, and the design system (tokens.css + README).",
+          "Target format. 'project' exports a tar.gz archive: the deck (with the standalone viewer), scratchpad.md, and the design system (tokens.css + README).",
       },
     ),
     filename: Type.Optional(
@@ -678,7 +822,7 @@ export const designExportTool = defineTool({
         try {
           await ctx.sandbox.stat(
             args.format === "project"
-              ? `/workspace/exports/${candidate}`
+              ? `/workspace/exports/${candidate}.tar.gz`
               : `/workspace/exports/${candidate}.${args.format}`,
           );
           return true; // exists
@@ -700,7 +844,7 @@ export const designExportTool = defineTool({
       args.format === "gslides"
         ? `a new Google Slides presentation titled "${args.filename ?? "from the deck's own title"}" in the connected Google Drive`
         : args.format === "project"
-          ? `/workspace/exports/${baseName}/ (deck + scratchpad + design system)`
+          ? `/workspace/exports/${baseName}.tar.gz (deck + scratchpad + design system)`
           : `/workspace/exports/${baseName}.${args.format}`;
 
     // ExportManifest gate (spec §design_export + threat 8): the user
@@ -721,12 +865,16 @@ export const designExportTool = defineTool({
     }
 
     if (args.format === "project") {
-      // Project-directory export (the Claude Design layout): the artifact,
-      // the scratchpad, and the design system as a folder a person (or
-      // another agent) can pick up whole.
-      const dir = `/workspace/exports/${baseName}`;
+      // Project export (the Claude Design layout): the artifact, the
+      // scratchpad, and the design system. The canvas exports listing is
+      // FLAT — a subdirectory would be invisible to the user — so the
+      // deliverable is one tar.gz at the top of /workspace/exports/,
+      // staged through a dot-prefixed directory that is removed after.
+      const outPath = `/workspace/exports/${baseName}.tar.gz`;
+      const stage = `/workspace/exports/.vd-project-${baseName}`;
+      const dir = `${stage}/${baseName}`;
       const isDeck = (parseHeader(current.content)?.template ?? "") === "slides";
-      for (const d of ["/workspace/exports", dir, `${dir}/design-system`]) {
+      for (const d of ["/workspace/exports", stage, dir, `${dir}/design-system`]) {
         try {
           await ctx.sandbox.mkdir(d);
         } catch {
@@ -734,36 +882,54 @@ export const designExportTool = defineTool({
         }
       }
       const written: string[] = [];
-      const deck = isDeck ? injectDeckRuntime(current.content) : current.content;
-      await ctx.sandbox.writeFile(`${dir}/${baseName}.dc.html`, deck);
-      written.push(`${baseName}.dc.html`);
-      if (current.scratchpad.trim()) {
-        await ctx.sandbox.writeFile(`${dir}/scratchpad.md`, current.scratchpad);
-        written.push("scratchpad.md");
+      try {
+        const deck = isDeck ? injectDeckRuntime(current.content) : current.content;
+        await ctx.sandbox.writeFile(`${dir}/${baseName}.dc.html`, deck);
+        written.push(`${baseName}.dc.html`);
+        if (current.scratchpad.trim()) {
+          await ctx.sandbox.writeFile(`${dir}/scratchpad.md`, current.scratchpad);
+          written.push("scratchpad.md");
+        }
+        const tokensRes = await fetch(designUrl(cfg, ctx, "tokens"), {
+          headers: designHeaders(cfg, ctx, false),
+          signal: ctx.signal,
+        });
+        if (tokensRes.ok) {
+          const { tokens } = (await tokensRes.json()) as { tokens: Record<string, string> };
+          const css = `:root {\n${Object.entries(tokens)
+            .map(([name, value]) => `  ${name}: ${value};`)
+            .join("\n")}\n}\n`;
+          await ctx.sandbox.writeFile(`${dir}/design-system/tokens.css`, css);
+          await ctx.sandbox.writeFile(
+            `${dir}/design-system/_ds_manifest.json`,
+            JSON.stringify(
+              { namespace: "valet", tokens: Object.entries(tokens).map(([name, value]) => ({ name, value })) },
+              null,
+              2,
+            ),
+          );
+          written.push("design-system/tokens.css", "design-system/_ds_manifest.json");
+        }
+        await ctx.sandbox.writeFile(`${dir}/design-system/README.md`, DESIGN_CRAFT_GUIDE);
+        written.push("design-system/README.md");
+        const tar = await ctx.sandbox.exec(`tar -czf ${outPath} -C ${stage} ${baseName}`, {
+          timeout: 60_000,
+        });
+        if (tar.exitCode !== 0) {
+          return {
+            text: `[design_export failed] tar exited ${tar.exitCode}: ${(tar.stderr || tar.stdout).slice(-400)}. Use format='html' for a single-file export instead.`,
+          };
+        }
+      } finally {
+        // The staging directory is an intermediate of this pipeline;
+        // remove it on every path so a failed run does not strand it.
+        await ctx.sandbox.exec(`rm -rf ${stage}`, { timeout: 10_000 }).catch(() => {
+          // Leftover dotdir is hidden from the exports listing.
+        });
       }
-      const tokensRes = await fetch(designUrl(cfg, ctx, "tokens"), {
-        headers: designHeaders(cfg, ctx, false),
-        signal: ctx.signal,
-      });
-      if (tokensRes.ok) {
-        const { tokens } = (await tokensRes.json()) as { tokens: Record<string, string> };
-        const css = `:root {\n${Object.entries(tokens)
-          .map(([name, value]) => `  ${name}: ${value};`)
-          .join("\n")}\n}\n`;
-        await ctx.sandbox.writeFile(`${dir}/design-system/tokens.css`, css);
-        await ctx.sandbox.writeFile(
-          `${dir}/design-system/_ds_manifest.json`,
-          JSON.stringify(
-            { namespace: "valet", tokens: Object.entries(tokens).map(([name, value]) => ({ name, value })) },
-            null,
-            2,
-          ),
-        );
-        written.push("design-system/tokens.css", "design-system/_ds_manifest.json");
-      }
-      await ctx.sandbox.writeFile(`${dir}/design-system/README.md`, DESIGN_CRAFT_GUIDE);
-      written.push("design-system/README.md");
-      return { text: `exported revision ${current.revision} to ${dir}/ (${written.join(", ")})` };
+      return {
+        text: `exported revision ${current.revision} to ${outPath} (archive contains ${written.join(", ")}). The file appears in the canvas Export menu under "Exported files".`,
+      };
     }
 
     if (args.format === "html") {
@@ -808,8 +974,7 @@ export const designExportTool = defineTool({
       // 1920x1080 page — the same layout the browser print view uses.
       if (isDeck) doc = injectDeckRuntime(doc);
       const srcPath = `${dir}/.vd-export.html`;
-      await ctx.sandbox.writeFile(srcPath, doc);
-      const cleanup = () =>
+      const cleanIntermediates = () =>
         ctx.sandbox
           .exec(
             `rm -f ${dir}/.vd-export.html ${dir}/.vd-export.pdf ${dir}/.vd-slide*.png ${dir}/.vd-pptx.cjs ${dir}/.vd-pptx.json`,
@@ -818,60 +983,66 @@ export const designExportTool = defineTool({
           .catch(() => {
             // Leftover dotfiles are hidden from the exports listing.
           });
+      // Pre-clean intermediates a previous failed run left behind: the
+      // pptx build globs .vd-slide-*.png, so one stale page would ride
+      // into this export as an extra slide.
+      await cleanIntermediates();
+      await ctx.sandbox.writeFile(srcPath, doc);
 
-      const chrome = await ctx.sandbox.exec(
-        "command -v chromium || command -v chromium-browser || command -v google-chrome",
-        { timeout: 10_000 },
-      );
-      if (chrome.exitCode !== 0) {
-        // No Chromium (older or minimal image): fall back to the marp
-        // text outline so SOMETHING exports, and say what was lost.
-        await cleanup();
-        return marpFallbackExport(ctx, current, baseName, args.format);
-      }
-      const bin = chrome.stdout.trim().split("\n")[0];
-      const pdfPath = args.format === "pdf" ? outPath : `${dir}/.vd-export.pdf`;
-      const print = await ctx.sandbox.exec(
-        `${bin} --headless --no-sandbox --disable-gpu --hide-scrollbars --virtual-time-budget=5000 --no-pdf-header-footer --print-to-pdf=${pdfPath} file://${srcPath}`,
-        { timeout: 180_000 },
-      );
-      const printed = await ctx.sandbox.stat(pdfPath).catch(() => null);
-      if (print.exitCode !== 0 || !printed?.isFile) {
-        await cleanup();
-        return {
-          text: `[design_export failed] Chromium print exited ${print.exitCode}: ${(print.stderr || print.stdout).slice(-800)}. For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity.`,
-        };
-      }
-
-      if (args.format === "pptx") {
-        // Rasterize the rendered pages (96dpi = 1920x1080 px) and build a
-        // full-fidelity image-per-slide pptx with speaker notes attached.
-        const ppm = await ctx.sandbox.exec(`pdftoppm -png -r 96 ${pdfPath} ${dir}/.vd-slide`, {
-          timeout: 120_000,
-        });
-        if (ppm.exitCode !== 0) {
-          await cleanup();
+      try {
+        const chrome = await ctx.sandbox.exec(
+          "command -v chromium || command -v chromium-browser || command -v google-chrome",
+          { timeout: 10_000 },
+        );
+        if (chrome.exitCode !== 0) {
+          // No Chromium (older or minimal image): fall back to the marp
+          // text outline so SOMETHING exports, and say what was lost.
+          return await marpFallbackExport(ctx, current, baseName, args.format);
+        }
+        const bin = chrome.stdout.trim().split("\n")[0];
+        const pdfPath = args.format === "pdf" ? outPath : `${dir}/.vd-export.pdf`;
+        const print = await ctx.sandbox.exec(
+          `${bin} --headless --no-sandbox --disable-gpu --hide-scrollbars --virtual-time-budget=5000 --no-pdf-header-footer --print-to-pdf=${pdfPath} file://${srcPath}`,
+          { timeout: 180_000 },
+        );
+        const printed = await ctx.sandbox.stat(pdfPath).catch(() => null);
+        if (print.exitCode !== 0 || !printed?.isFile) {
           return {
-            text: `[design_export failed] pdftoppm exited ${ppm.exitCode}: ${(ppm.stderr || ppm.stdout).slice(-400)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships poppler-utils — this sandbox is running an older image. The PDF export works; offer that instead.`,
+            text: `[design_export failed] Chromium print exited ${print.exitCode}: ${(print.stderr || print.stdout).slice(-800)}. For PDF, tell the user to use the canvas Export menu -> PDF instead: it opens a print view in their browser and Save as PDF is instant and full-fidelity.`,
           };
         }
-        await ctx.sandbox.writeFile(`${dir}/.vd-pptx.cjs`, PPTX_BUILD_SCRIPT);
-        await ctx.sandbox.writeFile(
-          `${dir}/.vd-pptx.json`,
-          JSON.stringify({ dir, out: outPath, notes: isDeck ? extractSpeakerNotes(current.content) : [] }),
-        );
-        const build = await ctx.sandbox.exec(
-          `NODE_PATH="$(npm root -g)" node ${dir}/.vd-pptx.cjs`,
-          { timeout: 120_000 },
-        );
-        if (build.exitCode !== 0) {
-          await cleanup();
-          return {
-            text: `[design_export failed] pptx build exited ${build.exitCode}: ${(build.stderr || build.stdout).slice(-400)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships pptxgenjs — this sandbox is running an older image. The PDF export works; offer that instead.`,
-          };
+
+        if (args.format === "pptx") {
+          // Rasterize the rendered pages (96dpi = 1920x1080 px) and build a
+          // full-fidelity image-per-slide pptx with speaker notes attached.
+          const ppm = await ctx.sandbox.exec(`pdftoppm -png -r 96 ${pdfPath} ${dir}/.vd-slide`, {
+            timeout: 120_000,
+          });
+          if (ppm.exitCode !== 0) {
+            return {
+              text: `[design_export failed] pdftoppm exited ${ppm.exitCode}: ${(ppm.stderr || ppm.stdout).slice(-400)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships poppler-utils — this sandbox is running an older image. The PDF export works; offer that instead.`,
+            };
+          }
+          await ctx.sandbox.writeFile(`${dir}/.vd-pptx.cjs`, PPTX_BUILD_SCRIPT);
+          await ctx.sandbox.writeFile(
+            `${dir}/.vd-pptx.json`,
+            JSON.stringify({ dir, out: outPath, notes: isDeck ? extractSpeakerNotes(current.content) : [] }),
+          );
+          const build = await ctx.sandbox.exec(
+            `NODE_PATH="$(npm root -g)" node ${dir}/.vd-pptx.cjs`,
+            { timeout: 120_000 },
+          );
+          if (build.exitCode !== 0) {
+            return {
+              text: `[design_export failed] pptx build exited ${build.exitCode}: ${(build.stderr || build.stdout).slice(-400)}. The stock sandbox image (docker/Dockerfile.sandbox-k8s) ships pptxgenjs — this sandbox is running an older image. The PDF export works; offer that instead.`,
+            };
+          }
         }
+      } finally {
+        // finally, not per-branch: a thrown exec or write must not strand
+        // intermediates for the next export's glob to pick up.
+        await cleanIntermediates();
       }
-      await cleanup();
       const pptxNote =
         args.format === "pptx"
           ? " Slides are full-fidelity images with speaker notes attached; for text-editable slides, export to Google Slides instead."
