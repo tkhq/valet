@@ -6,7 +6,7 @@
  * covered in that package's own suite. What is covered here is the decoder
  * this module adds: JSON first, then the YAML chunk.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseWorkflowImport,
   previewWorkflowImport,
@@ -129,6 +129,26 @@ describe("parseWorkflowImport", () => {
     const parsed = await parseWorkflowImport("{ nodes: [ ");
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.errors[0]).toContain("neither JSON nor YAML");
+  });
+
+  it("says the reader did not load when the YAML chunk fails, not that the file is bad", async () => {
+    // The decoder is split out of the main bundle, so a deploy or a dropped
+    // connection can fail the load of a file that is perfectly good. Told
+    // the file is malformed, the reader edits a correct file.
+    vi.doMock("yaml", () => {
+      throw new Error("Failed to fetch dynamically imported module");
+    });
+    try {
+      const parsed = await parseWorkflowImport("valet: workflow/v1\n", "nightly.yaml");
+
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.errors[0]).toContain("could not load the YAML reader");
+      expect(parsed.errors[0]).toContain("Reload the page");
+      expect(parsed.errors[0]).not.toContain("neither JSON nor YAML");
+    } finally {
+      vi.doUnmock("yaml");
+    }
   });
 
   it("refuses a file that holds no definition, and says what one looks like", async () => {

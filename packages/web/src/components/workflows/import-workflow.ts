@@ -94,14 +94,28 @@ export async function parseWorkflowImport(
   try {
     raw = JSON.parse(text);
   } catch {
+    // Loading the chunk and reading the file are two failures with nothing
+    // in common. A chunk that does not arrive says nothing about the file —
+    // and told "your file is malformed", the reader edits a file that was
+    // correct all along.
+    let yaml: typeof import("yaml");
     try {
-      const { parse } = await import("yaml");
-      raw = parse(text);
+      yaml = await import("yaml");
     } catch (err) {
       return {
         ok: false,
         errors: [
-          `${label} is neither JSON nor YAML: ${err instanceof Error ? err.message : String(err)}. Choose an exported workflow file.`,
+          `Valet could not load the YAML reader: ${detail(err)}. Reload the page, then try again. A JSON file imports without this reader.`,
+        ],
+      };
+    }
+    try {
+      raw = yaml.parse(text);
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `${label} is neither JSON nor YAML: ${detail(err)}. Choose an exported workflow file.`,
         ],
       };
     }
@@ -130,6 +144,10 @@ export async function parseWorkflowImport(
         ? { definition: file.definition, skipped }
         : { name, definition: file.definition, skipped },
   };
+}
+
+function detail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export interface ImportPreview {
