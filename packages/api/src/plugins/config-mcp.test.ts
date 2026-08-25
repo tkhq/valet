@@ -44,6 +44,20 @@ describe("configMcpPlugins", () => {
     expect(plugin.actions?.[0]?.requiresCredential).toBe(true);
   });
 
+  it("oauth entries carry declared scopes onto the credential declaration", () => {
+    const scopes = ["agent:query", "agent:search"];
+    const [plugin] = configMcpPlugins([decl({ auth: "oauth", scopes })], {});
+    expect(plugin.credentials).toEqual([
+      {
+        service: "example",
+        type: "oauth2",
+        scopes,
+        configKeys: ["accessToken"],
+        oauth: { mode: "mcp", serverUrl: URL },
+      },
+    ]);
+  });
+
   it("api_key entries declare a manual credential with the label defaulted from the name", () => {
     const [labeled] = configMcpPlugins(
       [decl({ auth: "api_key", connectLabel: "Example key" })],

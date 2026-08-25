@@ -63,6 +63,10 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     credentials.push({
       service: entry.name,
       type: "oauth2",
+      // Forwarded into the authorize request by the connect route. A
+      // scope-gated server (e.g. Metabase) grants a scopeless token when
+      // the request names none, and then lists zero tools.
+      ...(entry.scopes ? { scopes: entry.scopes } : {}),
       configKeys: ["accessToken"],
       oauth: { mode: "mcp", serverUrl: entry.url },
     });

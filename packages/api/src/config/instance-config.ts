@@ -72,6 +72,10 @@ export interface McpServerDecl {
   tokenEnv?: string;
   /** Send the credential as this URL query param instead of an Authorization header. */
   authQueryParam?: string;
+  /** OAuth scopes for the authorize request. Only valid when auth is
+   * "oauth". Scope-gated servers (e.g. Metabase) issue a token with no
+   * scopes when the request names none, and then list zero tools. */
+  scopes?: string[];
   /** Connect-UI copy for api_key entry, e.g. "Acme API key". */
   connectLabel?: string;
   description?: string;
@@ -648,6 +652,11 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
         entry.tokenEnv = assertNonEmptyString(v, `mcpServers[${i}].tokenEnv`, path);
       } else if (key === "authQueryParam") {
         entry.authQueryParam = assertNonEmptyString(v, `mcpServers[${i}].authQueryParam`, path);
+      } else if (key === "scopes") {
+        const raw = assertArray(v, `mcpServers[${i}].scopes`, path);
+        entry.scopes = raw.map((s, j) =>
+          assertNonEmptyString(s, `mcpServers[${i}].scopes[${j}]`, path),
+        );
       } else if (key === "connectLabel") {
         entry.connectLabel = assertString(v, `mcpServers[${i}].connectLabel`, path);
       } else if (key === "description") {
@@ -686,6 +695,13 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
     if (entry.auth !== "bearer" && entry.tokenEnv !== undefined) {
       err(
         `${path}: mcpServers[${i}].tokenEnv is only valid when auth is "bearer". Remove it, or set auth: bearer.`,
+      );
+    }
+    // scopes go into the OAuth authorize request; on any other mode they
+    // would be silently inert, so it refuses (same rule as tokenEnv).
+    if (entry.scopes !== undefined && entry.auth !== "oauth") {
+      err(
+        `${path}: mcpServers[${i}].scopes is only valid when auth is "oauth". Remove it, or set auth: oauth.`,
       );
     }
     // authQueryParam rewrites how a credential is SENT, so it needs a

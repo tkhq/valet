@@ -509,6 +509,8 @@ mcpServers:
     displayName: Salesforce CRM # optional; connect-UI card title
     url: https://mcp.example.com/mcp   # required; http(s) MCP endpoint
     auth: oauth                 # required; none | oauth | api_key | bearer
+    scopes:                     # oauth only: scopes for the authorize request
+      - crm:read
     tokenEnv: SF_MCP_TOKEN      # bearer only: env var that holds the token
     authQueryParam: API_KEY     # api_key/bearer only: send token as query param
     connectLabel: Acme API key  # api_key only: connect-UI copy
@@ -522,7 +524,13 @@ Auth modes:
 - **`none`** — no credential. The server's tools are visible to every user.
 - **`oauth`** — per-user MCP OAuth against `url` (RFC 8414 discovery +
   RFC 7591 dynamic registration, PKCE). Each user connects in the
-  integrations UI, exactly like the bundled Linear plugin.
+  integrations UI, exactly like the bundled Linear plugin. `scopes` go
+  into the authorize request. Declare them for a scope-gated server:
+  Metabase, for one, grants a token with no scopes when the request names
+  none — the server does not fall back to the registered client's default
+  scope set — and then lists zero tools with no error anywhere. A
+  connected zero-scope credential cannot be upgraded by refresh; the user
+  must disconnect and reconnect after scopes are added.
 - **`api_key`** — per-user manual token entry in the connect UI.
 - **`bearer`** — one instance-wide token, read from `tokenEnv` at boot.
   The file never holds secrets, so the entry names the env var. A `bearer`
@@ -538,8 +546,8 @@ Rules:
   `mcp-config:` prefix so a config entry can never silently dedupe against
   a bundled plugin.
 - Mode-specific keys on the wrong mode fail validation (`tokenEnv` outside
-  `bearer`, `connectLabel` outside `api_key`, `authQueryParam` outside
-  `api_key`/`bearer`).
+  `bearer`, `scopes` outside `oauth`, `connectLabel` outside `api_key`,
+  `authQueryParam` outside `api_key`/`bearer`).
 - `displayName` is the human-readable name the connect UI shows as the
   card title (and in the default `connectLabel` for `api_key` entries).
   When absent, the synthesized plugin title-cases `name`

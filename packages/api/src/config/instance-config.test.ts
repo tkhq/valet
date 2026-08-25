@@ -344,6 +344,39 @@ describe("mcpServers validation", () => {
     expect(cfg.mcpServers?.[3]?.enabled).toBe(false);
   });
 
+  it("accepts scopes on an oauth entry", () => {
+    const yaml = base(
+      [
+        "  - name: metabase",
+        "    url: https://metabase.example/api/metabase-mcp",
+        "    auth: oauth",
+        "    scopes:",
+        "      - agent:query",
+        "      - agent:search",
+      ].join("\n"),
+    );
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.mcpServers?.[0]?.scopes).toEqual(["agent:query", "agent:search"]);
+  });
+
+  it("rejects scopes on a non-oauth entry", () => {
+    const yaml = base(
+      "  - name: x\n    url: https://x.example/mcp\n    auth: none\n    scopes: [read]",
+    );
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      'mcpServers[0].scopes is only valid when auth is "oauth". Remove it, or set auth: oauth.',
+    );
+  });
+
+  it("rejects a scopes entry that is not a non-empty string", () => {
+    const yaml = base(
+      '  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    scopes: ["ok", ""]',
+    );
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "mcpServers[0].scopes[1] must not be empty",
+    );
+  });
+
   it("rejects an empty displayName", () => {
     const yaml = base(
       '  - name: x\n    url: https://x.example/mcp\n    auth: none\n    displayName: ""',
