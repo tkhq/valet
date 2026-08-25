@@ -563,6 +563,7 @@ describe("pg app schema + migrations", () => {
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
       { table: "content_sources", column: "created_by" },
+      { table: "content_sources", column: "kinds" },
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
@@ -586,6 +587,60 @@ describe("pg app schema + migrations", () => {
 
       for (const { table, column } of REPAIRED_COLUMNS) {
         expect(await columnExists(table, column), `${table}.${column} repaired`).toBe(true);
+      }
+    });
+  });
+
+  // The same failure mode one level up from a column: the database applied
+  // `0000_app.sql` while the table was still called `skill_sources`, so only
+  // `addColumnsMissingFromAppliedMigrations` can carry it to the new name.
+  // This is the one statement in the workflows MVP that touches a database
+  // somebody already has. Simulate that database by winding the table, its
+  // indexes and the `kinds` column back, then re-run the migrations.
+  describe("table rename for in-place 0000 edits", () => {
+    async function indexExists(name: string): Promise<boolean> {
+      const result = await db.query(
+        "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
+        [name],
+      );
+      return result.rows.length > 0;
+    }
+
+    it("carries skill_sources rows to content_sources and backfills kinds", async () => {
+      const now = Date.now();
+      await db.query(
+        `INSERT INTO "content_sources"
+           ("id","org_id","owner_type","owner_id","repo_full_name","next_attempt_at","created_at","updated_at")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        ["cs_pre_rename", "org-rename", "user", "u-rename", "acme/skills", now, now, now],
+      );
+
+      await db.query('ALTER TABLE "content_sources" DROP COLUMN "kinds"');
+      await db.query('ALTER INDEX "content_sources_owner" RENAME TO "skill_sources_owner"');
+      await db.query('ALTER INDEX "content_sources_due" RENAME TO "skill_sources_due"');
+      await db.query('ALTER INDEX "content_sources_repo" RENAME TO "skill_sources_repo"');
+      await db.query('ALTER TABLE "content_sources" RENAME TO "skill_sources"');
+      expect(await tableExists(db, "content_sources"), "content_sources wound back").toBe(false);
+
+      await applyAppMigrations(db);
+
+      expect(await tableExists(db, "content_sources"), "content_sources restored").toBe(true);
+      expect(await tableExists(db, "skill_sources"), "skill_sources gone").toBe(false);
+
+      // The row written under the old name survives, and the `kinds` repair
+      // backfills it to skills only — a repository tracked before workflow
+      // sync existed keeps mirroring exactly what it mirrored.
+      const rows = await db.query('SELECT "repo_full_name", "kinds" FROM "content_sources" WHERE "id" = $1', [
+        "cs_pre_rename",
+      ]);
+      expect(rows.rows).toHaveLength(1);
+      expect(rows.rows[0]?.repo_full_name).toBe("acme/skills");
+      expect(rows.rows[0]?.kinds).toEqual(["skills"]);
+
+      // The three indexes move with the table, so an upgraded database ends
+      // up matching `0000_app.sql` rather than keeping `skill_sources_*`.
+      for (const name of ["content_sources_owner", "content_sources_due", "content_sources_repo"]) {
+        expect(await indexExists(name), `${name} renamed`).toBe(true);
       }
     });
   });

@@ -147,10 +147,15 @@ export async function applyAppMigrations(db: PgDb): Promise<void> {
 async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // The 2026-08-24 workflows MVP design renamed `skill_sources` to
   // `content_sources`, because the sweep now mirrors more than skills. The
-  // rename is idempotent: after the first boot the old name is gone and this
-  // statement does nothing. It must run BEFORE the two column repairs below,
-  // which name the new table.
+  // renames are idempotent: after the first boot the old names are gone and
+  // these statements do nothing. The table rename must run BEFORE the two
+  // column repairs below, which name the new table. The three index renames
+  // keep an upgraded database in lockstep with `0000_app.sql`, which names
+  // the indexes `content_sources_*`.
   await db.query('ALTER TABLE IF EXISTS "skill_sources" RENAME TO "content_sources"');
+  await db.query('ALTER INDEX IF EXISTS "skill_sources_owner" RENAME TO "content_sources_owner"');
+  await db.query('ALTER INDEX IF EXISTS "skill_sources_due" RENAME TO "content_sources_due"');
+  await db.query('ALTER INDEX IF EXISTS "skill_sources_repo" RENAME TO "content_sources_repo"');
 
   // Records which person's GitHub credential a team source may use. Null on
   // every row written before the column existed, which the sync reads as
