@@ -4,7 +4,7 @@
  * the nav's switcher names (small-fixes design, decisions 1 and 2). These
  * cases pin the OWNER each list requests, which is the whole of the change:
  * the panel scopes hard, and the feed scopes only while its filter reads
- * "Mine".
+ * "This workspace".
  *
  * `~/api/events` is mocked to record the arguments its hooks receive,
  * following the same isolate-from-the-network pattern as the page suite in
@@ -128,24 +128,24 @@ describe("SubscriptionsPanel", () => {
 });
 
 describe("EventFeed scope control", () => {
-  it("starts on Mine and asks for the switcher's owner", () => {
+  it("starts on the workspace and asks for the switcher's owner", () => {
     render(<EventFeed />);
     expect(feedCalls).toBeGreaterThan(0);
     expect(feedOwner).toEqual({ ownerType: "user", ownerId: "u1" });
-    expect(screen.getByRole("button", { name: "Mine" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Scope: This workspace" })).toBeTruthy();
   });
 
   it("drops the owner when the reader selects All", async () => {
     render(<EventFeed />);
     // Radix dropdown triggers do not open from jsdom's plain click; the
     // keyboard path (Enter) is the reliable way to open one in tests.
-    fireEvent.keyDown(screen.getByRole("button", { name: "Mine" }), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
     fireEvent.click(await screen.findByText("All"));
 
     expect(feedOwner).toBeUndefined();
     // The org-wide state must be reachable AND legible: the trigger now
     // reads All, so a reader can tell which feed they are looking at.
-    expect(screen.getByRole("button", { name: "All" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
   });
 
   it("scopes to the team in a team workspace", () => {

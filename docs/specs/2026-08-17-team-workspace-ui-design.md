@@ -106,7 +106,8 @@ listed so the next pass starts here.
   decision 2). The feed still lists org-level facts, not owned rows, and
   `GET /api/events` still answers with the whole org when it gets no
   owner. The page filters to the active workspace on first load instead:
-  its scope control starts at "Mine" and sends the switcher's owner, which
+  its scope control starts at "This workspace" and sends the switcher's
+  owner, which
   narrows the feed to events delivered to that workspace's subscriptions,
   and "All" drops the owner again. The org-wide view stays one click away
   because an event that matched nothing you own is the row you open when

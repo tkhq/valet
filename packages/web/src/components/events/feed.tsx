@@ -20,10 +20,10 @@ const FEED_PAGE_SIZE = 50;
 
 /** Which events the feed asks for: those delivered to the active
  * workspace's subscriptions, or every event the org ingested. */
-type FeedScope = "mine" | "all";
+type FeedScope = "workspace" | "all";
 
 const SCOPE_OPTIONS = [
-  { value: "mine", label: "Mine" },
+  { value: "workspace", label: "This workspace" },
   { value: "all", label: "All" },
 ] as const;
 
@@ -35,20 +35,20 @@ const SCOPE_OPTIONS = [
  * answerable from this page alone.
  *
  * The scope control decides which events the question is asked about. It
- * starts at "Mine", the events that reached the active workspace's own
- * subscriptions. "All" restores the org-wide feed, and it must stay
- * available: an event that matched nothing you own is precisely the row you
- * open when your subscription never fired.
+ * starts at "This workspace", the events that reached the active
+ * workspace's own subscriptions. "All" restores the org-wide feed, and it
+ * must stay available: an event that matched nothing you own is precisely
+ * the row you open when your subscription never fired.
  */
 export function EventFeed() {
   const [service, setService] = useState(ALL);
   const [key, setKey] = useState(ALL);
-  const [scope, setScope] = useState<FeedScope>("mine");
+  const [scope, setScope] = useState<FeedScope>("workspace");
   const owner = useListOwner();
   const catalogQ = useEventCatalog();
   const eventsQ = useEvents(
     { service: service || undefined, key: key || undefined },
-    scope === "mine" ? owner : undefined,
+    scope === "workspace" ? owner : undefined,
   );
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -60,7 +60,14 @@ export function EventFeed() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <SelectMenu value={scope} onChange={setScope} options={SCOPE_OPTIONS} />
+        <SelectMenu
+          value={scope}
+          onChange={setScope}
+          // The trigger sits beside "All services" and "All events", so it
+          // names the dimension it filters.
+          triggerLabel={`Scope: ${scope === "all" ? "All" : "This workspace"}`}
+          options={SCOPE_OPTIONS}
+        />
 
         <SelectMenu
           value={service}
@@ -106,7 +113,7 @@ export function EventFeed() {
 
       {eventsQ.data && eventsQ.data.events.length === 0 && (
         <EmptyRow>
-          {scope === "mine"
+          {scope === "workspace"
             ? "No events reached this workspace's subscriptions yet. Select All to see every event the organization received."
             : "No events yet. Events appear here when a connected integration sends a webhook — connect one on the Integrations page."}
         </EmptyRow>
