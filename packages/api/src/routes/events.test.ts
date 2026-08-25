@@ -600,7 +600,7 @@ describe("GET /api/events", () => {
     expect(limited.events.map((e) => e.id)).toEqual(["ev_c"]);
   });
 
-  // The owner filter is what the page's "Mine" state sends. It reads
+  // The owner filter is what the page's "This workspace" state sends. It reads
   // ownership through the deliveries, because the events table has no owner
   // column (small-fixes design, decision 2).
   it("with an owner, returns only events delivered to that owner's subscriptions", async () => {

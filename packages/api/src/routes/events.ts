@@ -240,7 +240,7 @@ eventsRouter.get("/events/catalog", (c) => {
  * and gains none: an event is an org-level fact, and a row that matched
  * nothing you own is exactly the row you open to answer "why did my
  * subscription never fire". The web page therefore sends the owner for its
- * default "Mine" state and drops it for "All".
+ * default "This workspace" state and drops it for "All".
  *
  * The filter reads ownership one join away, through the deliveries the
  * dispatcher wrote for this event. `event_deliveries_event` indexes the
