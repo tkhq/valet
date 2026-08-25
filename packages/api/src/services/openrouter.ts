@@ -36,13 +36,11 @@ export type OpenrouterRegistryModel = Model<Api>;
  * one fails loudly instead of silently shrinking the catalog.
  */
 export const OPENROUTER_DEFAULT_MODEL_IDS: readonly string[] = [
-  "anthropic/claude-opus-5",
-  "anthropic/claude-haiku-4.5",
-  "anthropic/claude-fable-5",
-  "anthropic/claude-sonnet-5",
-  "openai/gpt-5.6-luna",
-  "openai/gpt-5.6-sol",
-  "openai/gpt-5.6-terra",
+  "anthropic/claude-opus-4.7",
+  "anthropic/claude-sonnet-4.6",
+  "anthropic/claude-3.5-haiku",
+  "openai/gpt-4o-2024-11-20",
+  "openai/o3-pro",
 ];
 
 /** The full pi-ai openrouter registry, keyed by model id. */

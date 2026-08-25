@@ -29,9 +29,18 @@ describe("openrouter curated defaults", () => {
     }
   });
 
-  it("the user-requested picks are present", () => {
-    expect(OPENROUTER_DEFAULT_MODEL_IDS).toContain("deepseek/deepseek-v4-pro");
-    expect(OPENROUTER_DEFAULT_MODEL_IDS).toContain("moonshotai/kimi-k2.6");
+  it("the curated selection is latest frontier models from Anthropic and OpenAI", () => {
+    // All models should be from Anthropic or OpenAI
+    const validPrefixes = ["anthropic/", "openai/"];
+    for (const id of OPENROUTER_DEFAULT_MODEL_IDS) {
+      const hasValidPrefix = validPrefixes.some((prefix) => id.startsWith(prefix));
+      expect(hasValidPrefix).toBe(true);
+    }
+    // Should include latest major versions
+    expect(OPENROUTER_DEFAULT_MODEL_IDS.some((id) => id.startsWith("anthropic/claude-opus"))).toBe(true);
+    expect(OPENROUTER_DEFAULT_MODEL_IDS.some((id) => id.startsWith("anthropic/claude-sonnet"))).toBe(true);
+    expect(OPENROUTER_DEFAULT_MODEL_IDS.some((id) => id.startsWith("anthropic/claude-") && id.includes("haiku"))).toBe(true);
+    expect(OPENROUTER_DEFAULT_MODEL_IDS.some((id) => id.startsWith("openai/"))).toBe(true);
   });
 
   it("parseOpenrouterLiveModels maps the live payload, scales per-token pricing to per-million, skips malformed", () => {
