@@ -44,6 +44,11 @@ async function boot(): Promise<TestApi> {
   return api;
 }
 
+/** The message both owner-filtered listings answer with when one half of
+ * the pair is missing. The same string the workflows and skills suites
+ * assert, because one client builds one query for all of them. */
+const HALF_FILTER_ERROR = "Filter by owner with both ownerType and ownerId, or send neither.";
+
 const VALID_BODY: CreateEventSubscriptionRequest = {
   name: "pr opens",
   eventKeys: ["github.pull_request.opened"],
@@ -435,8 +440,7 @@ describe("GET /api/event-subscriptions", () => {
     const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=user`);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("ownerType");
-    expect(body.error).toContain("ownerId");
+    expect(body.error).toBe(HALF_FILTER_ERROR);
   });
 });
 
@@ -679,8 +683,7 @@ describe("GET /api/events", () => {
     const res = await fetch(`${a.baseUrl}/api/events?ownerId=local-user`);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("ownerType");
-    expect(body.error).toContain("ownerId");
+    expect(body.error).toBe(HALF_FILTER_ERROR);
   });
 });
 
