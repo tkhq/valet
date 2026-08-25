@@ -9,6 +9,7 @@ import {
 } from "~/components/primitives";
 import { useEventCatalog, useEvents } from "~/api/events";
 import { useListOwner } from "~/lib/use-list-owner";
+import { useMe } from "~/api/settings";
 import { EventRow } from "./event-row";
 
 /** Sentinel for "no filter applied". */
@@ -63,6 +64,10 @@ export function EventFeed({
   const [service, setService] = useState(ALL);
   const [key, setKey] = useState(ALL);
   const owner = useListOwner();
+  // `useListOwner` answers undefined both while identity loads AND when it
+  // fails, so a held query would otherwise sit on "Loading events…" forever.
+  // Read the identity query directly to tell the two apart.
+  const me = useMe();
   const catalogQ = useEventCatalog();
   // `useListOwner` answers undefined while the caller's identity loads, and
   // an owner-less request IS the org-wide feed. A control that says "This
@@ -136,9 +141,15 @@ export function EventFeed({
 
       {/* `isPending`, not `isLoading`: the query is held (not fetching)
           while the owner resolves, and a held feed is still loading. */}
-      {eventsQ.isPending && <LoadingRow label="Loading events…" />}
+      {eventsQ.isPending && !(!canFetch && me.isError) && <LoadingRow label="Loading events…" />}
       {eventsQ.error != null && (
         <ErrorRow>Failed to load events. Press refresh to try again.</ErrorRow>
+      )}
+      {!canFetch && me.isError && (
+        <ErrorRow>
+          Could not load your workspace, so this feed cannot narrow to it. Select All to see every
+          event the organization received.
+        </ErrorRow>
       )}
 
       {eventsQ.data && eventsQ.data.events.length === 0 && (

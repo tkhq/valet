@@ -210,6 +210,23 @@ Each group has its own dogfood, run against a local stack with `make dev-local`.
 - **D.** From Slack, ask the assistant a question that forces several tool calls before it answers, on a model that does not narrate before calling tools. The thread shows the status indicator, then exactly one streamed answer, and no blank messages. Stop the turn mid-stream and confirm the reader gets one message saying it stopped.
 - **E.** The diagnostic is complete when a written report names one candidate from decision 12, cites the fingerprint lines that implicate it, states the pi-ai version it was measured on, and is attached to the fix pull request.
 
+## Known limits
+
+1. **The workspace default buys a single-user organization nothing and still
+   costs it the unmatched events.** In an organization with one member, the
+   caller's subscriptions are the only subscriptions, so "This workspace" and
+   "All" differ by exactly one set: the events that matched nothing. That set
+   is the one the page exists to explain. The default therefore hides the
+   interesting rows and hides nothing the reader wanted hidden, which is pure
+   downside on the shape of every dev-loop stack and most small installs. The
+   empty state names the "All" control, so the reader is one click from the
+   whole feed and is told so, and the request that produced this pass asked
+   for a scoped default. Making the default depend on member count would make
+   one page behave differently between two deployments for a reason nobody can
+   see, so this pass keeps one default and records the cost here. Revisit if a
+   single-member deployment reports the feed as useless rather than merely
+   narrow.
+
 ## Deviations from this design (recorded at implementation)
 
 Group A shipped first, on branch `fix/events-tab-scope`. Its differences from
