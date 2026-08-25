@@ -6,11 +6,6 @@
  * machine-written JSON, and committing one unseen is how a workflow nobody
  * recognises ends up in the list.
  *
- * The review step also names what the file carries and the import does not
- * create — a schedule, event triggers, a description. `POST /api/workflows`
- * writes a name and a definition, so a file whose schedule was dropped in
- * silence would import as a workflow that never runs.
- *
  * Nothing is created until the review step is confirmed, and a refusal
  * shows the validator's own messages, node by node. `POST /api/workflows`
  * validates again with the plugin catalog this deployment actually has, so
@@ -47,7 +42,6 @@ import {
   parseWorkflowImport,
   previewWorkflowImport,
   suggestedImportName,
-  type ParsedWorkflowImport,
   type WorkflowImport,
 } from "./import-workflow";
 
@@ -92,29 +86,9 @@ export function ImportWorkflowDialog({
 
   /** Parsed text → the review step, or the parser's messages. `from` names
    * the origin on screen; `fileName` seeds the name field when the file
-   * carried no name of its own. Pasted text has no file name.
-   *
-   * Async because a YAML file loads its parser on demand. A JSON file
-   * resolves on the first tick, so the review step still appears at once.
-   *
-   * The parser answers with a result for every input, so the catch is not a
-   * branch this expects to take. It is here because the two callers below
-   * start it with `void`: a rejected promise would leave the dialog on the
-   * step it was on, and the button that started it looking dead. */
-  async function review(fileText: string, from: string, fileName?: string): Promise<void> {
-    let parsed: ParsedWorkflowImport;
-    try {
-      parsed = await parseWorkflowImport(fileText, fileName);
-    } catch (err) {
-      const detail = err instanceof Error ? `: ${err.message}` : "";
-      setPhase({
-        kind: "error",
-        messages: [
-          `Valet could not read ${from}${detail}. Check that the file holds a workflow definition, then try again.`,
-        ],
-      });
-      return;
-    }
+   * carried no name of its own. Pasted text has no file name. */
+  function review(fileText: string, from: string, fileName?: string): void {
+    const parsed = parseWorkflowImport(fileText);
     if (!parsed.ok) {
       setPhase({ kind: "error", messages: parsed.errors });
       return;
@@ -139,7 +113,7 @@ export function ImportWorkflowDialog({
     void file.text().then(
       (fileText) => {
         setText(fileText);
-        void review(fileText, file.name, file.name);
+        review(fileText, file.name, file.name);
       },
       () => setPhase({ kind: "error", messages: ["Could not read that file. Choose it again."] }),
     );
@@ -153,7 +127,7 @@ export function ImportWorkflowDialog({
         path: path.trim(),
         ...(ref.trim() === "" ? {} : { ref: ref.trim() }),
       });
-      await review(file.content, `${file.repo}/${file.path}`, file.path);
+      review(file.content, `${file.repo}/${file.path}`, file.path);
     } catch (err) {
       setPhase({ kind: "error", messages: errorMessages(err) });
     }
@@ -232,19 +206,19 @@ export function ImportWorkflowDialog({
                 aria-labelledby={`${tabPanelId(TABLIST_LABEL, "file")}-tab`}
                 className="grid gap-2"
               >
-                <Label htmlFor={`${fieldId}-text`}>Workflow YAML or JSON</Label>
+                <Label htmlFor={`${fieldId}-text`}>Workflow JSON</Label>
                 <Textarea
                   id={`${fieldId}-text`}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   rows={8}
                   spellCheck={false}
-                  placeholder={'valet: workflow/v1\nname: Nightly triage\ndefinition:\n  version: dag/v1\n  nodes: [...]\n  edges: [...]'}
+                  placeholder='{ "version": "dag/v1", "nodes": [...], "edges": [...] }'
                   className="font-mono text-xs"
                 />
                 <p className="text-xs text-muted">
-                  Paste a workflow file, or choose one. YAML and JSON both work, and the
-                  editor&apos;s JSON view shows the definition of any workflow you already have.
+                  Paste a definition, or choose a file. The editor&apos;s JSON view shows the
+                  definition of any workflow you already have.
                 </p>
                 <div>
                   <Button
@@ -259,7 +233,7 @@ export function ImportWorkflowDialog({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="application/json,.json,.yaml,.yml"
+                  accept="application/json,.json"
                   className="hidden"
                   aria-label="Workflow file"
                   onChange={onPickFile}
@@ -340,10 +314,7 @@ export function ImportWorkflowDialog({
                 Cancel
               </Button>
               {source === "file" ? (
-                <Button
-                  onClick={() => void review(text, "pasted file")}
-                  disabled={busy || text.trim() === ""}
-                >
+                <Button onClick={() => review(text, "pasted JSON")} disabled={busy || text.trim() === ""}>
                   Review
                 </Button>
               ) : (
@@ -384,13 +355,6 @@ function ReviewStep({
         <Label htmlFor={`${id}-name`}>Name</Label>
         <Input id={`${id}-name`} value={name} onChange={(e) => onName(e.target.value)} autoFocus />
       </div>
-
-      {value.skipped.length > 0 && (
-        <p className="text-xs text-muted">
-          The file also carries {value.skipped.join(", ")}. The import creates the workflow and its
-          graph only. Arm a schedule or an event trigger in Triggers after it is created.
-        </p>
-      )}
 
       <div className="rounded border border-line bg-ink-wash px-3 py-2">
         <p className="text-xs text-ink">

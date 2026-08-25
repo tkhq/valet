@@ -56,20 +56,6 @@ export type { TriggerInputError, ResolvedTriggerInput } from './dag/trigger-inpu
 export { validateWorkflowDefinition } from './dag/validate.js';
 export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
-export {
-  parseWorkflowFileValue,
-  WORKFLOW_FILE_EXTENSIONS,
-  WORKFLOW_FILE_KIND,
-  WORKFLOW_TEMPLATE_FILE_KIND,
-} from './file.js';
-export type {
-  WorkflowFile,
-  WorkflowFileParseFailureCode,
-  WorkflowFileParseResult,
-  WorkflowTemplateFile,
-  WorkflowTemplateFileMeta,
-} from './file.js';
-
 export { WorkflowCursorError, WorkflowFenceError, decodeRunCursor, encodeRunCursor } from './store.js';
 export type {
   ListRunsFilter,

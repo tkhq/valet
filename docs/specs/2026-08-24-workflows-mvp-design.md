@@ -215,7 +215,11 @@ Test: move `packages/api/src/services/skill-sync.test.ts` to `packages/api/src/s
 **2. Open `.valet/skills` to discovery.** Modify `packages/api/src/services/skill-discovery.ts:128`: replace `SCANNED_DOT_DIRECTORY` with `SCANNED_DOT_PATHS: readonly string[] = [".claude", ".valet/skills"]` and update the ancestor test that reads it, which now judges the path below a dot-prefixed ancestor rather than the ancestor's name. Update the comment at `:44-47` that names the skipped dot directories.
 Test: extend `packages/api/src/services/skill-discovery.test.ts` with a `.valet/skills/deploy/SKILL.md` that is discovered, a `.github/skills/x/SKILL.md` and a `.venv/.../SKILL.md` that are still not, a `.valet/prebuild.yaml` that is not a candidate of any kind, and a `.valet/prompts/x.md` that is not a candidate either. Run `pnpm --filter @valet/api test skill-discovery`.
 
-**3. The workflow file envelope and the shared parser.** Create `packages/workflow/src/file.ts` exporting `parseWorkflowFileValue(value, path)`, `WorkflowFile`, `WorkflowTemplateFile`, `WORKFLOW_FILE_EXTENSIONS`, and the two `valet:` kind strings; export them from `packages/workflow/src/index.ts`. Modify `packages/web/src/components/workflows/import-workflow.ts` to call the shared parser and to fall back to a dynamically imported `yaml` chunk when a pasted file is not JSON, keeping the two legacy shapes it accepts today (`import-workflow.ts:38-45`).
+**3. The workflow file envelope and the shared parser — SHIPPED SEPARATELY.** This task
+landed on its own branch (`feat/workflow-file-envelope`) rather than with the sync rail,
+because the parser and the rail share no import in either direction and the parser is
+useful on its own: the import dialog reads YAML and the envelope with nothing else in
+place. The description below is what shipped there. Create `packages/workflow/src/file.ts` exporting `parseWorkflowFileValue(value, path)`, `WorkflowFile`, `WorkflowTemplateFile`, `WORKFLOW_FILE_EXTENSIONS`, and the two `valet:` kind strings; export them from `packages/workflow/src/index.ts`. Modify `packages/web/src/components/workflows/import-workflow.ts` to call the shared parser and to fall back to a dynamically imported `yaml` chunk when a pasted file is not JSON, keeping the two legacy shapes it accepts today (`import-workflow.ts:38-45`).
 Test: create `packages/workflow/src/file.test.ts` covering an envelope round trip, back-compatibility for a bare definition and for `{ name, definition }`, an unknown `valet:` value refused by name, a template envelope, and a bad graph whose errors are the validator's own text. Extend `packages/web/src/components/workflows/import-workflow.test.ts` with a pasted YAML envelope. Run `pnpm --filter @valet/workflow test file` and `pnpm --filter @valet/web test import-workflow`.
 
 **4. Workflow mirror columns and the read-only guard.** Modify `packages/api/src/schema/index.ts:917-946` and `packages/api/migrations/pg/0000_app.sql:524-546`: add `origin`, `source_id`, `upstream_path`, and `content_sha` to `workflow_definitions` with a unique index `workflow_definitions_upstream` on `(source_id, upstream_path)`; add nullable `origin` and `source_commit` to `workflow_versions`; add index `workflow_runs_owner_created` on `(owner_type, owner_id, created_at DESC)`. Modify `packages/api/src/workflows/service.ts:384` and `:673` to refuse a repo-origin row with a new `RepoOwnedWorkflowError` from `@valet/shared` whose message names the file and repository, and add `copyWorkflowDefinition`. Modify `packages/api/src/routes/workflows.ts` to map that error to 409 and to add `POST /:id/copy`. Modify `packages/api/src/wire/types.ts` so `WorkflowDefinitionSummary` carries `origin` and the upstream reference.
@@ -274,6 +278,11 @@ The platform engineer performs this sequence against a manually rolled deploymen
 11. Open the workflows list and confirm the latest run result, the repository badge, and the run paging control all render together.
 
 ## Deviations from this design (recorded at implementation)
+
+Tasks 1 and 2 ship on `feat/workflows-repo-sync`. Task 3 ships on
+`feat/workflow-file-envelope`, reviewed separately; that branch carries no spec of its
+own, so this document governs it too. Tasks 4 through 13 have not shipped, so the
+repository sync mirrors no workflow yet.
 
 Tasks 1, 2, and 3 have shipped. Tasks 4 through 13 have not, so the repository sync mirrors no workflow yet: the rail is generalized, `.valet/skills` is open to discovery, and the file envelope has one parser, which is the ground the workflow collector stands on.
 
