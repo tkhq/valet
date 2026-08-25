@@ -742,8 +742,8 @@ githubAppWebhookRouter.post("/", async (c) => {
     if (push) {
       const sources = await findOrgSkillSourcesForPush(db, orgId, push);
       for (const source of sources) {
-        await c.var.providers.skillSync.syncOnce(source.id).catch((err) => {
-          console.error(`skill sync ${source.id} (github push):`, err);
+        await c.var.providers.contentSync.syncOnce(source.id).catch((err) => {
+          console.error(`content sync ${source.id} (github push):`, err);
         });
       }
     }

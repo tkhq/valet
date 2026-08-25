@@ -8,7 +8,7 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionPolicies, invites, llmProviders, orgMembers, orgs, skillSources, skills, teams, teamMembers, users } from "../schema/index.js";
+import { actionPolicies, invites, llmProviders, orgMembers, orgs, contentSources, skills, teams, teamMembers, users } from "../schema/index.js";
 import { ensureOrg } from "./org.js";
 import {
   reconcileInstanceConfig,
@@ -765,7 +765,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     await reconcileInstanceConfig(deps(db), cfg);
 
     const expectedId = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "main", "skills");
-    const rows = await db.select().from(skillSources).where(eq(skillSources.id, expectedId));
+    const rows = await db.select().from(contentSources).where(eq(contentSources.id, expectedId));
     expect(rows).toHaveLength(1);
     const row = rows[0]!;
     expect(row.ownerType).toBe("org");
@@ -783,13 +783,13 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const id = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "", "");
     const claimedUntil = Date.now() + 60_000;
     await db
-      .update(skillSources)
+      .update(contentSources)
       .set({ nextAttemptAt: claimedUntil, status: "pending", lastSyncedAt: null })
-      .where(eq(skillSources.id, id));
+      .where(eq(contentSources.id, id));
 
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
     expect(row?.nextAttemptAt).toBe(claimedUntil);
   });
 
@@ -802,18 +802,18 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const id = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "", "");
     const claimedUntil = Date.now() + 60_000;
     await db
-      .update(skillSources)
+      .update(contentSources)
       .set({
         nextAttemptAt: claimedUntil,
         status: "pending",
         lastSyncedAt: null,
         updatedAt: Date.now() - 6 * 60_000,
       })
-      .where(eq(skillSources.id, id));
+      .where(eq(contentSources.id, id));
 
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
     expect(row?.nextAttemptAt).toBeLessThanOrEqual(Date.now());
   });
 
@@ -826,18 +826,18 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const id = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "", "");
     const nextAttemptAt = Date.now() + 120_000;
     await db
-      .update(skillSources)
+      .update(contentSources)
       .set({
         nextAttemptAt,
         status: "pending",
         lastSyncedAt: Date.now(),
         updatedAt: Date.now() - 6 * 60_000,
       })
-      .where(eq(skillSources.id, id));
+      .where(eq(contentSources.id, id));
 
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
     expect(row?.nextAttemptAt).toBe(nextAttemptAt);
     expect(row?.lastSyncedAt).not.toBeNull();
   });
@@ -851,7 +851,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const id = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "", "");
     const backoffUntil = Date.now() + 600_000;
     await db
-      .update(skillSources)
+      .update(contentSources)
       .set({
         nextAttemptAt: backoffUntil,
         status: "error",
@@ -860,11 +860,11 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
         attempts: 2,
         updatedAt: Date.now() - 6 * 60_000,
       })
-      .where(eq(skillSources.id, id));
+      .where(eq(contentSources.id, id));
 
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
     expect(row?.nextAttemptAt).toBe(backoffUntil);
     expect(row?.status).toBe("error");
     expect(row?.attempts).toBe(2);
@@ -885,7 +885,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
 
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const rows = await db.select().from(skillSources);
+    const rows = await db.select().from(contentSources);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.nextAttemptAt).toBe(future);
   });
@@ -912,7 +912,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
   it("skips and warns when an unmanaged row already tracks the same repo+subpath", async () => {
     const org = await ensureOrg(db);
     // Insert an unmanaged (non-cfg_) row for the same repo.
-    await db.insert(skillSources).values({
+    await db.insert(contentSources).values({
       id: "skillsrc_unmanaged_abc",
       orgId: org.id,
       ownerType: "org",
@@ -941,8 +941,8 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     // Should not have inserted a managed row.
     const managedRows = await db
       .select()
-      .from(skillSources)
-      .where(like(skillSources.id, "skillsrc_cfg_%"));
+      .from(contentSources)
+      .where(like(contentSources.id, "skillsrc_cfg_%"));
     expect(managedRows).toHaveLength(0);
   });
 
@@ -951,7 +951,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const srcId = configSkillSourceId("org", org.id, "owner/repo", "", "");
 
     // Insert the managed source directly.
-    await db.insert(skillSources).values({
+    await db.insert(contentSources).values({
       id: srcId,
       orgId: org.id,
       ownerType: "org",
@@ -993,7 +993,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     await reconcileInstanceConfig(deps(db), cfg);
 
     // Source and its skills should be gone.
-    const srcRows = await db.select().from(skillSources).where(eq(skillSources.id, srcId));
+    const srcRows = await db.select().from(contentSources).where(eq(contentSources.id, srcId));
     expect(srcRows).toHaveLength(0);
 
     const skillRows = await db.select().from(skills).where(eq(skills.sourceId, srcId));
@@ -1003,7 +1003,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
   it("does not remove an unmanaged source even when skillSources is empty", async () => {
     const org = await ensureOrg(db);
     // Insert an unmanaged source.
-    await db.insert(skillSources).values({
+    await db.insert(contentSources).values({
       id: "skillsrc_ui_abc123",
       orgId: org.id,
       ownerType: "org",
@@ -1026,7 +1026,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const cfg: InstanceConfig = { version: 1, skillSources: [] };
     await reconcileInstanceConfig(deps(db), cfg);
 
-    const rows = await db.select().from(skillSources).where(eq(skillSources.id, "skillsrc_ui_abc123"));
+    const rows = await db.select().from(contentSources).where(eq(contentSources.id, "skillsrc_ui_abc123"));
     expect(rows).toHaveLength(1);
   });
 
@@ -1050,7 +1050,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     const providerRows = await db.select().from(llmProviders);
     expect(providerRows).toHaveLength(1);
 
-    const sourceRows = await db.select().from(skillSources);
+    const sourceRows = await db.select().from(contentSources);
     expect(sourceRows).toHaveLength(1);
   });
 
@@ -1071,7 +1071,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     );
 
     // No partial write — neither entry landed a row.
-    const rows = await db.select().from(skillSources).where(like(skillSources.id, "skillsrc_cfg_%"));
+    const rows = await db.select().from(contentSources).where(like(contentSources.id, "skillsrc_cfg_%"));
     expect(rows).toHaveLength(0);
   });
 

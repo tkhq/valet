@@ -1,6 +1,6 @@
 /**
- * `syncOnce` — the one entry point that mirrors a repository's skills
- * into the `skills` table.
+ * The skills collector, driven through `syncOnce` — the one entry point that
+ * mirrors a repository's skills into the `skills` table.
  *
  * Every case runs the real `GitHubSkillRepoReader` against the shared GitHub
  * fixture, so "how many API calls did that poll cost" is a property this
@@ -10,40 +10,48 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
-import type { AppDb } from "../lib/drizzle.js";
-import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import type { AppDb } from "../../lib/drizzle.js";
+import { freshTestPgDb } from "../../test-helpers/pg-test-db.js";
 import {
   commitBody,
   contentsBody,
   startGithubFixture,
   treeEntry,
   type GithubFixture,
-} from "../test-helpers/github-fixture.js";
+} from "../../test-helpers/github-fixture.js";
 import {
+  contentSources,
   orgMembers,
   orgs,
   skills,
-  skillSources,
   teamMembers,
   teams,
   users,
-} from "../schema/index.js";
-import { PgCredentialStore } from "../plugins/credential-store.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { createSkill, type SkillOwner } from "./skills.js";
-import { createSkillSource } from "./skill-sources.js";
-import { GitHubSkillRepoReader } from "./skill-repo-reader.js";
-import { skillRepoReaderFactory } from "./skill-source-credential.js";
-import { MAX_SKILL_CANDIDATES } from "./skill-discovery.js";
+} from "../../schema/index.js";
+import { PgCredentialStore } from "../../plugins/credential-store.js";
+import { deriveSecretKey } from "../../lib/secret-crypto.js";
+import { createSkill, type SkillOwner } from "../skills.js";
+import { createContentSource } from "../content-sources.js";
+import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
+import { skillRepoReaderFactory } from "../content-source-credential.js";
+import { MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
+import type {
+  CollectorDiscoverContext,
+  CollectorNoticeContext,
+  CollectorPass,
+  CollectorReconcileContext,
+  ContentCollector,
+} from "./collector.js";
+import { SkillCollector } from "./skill-collector.js";
 import {
-  claimDueSkillSources,
-  overdueSkillSources,
-  SkillSyncService,
+  claimDueContentSources,
+  ContentSyncService,
   ORG_SYNC_INTERVAL_MS,
   ORG_WEBHOOK_BACKSTOP_MS,
+  overdueContentSources,
   SYNC_INTERVAL_MS,
   syncIntervalMs,
-} from "./skill-sync.js";
+} from "./service.js";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -169,7 +177,7 @@ function entry(name: string, type: "file" | "dir") {
   return { name, path: name, type, size: 0, sha: `sha-${name}` };
 }
 
-describe("skill sync", () => {
+describe("skill collector", () => {
   let db: AppDb;
   let credentials: PgCredentialStore;
 
@@ -195,15 +203,15 @@ describe("skill sync", () => {
     fixture = undefined;
   });
 
-  function serviceFor(f: GithubFixture): SkillSyncService {
-    return new SkillSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }) });
+  function serviceFor(f: GithubFixture): ContentSyncService {
+    return new ContentSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }) });
   }
 
   /** The service as `providers/node.ts` builds it: a per-source reader that
    * carries the credential the source's owner holds. */
-  function credentialedServiceFor(f: GithubFixture): SkillSyncService {
+  function credentialedServiceFor(f: GithubFixture): ContentSyncService {
     const deps = { db, credentials, key: deriveSecretKey("cache-key"), apiUrl: f.url };
-    return new SkillSyncService({
+    return new ContentSyncService({
       db,
       reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
       readerFor: skillRepoReaderFactory(deps, { apiUrl: f.url }),
@@ -227,7 +235,7 @@ describe("skill sync", () => {
       },
       files: ["README.md"],
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -245,7 +253,7 @@ describe("skill sync", () => {
     expect(rows[0]?.description).toBe("How to deploy the service.");
     expect(rows[0]?.content).toBe("Do the thing.\n");
 
-    const [after] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [after] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(after?.status).toBe("ok");
     expect(after?.lastSha).toBe("commit-1");
     expect(after?.lastManifestHash).not.toBeNull();
@@ -260,7 +268,7 @@ describe("skill sync", () => {
       root: "agent/skills",
       skills: { deploy: skillMd("deploy", "How to deploy the service.") },
     });
-    const source = await createSkillSource(db, owner("u1"), {
+    const source = await createContentSource(db, owner("u1"), {
       repo: "tkhq/skills",
       subpath: "agent/skills",
     });
@@ -288,7 +296,7 @@ describe("skill sync", () => {
           "01-notes/README.md": "# Notes\n",
         },
       });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -316,7 +324,7 @@ describe("skill sync", () => {
           "04-skills-archive/old/SKILL.md": skillMd("old", "Do not import."),
         },
       });
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/tk-brain",
         subpath: "04-skills",
       });
@@ -340,7 +348,7 @@ describe("skill sync", () => {
           ".github/workflows/ci/SKILL.md": skillMd("ci", "Tooling."),
         },
       });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -364,7 +372,7 @@ describe("skill sync", () => {
         },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       const service = serviceFor(f);
       await service.syncOnce(source.id);
 
@@ -382,7 +390,7 @@ describe("skill sync", () => {
       // The warning names the PATH, because only the reader can say whether
       // that path is a real skill or a vendored copy.
       expect(outcome?.warnings.join("\n")).toContain("build/escalate/SKILL.md");
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.status).toBe("warning");
       expect(row?.lastError).toContain("build/escalate/SKILL.md");
     });
@@ -397,7 +405,7 @@ describe("skill sync", () => {
         skills: { configure: skillMd("configure", "Configure it.") },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       const service = serviceFor(f);
       await service.syncOnce(source.id);
 
@@ -426,7 +434,7 @@ describe("skill sync", () => {
         skills: {},
         extra: { "node_modules/@acme/skills/deploy/SKILL.md": skillMd("deploy", "Deploy it.") },
       });
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/skills",
         subpath: "node_modules/@acme/skills",
       });
@@ -451,7 +459,7 @@ describe("skill sync", () => {
           "c/deploy/SKILL.md": skillMd("deploy", "Deploy it."),
         },
       });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -475,7 +483,7 @@ describe("skill sync", () => {
         extra: { "a/review/SKILL.md": skillMd("review", "One review skill.") },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       const service = serviceFor(f);
       await service.syncOnce(source.id);
       expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["review"]);
@@ -496,7 +504,7 @@ describe("skill sync", () => {
 
     it("skips a symlinked SKILL.md, whose blob holds a path and not a skill", async () => {
       const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       await serviceFor(f).syncOnce(source.id);
       await f.close();
 
@@ -538,7 +546,7 @@ describe("skill sync", () => {
           "04-skills/prompts/parts/intro.md": "Shared text",
         },
       });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -554,7 +562,7 @@ describe("skill sync", () => {
       // The exact shape of the report: the old scan reported `ok` with zero
       // counts, and the panel showed "0 skills · synced just now".
       const f = serve({ sha: "commit-1", skills: {}, extra: { "README.md": "# Notes\n" } });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -563,7 +571,7 @@ describe("skill sync", () => {
       expect(outcome?.excluded).toBe(0);
       expect(outcome?.notice).toContain("found no SKILL.md file");
       expect(outcome?.notice).toContain("check the branch");
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.status).toBe("warning");
       expect(row?.lastError).toContain("found no SKILL.md file");
     });
@@ -580,7 +588,7 @@ describe("skill sync", () => {
           "04-skills/deploy/SKILL.md": skillMd("deploy", "Deploy it."),
         },
       });
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/tk-brain",
         subpath: "skills",
       });
@@ -607,7 +615,7 @@ describe("skill sync", () => {
         },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/skills",
         subpath: "04-skills",
       });
@@ -628,7 +636,7 @@ describe("skill sync", () => {
       // The mirror survives, which is the whole point.
       const rows = await db.select().from(skills).orderBy(skills.name);
       expect(rows.map((r) => r.name)).toEqual(["deploy", "on-call"]);
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       // The commit is NOT recorded, so a fix upstream is picked up.
       expect(row?.lastSha).toBe("commit-1");
     });
@@ -647,7 +655,7 @@ describe("skill sync", () => {
         },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/skills",
         subpath: "04-skills",
       });
@@ -672,7 +680,7 @@ describe("skill sync", () => {
         skills: {},
         extra: { "node_modules/@acme/kit/skills/deploy/SKILL.md": skillMd("deploy", "Not ours.") },
       });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -688,7 +696,7 @@ describe("skill sync", () => {
       // the person is back to "0 skills, no reason given" five minutes
       // after reading the reason.
       const f = serve({ sha: "commit-1", skills: {} });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
       const service = serviceFor(f);
       await service.syncOnce(source.id);
 
@@ -697,7 +705,7 @@ describe("skill sync", () => {
 
       expect(f.calls).toHaveLength(1);
       expect(outcome?.status).toBe("warning");
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.status).toBe("warning");
       expect(row?.lastError).toContain("found no SKILL.md file");
     });
@@ -709,7 +717,7 @@ describe("skill sync", () => {
         sha: "commit-1",
         skills: { broken: "---\nname: Not A Name\n---\n\nBody.\n" },
       });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
       const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -734,7 +742,7 @@ license: Complete terms in LICENSE.txt
 Read the reference.
 `;
     const f = serve({ sha: "commit-1", skills: { "claude-api": claudeApi } });
-    const source = await createSkillSource(db, owner("u1"), { repo: "anthropics/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "anthropics/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -752,7 +760,7 @@ Read the reference.
   it("costs exactly one call when the head commit has not moved", async () => {
     const repo: FakeRepo = { sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } };
     const f = serve(repo);
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(f);
     await service.syncOnce(source.id);
 
@@ -768,7 +776,7 @@ Read the reference.
   it("records a moved commit that carries the same skills, and writes no skill rows", async () => {
     const repo: FakeRepo = { sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } };
     const f = serve(repo);
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(f);
     await service.syncOnce(source.id);
     const [before] = await db.select().from(skills);
@@ -788,7 +796,7 @@ Read the reference.
     expect(outcome).toMatchObject({ imported: 0, updated: 0, deleted: 0 });
     const [after] = await db.select().from(skills);
     expect(after?.updatedAt).toBe(before?.updatedAt);
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(row?.lastSha).toBe("commit-2");
   });
 
@@ -798,7 +806,7 @@ Read the reference.
       skills: { deploy: skillMd("deploy", "Deploy it.", "Run make deploy.") },
     };
     const f = serve(repo);
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(f);
     await service.syncOnce(source.id);
 
@@ -819,10 +827,10 @@ Read the reference.
       skills: { deploy: skillMd("deploy", "Deploy it."), "on-call": skillMd("on-call", "Answer.") },
     };
     const f = serve(repo);
-    const mine = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const mine = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     // A SECOND source in the SAME owner scope: only `source_id` separates
     // its rows from the ones being reconciled.
-    const sibling = await createSkillSource(db, owner("u1"), { repo: "tkhq/other" });
+    const sibling = await createContentSource(db, owner("u1"), { repo: "tkhq/other" });
     await createSkill(db, owner("u1"), {
       name: "escalate",
       description: "The sibling source's mirror.",
@@ -838,7 +846,7 @@ Read the reference.
       content: "# Local\n",
     });
     // Another owner's mirror of the name that is about to disappear.
-    const theirs = await createSkillSource(db, owner("u2"), { repo: "tkhq/skills" });
+    const theirs = await createContentSource(db, owner("u2"), { repo: "tkhq/skills" });
     await createSkill(db, owner("u2"), {
       name: "on-call",
       description: "Their mirror.",
@@ -879,7 +887,7 @@ Read the reference.
       },
     };
     const f = serve(repo);
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(f);
 
     const outcome = await service.syncOnce(source.id);
@@ -887,7 +895,7 @@ Read the reference.
     expect(outcome?.status).toBe("warning");
     expect(outcome?.imported).toBe(1);
     expect(outcome?.warnings.join(" ")).toContain("broken");
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(row?.status).toBe("warning");
     expect(row?.lastSha).toBe("commit-1");
     expect(row?.attempts).toBe(0);
@@ -910,7 +918,7 @@ Read the reference.
       sha: "commit-1",
       skills: { deploy: skillMd("deploy", "Deploy it."), verbose: skillMd("verbose", long) },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -931,7 +939,7 @@ Read the reference.
         lost: "---\nname: lost\ndescription: |-\nNot indented under the header.\n---\n\nBody.\n",
       },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -946,7 +954,7 @@ Read the reference.
       sha: "commit-1",
       skills: { deploy: skillMd("deploy", "Deploy it."), ".github": null },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -962,7 +970,7 @@ Read the reference.
       description: "Written here.",
       content: "# Local\n",
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -979,7 +987,7 @@ Read the reference.
     fixture = startGithubFixture({
       getCommit: () => ({ status: 404, body: { message: "Not Found" } }),
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/private" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/private" });
 
     const outcome = await serviceFor(fixture).syncOnce(source.id);
 
@@ -989,7 +997,7 @@ Read the reference.
     expect(outcome?.error).toContain("no GitHub credential");
     expect(outcome?.error).toContain("Connected accounts");
     expect(outcome?.error).not.toContain("make the repository public");
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(row?.status).toBe("error");
     expect(row?.attempts).toBe(1);
     expect(row?.lastError).toContain("Connected accounts");
@@ -1007,7 +1015,7 @@ Read the reference.
     it("mirrors when the owner's GitHub account can read it", async () => {
       const f = serve({ ...PRIVATE });
       await connectGitHub("u1", "ghu_u1", "octocat");
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       const outcome = await credentialedServiceFor(f).syncOnce(source.id);
 
@@ -1019,7 +1027,7 @@ Read the reference.
 
     it("tells an unconnected owner what to connect, and mirrors nothing", async () => {
       const f = serve({ ...PRIVATE });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       const outcome = await credentialedServiceFor(f).syncOnce(source.id);
 
@@ -1035,7 +1043,7 @@ Read the reference.
       const f = serve({ ...PRIVATE });
       // Connected, but to an account the repository does not admit.
       await connectGitHub("u1", "ghu_other", "hubot");
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       const outcome = await credentialedServiceFor(f).syncOnce(source.id);
 
@@ -1048,11 +1056,11 @@ Read the reference.
     it("keeps no token material in the row the wire and the UI read", async () => {
       const f = serve({ ...PRIVATE });
       await connectGitHub("u1", "ghu_other", "hubot");
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
 
       await credentialedServiceFor(f).syncOnce(source.id);
 
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.lastError).not.toContain("ghu_other");
       expect(row?.lastError).toContain("hubot");
     });
@@ -1063,11 +1071,11 @@ Read the reference.
       // anonymous rather than reach for whatever credential is nearby.
       const f = serve({ ...PRIVATE });
       await connectGitHub("u1", "ghu_u1", "octocat");
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
       await db
-        .update(skillSources)
+        .update(contentSources)
         .set({ ownerType: "team", ownerId: TEAM, createdBy: "u2" })
-        .where(eq(skillSources.id, source.id));
+        .where(eq(contentSources.id, source.id));
 
       const outcome = await credentialedServiceFor(f).syncOnce(source.id);
 
@@ -1084,11 +1092,11 @@ Read the reference.
       // membership and their GitHub credential all survive.
       const f = serve({ ...PRIVATE, requireToken: "ghu_u2" });
       await connectGitHub("u2", "ghu_u2", "hubot");
-      const source = await createSkillSource(db, owner("u2"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u2"), { repo: "tkhq/tk-brain" });
       await db
-        .update(skillSources)
+        .update(contentSources)
         .set({ ownerType: "team", ownerId: TEAM, createdBy: "u2" })
-        .where(eq(skillSources.id, source.id));
+        .where(eq(contentSources.id, source.id));
 
       // While u2 is a member the mirror fills, which is the intended feature.
       expect((await credentialedServiceFor(f).syncOnce(source.id))?.status).toBe("ok");
@@ -1101,7 +1109,7 @@ Read the reference.
         .where(and(eq(teamMembers.teamId, TEAM), eq(teamMembers.userId, "u2")));
       // Force the next sync to do real work rather than stop at an unmoved
       // head commit, the way a repository push would.
-      await db.update(skillSources).set({ lastSha: null }).where(eq(skillSources.id, source.id));
+      await db.update(contentSources).set({ lastSha: null }).where(eq(contentSources.id, source.id));
 
       const after = await credentialedServiceFor(f).syncOnce(source.id);
 
@@ -1120,15 +1128,15 @@ Read the reference.
       // on a row that otherwise names nobody.
       const f = serve({ ...PRIVATE });
       await connectGitHub("u2", "ghu_other", "hubot");
-      const source = await createSkillSource(db, owner("u2"), { repo: "tkhq/tk-brain" });
+      const source = await createContentSource(db, owner("u2"), { repo: "tkhq/tk-brain" });
       await db
-        .update(skillSources)
+        .update(contentSources)
         .set({ ownerType: "team", ownerId: TEAM, createdBy: "u2" })
-        .where(eq(skillSources.id, source.id));
+        .where(eq(contentSources.id, source.id));
 
       await credentialedServiceFor(f).syncOnce(source.id);
 
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.lastError).not.toContain("ghu_other");
       expect(row?.lastError).not.toContain("hubot");
       expect(row?.lastError).toContain("the GitHub account that added this source");
@@ -1140,7 +1148,7 @@ Read the reference.
     // The regression this change must not cause: tracking a public
     // repository has never needed a GitHub connection, and still does not.
     const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await credentialedServiceFor(f).syncOnce(source.id);
 
@@ -1179,7 +1187,7 @@ Read the reference.
         return { status: 404, body: { message: "Not Found" } };
       },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(fixture);
 
     const first = await service.syncOnce(source.id);
@@ -1188,7 +1196,7 @@ Read the reference.
     expect(first?.imported).toBe(1);
     expect(first?.warnings.join("\n")).toContain("escalate/SKILL.md");
     expect(first?.warnings.join("\n")).toContain("reads it again on the next sync");
-    const [afterFirst] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [afterFirst] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     // Neither compare may be told this commit is mirrored, because it is not.
     expect(afterFirst?.lastSha).toBeNull();
     expect(afterFirst?.lastManifestHash).toBeNull();
@@ -1203,7 +1211,7 @@ Read the reference.
     expect(second?.imported).toBe(1);
     const rows = await db.select().from(skills).orderBy(skills.name);
     expect(rows.map((r) => r.name)).toEqual(["deploy", "escalate"]);
-    const [afterSecond] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [afterSecond] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(afterSecond?.lastSha).toBe("commit-2");
     expect(afterSecond?.lastManifestHash).not.toBeNull();
   });
@@ -1221,7 +1229,7 @@ Read the reference.
       },
     };
     const f = serve(repo);
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(f);
 
     const first = await service.syncOnce(source.id);
@@ -1242,7 +1250,7 @@ Read the reference.
 
     expect(third?.status).toBe("warning");
     expect(third?.warnings.join("\n")).toContain("broken");
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(row?.status).toBe("warning");
     expect(row?.lastError).toContain("broken");
     // Still one skill mirrored, which is what the warning is about.
@@ -1259,7 +1267,7 @@ Read the reference.
       many[`skills/skill-${i}/SKILL.md`] = skillMd(`skill-${i}`, "One of very many.");
     }
     const f = serve({ sha: "commit-1", skills: {}, extra: many });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -1277,7 +1285,7 @@ Read the reference.
       skills: { deploy: skillMd("deploy", "Deploy it."), "on-call": skillMd("on-call", "Answer.") },
     };
     const f = serve(repo);
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
     const service = serviceFor(f);
     await service.syncOnce(source.id);
     await f.close();
@@ -1304,7 +1312,7 @@ Read the reference.
 
     expect(outcome?.status).toBe("error");
     expect(await db.select().from(skills)).toHaveLength(2);
-    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(row?.lastSha).toBe("commit-1");
   });
 
@@ -1325,7 +1333,7 @@ Read the reference.
         },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/skills",
         ...(subpath === undefined ? {} : { subpath }),
       });
@@ -1369,7 +1377,7 @@ Read the reference.
       // The sync stopped at the tree: no SKILL.md was read.
       expect(f.calls.filter((call) => call.path.endsWith("/SKILL.md"))).toHaveLength(0);
 
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, sourceId));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, sourceId));
       expect(row?.status).toBe("error");
       expect(row?.attempts).toBe(1);
       // The commit is NOT recorded, so the next poll reads the repository again.
@@ -1411,7 +1419,7 @@ Read the reference.
         },
       };
       const f = serve(repo);
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/skills",
         subpath: "agent/skills",
       });
@@ -1459,7 +1467,7 @@ Read the reference.
       expect(outcome?.deleted).toBe(0);
       expect(outcome?.error).toContain("part of its listing");
       expect(await db.select().from(skills)).toHaveLength(2);
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, sourceId));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, sourceId));
       expect(row?.lastSha).toBe("commit-1");
       // The message names the fix, which is to re-import a smaller directory.
       expect(row?.lastError).toContain("Remove this repository");
@@ -1477,7 +1485,7 @@ Read the reference.
       skills: { deploy: skillMd("deploy", "Deploy it.") },
       prompts: { standup: "---\ndescription: Daily standup\n---\nSummarize $1" },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -1497,7 +1505,7 @@ Read the reference.
         good: "Body $1",
       },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -1517,7 +1525,7 @@ Read the reference.
       skills: { standup: skillMd("standup", "Run the standup.", "Ask everyone for updates.") },
       prompts: { standup: "---\ndescription: Prompt version\n---\nSummarize $1" },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -1546,7 +1554,7 @@ Read the reference.
         summary: "---\ndescription: A safe name\n---\nSummarize $1",
       },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -1559,7 +1567,7 @@ Read the reference.
     expect(rows.some((r) => r.name === "status")).toBe(false);
   });
 
-  // F4 (skill-sync): a skill directory named after a reserved builtin is
+  // F4 (skill collector): a skill directory named after a reserved builtin is
   // skipped with a per-file warning; the rest of the sync continues.
   it("skips a skill directory whose name is a reserved builtin command", async () => {
     const f = serve({
@@ -1569,7 +1577,7 @@ Read the reference.
         good: skillMd("good", "A safe skill."),
       },
     });
-    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
     const outcome = await serviceFor(f).syncOnce(source.id);
 
@@ -1582,6 +1590,109 @@ Read the reference.
     expect(rows.some((r) => r.name === "status")).toBe(false);
   });
 
+  // `deps.collectors` has no caller outside this block, so every other case
+  // in this file runs the single default and the interface buys nothing it
+  // can be held to. These are the four properties it exists for.
+  describe("two collectors on one sweep", () => {
+    /** A second collector. It collects `.txt` files, which the skills
+     * collector never looks at, and it keeps the text map reconcile was
+     * handed so the merge is observable. */
+    class TextCollector implements ContentCollector {
+      readonly kind = "workflows" as const;
+      /** One entry per reconcile call, holding what `readContents` merged. */
+      readonly handed: Array<Map<string, string>> = [];
+      /** What this collector's next reconcile reports it removed and kept.
+       * A test sets it to prove that these numbers reach THIS collector's
+       * notice and no other's. */
+      deleted = 0;
+      keptStale: string[] = [];
+
+      discover({ entries }: CollectorDiscoverContext): CollectorPass {
+        const found = entries
+          .filter((entry) => entry.path.endsWith(".txt"))
+          .map((entry) => ({ name: entry.path, path: entry.path, blobSha: entry.sha }));
+        const collector = this;
+        return {
+          kind: this.kind,
+          readEntries: found,
+          manifestEntries: found,
+          text: new Map(),
+          warnings: [],
+          discovered: found.length,
+          excluded: 0,
+          async reconcile(ctx: CollectorReconcileContext) {
+            collector.handed.push(new Map(ctx.text));
+            return {
+              imported: found.length,
+              updated: 0,
+              deleted: collector.deleted,
+              keptStale: collector.keptStale,
+              warnings: [],
+            };
+          },
+          notice: (ctx: CollectorNoticeContext) =>
+            `Valet mirrored ${found.length} text file. It removed ${ctx.deleted} and kept ${ctx.keptStale.length}.`,
+          unreadWarning: (path: string) => `${path} could not be read.`,
+        };
+      }
+    }
+
+    it("shares one tree read, one manifest, one text map, and both notices", async () => {
+      const repo: FakeRepo = {
+        sha: "commit-1",
+        skills: { deploy: skillMd("deploy", "Deploy it.") },
+        extra: { "notes.txt": "one" },
+      };
+      const f = serve(repo);
+      const text = new TextCollector();
+      const service = new ContentSyncService({
+        db,
+        reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
+        collectors: [new SkillCollector(), text],
+      });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      await db
+        .update(contentSources)
+        .set({ kinds: ["skills", "workflows"] })
+        .where(eq(contentSources.id, source.id));
+
+      const first = await service.syncOnce(source.id);
+
+      // One tree read serves both collectors, which is the whole reason the
+      // sweep discovers before it reads anything.
+      expect(f.calls.filter((call) => call.path.includes("/git/trees/"))).toHaveLength(1);
+      expect(first?.imported).toBe(2);
+      // `readContents` merges both passes by PATH into one map, so each
+      // collector's reconcile sees the other's file bodies.
+      expect([...(text.handed[0]?.keys() ?? [])].sort()).toEqual(["deploy/SKILL.md", "notes.txt"]);
+
+      // The manifest hash covers the UNION: the commit moves and only the
+      // text file changes, so compare 2 must not stop this poll.
+      repo.sha = "commit-2";
+      repo.extra = { "notes.txt": "two" };
+      const second = await service.syncOnce(source.id);
+      expect(second?.changed).toBe(true);
+      expect(text.handed).toHaveLength(2);
+
+      // Both collectors report on the same repository, so the row carries
+      // both lines rather than whichever one ran last — and each line counts
+      // what ITS OWN pass did. The skills pass deletes the one skill it
+      // mirrored; the text pass reports two deletes of its own. A sweep-wide
+      // count would tell the reader that three skills were removed.
+      repo.sha = "commit-3";
+      repo.skills = {};
+      text.deleted = 2;
+      text.keptStale = ["archive.txt"];
+      const third = await service.syncOnce(source.id);
+      expect(third?.notice).toContain("found no SKILL.md file");
+      expect(third?.notice).toContain("Valet removed the 1 skill it had mirrored");
+      expect(third?.notice).toContain("Valet mirrored 1 text file. It removed 2 and kept 1.");
+      // The row's own counts are still the sum, which is what a reader of the
+      // source row expects.
+      expect(third?.deleted).toBe(3);
+    });
+  });
+
   describe("the sweep", () => {
     it("picks the interval from the owner type", () => {
       expect(syncIntervalMs("org")).toBe(ORG_SYNC_INTERVAL_MS);
@@ -1591,38 +1702,38 @@ Read the reference.
     });
 
     it("leases what it claims, so a second claim at the same instant gets nothing", async () => {
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       const now = source.nextAttemptAt;
 
-      expect(await claimDueSkillSources(db, now)).toEqual([source.id]);
+      expect(await claimDueContentSources(db, now)).toEqual([source.id]);
       // The fence: the loser of a race re-checks the due predicate against
       // the winner's committed row, where `next_attempt_at` has moved.
-      expect(await claimDueSkillSources(db, now)).toEqual([]);
+      expect(await claimDueContentSources(db, now)).toEqual([]);
 
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.nextAttemptAt).toBeGreaterThan(now);
     });
 
     it("leaves a source that is not due yet", async () => {
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       await db
-        .update(skillSources)
+        .update(contentSources)
         .set({ nextAttemptAt: source.nextAttemptAt + 60_000 })
-        .where(eq(skillSources.id, source.id));
+        .where(eq(contentSources.id, source.id));
 
-      expect(await claimDueSkillSources(db, source.nextAttemptAt)).toEqual([]);
+      expect(await claimDueContentSources(db, source.nextAttemptAt)).toEqual([]);
     });
 
     it("leaves a disabled source", async () => {
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
-      await db.update(skillSources).set({ enabled: false }).where(eq(skillSources.id, source.id));
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      await db.update(contentSources).set({ enabled: false }).where(eq(contentSources.id, source.id));
 
-      expect(await claimDueSkillSources(db, source.nextAttemptAt)).toEqual([]);
+      expect(await claimDueContentSources(db, source.nextAttemptAt)).toEqual([]);
     });
 
     it("syncs every source one pass claims", async () => {
       const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 
       // Read the clock before the sync, not after. The sync schedules from
       // its own `Date.now()`, which is at or after this one, so the bound
@@ -1631,7 +1742,7 @@ Read the reference.
       await serviceFor(f).pollOnce();
 
       expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["deploy"]);
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.status).toBe("ok");
       // The sync's own schedule replaces the claim lease.
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + SYNC_INTERVAL_MS);
@@ -1639,43 +1750,63 @@ Read the reference.
 
     it("schedules an org source on the webhook backstop when the hook is live", async () => {
       const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/org-skills",
         ownerType: "org",
       });
       const beforeSync = Date.now();
-      const service = new SkillSyncService({
+      const service = new ContentSyncService({
         db,
         reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
         orgWebhookLive: () => true,
       });
       await service.syncOnce(source.id);
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + ORG_WEBHOOK_BACKSTOP_MS);
     });
 
     it("schedules an org source on the shorter interval", async () => {
       const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
-      const source = await createSkillSource(db, owner("u1"), {
+      const source = await createContentSource(db, owner("u1"), {
         repo: "tkhq/org-skills",
         ownerType: "org",
       });
       const beforeSync = Date.now();
       await serviceFor(f).syncOnce(source.id);
-      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + ORG_SYNC_INTERVAL_MS);
       expect(row?.nextAttemptAt).toBeLessThan(beforeSync + SYNC_INTERVAL_MS);
     });
 
     it("reports sources that have been due longer than the org interval", async () => {
-      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
       const now = Date.now();
       await db
-        .update(skillSources)
+        .update(contentSources)
         .set({ nextAttemptAt: now - ORG_SYNC_INTERVAL_MS })
-        .where(eq(skillSources.id, source.id));
-      expect(await overdueSkillSources(db, now)).toEqual([source.id]);
-      expect(await overdueSkillSources(db, now - 1)).toEqual([]);
+        .where(eq(contentSources.id, source.id));
+      expect(await overdueContentSources(db, now)).toEqual([source.id]);
+      expect(await overdueContentSources(db, now - 1)).toEqual([]);
+    });
+
+    it("runs no collector for a source that collects no kind it has one for", async () => {
+      // `kinds` selects the collectors, so an empty list and a kind with no
+      // collector registered yet are the same answer: nothing runs, nothing
+      // is mirrored, and the sweep does not throw.
+      const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
+      const empty = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const unknown = await createContentSource(db, owner("u2"), { repo: "tkhq/skills" });
+      await db.update(contentSources).set({ kinds: [] }).where(eq(contentSources.id, empty.id));
+      await db
+        .update(contentSources)
+        .set({ kinds: ["workflows"] })
+        .where(eq(contentSources.id, unknown.id));
+
+      const service = serviceFor(f);
+      expect((await service.syncOnce(empty.id))?.imported).toBe(0);
+      expect((await service.syncOnce(unknown.id))?.imported).toBe(0);
+
+      expect(await db.select().from(skills)).toEqual([]);
     });
   });
 });

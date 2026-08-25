@@ -532,6 +532,7 @@ CREATE TABLE "skill_sources" (
 	"repo_full_name" text NOT NULL,
 	"ref" text DEFAULT '' NOT NULL,
 	"subpath" text DEFAULT '' NOT NULL,
+	"kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
 	"status" text DEFAULT 'pending' NOT NULL,
 	"attempts" integer DEFAULT 0 NOT NULL,

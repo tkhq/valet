@@ -1,7 +1,7 @@
 /**
- * Which GitHub credential a skill source syncs with.
+ * Which GitHub credential a content source syncs with.
  *
- * This is the whole tenancy rule for skill sync, in one function, because
+ * This is the whole tenancy rule for repository sync, in one function, because
  * picking the wrong credential here is a privilege escalation and a reviewer
  * must be able to check the rule without reading the sweep.
  *
@@ -36,7 +36,7 @@
  *
  * ## The binding is re-checked at READ time, not at creation
  *
- * `createSkillSource` checks team membership before it writes the row. That
+ * `createContentSource` checks team membership before it writes the row. That
  * check alone is not enough, because the row then reads GitHub every
  * `SYNC_INTERVAL_MS` for as long as it exists, and any remaining team member
  * can force a read with "Sync now". If the person named in `created_by`
@@ -45,7 +45,7 @@
  * reads. Nothing would show it: the source row shows the OWNER, not the
  * identity funding the read.
  *
- * So `resolveSkillSourceCredential` asks the same questions again on every
+ * So `resolveContentSourceCredential` asks the same questions again on every
  * sync, matching `isTeamMember`'s stated contract that "a member removed
  * from a team must lose access to its resources on their very next request":
  *
@@ -85,7 +85,7 @@
  *                     no App installation that covers the repository.
  *                     The 404 names installing the App.
  */
-import type { SkillSourceRow } from "../schema/index.js";
+import type { ContentSourceRow } from "../schema/index.js";
 import {
   GitHubAuthError,
   resolveGitHubToken,
@@ -150,9 +150,9 @@ function usesOrgApp(source: SkillSourceRow): boolean {
  * A membership query that throws lands in the same catch, which is the safe
  * direction: an unconfirmed membership must not hand out a token.
  */
-export async function resolveSkillSourceCredential(
+export async function resolveContentSourceCredential(
   deps: GitHubTokenDeps,
-  source: SkillSourceRow,
+  source: ContentSourceRow,
 ): Promise<SkillRepoCredential> {
   try {
     if (usesOrgApp(source)) {
@@ -213,7 +213,7 @@ export async function resolveSkillSourceCredential(
     // Only the message, and only to the server log. The source row is shown
     // to users, and an arbitrary error is not written for them to read.
     console.error(
-      `skill sync ${source.id}: cannot read the GitHub credential:`,
+      `content sync ${source.id}: cannot read the GitHub credential:`,
       err instanceof Error ? err.message : String(err),
     );
     return UNAVAILABLE;
@@ -221,16 +221,16 @@ export async function resolveSkillSourceCredential(
 }
 
 /**
- * The reader factory `SkillSyncService` calls once per sync. Both the server
+ * The reader factory `ContentSyncService` calls once per sync. Both the server
  * (`providers/node.ts`) and the integration harness build it from here, so
  * neither can hold its own copy of the rule above.
  */
 export function skillRepoReaderFactory(
   deps: GitHubTokenDeps,
   opts: { apiUrl?: string } = {},
-): (source: SkillSourceRow) => Promise<SkillRepoReader> {
+): (source: ContentSourceRow) => Promise<SkillRepoReader> {
   return async (source) => {
-    const credential = await resolveSkillSourceCredential(deps, source);
+    const credential = await resolveContentSourceCredential(deps, source);
     return new GitHubSkillRepoReader({ apiUrl: opts.apiUrl, credential });
   };
 }

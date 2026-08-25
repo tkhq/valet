@@ -20,7 +20,7 @@
  *
  * ## The reader does not choose the credential
  *
- * `services/skill-source-credential.ts` makes that choice from the source
+ * `services/content-source-credential.ts` makes that choice from the source
  * row's owner, and this class carries only what it is given. The two stay
  * apart on purpose: reading a private repository through the wrong
  * credential is a privilege escalation, so the rule that picks one must live
@@ -43,7 +43,7 @@
  * ## Rate limits
  *
  * Anonymous GitHub allows 60 requests per hour per IP; an authenticated
- * request gets 5000. `services/skill-sync.ts` polls on a long interval and
+ * request gets 5000. `services/content-sync/service.ts` polls on a long interval and
  * stops after one call when the head commit has not moved, which is what
  * keeps the anonymous budget workable.
  */
@@ -374,7 +374,7 @@ const DEFAULT_REF = "HEAD";
 
 /**
  * Deadline for one GitHub request. A hung connection must not pin the sweep:
- * `SkillSyncService.pollOnce` holds its `draining` flag for a whole pass, so
+ * `ContentSyncService.pollOnce` holds its `draining` flag for a whole pass, so
  * one stalled read stops every other source from syncing until the socket
  * gives up on its own.
  */

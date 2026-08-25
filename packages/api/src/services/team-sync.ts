@@ -10,7 +10,7 @@
  * Valet (`origin='local'`) is a different kind of thing: the sync never
  * renames one, never deletes one, and never takes over its membership.
  * Every write and every delete below is scoped by `origin='idp'`, the same
- * way `skill-sync.ts` scopes its writes by `origin='repo'`.
+ * way `content-sync/service.ts` scopes its writes by `origin='repo'`.
  *
  * A third origin joins the same rule. A team declared in `valet.yaml` carries
  * `origin='config'`, and the boot reconciler
@@ -35,7 +35,7 @@
  * Read the other way, one mapper edit deprovisions every user of the
  * deployment on their next login. This repo shipped that failure once
  * already, in the skill sync, where a truncated directory listing read as
- * "everything was deleted upstream" (`skill-sync.ts`, "A transport failure
+ * "everything was deleted upstream" (`content-sync/service.ts`, "A transport failure
  * is different").
  *
  * Keycloak drops the group claim for a user who is in no groups (measured

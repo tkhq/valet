@@ -153,6 +153,13 @@ interface SchemaRepair {
  * way and does need a real migration. Keep each `sql` in lockstep with
  * `0000_app.sql`. Delete this list at 1.0, when numbered migrations take
  * over.
+ *
+ * Every entry must also be safe to ROLL BACK, because these repairs run on
+ * a database the PREVIOUS release may boot again. Adding a column or a
+ * table is safe: the older release ignores what it does not know. Renaming
+ * or dropping is not — the older release repairs the OLD name, and its own
+ * statement against a table that no longer exists stops its boot. Do not
+ * rename or drop here.
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
@@ -172,12 +179,20 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
   },
   {
-    // Records which person's GitHub credential a team skill source may use.
+    // Records which person's GitHub credential a team source may use.
     // Null on every row written before the column existed, which the sync
     // reads as "no credential" rather than climbing to the org's App.
     describe: "skill_sources.created_by column",
     probe: { kind: "column", table: "skill_sources", column: "created_by" },
     sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text',
+  },
+  {
+    // Which content kinds a source collects. The DEFAULT backfills every
+    // pre-existing row to skills only, so a repository tracked before
+    // workflow sync existed keeps mirroring exactly what it mirrored.
+    describe: "skill_sources.kinds column",
+    probe: { kind: "column", table: "skill_sources", column: "kinds" },
+    sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
   },
   {
     // The per-group team-sync allowlist. Null on every row written before

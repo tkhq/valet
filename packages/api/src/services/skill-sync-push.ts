@@ -8,7 +8,7 @@
  */
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { skillSources, type SkillSourceRow } from "../schema/index.js";
+import { contentSources, type ContentSourceRow } from "../schema/index.js";
 
 export interface SkillPushRef {
   repoFullName: string;
@@ -49,16 +49,16 @@ export async function findOrgSkillSourcesForPush(
   db: AppDb,
   orgId: string,
   push: SkillPushRef,
-): Promise<SkillSourceRow[]> {
+): Promise<ContentSourceRow[]> {
   const rows = await db
     .select()
-    .from(skillSources)
+    .from(contentSources)
     .where(
       and(
-        eq(skillSources.orgId, orgId),
-        eq(skillSources.ownerType, "org"),
-        eq(skillSources.repoFullName, push.repoFullName),
-        eq(skillSources.enabled, true),
+        eq(contentSources.orgId, orgId),
+        eq(contentSources.ownerType, "org"),
+        eq(contentSources.repoFullName, push.repoFullName),
+        eq(contentSources.enabled, true),
       ),
     );
   return rows.filter((row) => skillSourceRefMatchesPush(row.ref, push));

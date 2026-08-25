@@ -40,9 +40,9 @@ import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
-import { SkillSyncService } from "../services/skill-sync.js";
+import { ContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
-import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
+import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -717,14 +717,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
   });
 
-  // Skill-repository sync (agent-skills design). `readerFor` gives each
+  // Repository content sync (agent-skills design). `readerFor` gives each
   // source the GitHub credential its OWNER holds, so a private repository
   // syncs without letting a source borrow reach it does not have — the rule
-  // is in `services/skill-source-credential.ts`. A source with no resolvable
+  // is in `services/content-source-credential.ts`. A source with no resolvable
   // credential falls back to the anonymous `reader`, which is what every
   // public repository uses. `start()`/`stop()` are called from `main.ts`
   // alongside the other loops.
-  const skillSync = new SkillSyncService({
+  const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader(),
     readerFor: skillRepoReaderFactory({
@@ -763,7 +763,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowScheduler,
     webhookRateLimiter,
     eventDispatcher,
-    skillSync,
+    contentSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

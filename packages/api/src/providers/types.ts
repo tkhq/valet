@@ -23,7 +23,7 @@ import type { SecurityRunnerDriver } from "../orchestrator/security-runner-drive
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
-import type { SkillSyncService } from "../services/skill-sync.js";
+import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 
 /**
@@ -93,10 +93,11 @@ export interface Providers {
   eventDispatcher: EventDispatcher;
   /** Cron-driven workflow run starts. `start()`/`stop()` from main.ts. */
   workflowScheduler: WorkflowScheduler;
-  /** Skill-repository sync (`services/skill-sync.ts`) — `start()`/`stop()`
-   * from main.ts. `routes/skills.ts` calls its `syncOnce` for the create and
-   * "sync now" routes, so there is one sync implementation. */
-  skillSync: SkillSyncService;
+  /** Repository content sync (`services/content-sync/service.ts`) —
+   * `start()`/`stop()` from main.ts. `routes/skills.ts` calls its `syncOnce`
+   * for the create and "sync now" routes, so there is one sync
+   * implementation. */
+  contentSync: ContentSyncService;
   /** Per-workflow in-memory limiter for the public webhook-trigger route
    * (`routes/workflow-hooks.ts`, overhaul design decision 5) — single-
    * process, coarse, not shared across API instances. */

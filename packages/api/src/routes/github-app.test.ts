@@ -11,8 +11,8 @@ import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, eventSubscriptions, githubInstallations, skillSources } from "../schema/index.js";
-import { createSkillSource } from "../services/skill-sources.js";
+import { eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources } from "../schema/index.js";
+import { createContentSource } from "../services/content-sources.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -812,12 +812,12 @@ describe("POST /webhooks/github-app", () => {
   it("a push syncs the matching org skill source and leaves a personal one", async () => {
     api = await bootTestApi();
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
-    const orgSource = await createSkillSource(
+    const orgSource = await createContentSource(
       api.providers.db,
       { userId: "local-user", orgId: "local-org" },
       { repo: "tkhq/skills", ownerType: "org" },
     );
-    const personal = await createSkillSource(
+    const personal = await createContentSource(
       api.providers.db,
       { userId: "local-user", orgId: "local-org" },
       { repo: "tkhq/skills" },
@@ -835,12 +835,12 @@ describe("POST /webhooks/github-app", () => {
 
     const [orgRow] = await api.providers.db
       .select()
-      .from(skillSources)
-      .where(eq(skillSources.id, orgSource.id));
+      .from(contentSources)
+      .where(eq(contentSources.id, orgSource.id));
     const [personalRow] = await api.providers.db
       .select()
-      .from(skillSources)
-      .where(eq(skillSources.id, personal.id));
+      .from(contentSources)
+      .where(eq(contentSources.id, personal.id));
     expect(orgRow?.status).not.toBe("pending");
     expect(personalRow?.status).toBe("pending");
   });
