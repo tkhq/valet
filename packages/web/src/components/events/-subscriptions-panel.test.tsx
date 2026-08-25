@@ -261,6 +261,18 @@ describe("EventFeed scope control", () => {
     expect(feedOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
   });
 
+  // The route bounds the owner-filtered query to a window, so an empty
+  // scoped feed must not read as "nothing ever matched".
+  it("names the window when the scoped feed is empty", () => {
+    renderFeed();
+    expect(screen.getByText(/in the last 30 days/)).toBeTruthy();
+  });
+
+  it("claims no window on All", () => {
+    renderFeed("all");
+    expect(screen.queryByText(/last 30 days/)).toBeNull();
+  });
+
   // `refetch()` ignores `enabled`, so the hold is only as good as the
   // control that can trigger one.
   it("refuses to refresh while the owner is unresolved", () => {

@@ -16,7 +16,7 @@
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -88,6 +88,26 @@ const TARGET_KINDS = ["workflow", "orchestrator"] as const;
 
 const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
+
+/**
+ * How far back the OWNER-FILTERED feed looks.
+ *
+ * The unfiltered feed needs no window: `events_org_received` covers
+ * `(org_id, received_at)`, so `LIMIT 50` reads fifty index entries and
+ * stops. The owner filter rejects candidates that no index can pre-select,
+ * so a workspace whose subscriptions have matched nothing walks the org's
+ * whole event history to fill a page it can never fill. Measured on 40,000
+ * events: 40,000 semi-join loops and 200,689 buffer hits for one empty
+ * page, against 1,001 loops and 5,026 hits with this bound.
+ *
+ * A lower bound on `received_at` joins the same index condition, which is
+ * why it is the cheapest bound available. The cost is real and stated: a
+ * workspace whose newest matching event is older than this window sees an
+ * empty feed. `components/events/feed.tsx` names the window in its empty
+ * state and beside a scoped list, and "All" carries no window at all.
+ * Change the two together.
+ */
+const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
   return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
@@ -255,6 +275,11 @@ eventsRouter.get("/events/catalog", (c) => {
  * `EXISTS` costs one index probe per candidate row. An event with no
  * deliveries at all matches no owner, which is correct: nobody's
  * subscription acted on it.
+ *
+ * The probe is cheap; the NUMBER of probes is not, because the `LIMIT` no
+ * longer stops the scan early when nothing matches. The filtered query
+ * therefore also carries the `OWNER_FEED_WINDOW_MS` lower bound — see that
+ * constant for the measurement and for what the window costs the reader.
  */
 eventsRouter.get("/events", async (c) => {
   const { db } = c.var.providers;
@@ -273,6 +298,9 @@ eventsRouter.get("/events", async (c) => {
   if (key) conditions.push(eq(events.eventKey, key));
   if (filter.owner) {
     const owner = filter.owner;
+    // Bounds the rows the semi-join examines. The unfiltered feed keeps
+    // the org's whole history.
+    conditions.push(gte(events.receivedAt, Date.now() - OWNER_FEED_WINDOW_MS));
     conditions.push(
       exists(
         db

@@ -659,15 +659,17 @@ describe("GET /api/events", () => {
 
   // The owner filter is what the page's "This workspace" state sends. It reads
   // ownership through the deliveries, because the events table has no owner
-  // column (small-fixes design, decision 2).
+  // column (small-fixes design, decision 2). It also carries a 30-day lower
+  // bound on `received_at`, so these rows are seeded relative to now.
   it("with an owner, returns only events delivered to that owner's subscriptions", async () => {
     const a = await boot();
     await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
     await seedSubscriptionRow(a, "sub_colleague", "local-org", { ownerId: "someone" });
 
-    await seedEventRow(a, { id: "ev_mine", receivedAt: 3_000 });
-    await seedEventRow(a, { id: "ev_theirs", receivedAt: 2_000 });
-    await seedEventRow(a, { id: "ev_undelivered", receivedAt: 1_000 });
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_mine", receivedAt: now - 3_000 });
+    await seedEventRow(a, { id: "ev_theirs", receivedAt: now - 4_000 });
+    await seedEventRow(a, { id: "ev_undelivered", receivedAt: now - 5_000 });
 
     await a.providers.db.insert(eventDeliveries).values([
       {
@@ -704,8 +706,9 @@ describe("GET /api/events", () => {
   it("combines the owner filter with the service and key filters", async () => {
     const a = await boot();
     await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
-    await seedEventRow(a, { id: "ev_pr", eventKey: "github.pull_request.opened", receivedAt: 2_000 });
-    await seedEventRow(a, { id: "ev_push", eventKey: "github.push", receivedAt: 1_000 });
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_pr", eventKey: "github.pull_request.opened", receivedAt: now - 2_000 });
+    await seedEventRow(a, { id: "ev_push", eventKey: "github.push", receivedAt: now - 3_000 });
     await a.providers.db.insert(eventDeliveries).values([
       {
         id: "del_pr",
@@ -732,6 +735,38 @@ describe("GET /api/events", () => {
     );
     const body = (await res.json()) as ListEventsResponse;
     expect(body.events.map((e) => e.id)).toEqual(["ev_push"]);
+  });
+
+  // Without a lower bound the `EXISTS` walks the org's whole event history
+  // to fill a page it can never fill, because no index can pre-select the
+  // rows it rejects. The window is the bound; "All" keeps the full history.
+  it("with an owner, looks back 30 days only, while All keeps the history", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
+
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    await seedEventRow(a, { id: "ev_recent", receivedAt: now - day });
+    await seedEventRow(a, { id: "ev_old", receivedAt: now - 31 * day });
+    await a.providers.db.insert(eventDeliveries).values(
+      ["ev_recent", "ev_old"].map((eventId) => ({
+        id: `del_${eventId}`,
+        eventId,
+        subscriptionId: "sub_mine",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: now,
+      })),
+    );
+
+    const scoped = (await (
+      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
+    ).json()) as ListEventsResponse;
+    expect(scoped.events.map((e) => e.id)).toEqual(["ev_recent"]);
+
+    const all = (await (await fetch(`${a.baseUrl}/api/events`)).json()) as ListEventsResponse;
+    expect(all.events.map((e) => e.id)).toEqual(["ev_recent", "ev_old"]);
   });
 
   it("400s a half-specified owner pair, naming both parameters", async () => {

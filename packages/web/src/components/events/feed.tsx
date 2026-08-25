@@ -18,6 +18,12 @@ const ALL = "";
  * at exactly this count may be hiding older events. */
 const FEED_PAGE_SIZE = 50;
 
+/** How far back the workspace-scoped feed reaches. The route bounds the
+ * owner-filtered query so it cannot walk the org's whole event history —
+ * see `OWNER_FEED_WINDOW_MS` in `packages/api/src/routes/events.ts`, which
+ * this number must match. "All" has no window. */
+const WORKSPACE_WINDOW_DAYS = 30;
+
 /** Which events the feed asks for: those delivered to the active
  * workspace's subscriptions, or every event the org ingested. The route
  * owns the value, in `?scope=` — see `routes/events.index.tsx`. */
@@ -138,7 +144,7 @@ export function EventFeed({
       {eventsQ.data && eventsQ.data.events.length === 0 && (
         <EmptyRow>
           {scope === "workspace"
-            ? "No events reached this workspace's subscriptions yet. Select All to see every event the organization received."
+            ? `No events reached this workspace's subscriptions in the last ${WORKSPACE_WINDOW_DAYS} days. Select All to see every event the organization received.`
             : "No events yet. Events appear here when a connected integration sends a webhook — connect one on the Integrations page."}
         </EmptyRow>
       )}
@@ -154,6 +160,15 @@ export function EventFeed({
             />
           ))}
         </div>
+      )}
+
+      {/* The window is a property of the scoped query, not of the page
+          size, so it is stated whenever a scoped list has rows. */}
+      {eventsQ.data && scope === "workspace" && eventsQ.data.events.length > 0 && (
+        <p className="pt-1 text-xs text-muted">
+          This workspace's feed covers the last {WORKSPACE_WINDOW_DAYS} days. Select All for
+          every event the organization received.
+        </p>
       )}
 
       {eventsQ.data && eventsQ.data.events.length >= FEED_PAGE_SIZE && (

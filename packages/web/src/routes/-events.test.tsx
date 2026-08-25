@@ -285,6 +285,17 @@ describe("EventsPage — Activity", () => {
     expect(screen.getByText(LONG_ERROR)).toBeTruthy();
   });
 
+  it("says how far back the workspace-scoped feed reaches", () => {
+    render(<EventsPage />);
+    expect(screen.getByText(/covers the last 30 days/)).toBeTruthy();
+  });
+
+  it("drops that note on All, which has no window", () => {
+    searchState = { scope: "all" };
+    render(<EventsPage />);
+    expect(screen.queryByText(/covers the last 30 days/)).toBeNull();
+  });
+
   // The diagnosis this page exists for is a round trip: select All to find
   // an event that matched nothing, open Subscriptions to read the rule,
   // come back. The tabs unmount each other, so a local-state scope would
