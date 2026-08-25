@@ -2098,26 +2098,35 @@ export class Thread {
       const validated: MessageEntry["attachments"] = [];
       for (const att of item.content.attachments) {
         if (typeof att !== "object" || att === null) continue;
-        if (
-          att.type === "file" &&
-          typeof att.path === "string" &&
-          typeof att.bytes === "number" &&
-          typeof att.sha256 === "string" &&
-          typeof att.name === "string"
-        ) {
+        if (att.type === "file") {
           // Sandbox file (upload subsystem): persist path/size/hash so the
-          // REST projection and the transcript note survive reload.
-          validated.push({
-            type: "file" as const,
-            path: att.path,
-            bytes: att.bytes,
-            sha256: att.sha256,
-            mimeType: att.mimeType,
-            markdownPath: att.markdownPath,
-            extractedTo: att.extractedTo,
-            extractedFiles: att.extractedFiles,
-            name: att.name,
-          });
+          // REST projection and the transcript note survive reload. A
+          // malformed file attachment is DROPPED with a warning — it must
+          // never fall through to the image branch, where it would persist
+          // as a phantom image with no url/data and silently vanish from
+          // the projection and the transcript note on reload.
+          if (
+            typeof att.path === "string" &&
+            typeof att.bytes === "number" &&
+            typeof att.sha256 === "string" &&
+            typeof att.name === "string"
+          ) {
+            validated.push({
+              type: "file" as const,
+              path: att.path,
+              bytes: att.bytes,
+              sha256: att.sha256,
+              mimeType: att.mimeType,
+              markdownPath: att.markdownPath,
+              extractedTo: att.extractedTo,
+              extractedFiles: att.extractedFiles,
+              name: att.name,
+            });
+          } else {
+            console.warn(
+              `thread ${this.id}: dropping malformed file attachment (name=${String(att.name)})`,
+            );
+          }
         } else if (typeof att.mimeType === "string") {
           // Data/url-carrying media (images; channel audio/file bytes keep
           // their long-standing image-shaped persistence).

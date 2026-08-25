@@ -18,6 +18,7 @@ import {
   VirtualSandboxProvider,
   entriesToAgentMessages,
   type MessageEntry,
+  type PromptContent,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -91,6 +92,42 @@ describe("File attachments", () => {
     expect(flat).toContain("[User attached files to the sandbox:");
     expect(flat).toContain("/workspace/uploads/report.pdf");
     expect(flat).toContain("Summarize the report.");
+  });
+
+  it("drops a malformed file attachment instead of persisting a phantom image", async () => {
+    faux.setResponses([() => fauxAssistantMessage("ok")]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = await session.ensureDefaultThread();
+
+    // Simulate wire drift: `bytes` arrives as a string. The JSON round trip
+    // erases the compile-time shape exactly like a real wire payload would.
+    const drifted: PromptContent = JSON.parse(
+      JSON.stringify({
+        text: "Summarize the report.",
+        attachments: [{ ...FILE_ATTACHMENT, bytes: "843776" }],
+      }),
+    );
+
+    const receipt = await thread.submitPrompt(drifted, {});
+    await thread.awaitResult(receipt.queueItemId);
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const userEntry = entries.find(
+      (e): e is MessageEntry => e.type === "message" && e.role === "user",
+    );
+    expect(userEntry).toBeDefined();
+    // Dropped, not coerced: the historical failure persisted this as
+    // `type:"image"` with no url/data, which the REST projection then
+    // silently discarded on reload.
+    expect(userEntry?.attachments).toBeUndefined();
   });
 
   it("renders the same note on reload via entriesToAgentMessages", () => {
