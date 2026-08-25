@@ -4,11 +4,12 @@
  * are tested directly.
  *
  * One parser reads every source the product offers — a pasted or uploaded
- * file, a file read out of a public repository through
- * `GET /api/workflows/import/repo-file`, and a file the repository sync
- * mirrors. That parser is `parseWorkflowFileValue` in `@valet/workflow`, so
- * the browser and the server cannot drift into accepting different shapes.
- * This module supplies the decoder and nothing else.
+ * file, and a file read out of a public repository through
+ * `GET /api/workflows/import/repo-file`. The repository sync reads through the
+ * same parser once the 2026-08-24 workflows MVP design adds it (task 5). That
+ * parser is `parseWorkflowFileValue` in `@valet/workflow`, so the browser and
+ * the server cannot drift into accepting different shapes. This module
+ * supplies the decoder and nothing else.
  *
  * ## The decoder
  *

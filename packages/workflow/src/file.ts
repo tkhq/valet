@@ -2,11 +2,13 @@
  * The workflow file envelope — one shape for a workflow kept in a file,
  * and one parser that every source reads it through.
  *
- * Three places turn a file into a workflow: the repository sync mirrors
- * `.valet/workflows/**`, the import dialog takes a pasted or uploaded file,
- * and the export route writes one back out. A second parser anywhere in that
- * set would drift into accepting a shape the others refuse, and the author
- * would learn about it from whichever door they happened to use.
+ * The import dialog turns a file into a workflow: a pasted or uploaded file,
+ * and a repository file the api hands back as text. The repository sync and
+ * the export route are the two doors the 2026-08-24 workflows MVP design adds
+ * on this same parser (`docs/specs/2026-08-24-workflows-mvp-design.md`, tasks
+ * 5 and 9). A second parser anywhere in that set would drift into accepting a
+ * shape the others refuse, and the author would learn about it from whichever
+ * door they happened to use.
  *
  * ## Text stays out of this file
  *

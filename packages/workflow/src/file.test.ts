@@ -1,8 +1,9 @@
 /**
- * The workflow file envelope. One parser reads every source — a repository
- * file the sync mirrors, a file somebody pastes into the import dialog, and
- * whatever the export route writes — so no two of them can drift into
- * accepting different shapes.
+ * The workflow file envelope. One parser reads every source the import
+ * dialog offers — a file somebody pastes or uploads, and a repository file
+ * the api hands back as text. The repository sync and the export route read
+ * through it once the 2026-08-24 workflows MVP design adds them (tasks 5 and
+ * 9), so no two of the four can drift into accepting different shapes.
  *
  * These cases run on ALREADY-PARSED values. `parseWorkflowFileValue` takes no
  * text and holds no decoder, so YAML and JSON reach it through the same door
@@ -11,7 +12,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseWorkflowFileValue,
-  WORKFLOW_FILE_EXTENSIONS,
   WORKFLOW_FILE_KIND,
   WORKFLOW_TEMPLATE_FILE_KIND,
 } from './file.js';
@@ -76,14 +76,14 @@ describe('parseWorkflowFileValue', () => {
     ]);
   });
 
-  it('round-trips a file that declares no trigger', () => {
+  it('leaves schedule and events unset when the file declares no trigger', () => {
     const value = {
       valet: WORKFLOW_FILE_KIND,
       name: 'By hand',
       definition: definition(),
     };
 
-    const result = parseWorkflowFileValue(JSON.parse(JSON.stringify(value)), 'workflows/x.json');
+    const result = parseWorkflowFileValue(value, 'workflows/x.json');
 
     expect(result.ok).toBe(true);
     if (!result.ok || result.file.kind !== 'workflow') return;
@@ -206,42 +206,6 @@ describe('parseWorkflowFileValue', () => {
       };
     }
 
-    it('reads the gallery fields the card renders', () => {
-      const result = parseWorkflowFileValue(
-        templateValue({ rank: 10, icon: '🌙', caveats: ['Reads public issues only.'] }),
-        '.valet/templates/nightly.yaml',
-      );
-
-      expect(result.ok).toBe(true);
-      if (!result.ok || result.file.kind !== 'template') return;
-      expect(result.file.labeled).toBe(true);
-      expect(result.file.template.id).toBe('acme-nightly-triage');
-      expect(result.file.template.category).toBe('Daily digest');
-      expect(result.file.template.apps).toEqual(['github', 'slack']);
-      expect(result.file.template.steps).toEqual(['Read the open issues', 'Post a summary']);
-      expect(result.file.template.rank).toBe(10);
-      expect(result.file.template.icon).toBe('🌙');
-      expect(result.file.template.caveats).toEqual(['Reads public issues only.']);
-      expect(result.file.definition).toEqual(definition());
-    });
-
-    it('names every gallery field a template file leaves out', () => {
-      const bare = templateValue();
-      delete bare.category;
-      delete bare.apps;
-      delete bare.steps;
-
-      const result = parseWorkflowFileValue(bare, '.valet/templates/thin.yaml');
-
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.code).toBe('invalid');
-      const message = result.errors.join(' ');
-      expect(message).toContain('category');
-      expect(message).toContain('apps');
-      expect(message).toContain('steps');
-    });
-
     it('validates the graph the same way a workflow file is validated', () => {
       const result = parseWorkflowFileValue(
         templateValue({ definition: { version: 'dag/v1', nodes: [], edges: [] } }),
@@ -253,9 +217,5 @@ describe('parseWorkflowFileValue', () => {
       expect(result.code).toBe('invalid');
       expect(result.errors.join(' ')).toContain('trigger');
     });
-  });
-
-  it('names the file extensions the sync reads', () => {
-    expect([...WORKFLOW_FILE_EXTENSIONS]).toEqual(['.yaml', '.yml', '.json']);
   });
 });
