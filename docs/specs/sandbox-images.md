@@ -380,7 +380,7 @@ New image deploys only affect **new** sandboxes. Existing running or hibernated 
 
 ### Fully Implemented
 - Single base image via Modal Python SDK with 16 build layers
-- Full dev environment: Node 22, Bun, OpenCode 1.1.52, code-server, VNC, TTYD, Chromium, whisper.cpp
+- Full dev environment: Node 22, Bun, OpenCode 1.18.18, code-server, VNC, TTYD, Chromium, whisper.cpp
 - 63 custom OpenCode tools + 3 skills baked into image
 - Runner from local source with dependency install
 - Environment variable assembly from org keys, user credentials, GitHub OAuth, custom providers
