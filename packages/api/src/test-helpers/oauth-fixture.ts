@@ -12,6 +12,8 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 export interface FakeOAuthServer {
   url: string; // http://127.0.0.1:{port}
   registrations: Array<{ redirect_uris: string[]; scope?: string }>;
+  /** Number of hits on the discovery well-known endpoint. */
+  discoveryRequests: { count: number };
   tokenRequests: Array<Record<string, string>>;
   /** Next token response body (default below). */
   tokenResponse: Record<string, unknown>;
@@ -41,15 +43,17 @@ export function startFakeOAuthServer(opts?: {
 
   const app = new Hono();
   let url = "";
+  const discoveryRequests = { count: 0 };
 
-  app.get("/.well-known/oauth-authorization-server", (c) =>
-    c.json({
+  app.get("/.well-known/oauth-authorization-server", (c) => {
+    discoveryRequests.count++;
+    return c.json({
       authorization_endpoint: `${url}/authorize`,
       token_endpoint: `${url}/token`,
       ...(opts?.omitRegistration ? {} : { registration_endpoint: `${url}/register` }),
       ...(opts?.scopesSupported ? { scopes_supported: opts.scopesSupported } : {}),
-    }),
-  );
+    });
+  });
 
   app.post("/register", async (c) => {
     const body = (await c.req.json()) as { redirect_uris: string[]; scope?: string };
@@ -78,6 +82,7 @@ export function startFakeOAuthServer(opts?: {
   return {
     url,
     registrations,
+    discoveryRequests,
     tokenRequests,
     get tokenResponse() {
       return state.tokenResponse;

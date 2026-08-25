@@ -14,6 +14,8 @@ import {
   exchangeAuthorizationCodeRaw,
 } from "./integration-oauth.js";
 import type { ValetPlugin } from "@valet/engine";
+import { eq } from "drizzle-orm";
+import { mcpOauthClients } from "../schema/index.js";
 
 let fake: FakeOAuthServer;
 let testDb: TestPgDb;
@@ -96,6 +98,70 @@ describe("ensureMcpOAuthClient", () => {
     } finally {
       warn.mockRestore();
       await scoped.close();
+    }
+  });
+
+  it("keeps warning on later scopeless connects from the stored scopes_supported, without re-discovery", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const discoveriesAfterRegistration = scoped.discoveryRequests.count;
+      warn.mockClear();
+
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("metabase") && m.includes("scopes"))).toBe(true);
+      expect(scoped.discoveryRequests.count).toBe(discoveriesAfterRegistration);
+      expect(scoped.registrations).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
+  it("backfills scopes_supported on a pre-column row, then warns from the stored value", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      // Simulate a row written before the scopes_supported column existed.
+      await testDb.appDb
+        .update(mcpOauthClients)
+        .set({ scopesSupported: null })
+        .where(eq(mcpOauthClients.service, "metabase"));
+      warn.mockClear();
+
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("metabase") && m.includes("scopes"))).toBe(true);
+      // The backfill re-discovered once and stored the result; no re-registration.
+      expect(scoped.registrations).toHaveLength(1);
+      const rows = await testDb.appDb
+        .select()
+        .from(mcpOauthClients)
+        .where(eq(mcpOauthClients.service, "metabase"));
+      expect(rows[0]?.scopesSupported).toEqual(["agent:query"]);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
+  it("a failed scopes_supported backfill does not block the connect", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "linear", fake.url, "https://valet.example/cb");
+    await testDb.appDb
+      .update(mcpOauthClients)
+      .set({ scopesSupported: null })
+      .where(eq(mcpOauthClients.service, "linear"));
+    await fake.close(); // discovery now fails
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "linear", fake.url, "https://valet.example/cb");
+      expect(row.clientId).toBe("client-1");
+    } finally {
+      warn.mockRestore();
+      fake = await startFakeOAuthServer(); // afterEach closes it
     }
   });
 

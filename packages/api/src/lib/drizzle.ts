@@ -19,7 +19,7 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { drizzle as drizzleNodePg } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
-import { applyEngineMigrations, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
+import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
 import * as schema from "../schema/index.js";
 
@@ -242,46 +242,63 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "mcp_oauth_clients", column: "registered_scopes" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "registered_scopes" jsonb',
   },
+  {
+    // The server's advertised scopes_supported, captured at registration or
+    // lazily backfilled (integration-oauth.ts). Null on rows from before the
+    // column existed — exactly the rows the backfill fills in.
+    describe: "mcp_oauth_clients.scopes_supported column",
+    probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
+    sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
+  },
 ];
 
-/** The repairs this database still lacks, by catalog probe. Exported for the
- * schema tests: steady state must return [] — that is the no-locks contract. */
+/** The repairs this database still lacks, by catalog probe — one query per
+ * probe kind (3 round-trips), not one per repair. Exported for the schema
+ * tests: steady state must return [] — that is the no-locks contract.
+ * The probe lists ride as JSON strings so both drivers (node-postgres,
+ * PGlite) bind them identically. */
 export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
-  const missing: SchemaRepair[] = [];
-  for (const repair of SCHEMA_REPAIRS) {
-    const p = repair.probe;
-    const probeSql =
-      p.kind === "column"
-        ? {
-            text: "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2",
-            params: [p.table, p.column],
-          }
-        : p.kind === "table"
-          ? {
-              text: "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1",
-              params: [p.table],
-            }
-          : {
-              text: "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
-              params: [p.index],
-            };
-    const result = await db.query(probeSql.text, probeSql.params);
-    if (result.rows.length === 0) missing.push(repair);
+  const columnTables = new Set<string>();
+  const tableNames: string[] = [];
+  const indexNames: string[] = [];
+  for (const { probe } of SCHEMA_REPAIRS) {
+    if (probe.kind === "column") columnTables.add(probe.table);
+    else if (probe.kind === "table") tableNames.push(probe.table);
+    else indexNames.push(probe.index);
   }
-  return missing;
-}
 
-/** True when `err` (or its `cause`) is postgres `lock_not_available` (55P03) —
- * the lock_timeout below expired while a repair waited for a table lock. */
-export function isLockTimeoutError(err: unknown): boolean {
-  let current: unknown = err;
-  for (let depth = 0; current !== null && current !== undefined && depth < 5; depth++) {
-    if (typeof current === "object" && "code" in current && (current as { code?: unknown }).code === "55P03") {
-      return true;
-    }
-    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
-  }
-  return false;
+  const present = new Set<string>();
+  const collect = async (sql: string, names: string[], toKey: (row: Record<string, unknown>) => string) => {
+    if (names.length === 0) return;
+    const result = await db.query(sql, [JSON.stringify(names)]);
+    for (const row of result.rows) present.add(toKey(row));
+  };
+  await collect(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND table_name IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    [...columnTables],
+    (row) => `column:${String(row["table_name"])}.${String(row["column_name"])}`,
+  );
+  await collect(
+    `SELECT table_name FROM information_schema.tables
+     WHERE table_schema = current_schema()
+       AND table_name IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    tableNames,
+    (row) => `table:${String(row["table_name"])}`,
+  );
+  await collect(
+    `SELECT indexname FROM pg_indexes
+     WHERE schemaname = current_schema()
+       AND indexname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    indexNames,
+    (row) => `index:${String(row["indexname"])}`,
+  );
+
+  return SCHEMA_REPAIRS.filter(({ probe: p }) => {
+    const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
+    return !present.has(key);
+  });
 }
 
 const REPAIR_LOCK_TIMEOUT = "5s";
@@ -314,7 +331,7 @@ async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
       console.log(`schema repair: added ${repair.describe}`);
       return;
     } catch (err) {
-      if (!isLockTimeoutError(err)) throw err;
+      if (!isPgLockTimeout(err)) throw err;
       if (attempt < REPAIR_ATTEMPTS) {
         console.warn(
           `schema repair: ${repair.describe} waited ${REPAIR_LOCK_TIMEOUT} for a table lock (attempt ${attempt}/${REPAIR_ATTEMPTS}); retrying`,

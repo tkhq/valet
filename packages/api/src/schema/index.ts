@@ -1121,6 +1121,10 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
   // rows registered before scopes support; a declared-scope change
   // re-registers and replaces the row (integration-oauth.ts).
   registeredScopes: jsonb("registered_scopes").$type<string[]>(),
+  // What discovery advertised as scopes_supported, captured at registration
+  // (or lazily backfilled). Drives the scopeless-entry warning on every
+  // connect. [] = the server advertises none; null = not yet captured.
+  scopesSupported: jsonb("scopes_supported").$type<string[]>(),
   metadata: jsonb("metadata"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

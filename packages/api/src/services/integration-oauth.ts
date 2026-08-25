@@ -55,6 +55,20 @@ function sameScopes(stored: string[] | null | undefined, declared: string[]): bo
 }
 
 /**
+ * The TKAI-242 failure shape: a scope-gated server + a scope-less authorize
+ * request = a token with no scopes and zero tools, with no error anywhere.
+ * Fires on every connect for a scopeless entry, so the misconfiguration
+ * stays visible, not just on first registration.
+ */
+function warnScopelessEntry(service: string, scopesSupported: string[]): void {
+  console.warn(
+    `MCP OAuth: "${service}" declares no scopes but its server advertises scopes_supported ` +
+      `(${scopesSupported.join(", ")}). A scope-gated server grants a token with no ` +
+      `scopes and lists zero tools. Add the scopes this instance needs to the mcpServers "${service}" entry.`,
+  );
+}
+
+/**
  * The stored dynamic client for `service`, registering one when none exists
  * or when the DECLARED scope set differs from the registered one. The scope
  * set rides the RFC 7591 registration, not only the authorize request —
@@ -74,21 +88,38 @@ export async function ensureMcpOAuthClient(
 ): Promise<McpClientRow> {
   const declared = normalizeScopes(scopes);
   const existing = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
-  if (existing[0] && sameScopes(existing[0].registeredScopes, declared)) return toRow(existing[0]);
+  if (existing[0] && sameScopes(existing[0].registeredScopes, declared)) {
+    if (declared.length === 0) {
+      let advertised = existing[0].scopesSupported;
+      if (advertised === null) {
+        // Row from before the scopes_supported column: backfill it with one
+        // discovery, fail-soft — a dead discovery endpoint must not block a
+        // connect that only needs the stored client.
+        try {
+          const meta = await discoverAuthServer(serverUrl);
+          advertised = meta.scopes_supported ?? [];
+          await deps.db
+            .update(mcpOauthClients)
+            .set({ scopesSupported: advertised, updatedAt: Date.now() })
+            .where(eq(mcpOauthClients.service, service));
+        } catch (err) {
+          console.warn(
+            `MCP OAuth: ${service} scopes_supported backfill failed (connect continues):`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+      if (advertised && advertised.length > 0) warnScopelessEntry(service, advertised);
+    }
+    return toRow(existing[0]);
+  }
 
   const meta = await discoverAuthServer(serverUrl);
   if (!meta.registration_endpoint) {
     throw new Error(`MCP OAuth: ${service} discovery reported no registration_endpoint`);
   }
   if (declared.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
-    // The TKAI-242 failure shape: a scope-gated server + a scope-less
-    // authorize request = a token with no scopes and zero tools, with no
-    // error anywhere. Name the fix while the metadata is in hand.
-    console.warn(
-      `MCP OAuth: "${service}" declares no scopes but its server advertises scopes_supported ` +
-        `(${(meta.scopes_supported ?? []).join(", ")}). A scope-gated server grants a token with no ` +
-        `scopes and lists zero tools. Add the scopes this instance needs to the mcpServers "${service}" entry.`,
-    );
+    warnScopelessEntry(service, meta.scopes_supported ?? []);
   }
   const client = await registerClient(meta.registration_endpoint, {
     clientName: "Valet",
@@ -102,6 +133,7 @@ export async function ensureMcpOAuthClient(
     tokenEndpoint: meta.token_endpoint,
     registrationEndpoint: meta.registration_endpoint,
     registeredScopes: declared,
+    scopesSupported: meta.scopes_supported ?? [],
     updatedAt: now,
   };
   if (existing[0]) {

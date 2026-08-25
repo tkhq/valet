@@ -151,16 +151,27 @@ function hasCause(value: unknown): value is { cause: unknown } {
   return typeof value === "object" && value !== null && "cause" in value;
 }
 
+/** True iff `err` (or its `.cause` chain) carries the given Postgres error
+ * code. The one cause-walker for pg-code checks — add named wrappers below
+ * rather than a new walker. */
+export function isPgErrorCode(err: unknown, code: string): boolean {
+  if (hasCode(err) && err.code === code) return true;
+  if (hasCause(err)) return isPgErrorCode(err.cause, code);
+  return false;
+}
+
 /** True iff `err` (or its `.cause`) carries Postgres's unique_violation code. */
 export function isPgUniqueViolation(err: unknown): boolean {
-  if (hasCode(err) && err.code === "23505") return true;
-  if (hasCause(err)) return isPgUniqueViolation(err.cause);
-  return false;
+  return isPgErrorCode(err, "23505");
 }
 
 /** True iff `err` (or its `.cause`) carries Postgres's deadlock_detected code. */
 export function isPgDeadlock(err: unknown): boolean {
-  if (hasCode(err) && err.code === "40P01") return true;
-  if (hasCause(err)) return isPgDeadlock(err.cause);
-  return false;
+  return isPgErrorCode(err, "40P01");
+}
+
+/** True iff `err` (or its `.cause`) carries Postgres's lock_not_available
+ * code — a `lock_timeout` expired while waiting for a table lock. */
+export function isPgLockTimeout(err: unknown): boolean {
+  return isPgErrorCode(err, "55P03");
 }

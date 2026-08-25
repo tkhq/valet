@@ -15,12 +15,8 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
-import {
-  applyAppMigrations,
-  buildAppDb as buildAppPgDb,
-  isLockTimeoutError,
-  missingSchemaRepairs,
-} from "../lib/drizzle.js";
+import { applyAppMigrations, buildAppDb as buildAppPgDb, missingSchemaRepairs } from "../lib/drizzle.js";
+import { isPgLockTimeout } from "@valet/store-postgres";
 import {
   users,
   session,
@@ -572,6 +568,7 @@ describe("pg app schema + migrations", () => {
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
       { table: "mcp_oauth_clients", column: "registered_scopes" },
+      { table: "mcp_oauth_clients", column: "scopes_supported" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {
@@ -626,11 +623,13 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
-    it("isLockTimeoutError matches pg 55P03 directly and via cause", () => {
-      expect(isLockTimeoutError({ code: "55P03" })).toBe(true);
-      expect(isLockTimeoutError(new Error("outer", { cause: { code: "55P03" } }))).toBe(true);
-      expect(isLockTimeoutError({ code: "42703" })).toBe(false);
-      expect(isLockTimeoutError(new Error("plain"))).toBe(false);
+    // The repair path's lock_timeout handling rides this store-postgres
+    // helper — pin the contract where the dependency lives.
+    it("isPgLockTimeout matches pg 55P03 directly and via cause", () => {
+      expect(isPgLockTimeout({ code: "55P03" })).toBe(true);
+      expect(isPgLockTimeout(new Error("outer", { cause: { code: "55P03" } }))).toBe(true);
+      expect(isPgLockTimeout({ code: "42703" })).toBe(false);
+      expect(isPgLockTimeout(new Error("plain"))).toBe(false);
     });
   });
 
