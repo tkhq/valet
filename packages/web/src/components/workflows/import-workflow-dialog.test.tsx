@@ -27,6 +27,25 @@ vi.mock("~/api/workflows", () => ({
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false }),
 }));
 
+/**
+ * Set by the one case that needs the parser to REJECT rather than answer.
+ * `parseWorkflowImport` returns a result for every input it is given today,
+ * so nothing else can drive the dialog's catch, and the catch is what keeps
+ * the Review button from going dead if that ever changes.
+ */
+let parseRejection: Error | null = null;
+
+vi.mock("./import-workflow", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./import-workflow")>();
+  return {
+    ...actual,
+    parseWorkflowImport: async (text: string, fileName?: string) => {
+      if (parseRejection !== null) throw parseRejection;
+      return actual.parseWorkflowImport(text, fileName);
+    },
+  };
+});
+
 import { ImportWorkflowDialog } from "./import-workflow-dialog";
 
 const VALID = {
@@ -48,26 +67,37 @@ function renderDialog() {
   return onOpenChange;
 }
 
-/** Paste `json` and move to the review step. */
-function paste(json: string): void {
-  fireEvent.change(screen.getByLabelText("Workflow JSON"), { target: { value: json } });
+/**
+ * Paste `text` and move to the review step.
+ *
+ * Async because the parser is: a YAML file loads its decoder on demand, so
+ * `review` awaits even when `JSON.parse` answered on the first try. The wait
+ * ends on whichever the outcome is — the review step's Name field, or the
+ * refusal alert.
+ */
+async function paste(text: string): Promise<void> {
+  fireEvent.change(screen.getByLabelText("Workflow YAML or JSON"), { target: { value: text } });
   fireEvent.click(screen.getByRole("button", { name: "Review" }));
+  await waitFor(() =>
+    expect(screen.queryByLabelText("Name") ?? screen.queryByRole("alert")).not.toBeNull(),
+  );
 }
 
 beforeEach(() => {
   navigate.mockReset();
   createMutateAsync.mockReset();
   createMutateAsync.mockResolvedValue({ id: "wf_new" });
+  parseRejection = null;
   vi.restoreAllMocks();
 });
 
-describe("ImportWorkflowDialog — pasted JSON", () => {
-  it("previews what the definition contains before anything is created", () => {
+describe("ImportWorkflowDialog — a pasted file", () => {
+  it("previews what the definition contains before anything is created", async () => {
     renderDialog();
-    paste(JSON.stringify(VALID));
+    await paste(JSON.stringify(VALID));
 
     expect(screen.getByText("3")).toBeTruthy(); // node count
-    expect(screen.getByText(/pasted JSON/)).toBeTruthy();
+    expect(screen.getByText(/pasted file/)).toBeTruthy();
     expect(screen.getByText("tool × 1")).toBeTruthy();
     expect(screen.getByText("Slack")).toBeTruthy();
     expect(createMutateAsync).not.toHaveBeenCalled();
@@ -75,7 +105,7 @@ describe("ImportWorkflowDialog — pasted JSON", () => {
 
   it("creates the workflow under the active workspace, then opens it", async () => {
     const onOpenChange = renderDialog();
-    paste(JSON.stringify(VALID));
+    await paste(JSON.stringify(VALID));
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Nightly deploy" } });
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
@@ -91,17 +121,17 @@ describe("ImportWorkflowDialog — pasted JSON", () => {
     );
   });
 
-  it("takes the name out of a file that carries one", () => {
+  it("takes the name out of a file that carries one", async () => {
     renderDialog();
-    paste(JSON.stringify({ name: "Nightly deploy", definition: VALID }));
+    await paste(JSON.stringify({ name: "Nightly deploy", definition: VALID }));
 
     const field = screen.getByLabelText("Name");
     expect(field instanceof HTMLInputElement && field.value).toBe("Nightly deploy");
   });
 
-  it("refuses a broken definition with the validator's own messages, and creates nothing", () => {
+  it("refuses a broken definition with the validator's own messages, and creates nothing", async () => {
     renderDialog();
-    paste(
+    await paste(
       JSON.stringify({
         version: "dag/v1",
         nodes: [{ id: "trigger", type: "trigger" }],
@@ -115,9 +145,47 @@ describe("ImportWorkflowDialog — pasted JSON", () => {
     expect(createMutateAsync).not.toHaveBeenCalled();
   });
 
-  it("refuses text that is not a workflow definition", () => {
+  it("says what the file carries and the import does not create", async () => {
+    // The create route writes a name and a definition. A schedule dropped in
+    // silence imports as a workflow that never runs.
     renderDialog();
-    paste(JSON.stringify({ hello: "world" }));
+    await paste(
+      [
+        "valet: workflow/v1",
+        "name: Nightly triage",
+        "schedule:",
+        '  cron: "0 3 * * *"',
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "  edges: []",
+        "",
+      ].join("\n"),
+    );
+
+    expect(screen.getByText(/The file also carries a schedule/)).toBeTruthy();
+    expect(screen.getByText(/Arm a schedule or an event trigger in Triggers/)).toBeTruthy();
+  });
+
+  it("shows a message when the parser throws instead of answering", async () => {
+    parseRejection = new Error("Converting circular structure to JSON");
+    renderDialog();
+
+    await paste(JSON.stringify(VALID));
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Converting circular structure to JSON",
+    );
+    // The person is told what to do next, and the Review button still works.
+    expect(screen.getByRole("alert").textContent).toContain("try again");
+    expect(screen.queryByLabelText("Name")).toBeNull();
+  });
+
+  it("refuses text that is not a workflow definition", async () => {
+    renderDialog();
+    await paste(JSON.stringify({ hello: "world" }));
 
     expect(screen.getByRole("alert").textContent).toContain("nodes");
     expect(createMutateAsync).not.toHaveBeenCalled();
@@ -134,7 +202,7 @@ describe("ImportWorkflowDialog — pasted JSON", () => {
     );
 
     renderDialog();
-    paste(JSON.stringify(VALID));
+    await paste(JSON.stringify(VALID));
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
 
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(unknownService));
