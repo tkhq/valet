@@ -16,22 +16,27 @@ import type { EventSubscriptionWire } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
 
-const subscriptionsData: { subscriptions: EventSubscriptionWire[] } = {
-  subscriptions: [
-    {
-      id: "sub_1",
-      name: "PR alerts",
-      ownerType: "user",
-      ownerId: "u1",
-      eventKeys: ["github.pr.opened"],
-      filters: [],
-      target: { kind: "orchestrator" as const },
-      enabled: true,
-      createdBy: "u1",
-      createdAt: 1,
-      updatedAt: 1,
-    },
-  ],
+function subscription(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
+  return {
+    id: "sub_1",
+    name: "PR alerts",
+    ownerType: "user",
+    ownerId: "u1",
+    eventKeys: ["github.pr.opened"],
+    filters: [],
+    target: { kind: "orchestrator" as const },
+    enabled: true,
+    createdBy: "u1",
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  };
+}
+
+/** The rows the mocked list answers with; reassigned per case, reset in
+ * `beforeEach`. */
+let subscriptionsData: { subscriptions: EventSubscriptionWire[] } = {
+  subscriptions: [subscription()],
 };
 
 const catalogData = {
@@ -110,6 +115,7 @@ beforeEach(() => {
   subscriptionsOwner = undefined;
   feedOwner = undefined;
   feedCalls = 0;
+  subscriptionsData = { subscriptions: [subscription()] };
 });
 
 afterEach(() => {
@@ -135,6 +141,40 @@ describe("SubscriptionsPanel", () => {
       </TooltipProvider>,
     );
     expect(subscriptionsOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
+  });
+
+  // An org-owned subscription belongs to no single workspace. The route
+  // returns it beside every workspace's own rows, and the panel must render
+  // it as manageable in each — it is the only off-switch such a row has.
+  it("lists an org-owned subscription in the personal workspace", () => {
+    subscriptionsData = {
+      subscriptions: [subscription({ id: "sub_org", name: "Org watch", ownerType: "org", ownerId: "org_1" })],
+    };
+    render(
+      <TooltipProvider>
+        <SubscriptionsPanel />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText("Org watch")).toBeTruthy();
+    expect(screen.getByText("Org")).toBeTruthy();
+    const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(false);
+  });
+
+  it("lists an org-owned subscription in a team workspace too", () => {
+    scopeTeamId = "t_eng";
+    subscriptionsData = {
+      subscriptions: [subscription({ id: "sub_org", name: "Org watch", ownerType: "org", ownerId: "org_1" })],
+    };
+    render(
+      <TooltipProvider>
+        <SubscriptionsPanel />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText("Org watch")).toBeTruthy();
+    expect(screen.getByText("Org")).toBeTruthy();
+    const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(false);
   });
 });
 

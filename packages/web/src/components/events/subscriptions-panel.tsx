@@ -63,11 +63,13 @@ function describeTarget(
  * delete; create via `SubscriptionCreateDialog`. Rows show filters
  * read-only (filters are API-only for now).
  *
- * The list is the active workspace's: your own subscriptions in the
- * personal workspace, and one team's in a team workspace. It was org-wide
- * until 2026-08-24 (small-fixes design, decision 1), which is why the rows
- * still badge ownership — an unscoped list is what the API answers without
- * an owner, and the badges stay correct for both.
+ * The list is the active workspace's, plus every org-owned subscription:
+ * your own rows and the org's in the personal workspace, one team's and the
+ * org's in a team workspace. An org-owned row belongs to no single
+ * workspace, so the route returns it in all of them — otherwise the create
+ * dialog's "Notify the org assistant" option writes a row this page can
+ * never disable. Ownership therefore still varies row to row, which is what
+ * the badges say.
  */
 export function SubscriptionsPanel() {
   const owner = useListOwner();
@@ -166,11 +168,11 @@ function SubscriptionRow({
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
           {/* Ownership varies row to row here, so it is badged: "Org" for
-              org-owned, the team's name for a team's (`OwnerBadge`), and
-              "Personal" for a COLLEAGUE's — the list carries every
-              subscription in the org, so an unbadged row means yours only
-              because everyone else's personal rows say whose kind they
-              are. */}
+              an org-owned row, the team's name for a team's (`OwnerBadge`),
+              and "Personal" for a COLLEAGUE's. The scoped list returns no
+              colleague's row, so that last badge marks a row the server
+              should not have sent — it keeps such a row from reading as
+              yours. An unbadged row is yours. */}
           {sub.ownerType === "org" && (
             <Badge variant="accent" className="shrink-0">
               Org

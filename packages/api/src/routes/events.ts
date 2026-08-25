@@ -7,15 +7,16 @@
  * 403 (same "an owned row and a missing row are indistinguishable" rule as
  * `routes/workflows.ts`). Inside that org scope, the feed and the
  * subscriptions list both take an optional `?ownerType=&ownerId=` pair that
- * narrows to one workspace — see the two docstrings below for what each one
- * does with it. Subscription bodies are validated against the merged plugin
+ * narrows to one workspace — the feed to that workspace alone, the
+ * subscriptions list to that workspace plus the org's own rows. See the two
+ * docstrings below. Subscription bodies are validated against the merged plugin
  * trigger catalog before any row is written — the ingest matcher
  * (`events/ingest.ts`) trusts the `event_keys`/`filters` jsonb shapes this
  * file writes.
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, sql } from "drizzle-orm";
+import { and, desc, eq, exists, or, sql, type SQL } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -53,14 +54,20 @@ export const eventsRouter = new Hono<AppEnv>();
  * Visibility is a different rule, and it changed on 2026-08-24 (small-fixes
  * design, decision 1). The list scopes to the owner the caller names in
  * `?ownerType=&ownerId=`, which the web page fills from the nav's workspace
- * switcher: the personal workspace lists your own subscriptions and a team
- * workspace lists that team's. A caller who sends no owner still gets every
- * subscription in the org, which is what the list did for every caller
- * before that date. The org-wide default is safe to keep because the rows
- * were already org-visible; the filter answers "whose automations am I
- * looking at", not "what may I see". This gate stays mutation-only, so a
- * colleague's personal subscription is still un-toggleable when an
- * unscoped list shows it.
+ * switcher, PLUS every org-owned row. The personal workspace lists your own
+ * subscriptions and the org's; a team workspace lists that team's and the
+ * org's. Org-owned rows join every workspace because an org-owned
+ * subscription is org-wide by construction — this route creates one for a
+ * target of `orchestrator: "org"` — and a row that appears in no workspace
+ * could never be disabled or deleted from the page that created it. A
+ * colleague's personal row still does not join, which is the point of the
+ * filter. A caller who sends no owner gets every subscription in the org,
+ * which is what the list did for every caller before that date. The
+ * org-wide default is safe to keep because the rows were already
+ * org-visible; the filter answers "whose automations am I looking at", not
+ * "what may I see". This gate stays mutation-only, so a colleague's
+ * personal subscription is still un-toggleable when an unscoped list shows
+ * it.
  */
 async function canMutateSubscription(
   db: AppDb,
@@ -525,10 +532,20 @@ eventsRouter.get("/event-subscriptions", async (c) => {
   const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
   if (filter.error) return c.json({ error: filter.error }, 400);
 
-  const conditions = [eq(eventSubscriptions.orgId, user.orgId)];
+  const conditions: (SQL | undefined)[] = [eq(eventSubscriptions.orgId, user.orgId)];
   if (filter.owner) {
-    conditions.push(eq(eventSubscriptions.ownerType, filter.owner.type));
-    conditions.push(eq(eventSubscriptions.ownerId, filter.owner.id));
+    const owner = filter.owner;
+    conditions.push(
+      or(
+        and(
+          eq(eventSubscriptions.ownerType, owner.type),
+          eq(eventSubscriptions.ownerId, owner.id),
+        ),
+        // Org-owned rows join every workspace's list. The outer `orgId`
+        // predicate bounds them to the caller's own org.
+        eq(eventSubscriptions.ownerType, "org"),
+      ),
+    );
   }
 
   const rows = await db

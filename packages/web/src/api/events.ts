@@ -91,8 +91,9 @@ export function useRedeliverEvent(id: string) {
   });
 }
 
-/** `owner` scopes the list to one workspace: your own subscriptions, or one
- * team's. Undefined lists every subscription in the org. */
+/** `owner` scopes the list to one workspace — your own subscriptions, or one
+ * team's — plus every org-owned subscription, which belongs to no single
+ * workspace. Undefined lists every subscription in the org. */
 export function useEventSubscriptions(
   owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventSubscriptionsResponse>>,

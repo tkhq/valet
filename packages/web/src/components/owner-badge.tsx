@@ -21,8 +21,12 @@ export function OwnerBadge({
   ownerType,
   ownerId,
 }: {
-  /** The wire types allow `org`, which no route creates yet. It reads as
-   * personal here — one unowned-looking row beats a badge nothing links to. */
+  /** `org` is a real owner: `POST /api/event-subscriptions` writes one for
+   * a target of `orchestrator: "org"`, and the subscriptions panel lists
+   * those rows in every workspace. This badge still renders nothing for
+   * one, because it links to the OWNING TEAM's assistant and an org has no
+   * team to link to. A list that must label an org row labels it itself —
+   * the subscriptions panel does. */
   ownerType: "user" | "team" | "org";
   /** Team id when `ownerType` is `team`; the user id otherwise. */
   ownerId: string;
