@@ -3282,8 +3282,14 @@ export interface PostSessionFileUploadResponse {
   bytes: number;
   sha256: string;
   attachmentRef: string;
-  /** Extracted file paths. Present only when a zip was extracted. */
+  /** Extracted file paths. Present only when a zip extracted at least one file. */
   extracted?: string[];
+  /**
+   * Server-computed extract root (ends with "/"). Present exactly when
+   * `extracted` is. Clients print this verbatim — the naming rule lives on
+   * the server.
+   */
+  extractedTo?: string;
   /** PDF metadata. Present only when the upload is a PDF. */
   pdf?: PostSessionFileUploadPdfInfo;
 }

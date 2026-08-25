@@ -1,27 +1,34 @@
 /**
  * `POST /api/sessions/:id/files` — sandbox file upload route.
  *
- * Multipart form-data upload with a size cap (the body is buffered in
- * memory up to the cap, then written to the sandbox in one call),
- * magic-byte detection for archives and PDFs, and attachment ref minting.
- * Auth: session-owner only (404 for non-owner, never 403). Sandbox-token
- * requests 404 (not in SANDBOX_ALLOWED_PATH_PREFIXES).
+ * Multipart form-data upload with a size cap, magic-byte detection for
+ * archives and PDFs, and attachment ref minting. Auth: session-owner only
+ * (404 for non-owner, never 403). Sandbox-token requests 404 (not in
+ * SANDBOX_ALLOWED_PATH_PREFIXES).
  *
- * Fields per spec:
+ * Memory: a request with a Content-Length above the cap is rejected before
+ * the body is parsed. A body without a Content-Length (chunked) is buffered
+ * by the multipart parser before the cap re-check on the file — the cap
+ * bounds well-formed clients, not adversarial chunked bodies.
+ *
+ * Fields per spec (docs/specs/2026-08-24-sandbox-file-upload-design.md):
  * - file (required)
  * - dest (optional, default /workspace/uploads/<name>)
  * - extract (optional, auto|true|false, default auto)
  * - overwrite (optional, boolean, default false)
  *
  * Response 200 includes exact wire shape from spec: path, bytes, sha256,
- * attachmentRef, plus optional extracted[] for zips and pdf{} for PDFs.
+ * attachmentRef, plus optional extracted[]/extractedTo for zips and pdf{}
+ * for PDFs.
  *
- * Error responses per spec: 400, 404, 409 (two variants), 413, 415, 422.
+ * Error responses per spec: 400, 404, 409 (three variants), 413, 415, 422.
  */
 
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { basename, dirname } from "node:path";
+import { dirname } from "node:path";
+import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
+import type { Sandbox } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { resolveUploadDest } from "../services/path-validation.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
@@ -36,25 +43,69 @@ import type {
 
 export const fileUploadRouter = new Hono<AppEnv>();
 
-const MAX_UPLOAD_BYTES = parseInt(process.env.VALET_MAX_UPLOAD_BYTES ?? "52428800", 10); // 50 MB default
+const MAX_UPLOAD_BYTES = parseInt(
+  process.env.VALET_MAX_UPLOAD_BYTES ?? String(DEFAULT_MAX_UPLOAD_BYTES),
+  10,
+);
+
+// Slack for multipart framing (boundaries, part headers, small text fields)
+// on top of the file cap when pre-checking Content-Length.
+const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 
 /**
- * Magic-byte detection for PDF and ZIP.
+ * Magic-byte detection for PDF (%PDF-) and ZIP (PK\x03\x04).
  */
-function detectFileType(
-  firstBytes: Uint8Array,
-): { type: "pdf" | "zip" | "other"; magicBytes: Uint8Array } {
-  // PDF: %PDF-
+function detectFileType(firstBytes: Uint8Array): "pdf" | "zip" | "other" {
   if (firstBytes.length >= 5 && firstBytes[0] === 0x25 && firstBytes[1] === 0x50 && firstBytes[2] === 0x44 && firstBytes[3] === 0x46 && firstBytes[4] === 0x2d) {
-    return { type: "pdf", magicBytes: firstBytes };
+    return "pdf";
   }
-
-  // ZIP: PK\x03\x04
   if (firstBytes.length >= 4 && firstBytes[0] === 0x50 && firstBytes[1] === 0x4b && firstBytes[2] === 0x03 && firstBytes[3] === 0x04) {
-    return { type: "zip", magicBytes: firstBytes };
+    return "zip";
   }
+  return "other";
+}
 
-  return { type: "other", magicBytes: firstBytes };
+/**
+ * Extract root for an uploaded zip. Strips a case-insensitive ".zip" suffix;
+ * when the name has no such suffix (type detection is magic-byte based, so
+ * any name can hold zip content) the root is "<path>.extracted/" — the root
+ * must never collide with the archive file itself. The CLI prints the
+ * server-computed value from the response; this rule lives only here.
+ */
+export function zipExtractRoot(uploadPath: string): string {
+  const stripped = uploadPath.replace(/\.zip$/i, "");
+  return `${stripped !== uploadPath ? stripped : `${uploadPath}.extracted`}/`;
+}
+
+/**
+ * True for errors that mean "path does not exist" on some provider:
+ * node:fs ENOENT (docker/local) or the kubernetes stat probe's exit 2
+ * (PodFileOpError). Anything else — transport failure, exec timeout — is
+ * NOT a not-found and must not bypass the overwrite guard.
+ */
+function isNotFoundError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: unknown; name?: unknown; exitCode?: unknown; message?: unknown };
+  return (
+    e.code === "ENOENT" ||
+    (e.name === "PodFileOpError" && e.exitCode === 2) ||
+    // Providers that proxy a remote fs (gateway, virtual) may carry only
+    // the message text.
+    (typeof e.message === "string" && e.message.startsWith("ENOENT"))
+  );
+}
+
+/** stat() that returns null for a missing path and rethrows everything else. */
+async function statIfExists(
+  sandbox: Sandbox,
+  path: string,
+): Promise<{ isFile: boolean; isDirectory: boolean; size: number } | null> {
+  try {
+    return await sandbox.stat(path);
+  } catch (err) {
+    if (isNotFoundError(err)) return null;
+    throw err;
+  }
 }
 
 fileUploadRouter.post("/:id/files", async (c) => {
@@ -62,6 +113,18 @@ fileUploadRouter.post("/:id/files", async (c) => {
   if (!row) return c.json({ error: "session not found" }, 404);
 
   const { engineHost, db } = c.var.providers;
+
+  // Reject oversized requests before the multipart parser buffers the body.
+  const contentLength = Number(c.req.header("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES) {
+    return c.json(
+      {
+        error: `File exceeds ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload cap`,
+        corrective: "Reduce the file, or raise VALET_MAX_UPLOAD_BYTES on the server.",
+      },
+      413,
+    );
+  }
 
   // Parse multipart form
   let formData: FormData;
@@ -85,9 +148,12 @@ fileUploadRouter.post("/:id/files", async (c) => {
     return c.json({ error: "File must have a name", corrective: "The file field must include a filename." }, 400);
   }
 
-  // Extract optional fields
-  const dest = (formData.get("dest") as string) || undefined;
-  const extractStr = ((formData.get("extract") as string) || "auto").toLowerCase();
+  // Extract optional fields. formData.get returns string | File | null —
+  // narrow instead of casting; a File in a text field reads as absent.
+  const destField = formData.get("dest");
+  const dest = typeof destField === "string" && destField.length > 0 ? destField : undefined;
+  const extractField = formData.get("extract");
+  const extractStr = (typeof extractField === "string" && extractField.length > 0 ? extractField : "auto").toLowerCase();
   const overwrite = formData.get("overwrite") === "true" || formData.get("overwrite") === "1";
 
   // Validate extract value
@@ -109,10 +175,50 @@ fileUploadRouter.post("/:id/files", async (c) => {
 
   const uploadPath = pathResult.path;
 
+  // Size cap. The multipart parser already buffered the body, so this bounds
+  // what proceeds to the sandbox, not parser memory (see the header comment).
+  if (fileField.size > MAX_UPLOAD_BYTES) {
+    return c.json(
+      {
+        error: `File exceeds ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload cap`,
+        corrective: "Reduce the file, or raise VALET_MAX_UPLOAD_BYTES on the server.",
+      },
+      413,
+    );
+  }
+
+  // Read the (already buffered) bytes once; hash and type-detect from the
+  // same buffer. Nothing is written to the sandbox until every pre-write
+  // check passed — an error here must NOT touch `uploadPath` (with
+  // overwrite=true a pre-existing file lives there).
+  let totalBytes: Uint8Array;
+  try {
+    totalBytes = new Uint8Array(await fileField.arrayBuffer());
+  } catch {
+    return c.json(
+      { error: "Upload stream error", corrective: "Try uploading again." },
+      400,
+    );
+  }
+
+  const fileBytes = totalBytes.length;
+  const sha256Hex = createHash("sha256").update(totalBytes).digest("hex");
+  const detectedType = detectFileType(totalBytes.subarray(0, 5));
+
+  // extract=true on a file that is neither a zip nor a PDF: nothing to
+  // extract. Checked before the write, so the failed request leaves no
+  // file behind and a retry with extract=false does not hit the 409
+  // destination-exists check.
+  if (forceExtract && detectedType === "other") {
+    return c.json(
+      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
+      415,
+    );
+  }
+
   // Load engine session and check sandbox readiness
   let engineSession;
   try {
-    const { db } = c.var.providers;
     engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
   } catch {
     return c.json(
@@ -134,18 +240,40 @@ fileUploadRouter.post("/:id/files", async (c) => {
     );
   }
 
-  // Check if dest already exists (unless overwrite=true)
-  try {
-    await sandbox.stat(uploadPath);
-    // File exists
-    if (!overwrite) {
+  // Overwrite protection: check every path this request will write before
+  // writing any of them. The PDF sidecar counts — overwrite=false must not
+  // clobber a pre-existing `<dest>.md` either. A stat failure that is not a
+  // clean not-found (transport error, exec timeout) must NOT read as "does
+  // not exist": that would silently bypass the 409 contract.
+  const sidecarPath = `${uploadPath}.md`;
+  let skipSidecar = false;
+  if (!overwrite) {
+    try {
+      if ((await statIfExists(sandbox, uploadPath)) !== null) {
+        return c.json(
+          { error: "File already exists", corrective: "Retry with overwrite=true, or choose a different dest." },
+          409,
+        );
+      }
+      if (detectedType === "pdf" && shouldExtract && (await statIfExists(sandbox, sidecarPath)) !== null) {
+        if (forceExtract) {
+          return c.json(
+            {
+              error: `A file already exists at ${sidecarPath}`,
+              corrective: "Retry with overwrite=true, or choose a different dest.",
+            },
+            409,
+          );
+        }
+        // extract=auto: upload the PDF, keep the existing sidecar untouched.
+        skipSidecar = true;
+      }
+    } catch {
       return c.json(
-        { error: "File already exists", corrective: "Retry with overwrite=true, or choose a different dest." },
-        409,
+        { error: "Could not verify the destination", corrective: "Try uploading again." },
+        500,
       );
     }
-  } catch {
-    // File does not exist, which is what we want
   }
 
   // Create parent directory
@@ -158,72 +286,6 @@ fileUploadRouter.post("/:id/files", async (c) => {
     return c.json(
       { error: "Failed to create parent directory", corrective: "Check permissions and try again." },
       500,
-    );
-  }
-
-  // Read the file, counting size and computing the hash. Nothing is written
-  // to the sandbox until the whole body passed the cap — an error here must
-  // NOT touch `uploadPath` (with overwrite=true a pre-existing file lives
-  // there).
-  const sha256 = createHash("sha256");
-
-  let fileBytes = 0;
-  let detectedType: "pdf" | "zip" | "other" = "other";
-  const chunks: Uint8Array[] = [];
-
-  try {
-    const stream = fileField.stream();
-    const reader = stream.getReader();
-
-    let firstChunkRead = false;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = new Uint8Array(value);
-
-      // Detect type from first bytes
-      if (!firstChunkRead) {
-        firstChunkRead = true;
-        const detection = detectFileType(chunk);
-        detectedType = detection.type;
-      }
-
-      fileBytes += chunk.length;
-      sha256.update(chunk);
-
-      // Check size cap
-      if (fileBytes > MAX_UPLOAD_BYTES) {
-        return c.json(
-          {
-            error: `File exceeds ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload cap`,
-            corrective: "Reduce the file, or raise VALET_MAX_UPLOAD_BYTES on the server.",
-          },
-          413,
-        );
-      }
-
-      chunks.push(chunk);
-    }
-  } catch {
-    return c.json(
-      { error: "Upload stream error", corrective: "Try uploading again." },
-      400,
-    );
-  }
-
-  const totalBytes: Uint8Array = Buffer.concat(chunks);
-  const sha256Hex = sha256.digest("hex");
-
-  // extract=true on a file that is neither a zip nor a PDF: nothing to
-  // extract. Checked before the write, so the failed request leaves no
-  // file behind and a retry with extract=false does not hit the 409
-  // destination-exists check.
-  if (forceExtract && detectedType === "other") {
-    return c.json(
-      { error: "This file cannot be extracted", corrective: "Set extract=false or omit it." },
-      415,
     );
   }
 
@@ -257,17 +319,19 @@ fileUploadRouter.post("/:id/files", async (c) => {
         needsOcr: result.needsOcr,
       };
 
-      // Always write the sidecar: real markdown when the PDF has text, a
-      // one-line stub otherwise (scanned / no extractable text). Only a
-      // real sidecar is reported via markdownPath.
-      const sidecarPath = `${uploadPath}.md`;
-      await sandbox.writeBinary(
-        sidecarPath,
-        new TextEncoder().encode(result.markdown ?? pdfStubMarkdown()),
-      );
-      if (result.markdown) {
-        markdownPath = sidecarPath;
-        pdfInfo.markdownPath = sidecarPath;
+      // Write the sidecar: real markdown when the PDF has text, a one-line
+      // stub otherwise (scanned / no extractable text). Only a real sidecar
+      // is reported via markdownPath. Skipped when overwrite=false found an
+      // existing file at the sidecar path.
+      if (!skipSidecar) {
+        await sandbox.writeBinary(
+          sidecarPath,
+          new TextEncoder().encode(result.markdown ?? pdfStubMarkdown()),
+        );
+        if (result.markdown) {
+          markdownPath = sidecarPath;
+          pdfInfo.markdownPath = sidecarPath;
+        }
       }
     } catch (err) {
       if (forceExtract) {
@@ -287,9 +351,10 @@ fileUploadRouter.post("/:id/files", async (c) => {
 
   // Handle ZIP extraction
   let extracted: string[] | undefined;
+  let extractedTo: string | undefined;
 
   if (detectedType === "zip" && shouldExtract) {
-    const extractRoot = `${dirname(uploadPath)}/${basename(uploadPath, ".zip")}/`;
+    const extractRoot = zipExtractRoot(uploadPath);
 
     const zipResult = await extractZip({
       sandbox,
@@ -308,7 +373,13 @@ fileUploadRouter.post("/:id/files", async (c) => {
       );
     }
 
-    extracted = zipResult.extracted;
+    // A zip can legally extract to nothing (all entries symlinks, or only
+    // empty directories). Report an extraction only when files landed —
+    // the note the agent reads must not point at content that is not there.
+    if (zipResult.extracted.length > 0) {
+      extracted = zipResult.extracted;
+      extractedTo = extractRoot;
+    }
   }
 
   // Mint attachment ref
@@ -319,7 +390,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
     mimeType: mimeType !== "application/octet-stream" ? mimeType : undefined,
     markdownPath,
     extractedFiles: extracted,
-    extractedTo: extracted ? `${dirname(uploadPath)}/${basename(uploadPath, ".zip")}/` : undefined,
+    extractedTo,
     name: filename,
   };
 
@@ -333,8 +404,9 @@ fileUploadRouter.post("/:id/files", async (c) => {
     attachmentRef,
   };
 
-  if (extracted && extracted.length > 0) {
+  if (extracted) {
     response.extracted = extracted;
+    response.extractedTo = extractedTo;
   }
 
   if (pdfInfo) {
