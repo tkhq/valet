@@ -127,7 +127,7 @@ Regression suites (run before claiming done): `pnpm --filter @valet/engine test 
 
 ### Pre-1.0: edit migrations in place
 
-Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, `rm -rf ~/.valet/pg` is MANDATORY — the migration tracker skips an already-applied `0000` and there is no backfill path. This rule flips to numbered migrations at 1.0.
+Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, `rm -rf ~/.valet/pg` is MANDATORY — the migration tracker skips an already-applied `0000` and there is no backfill path locally. An app-table edit that adds a nullable/DEFAULT column, table, or index ALSO needs a matching `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`, or deployed databases never get it and the rollout sticks on the old image. This rule flips to numbered migrations at 1.0.
 
 ### Node & workspace traps
 

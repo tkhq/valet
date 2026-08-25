@@ -15,7 +15,12 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
-import { applyAppMigrations, buildAppDb as buildAppPgDb } from "../lib/drizzle.js";
+import {
+  applyAppMigrations,
+  buildAppDb as buildAppPgDb,
+  isLockTimeoutError,
+  missingSchemaRepairs,
+} from "../lib/drizzle.js";
 import {
   users,
   session,
@@ -587,6 +592,43 @@ describe("pg app schema + migrations", () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         expect(await columnExists(table, column), `${table}.${column} repaired`).toBe(true);
       }
+    });
+
+    // TKAI-244: a no-op ALTER TABLE still takes an ACCESS EXCLUSIVE lock, and
+    // during a rolling update that lock queues behind the old pod's open
+    // transactions — deadlocking the deploy. The steady-state contract is
+    // therefore: when nothing is missing, the repair pass issues NO DDL at
+    // all, only catalog probes.
+    it("reports no missing repairs on an up-to-date schema (steady state takes no locks)", async () => {
+      const missing = await missingSchemaRepairs(db);
+      expect(missing.map((r) => r.describe)).toEqual([]);
+    });
+
+    it("names exactly the dropped column as missing, and repairs restore steady state", async () => {
+      await db.query('ALTER TABLE "orgs" DROP COLUMN "sso_team_groups"');
+      const missing = await missingSchemaRepairs(db);
+      expect(missing.map((r) => r.describe)).toEqual(["orgs.sso_team_groups column"]);
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      expect(await columnExists("orgs", "sso_team_groups")).toBe(true);
+    });
+
+    it("detects a missing table and index independently", async () => {
+      await db.query('DROP TABLE "artifacts"'); // drops its indexes too
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("artifacts table");
+      expect(missing).toContain("artifacts_token_unique index");
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("isLockTimeoutError matches pg 55P03 directly and via cause", () => {
+      expect(isLockTimeoutError({ code: "55P03" })).toBe(true);
+      expect(isLockTimeoutError(new Error("outer", { cause: { code: "55P03" } }))).toBe(true);
+      expect(isLockTimeoutError({ code: "42703" })).toBe(false);
+      expect(isLockTimeoutError(new Error("plain"))).toBe(false);
     });
   });
 
