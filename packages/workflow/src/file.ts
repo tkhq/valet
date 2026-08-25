@@ -145,11 +145,41 @@ export type WorkflowFileParseResult =
  * the validator's own text instead of at run time inside a node. The browser
  * has no plugin catalog and passes none, so a file that parses there can
  * still be refused by the server.
+ *
+ * This function returns a result for EVERY input, and never throws. Its
+ * callers are a sync that must record a per-file warning, an import dialog
+ * that must show a message, and an export route; none of them has anything
+ * to do with a value that arrives as an exception.
  */
 export function parseWorkflowFileValue(
   value: unknown,
   path: string,
   env: ValidateEnvironment = {},
+): WorkflowFileParseResult {
+  try {
+    return readWorkflowFileValue(value, path, env);
+  } catch (err) {
+    // Every branch below returns a result, and this catch is what makes that
+    // true of the FUNCTION rather than of its branches. A message builder
+    // reaches for `JSON.stringify` on a value the author wrote — the
+    // validator does it in most of its errors — and a YAML anchor that
+    // refers to itself makes that throw. Callers here show a result; one
+    // handed a throw has no message to put on screen.
+    const detail = err instanceof Error ? err.message : 'the parser could not read it';
+    return {
+      ok: false,
+      code: 'invalid',
+      errors: [
+        `${path} could not be read: ${detail}. Check the file for a YAML anchor that refers to itself.`,
+      ],
+    };
+  }
+}
+
+function readWorkflowFileValue(
+  value: unknown,
+  path: string,
+  env: ValidateEnvironment,
 ): WorkflowFileParseResult {
   if (!isRecord(value)) {
     return {
@@ -419,9 +449,19 @@ function optionalString(field: 'name' | 'description', value: unknown): Record<s
   return typeof value === 'string' && value.trim() !== '' ? { [field]: value.trim() } : {};
 }
 
-/** A value as a message names it, with no quoting surprise for a number or
- * a list somebody wrote where a kind belongs. */
+/**
+ * A value as a message names it, with no quoting surprise for a number or a
+ * list somebody wrote where a kind belongs.
+ *
+ * Total, deliberately. `JSON.stringify` was here and it throws on a value
+ * that refers to itself, which a YAML anchor writes in two lines. A message
+ * must never be the thing that fails.
+ */
 function describe(value: unknown): string {
   if (typeof value === 'string') return value;
-  return JSON.stringify(value) ?? String(value);
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'a list';
+  if (typeof value === 'object') return 'a mapping';
+  if (typeof value === 'function') return 'a function';
+  return String(value);
 }

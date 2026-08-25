@@ -27,6 +27,25 @@ vi.mock("~/api/workflows", () => ({
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false }),
 }));
 
+/**
+ * Set by the one case that needs the parser to REJECT rather than answer.
+ * `parseWorkflowImport` returns a result for every input it is given today,
+ * so nothing else can drive the dialog's catch, and the catch is what keeps
+ * the Review button from going dead if that ever changes.
+ */
+let parseRejection: Error | null = null;
+
+vi.mock("./import-workflow", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./import-workflow")>();
+  return {
+    ...actual,
+    parseWorkflowImport: async (text: string, fileName?: string) => {
+      if (parseRejection !== null) throw parseRejection;
+      return actual.parseWorkflowImport(text, fileName);
+    },
+  };
+});
+
 import { ImportWorkflowDialog } from "./import-workflow-dialog";
 
 const VALID = {
@@ -68,6 +87,7 @@ beforeEach(() => {
   navigate.mockReset();
   createMutateAsync.mockReset();
   createMutateAsync.mockResolvedValue({ id: "wf_new" });
+  parseRejection = null;
   vi.restoreAllMocks();
 });
 
@@ -123,6 +143,20 @@ describe("ImportWorkflowDialog — a pasted file", () => {
     expect(alert.textContent).toContain("ghost");
     expect(screen.queryByRole("button", { name: "Import" })).toBeNull();
     expect(createMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("shows a message when the parser throws instead of answering", async () => {
+    parseRejection = new Error("Converting circular structure to JSON");
+    renderDialog();
+
+    await paste(JSON.stringify(VALID));
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Converting circular structure to JSON",
+    );
+    // The person is told what to do next, and the Review button still works.
+    expect(screen.getByRole("alert").textContent).toContain("try again");
+    expect(screen.queryByLabelText("Name")).toBeNull();
   });
 
   it("refuses text that is not a workflow definition", async () => {

@@ -42,6 +42,7 @@ import {
   parseWorkflowImport,
   previewWorkflowImport,
   suggestedImportName,
+  type ParsedWorkflowImport,
   type WorkflowImport,
 } from "./import-workflow";
 
@@ -89,9 +90,26 @@ export function ImportWorkflowDialog({
    * carried no name of its own. Pasted text has no file name.
    *
    * Async because a YAML file loads its parser on demand. A JSON file
-   * resolves on the first tick, so the review step still appears at once. */
+   * resolves on the first tick, so the review step still appears at once.
+   *
+   * The parser answers with a result for every input, so the catch is not a
+   * branch this expects to take. It is here because the two callers below
+   * start it with `void`: a rejected promise would leave the dialog on the
+   * step it was on, and the button that started it looking dead. */
   async function review(fileText: string, from: string, fileName?: string): Promise<void> {
-    const parsed = await parseWorkflowImport(fileText, fileName);
+    let parsed: ParsedWorkflowImport;
+    try {
+      parsed = await parseWorkflowImport(fileText, fileName);
+    } catch (err) {
+      const detail = err instanceof Error ? `: ${err.message}` : "";
+      setPhase({
+        kind: "error",
+        messages: [
+          `Valet could not read ${from}${detail}. Check that the file holds a workflow definition, then try again.`,
+        ],
+      });
+      return;
+    }
     if (!parsed.ok) {
       setPhase({ kind: "error", messages: parsed.errors });
       return;

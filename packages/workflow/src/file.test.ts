@@ -191,6 +191,51 @@ describe('parseWorkflowFileValue', () => {
     expect(result.errors.join(' ')).toContain('definition');
   });
 
+  describe('a value that would make a message builder throw', () => {
+    // YAML writes a value that refers to itself in two lines, with an anchor
+    // and an alias. Every message builder that reaches for `JSON.stringify`
+    // then throws on it — and a caller of this parser expects a result to
+    // show, not an exception to catch.
+    it('names the file when the valet key refers to itself', () => {
+      const loop: Record<string, unknown> = {};
+      loop.self = loop;
+
+      const result = parseWorkflowFileValue(
+        { valet: loop, definition: definition() },
+        '.valet/workflows/anchor.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('unknown-kind');
+      expect(result.errors.join(' ')).toContain('.valet/workflows/anchor.yaml');
+      expect(result.errors.join(' ')).toContain('a mapping');
+    });
+
+    it('names the file when a node refers to itself', () => {
+      // Reached inside the validator, which names the offending value in
+      // most of its errors and builds those names with `JSON.stringify`.
+      const type: Record<string, unknown> = {};
+      type.self = type;
+
+      const result = parseWorkflowFileValue(
+        {
+          valet: WORKFLOW_FILE_KIND,
+          definition: { version: 'dag/v1', nodes: [{ type }], edges: [] },
+        },
+        '.valet/workflows/node-anchor.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      expect(result.errors.join(' ')).toContain('.valet/workflows/node-anchor.yaml');
+      // The message names what to look for in the file, because the
+      // underlying TypeError does not.
+      expect(result.errors.join(' ')).toContain('anchor that refers to itself');
+    });
+  });
+
   describe('a template file', () => {
     function templateValue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       return {
