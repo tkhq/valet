@@ -654,6 +654,13 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
         entry.authQueryParam = assertNonEmptyString(v, `mcpServers[${i}].authQueryParam`, path);
       } else if (key === "scopes") {
         const raw = assertArray(v, `mcpServers[${i}].scopes`, path);
+        // An empty list behaves exactly like an absent key (no scope param
+        // is sent), so accepting it would hide a broken fix attempt.
+        if (raw.length === 0) {
+          err(
+            `${path}: mcpServers[${i}].scopes must not be empty. List at least one scope, or remove the key.`,
+          );
+        }
         entry.scopes = raw.map((s, j) => {
           const scope = assertNonEmptyString(s, `mcpServers[${i}].scopes[${j}]`, path);
           // The authorize request joins scopes with spaces (RFC 6749), so a

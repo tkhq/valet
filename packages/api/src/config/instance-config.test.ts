@@ -368,6 +368,13 @@ describe("mcpServers validation", () => {
     );
   });
 
+  it("rejects an empty scopes list as inert", () => {
+    const yaml = base("  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    scopes: []");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      "mcpServers[0].scopes must not be empty. List at least one scope, or remove the key.",
+    );
+  });
+
   it("rejects a scopes entry that is not a non-empty string", () => {
     const yaml = base(
       '  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    scopes: ["ok", ""]',
