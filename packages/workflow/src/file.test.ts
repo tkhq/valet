@@ -191,6 +191,75 @@ describe('parseWorkflowFileValue', () => {
     expect(result.errors.join(' ')).toContain('definition');
   });
 
+  describe('the filters on an event trigger', () => {
+    // A filter Valet reads only in part is worse than one it refuses: an
+    // EMPTY filter list matches every event of its key, so a dropped entry
+    // arms the subscription on every push in the org rather than on the one
+    // repository the file named.
+    function withFilters(filters: unknown): unknown {
+      return {
+        valet: WORKFLOW_FILE_KIND,
+        definition: definition(),
+        events: [{ name: 'On push', eventKeys: ['github.push'], filters }],
+      };
+    }
+
+    it('refuses an op it does not read, and names the ops it does', () => {
+      const result = parseWorkflowFileValue(
+        withFilters([{ field: 'repo', op: 'equals', value: 'acme/service' }]),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      const message = result.errors.join(' ');
+      expect(message).toContain('equals');
+      expect(message).toContain('eq, in, prefix, contains');
+      expect(message).toContain('events[0].filters[0]');
+    });
+
+    it('refuses a filter with no field to test', () => {
+      const result = parseWorkflowFileValue(
+        withFilters([{ op: 'eq', value: 'acme/service' }]),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      expect(result.errors.join(' ')).toContain('"field"');
+    });
+
+    it('refuses a filters block written as a mapping', () => {
+      // The shape somebody writes who expects filters to be keyed by field.
+      const result = parseWorkflowFileValue(
+        withFilters({ repo: 'acme/service' }),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      const message = result.errors.join(' ');
+      expect(message).toContain('a mapping');
+      expect(message).toContain('list');
+    });
+
+    it('keeps a filter it can read whole', () => {
+      const result = parseWorkflowFileValue(
+        withFilters([{ field: 'repo', op: 'in', value: ['acme/service', 'acme/web'] }]),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok || result.file.kind !== 'workflow') return;
+      expect(result.file.events?.[0]?.filters).toEqual([
+        { field: 'repo', op: 'in', value: ['acme/service', 'acme/web'] },
+      ]);
+    });
+  });
+
   describe('a value that would make a message builder throw', () => {
     // YAML writes a value that refers to itself in two lines, with an anchor
     // and an alias. Every message builder that reaches for `JSON.stringify`

@@ -61,7 +61,11 @@
  * repository collector can refuse a file that never claimed to be a workflow
  * while the dialog keeps accepting one somebody exported by hand.
  */
-import type { WorkflowTemplateEventTrigger, WorkflowTemplateSchedule } from '@valet/engine';
+import type {
+  WorkflowTemplateEventFilter,
+  WorkflowTemplateEventTrigger,
+  WorkflowTemplateSchedule,
+} from '@valet/engine';
 import type { WorkflowDefinition } from './dag/shape.js';
 import { validateWorkflowDefinition, type ValidateEnvironment } from './dag/validate.js';
 
@@ -290,8 +294,10 @@ function readDefinition(
 }
 
 /** The optional `schedule` and `events` blocks, shape-checked only. The cron
- * expression and the filter fields are checked by the host that arms them,
- * so one file cannot pass here and fail there. */
+ * expression and the filter FIELD names are checked by the host that arms
+ * them, so one file cannot pass here and fail there. What this checks is the
+ * shape, and it refuses rather than drops: a trigger block Valet reads only
+ * in part is a trigger that fires on something the author did not ask for. */
 function readTriggers(
   value: Record<string, unknown>,
   path: string,
@@ -328,6 +334,7 @@ function readTriggers(
           );
           return;
         }
+        const filters = readFilters(raw.filters, `${path}: events[${index}]`, errors);
         read.push({
           name:
             typeof raw.name === 'string' && raw.name.trim() !== ''
@@ -335,7 +342,7 @@ function readTriggers(
               : raw.eventKeys.join(', '),
           eventKeys: raw.eventKeys,
           description: typeof raw.description === 'string' ? raw.description : '',
-          ...(Array.isArray(raw.filters) ? { filters: readFilters(raw.filters) } : {}),
+          ...(filters === undefined ? {} : { filters }),
         });
       });
       if (read.length > 0) events = read;
@@ -352,28 +359,77 @@ function readTriggers(
   };
 }
 
+/** The ops a filter may declare. Named because the refusal prints them. */
+const FILTER_OPS: ReadonlyArray<WorkflowTemplateEventFilter['op']> = [
+  'eq',
+  'in',
+  'prefix',
+  'contains',
+];
+
 /**
- * Filters pass through with their shape checked and their vocabulary
- * unchecked. Which fields an event key declares is the event catalog's
- * answer, and `validateSubscription` on the host gives it — a second copy
- * here would go stale as the catalog grows.
+ * The optional `filters` list. A filter this cannot read FAILS the file, and
+ * it adds to `errors` rather than answering, so one pass names every bad
+ * entry.
+ *
+ * Dropping the entry was the dangerous answer. An empty filter list matches
+ * EVERY event of its key, so one misspelled `equals` would arm a
+ * subscription on every push in the org instead of on the one repository the
+ * author named — and the file would report no problem at all.
+ *
+ * Which FIELDS an event key declares is still the host's answer and not this
+ * module's: the event catalog owns that vocabulary and `validateSubscription`
+ * checks it, so a second copy here would go stale as the catalog grows. What
+ * is checked here is what this module owns — the shape, and the four ops.
  */
-function readFilters(raw: unknown[]): WorkflowTemplateEventTrigger['filters'] {
-  const filters: NonNullable<WorkflowTemplateEventTrigger['filters']> = [];
-  for (const entry of raw) {
-    if (!isRecord(entry) || typeof entry.field !== 'string') continue;
-    const op = entry.op;
-    if (op !== 'eq' && op !== 'in' && op !== 'prefix' && op !== 'contains') continue;
+function readFilters(
+  raw: unknown,
+  label: string,
+  errors: string[],
+): WorkflowTemplateEventFilter[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    errors.push(
+      `${label}: "filters" is ${describe(raw)}, and it must be a list. Write it as [{ field: repo, op: eq, value: acme/service }].`,
+    );
+    return undefined;
+  }
+
+  const filters: WorkflowTemplateEventFilter[] = [];
+  raw.forEach((entry, index) => {
+    const at = `${label}.filters[${index}]`;
+    if (!isRecord(entry)) {
+      errors.push(
+        `${at} is ${describe(entry)}. Write each filter as a mapping with a "field" and an "op".`,
+      );
+      return;
+    }
+    if (typeof entry.field !== 'string' || entry.field.trim() === '') {
+      errors.push(
+        `${at} has no "field" to test. Name the event field to filter on, such as "repo".`,
+      );
+      return;
+    }
+    if (!isFilterOp(entry.op)) {
+      errors.push(
+        `${at} declares op: ${describe(entry.op)}, which Valet does not read. Use one of ${FILTER_OPS.join(', ')}.`,
+      );
+      return;
+    }
     filters.push({
-      field: entry.field,
-      op,
+      field: entry.field.trim(),
+      op: entry.op,
       ...(typeof entry.value === 'string' || isStringArray(entry.value)
         ? { value: entry.value }
         : {}),
       ...(typeof entry.fromInput === 'string' ? { fromInput: entry.fromInput } : {}),
     });
-  }
+  });
   return filters;
+}
+
+function isFilterOp(value: unknown): value is WorkflowTemplateEventFilter['op'] {
+  return FILTER_OPS.some((op) => op === value);
 }
 
 /** The gallery fields. Every one is named in the failure, so an author fixes
