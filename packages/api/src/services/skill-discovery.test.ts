@@ -137,8 +137,12 @@ describe("discoverFromTree", () => {
     });
 
     it("drops a candidate under a dot-directory, and keeps .claude and .valet", () => {
+      // `.github/skills/x/SKILL.md` is the case the two exceptions invite:
+      // the canonical skills layout under a dot-directory that stays shut.
+      // Which dot-directory the path names is the whole rule.
       const found = discoverFromTree(
         [
+          blob(".github/skills/x/SKILL.md"),
           blob(".github/workflows/ci/SKILL.md"),
           blob(".venv/lib/pkg/a/SKILL.md"),
           blob(".claude/skills/triage/SKILL.md"),
@@ -152,6 +156,7 @@ describe("discoverFromTree", () => {
         ".claude/skills/triage/SKILL.md",
       ]);
       expect(found.excludedCandidates.map((c) => c.path)).toEqual([
+        ".github/skills/x/SKILL.md",
         ".github/workflows/ci/SKILL.md",
         ".venv/lib/pkg/a/SKILL.md",
       ]);

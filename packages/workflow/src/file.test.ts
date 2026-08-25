@@ -206,6 +206,42 @@ describe('parseWorkflowFileValue', () => {
       };
     }
 
+    it('reads the gallery fields a template card renders', () => {
+      const result = parseWorkflowFileValue(
+        templateValue({ rank: 10, icon: '🌙', caveats: ['Reads public issues only.'] }),
+        '.valet/templates/nightly.yaml',
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok || result.file.kind !== 'template') return;
+      expect(result.file.labeled).toBe(true);
+      expect(result.file.template.id).toBe('acme-nightly-triage');
+      expect(result.file.template.category).toBe('Daily digest');
+      expect(result.file.template.apps).toEqual(['github', 'slack']);
+      expect(result.file.template.steps).toEqual(['Read the open issues', 'Post a summary']);
+      expect(result.file.template.rank).toBe(10);
+      expect(result.file.template.icon).toBe('🌙');
+      expect(result.file.template.caveats).toEqual(['Reads public issues only.']);
+      expect(result.file.definition).toEqual(definition());
+    });
+
+    it('names every gallery field a template file leaves out', () => {
+      const bare = templateValue();
+      delete bare.category;
+      delete bare.apps;
+      delete bare.steps;
+
+      const result = parseWorkflowFileValue(bare, '.valet/templates/thin.yaml');
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      const message = result.errors.join(' ');
+      expect(message).toContain('category');
+      expect(message).toContain('apps');
+      expect(message).toContain('steps');
+    });
+
     it('validates the graph the same way a workflow file is validated', () => {
       const result = parseWorkflowFileValue(
         templateValue({ definition: { version: 'dag/v1', nodes: [], edges: [] } }),
