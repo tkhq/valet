@@ -12,7 +12,7 @@
  * exactly what is under test.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ApiError, api } from "~/api/client";
 
 const navigate = vi.fn();
@@ -35,12 +35,20 @@ vi.mock("~/api/workflows", () => ({
  */
 let parseRejection: Error | null = null;
 
+/**
+ * Set by the case that has to hold a parse open. A YAML file loads its
+ * decoder on demand, so the parse is genuinely in flight for as long as that
+ * takes — long enough for a reader to press Cancel.
+ */
+let parseGate: Promise<void> | null = null;
+
 vi.mock("./import-workflow", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./import-workflow")>();
   return {
     ...actual,
     parseWorkflowImport: async (text: string, fileName?: string) => {
       if (parseRejection !== null) throw parseRejection;
+      if (parseGate !== null) await parseGate;
       return actual.parseWorkflowImport(text, fileName);
     },
   };
@@ -88,6 +96,7 @@ beforeEach(() => {
   createMutateAsync.mockReset();
   createMutateAsync.mockResolvedValue({ id: "wf_new" });
   parseRejection = null;
+  parseGate = null;
   vi.restoreAllMocks();
 });
 
@@ -181,6 +190,33 @@ describe("ImportWorkflowDialog — a pasted file", () => {
     // The person is told what to do next, and the Review button still works.
     expect(screen.getByRole("alert").textContent).toContain("try again");
     expect(screen.queryByLabelText("Name")).toBeNull();
+  });
+
+  it("writes nothing after the reader cancels a parse that is still running", async () => {
+    // A YAML file loads its decoder before it parses, so Cancel is reachable
+    // while the parse runs. The result that lands afterwards belongs to an
+    // import nobody wants: written, it leaves the review step behind for the
+    // next open, holding a file that was never chosen.
+    let release = (): void => {};
+    parseGate = new Promise<void>((resolve) => {
+      release = () => resolve();
+    });
+
+    const onOpenChange = renderDialog();
+    fireEvent.change(screen.getByLabelText("Workflow YAML or JSON"), {
+      target: { value: JSON.stringify(VALID) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByLabelText("Name")).toBeNull();
+    expect(screen.getByRole("button", { name: "Review" })).toBeTruthy();
   });
 
   it("refuses text that is not a workflow definition", async () => {

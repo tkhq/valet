@@ -89,6 +89,15 @@ export function ImportWorkflowDialog({
   const [ref, setRef] = useState("");
   const [name, setName] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  /**
+   * Which open this dialog is on. Reading a file, loading the YAML chunk and
+   * reading a repository all take time the reader can spend on Cancel, and a
+   * task that lands after the close would write the step it computed over
+   * the cleared form — so the next open starts on a review step for a file
+   * nobody chose. Every task holds the count it started under and writes
+   * nothing once `close` has moved it on.
+   */
+  const opened = useRef(0);
 
   /** Parsed text → the review step, or the parser's messages. `from` names
    * the origin on screen; `fileName` seeds the name field when the file
@@ -102,10 +111,12 @@ export function ImportWorkflowDialog({
    * start it with `void`: a rejected promise would leave the dialog on the
    * step it was on, and the button that started it looking dead. */
   async function review(fileText: string, from: string, fileName?: string): Promise<void> {
+    const open = opened.current;
     let parsed: ParsedWorkflowImport;
     try {
       parsed = await parseWorkflowImport(fileText, fileName);
     } catch (err) {
+      if (opened.current !== open) return;
       const detail = err instanceof Error ? `: ${err.message}` : "";
       setPhase({
         kind: "error",
@@ -115,6 +126,7 @@ export function ImportWorkflowDialog({
       });
       return;
     }
+    if (opened.current !== open) return;
     if (!parsed.ok) {
       setPhase({ kind: "error", messages: parsed.errors });
       return;
@@ -124,6 +136,7 @@ export function ImportWorkflowDialog({
   }
 
   function onPickFile(e: ChangeEvent<HTMLInputElement>): void {
+    const open = opened.current;
     const file = e.target.files?.[0];
     e.target.value = ""; // so the same file can be chosen again after a fix
     if (!file) return;
@@ -138,14 +151,19 @@ export function ImportWorkflowDialog({
     }
     void file.text().then(
       (fileText) => {
+        if (opened.current !== open) return;
         setText(fileText);
         void review(fileText, file.name, file.name);
       },
-      () => setPhase({ kind: "error", messages: ["Could not read that file. Choose it again."] }),
+      () => {
+        if (opened.current !== open) return;
+        setPhase({ kind: "error", messages: ["Could not read that file. Choose it again."] });
+      },
     );
   }
 
   async function readFromRepo(): Promise<void> {
+    const open = opened.current;
     setPhase({ kind: "busy", label: "Reading…" });
     try {
       const file = await api.getWorkflowImportFile({
@@ -153,8 +171,10 @@ export function ImportWorkflowDialog({
         path: path.trim(),
         ...(ref.trim() === "" ? {} : { ref: ref.trim() }),
       });
+      if (opened.current !== open) return;
       await review(file.content, `${file.repo}/${file.path}`, file.path);
     } catch (err) {
+      if (opened.current !== open) return;
       setPhase({ kind: "error", messages: errorMessages(err) });
     }
   }
@@ -179,8 +199,11 @@ export function ImportWorkflowDialog({
   }
 
   /** Closing clears the form. A half-typed repository address left over from
-   * a failed read reads as the state of the NEXT import, which it is not. */
+   * a failed read reads as the state of the NEXT import, which it is not.
+   * The count moves on for the same reason: a read still in flight belongs
+   * to the import that was cancelled, and it writes nothing after this. */
   function close(): void {
+    opened.current += 1;
     setPhase({ kind: "idle" });
     setText("");
     setRepo("");
