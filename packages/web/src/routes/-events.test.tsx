@@ -157,7 +157,7 @@ vi.mock("~/api/events", () => ({
     refetch: vi.fn(),
   }),
   useEvent: () => ({ data: eventDetailData, isLoading: false, error: null }),
-  useEventSubscriptions: () => ({ data: subscriptionsData, isLoading: false, error: null }),
+  useEventSubscriptions: () => ({ data: subscriptionsData, isPending: false, error: null }),
   usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false }),
   useCreateEventSubscription: () => ({ mutate: createMutate, isPending: false }),
   useDeleteEventSubscription: () => ({ mutate: deleteMutate, isPending: false, error: null }),

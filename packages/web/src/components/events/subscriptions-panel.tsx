@@ -70,10 +70,20 @@ function describeTarget(
  * dialog's "Notify the org assistant" option writes a row this page can
  * never disable. Ownership therefore still varies row to row, which is what
  * the badges say.
+ *
+ * The list is held until the workspace owner resolves, for the same reason
+ * the feed holds its own query: an owner-less request is the org-wide list.
  */
 export function SubscriptionsPanel() {
   const owner = useListOwner();
-  const subsQ = useEventSubscriptions(owner);
+  const subsQ = useEventSubscriptions(owner, {
+    // `useListOwner()` answers undefined while the caller's identity is in
+    // flight, and an owner-less request lists every subscription in the
+    // org. The page header names the active workspace, so a held query
+    // beats one frame of every colleague's automations under it. Same gate
+    // the feed uses.
+    enabled: owner !== undefined,
+  });
   const workflowsQ = useWorkflows();
   const meQ = useMe();
   const teamsQ = useTeams();
@@ -111,7 +121,9 @@ export function SubscriptionsPanel() {
         </Button>
       </div>
 
-      {subsQ.isLoading && <LoadingRow label="Loading subscriptions…" />}
+      {/* `isPending`, not `isLoading`: the query is held (not fetching)
+          while the owner resolves, and a held list is still loading. */}
+      {subsQ.isPending && <LoadingRow label="Loading subscriptions…" />}
       {subsQ.error != null && <ErrorRow>Failed to load subscriptions.</ErrorRow>}
 
       {subsQ.data && subsQ.data.subscriptions.length === 0 && (

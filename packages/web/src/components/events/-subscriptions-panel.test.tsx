@@ -56,8 +56,9 @@ const eventsData = { events: [] };
 let subscriptionsOwner: OwnerFilter | undefined;
 let feedOwner: OwnerFilter | undefined;
 let feedCalls = 0;
-/** Whether the feed query was allowed to run on the last render. */
+/** Whether each query was allowed to run on the last render. */
 let feedEnabled: boolean | undefined;
+let subscriptionsEnabled: boolean | undefined;
 
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
@@ -67,9 +68,17 @@ vi.mock("~/api/events", () => ({
     feedEnabled = opts?.enabled;
     return { data: eventsData, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
   },
-  useEventSubscriptions: (owner?: OwnerFilter) => {
+  useEventSubscriptions: (owner?: OwnerFilter, opts?: { enabled?: boolean }) => {
     subscriptionsOwner = owner;
-    return { data: subscriptionsData, isLoading: false, error: null };
+    subscriptionsEnabled = opts?.enabled;
+    // A held query has no data, which is what react-query answers while
+    // `enabled` is false.
+    const held = opts?.enabled === false;
+    return {
+      data: held ? undefined : subscriptionsData,
+      isPending: held,
+      error: null,
+    };
   },
   usePatchEventSubscription: () => ({ mutate: vi.fn(), isPending: false }),
   useCreateEventSubscription: () => ({ mutate: vi.fn(), isPending: false }),
@@ -141,6 +150,21 @@ describe("SubscriptionsPanel", () => {
       </TooltipProvider>,
     );
     expect(subscriptionsOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
+  });
+
+  // The header names the active workspace, so the list must not show the
+  // whole org for the frame before `useMe` lands. Same gate as the feed.
+  it("holds the list until the workspace owner resolves", () => {
+    meId = undefined;
+    render(
+      <TooltipProvider>
+        <SubscriptionsPanel />
+      </TooltipProvider>,
+    );
+    expect(subscriptionsOwner).toBeUndefined();
+    expect(subscriptionsEnabled).toBe(false);
+    expect(screen.queryByText("PR alerts")).toBeNull();
+    expect(screen.getByText("Loading subscriptions…")).toBeTruthy();
   });
 
   // An org-owned subscription belongs to no single workspace. The route
