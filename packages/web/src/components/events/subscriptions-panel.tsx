@@ -24,7 +24,6 @@ import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
-import type { OwnerFilter } from "~/api/client";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { SubscriptionCreateDialog } from "./subscription-create-dialog";
@@ -127,7 +126,6 @@ export function SubscriptionsPanel() {
               teamNames={teamNames}
               viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
-              owner={owner}
             />
           ))}
         </div>
@@ -137,7 +135,7 @@ export function SubscriptionsPanel() {
           mount, so mount time must be open time (see its header comment).
           Also keeps its catalog/workflow queries off the tab's initial
           load. */}
-      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} owner={owner} />}
+      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} />}
     </div>
   );
 }
@@ -148,7 +146,6 @@ function SubscriptionRow({
   teamNames,
   viewerId,
   mutable,
-  owner,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
@@ -157,12 +154,9 @@ function SubscriptionRow({
   viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
-  /** The workspace this row is listed under, so a toggle or a delete
-   * refetches the list the reader is looking at. */
-  owner: OwnerFilter | undefined;
 }) {
-  const patch = usePatchEventSubscription(owner);
-  const del = useDeleteEventSubscription(owner);
+  const patch = usePatchEventSubscription();
+  const del = useDeleteEventSubscription();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
 

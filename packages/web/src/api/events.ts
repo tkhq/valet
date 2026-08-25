@@ -104,21 +104,17 @@ export function useEventSubscriptions(
   });
 }
 
-// The three mutations take the workspace they act in, so a write refetches
-// the list the reader is looking at. An absent owner invalidates the bare
-// prefix, which covers every workspace's cached list.
-
-export function useCreateEventSubscription(owner?: OwnerFilter) {
+export function useCreateEventSubscription() {
   const qc = useQueryClient();
   return useMutation<CreateEventSubscriptionResponse, Error, CreateEventSubscriptionRequest>({
     mutationFn: (body) => api.createEventSubscription(body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions(owner) });
+      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
     },
   });
 }
 
-export function usePatchEventSubscription(owner?: OwnerFilter) {
+export function usePatchEventSubscription() {
   const qc = useQueryClient();
   return useMutation<
     PatchEventSubscriptionResponse,
@@ -127,17 +123,17 @@ export function usePatchEventSubscription(owner?: OwnerFilter) {
   >({
     mutationFn: ({ id, body }) => api.patchEventSubscription(id, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions(owner) });
+      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
     },
   });
 }
 
-export function useDeleteEventSubscription(owner?: OwnerFilter) {
+export function useDeleteEventSubscription() {
   const qc = useQueryClient();
   return useMutation<void, Error, string>({
     mutationFn: (id) => api.deleteEventSubscription(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions(owner) });
+      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
     },
   });
 }

@@ -4,7 +4,6 @@ import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
 import { useActiveWorkspace } from "~/components/workspace-clause";
-import type { OwnerFilter } from "~/api/client";
 
 type TargetChoice =
   | { kind: "orchestrator"; orchestrator: "user" | "org" }
@@ -28,18 +27,13 @@ function targetFor(scopedTeamId: string | undefined): TargetChoice {
 export function SubscriptionCreateDialog({
   open,
   onOpenChange,
-  owner,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The workspace the panel is listing, so a created subscription
-   * refetches that list. A target outside it — the org assistant — writes a
-   * row no workspace list carries; the invalidation is still harmless. */
-  owner?: OwnerFilter;
 }) {
   const catalogQ = useEventCatalog();
   const workflowsQ = useWorkflows();
-  const create = useCreateEventSubscription(owner);
+  const create = useCreateEventSubscription();
   const ws = useActiveWorkspace();
   const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
   const scopedTeamId = scopedTeam?.id;
