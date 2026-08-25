@@ -86,6 +86,42 @@ describe("parseWorkflowImport", () => {
     expect(parsed.value.definition.nodes).toHaveLength(2);
   });
 
+  it("names the envelope blocks the import does not create", async () => {
+    // `POST /api/workflows` writes a name and a definition. A schedule, an
+    // event trigger and a description have nowhere to land, and a file whose
+    // schedule is dropped in silence imports as a workflow that never runs.
+    const parsed = await parseWorkflowImport(
+      [
+        "valet: workflow/v1",
+        "name: Nightly triage",
+        "description: Sweeps open issues.",
+        "schedule:",
+        '  cron: "0 3 * * *"',
+        "events:",
+        "  - name: On push",
+        "    eventKeys: [github.push]",
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "  edges: []",
+        "",
+      ].join("\n"),
+      "nightly.yaml",
+    );
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.skipped).toEqual(["a schedule", "an event trigger", "a description"]);
+  });
+
+  it("has nothing to skip when the file carries a definition alone", async () => {
+    const parsed = await parseWorkflowImport(JSON.stringify(VALID));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.skipped).toEqual([]);
+  });
+
   it("refuses text that is neither JSON nor YAML", async () => {
     // Unbalanced brackets are the shape no decoder can read. Plain prose is
     // a valid YAML scalar, and it is refused a line later for holding no

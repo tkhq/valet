@@ -37,6 +37,19 @@ export interface WorkflowImport {
   /** The name the file carried, when it carried one. */
   name?: string;
   definition: WorkflowDefinition;
+  /**
+   * The envelope blocks this import does NOT create, as short phrases for
+   * the review step to print.
+   *
+   * `POST /api/workflows` writes a name and a definition. A file may also
+   * carry a schedule, event triggers, and a description, and none of the
+   * three has a place to land: arming a trigger is the Triggers page's job,
+   * and `workflow_definitions` has no description column. Dropping them in
+   * silence is the failure this list exists to prevent — a file that
+   * declares a nightly schedule would otherwise import as a workflow that
+   * never runs, with nothing on screen to say so.
+   */
+  skipped: string[];
 }
 
 export type ParsedWorkflowImport =
@@ -56,6 +69,10 @@ export type ParsedWorkflowImport =
  * A `valet: workflow-template/v1` file imports as the workflow its graph
  * describes, under the template's name. Installing a template produces a
  * local workflow too, so the two paths agree.
+ *
+ * A success carries `skipped`: the envelope blocks the import does not
+ * create. The review step prints them, because a file whose schedule is
+ * dropped in silence imports as a workflow that never runs.
  *
  * A failure returns the messages to show. When the shape is right but the
  * graph is wrong, those messages are the validator's own, unaltered: they
@@ -93,13 +110,25 @@ export async function parseWorkflowImport(
   const parsed = parseWorkflowFileValue(raw, label);
   if (!parsed.ok) return { ok: false, errors: parsed.errors };
 
-  const name = parsed.file.kind === "template" ? parsed.file.template.name : parsed.file.name;
+  const file = parsed.file;
+  const name = file.kind === "template" ? file.template.name : file.name;
+  const description = file.kind === "template" ? file.template.description : file.description;
+
+  const skipped: string[] = [];
+  if (file.schedule !== undefined) skipped.push("a schedule");
+  if (file.events !== undefined && file.events.length > 0) {
+    skipped.push(
+      file.events.length === 1 ? "an event trigger" : `${file.events.length} event triggers`,
+    );
+  }
+  if (description !== undefined && description.trim() !== "") skipped.push("a description");
+
   return {
     ok: true,
     value:
       name === undefined
-        ? { definition: parsed.file.definition }
-        : { name, definition: parsed.file.definition },
+        ? { definition: file.definition, skipped }
+        : { name, definition: file.definition, skipped },
   };
 }
 

@@ -6,6 +6,11 @@
  * machine-written JSON, and committing one unseen is how a workflow nobody
  * recognises ends up in the list.
  *
+ * The review step also names what the file carries and the import does not
+ * create — a schedule, event triggers, a description. `POST /api/workflows`
+ * writes a name and a definition, so a file whose schedule was dropped in
+ * silence would import as a workflow that never runs.
+ *
  * Nothing is created until the review step is confirmed, and a refusal
  * shows the validator's own messages, node by node. `POST /api/workflows`
  * validates again with the plugin catalog this deployment actually has, so
@@ -379,6 +384,13 @@ function ReviewStep({
         <Label htmlFor={`${id}-name`}>Name</Label>
         <Input id={`${id}-name`} value={name} onChange={(e) => onName(e.target.value)} autoFocus />
       </div>
+
+      {value.skipped.length > 0 && (
+        <p className="text-xs text-muted">
+          The file also carries {value.skipped.join(", ")}. The import creates the workflow and its
+          graph only. Arm a schedule or an event trigger in Triggers after it is created.
+        </p>
+      )}
 
       <div className="rounded border border-line bg-ink-wash px-3 py-2">
         <p className="text-xs text-ink">

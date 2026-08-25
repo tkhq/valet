@@ -145,6 +145,30 @@ describe("ImportWorkflowDialog — a pasted file", () => {
     expect(createMutateAsync).not.toHaveBeenCalled();
   });
 
+  it("says what the file carries and the import does not create", async () => {
+    // The create route writes a name and a definition. A schedule dropped in
+    // silence imports as a workflow that never runs.
+    renderDialog();
+    await paste(
+      [
+        "valet: workflow/v1",
+        "name: Nightly triage",
+        "schedule:",
+        '  cron: "0 3 * * *"',
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "  edges: []",
+        "",
+      ].join("\n"),
+    );
+
+    expect(screen.getByText(/The file also carries a schedule/)).toBeTruthy();
+    expect(screen.getByText(/Arm a schedule or an event trigger in Triggers/)).toBeTruthy();
+  });
+
   it("shows a message when the parser throws instead of answering", async () => {
     parseRejection = new Error("Converting circular structure to JSON");
     renderDialog();
