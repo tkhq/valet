@@ -50,7 +50,8 @@ function normalizeScopes(scopes: string[] | undefined): string[] {
 /** Order-insensitive equality; a null stored set reads as "no scopes". */
 function sameScopes(stored: string[] | null | undefined, declared: string[]): boolean {
   const a = normalizeScopes(stored ?? undefined);
-  return a.length === declared.length && a.every((s, i) => s === declared[i]);
+  const b = normalizeScopes(declared);
+  return a.length === b.length && a.every((s, i) => s === b[i]);
 }
 
 /**
@@ -108,6 +109,13 @@ export async function ensureMcpOAuthClient(
     // writer wins on a concurrent scope change — both writers registered
     // with the same declared set, so either row works.
     await deps.db.update(mcpOauthClients).set(values).where(eq(mcpOauthClients.service, service));
+    // Refresh tokens were issued to the OLD client_id and stop refreshing
+    // now. Nothing repairs that automatically — connected users must
+    // disconnect and reconnect, so tell the operator while they are looking.
+    console.warn(
+      `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}). ` +
+        `Existing ${service} credentials stop refreshing; users must disconnect and reconnect in Integrations.`,
+    );
   } else {
     await deps.db
       .insert(mcpOauthClients)

@@ -571,6 +571,7 @@ describe("pg app schema + migrations", () => {
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
+      { table: "mcp_oauth_clients", column: "registered_scopes" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {
@@ -619,6 +620,7 @@ describe("pg app schema + migrations", () => {
       const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
       expect(missing).toContain("artifacts table");
       expect(missing).toContain("artifacts_token_unique index");
+      expect(missing).toContain("artifacts_owner_path_unique index");
 
       await applyAppMigrations(db);
       expect(await missingSchemaRepairs(db)).toEqual([]);
