@@ -817,6 +817,15 @@ export interface DesignExportFile {
 
 export interface DesignExportsResponse {
   files: DesignExportFile[];
+  /**
+   * Where the listing came from (Valet Design export panel). Absent means
+   * "live" (backward compatible with pre-field clients). "live": a running,
+   * attached sandbox served the listing. "cold": the session has a sandbox
+   * but it is hibernated or not attached — the names are a cached listing and
+   * the panel shows them greyed with wake copy; the listing NEVER wakes the
+   * sandbox. "none": the session has no sandbox at all.
+   */
+  sandbox?: "live" | "cold" | "none";
 }
 
 /**

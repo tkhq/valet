@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { countSlides, validateDcHtml } from "@valet/plugin-design/lib";
+import { teams, teamMembers } from "../schema/index.js";
 import type { CreateSessionResponse, DesignArtifactResponse, ListSessionsResponse } from "../wire/types.js";
 
 const INTERNAL_HEADERS = {
@@ -238,7 +239,8 @@ describe("design acceptance (API-level)", () => {
     const sessionId = await createDesignSession("slides");
     const list = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/exports`);
     expect(list.status).toBe(200);
-    expect(await list.json()).toEqual({ files: [] });
+    // A never-provisioned session has no sandbox at all: empty + "none".
+    expect(await list.json()).toEqual({ files: [], sandbox: "none" });
 
     // Traversal and dotfiles (the marp intermediate) 404 on the name check
     // alone — no sandbox is consulted.
@@ -247,10 +249,9 @@ describe("design acceptance (API-level)", () => {
       expect(res.status).toBe(404);
     }
 
-    // A well-formed name with no live sandbox: 409 (wake it) or 404 (no
-    // such file on a live-but-empty sandbox) — never a 500.
+    // A well-formed name with no attached sandbox: 409 (reconnect) — never 500.
     const missing = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/exports/deck.pdf`);
-    expect([404, 409]).toContain(missing.status);
+    expect(missing.status).toBe(409);
   });
 
   it("design session create rejects a missing or unknown template with the valid list", async () => {
@@ -261,5 +262,127 @@ describe("design acceptance (API-level)", () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("Valid templates");
+  });
+
+  it("health POST: rejects an over-cap issues array with 400 and a cap message", async () => {
+    const sessionId = await createDesignSession("slides");
+    // 51 hidden-slide indexes: over the 50-issue cap.
+    const tooMany = Array.from({ length: 51 }, (_, i) => i);
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/health`, {
+      method: "POST",
+      headers: INTERNAL_HEADERS,
+      body: JSON.stringify({ revision: "r-001", totalSlides: 2, hiddenSlides: tooMany }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("50");
+  });
+
+  it("health POST: rejects an over-long revision id with 400", async () => {
+    const sessionId = await createDesignSession("slides");
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/health`, {
+      method: "POST",
+      headers: INTERNAL_HEADERS,
+      body: JSON.stringify({ revision: "r-".padEnd(200, "0"), totalSlides: 2 }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("120");
+  });
+
+  it("health GET: exposes reportedAt and reporterId after a valid POST", async () => {
+    const sessionId = await createDesignSession("slides");
+    const before = Date.now();
+    const post = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/health`, {
+      method: "POST",
+      headers: INTERNAL_HEADERS,
+      body: JSON.stringify({ revision: "r-001", totalSlides: 2, hiddenSlides: [1] }),
+    });
+    expect(post.status).toBe(200);
+
+    const get = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/health`);
+    expect(get.status).toBe(200);
+    const body = (await get.json()) as {
+      report: { revision: string; hiddenSlides: number[] } | null;
+      reportedAt: number;
+      reporterId: string;
+    };
+    expect(body.report?.revision).toBe("r-001");
+    expect(body.report?.hiddenSlides).toEqual([1]);
+    // An internal (canvas) post is attributed to "canvas".
+    expect(body.reporterId).toBe("canvas");
+    expect(body.reportedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it("mutation auth: a view-only member is refused revert but may still comment", async () => {
+    // A team-owned design session. `local-user` is the team admin (its owner
+    // for administer purposes); `test-member` is a plain member — view access
+    // but no authority to revert.
+    await api.providers.db
+      .insert(teams)
+      .values({ id: "team_design", orgId: "local-org", name: "Design", createdAt: Date.now() })
+      .onConflictDoNothing();
+    await api.providers.db
+      .insert(teamMembers)
+      .values({ teamId: "team_design", userId: "local-user", role: "admin" })
+      .onConflictDoNothing();
+    await api.providers.db
+      .insert(teamMembers)
+      .values({ teamId: "team_design", userId: "test-member", role: "member" })
+      .onConflictDoNothing();
+
+    const createRes = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        workspace: join(workspaceRoot, "team-design"),
+        kind: "design",
+        template: "document",
+        teamId: "team_design",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const sessionId = ((await createRes.json()) as CreateSessionResponse).id;
+
+    // Write a second revision (via the tool seam) so there is a target to
+    // revert to.
+    const editRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/edit`, {
+      method: "POST",
+      headers: INTERNAL_HEADERS,
+      body: JSON.stringify({ content: editedDoc("v2"), summary: "second" }),
+    });
+    expect(editRes.status).toBe(200);
+
+    const MEMBER = { "x-valet-test-user-id": "test-member" };
+
+    // The member may VIEW the artifact (collaboration) ...
+    const view = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/artifact`, { headers: MEMBER });
+    expect(view.status).toBe(200);
+    const artifact = (await view.json()) as DesignArtifactResponse;
+    const vdid = /data-vdid="([0-9a-f_]+)"/.exec(artifact.content)?.[1] ?? "";
+    expect(vdid).not.toBe("");
+
+    // ... and may add a comment (collaboration stays view-gated) ...
+    const comment = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/comments`, {
+      method: "POST",
+      headers: { ...MEMBER, "content-type": "application/json" },
+      body: JSON.stringify({ vdid, body: "please tweak this" }),
+    });
+    expect(comment.status).toBe(201);
+
+    // ... but may NOT revert (an administrative mutation).
+    const revert = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/revert`, {
+      method: "POST",
+      headers: { ...MEMBER, "content-type": "application/json" },
+      body: JSON.stringify({ revision: "r-001" }),
+    });
+    expect(revert.status).toBe(403);
+    expect(((await revert.json()) as { error: string }).error).toContain("Ask the session owner");
+
+    // The internal-token path keeps full access to the same mutation.
+    const revertInternal = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/design/revert`, {
+      method: "POST",
+      headers: INTERNAL_HEADERS,
+      body: JSON.stringify({ revision: "r-001" }),
+    });
+    expect(revertInternal.status).toBe(200);
   });
 });
