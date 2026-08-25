@@ -116,6 +116,42 @@ describe('parseWorkflowFileValue', () => {
       expect(result.file.labeled).toBe(false);
       expect(result.file.name).toBe('Saved response');
     });
+
+    it('hands back a schedule, events and a description written without a valet key', () => {
+      // Neither producer writes these blocks, and a hand-edited file does.
+      // The caller lists what it does not create, and it can only list a
+      // block this parser hands it — dropped here, a nightly schedule
+      // imports as a workflow that never runs and says nothing.
+      const result = parseWorkflowFileValue(
+        {
+          name: 'Nightly triage',
+          description: 'Sweeps open issues.',
+          definition: definition(),
+          schedule: { cron: '0 3 * * *' },
+          events: [{ name: 'On push', eventKeys: ['github.push'] }],
+        },
+        'pasted.yaml',
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok || result.file.kind !== 'workflow') return;
+      expect(result.file.labeled).toBe(false);
+      expect(result.file.description).toBe('Sweeps open issues.');
+      expect(result.file.schedule?.cron).toBe('0 3 * * *');
+      expect(result.file.events?.[0]?.eventKeys).toEqual(['github.push']);
+    });
+
+    it('refuses a trigger block it cannot read, valet key or not', () => {
+      const result = parseWorkflowFileValue(
+        { definition: definition(), schedule: { every: 'night' } },
+        'pasted.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      expect(result.errors.join(' ')).toContain('"cron"');
+    });
   });
 
   it('refuses an unknown valet kind by name', () => {
@@ -246,6 +282,47 @@ describe('parseWorkflowFileValue', () => {
       expect(message).toContain('list');
     });
 
+    it('refuses a value it cannot match on, and names the shapes it reads', () => {
+      // Kept, a value of the wrong shape reaches the matcher as no value at
+      // all — and a filter with no value tests nothing, which widens the
+      // subscription that the entry was written to narrow.
+      const result = parseWorkflowFileValue(
+        withFilters([{ field: 'repo', op: 'eq', value: { name: 'acme/service' } }]),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      const message = result.errors.join(' ');
+      expect(message).toContain('a mapping');
+      expect(message).toContain('list of strings');
+    });
+
+    it('refuses a list of values that is not all strings', () => {
+      const result = parseWorkflowFileValue(
+        withFilters([{ field: 'repo', op: 'in', value: ['acme/service', 7] }]),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.errors.join(' ')).toContain('list of strings');
+    });
+
+    it('keeps a filter that names a trigger input instead of a value', () => {
+      const result = parseWorkflowFileValue(
+        withFilters([{ field: 'repo', op: 'eq', fromInput: 'repository' }]),
+        '.valet/workflows/push.yaml',
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok || result.file.kind !== 'workflow') return;
+      expect(result.file.events?.[0]?.filters).toEqual([
+        { field: 'repo', op: 'eq', fromInput: 'repository' },
+      ]);
+    });
+
     it('keeps a filter it can read whole', () => {
       const result = parseWorkflowFileValue(
         withFilters([{ field: 'repo', op: 'in', value: ['acme/service', 'acme/web'] }]),
@@ -257,6 +334,29 @@ describe('parseWorkflowFileValue', () => {
       expect(result.file.events?.[0]?.filters).toEqual([
         { field: 'repo', op: 'in', value: ['acme/service', 'acme/web'] },
       ]);
+    });
+  });
+
+  describe('a value the parser cannot read at all', () => {
+    it('names the empty list entry check when the validator dereferences one', () => {
+      // A YAML list item left empty writes `null` into `nodes`, and the
+      // validator reads `.type` off it. The message must not blame a YAML
+      // anchor for this: there is none, and the reader would look for one.
+      const result = parseWorkflowFileValue(
+        { valet: WORKFLOW_FILE_KIND, definition: { version: 'dag/v1', nodes: [null], edges: [] } },
+        '.valet/workflows/empty-item.yaml',
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe('invalid');
+      const message = result.errors.join(' ');
+      expect(message).toContain('.valet/workflows/empty-item.yaml');
+      // What is known: the throw. What to do: check both inputs that reach
+      // here, because nothing at this point can tell them apart.
+      expect(message).toContain("Cannot read properties of null");
+      expect(message).toContain('"nodes" and "edges" is a mapping and not empty');
+      expect(message).toContain('anchor that refers to itself');
     });
   });
 

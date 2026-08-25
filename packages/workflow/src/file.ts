@@ -164,17 +164,23 @@ export function parseWorkflowFileValue(
     return readWorkflowFileValue(value, path, env);
   } catch (err) {
     // Every branch below returns a result, and this catch is what makes that
-    // true of the FUNCTION rather than of its branches. A message builder
-    // reaches for `JSON.stringify` on a value the author wrote — the
-    // validator does it in most of its errors — and a YAML anchor that
-    // refers to itself makes that throw. Callers here show a result; one
-    // handed a throw has no message to put on screen.
-    const detail = err instanceof Error ? err.message : 'the parser could not read it';
+    // true of the FUNCTION rather than of its branches. Callers here show a
+    // result; one handed a throw has no message to put on screen.
+    //
+    // Two inputs reach it, and nothing here can tell them apart. The
+    // validator dereferences an entry it expected to be a mapping — a YAML
+    // list item left empty writes `null` into `nodes` — and it builds most
+    // of its messages with `JSON.stringify`, which throws on a value that
+    // refers to itself through an anchor. So the message reports the throw
+    // and names both checks, rather than naming one cause as if it were
+    // known.
+    const detail = err instanceof Error ? `: ${err.message}` : '';
     return {
       ok: false,
       code: 'invalid',
       errors: [
-        `${path} could not be read: ${detail}. Check the file for a YAML anchor that refers to itself.`,
+        `${path} could not be read${detail}.`,
+        `Check that every entry under "nodes" and "edges" is a mapping and not empty. Then check the file for a YAML anchor that refers to itself.`,
       ],
     };
   }
@@ -238,8 +244,14 @@ function readWorkflowFileValue(
 
 /**
  * The two shapes that predate the envelope: a bare definition, and
- * `{ name, definition }`. Neither carries a schedule or events — a file that
- * arms a trigger has always had to say `valet:` first.
+ * `{ name, definition }`. Neither producer writes a schedule, events or a
+ * description, but a file that carries one anyway is read here exactly as
+ * the labelled path reads it.
+ *
+ * A caller can only report a block this parser hands it: the import dialog
+ * lists what it does not create, and a block dropped here is a block that
+ * list cannot name. That is how a file declaring a nightly schedule imports
+ * as a workflow that never runs, with nothing on screen to say so.
  */
 function parseLegacyShape(
   value: Record<string, unknown>,
@@ -259,12 +271,15 @@ function parseLegacyShape(
   }
   const result = validateWorkflowDefinition(candidate, env);
   if (!result.ok) return { ok: false, code: 'invalid', errors: result.errors };
-  const name = typeof value.name === 'string' && value.name.trim() !== '' ? value.name.trim() : undefined;
+  const triggers = readTriggers(value, path);
+  if (!triggers.ok) return triggers.failure;
   const file: WorkflowFile = {
     kind: 'workflow',
     labeled: false,
     definition: candidate,
-    ...(name === undefined ? {} : { name }),
+    ...optionalString('name', value.name),
+    ...optionalString('description', value.description),
+    ...triggers.value,
   };
   return { ok: true, file };
 }
@@ -380,7 +395,8 @@ const FILTER_OPS: ReadonlyArray<WorkflowTemplateEventFilter['op']> = [
  * Which FIELDS an event key declares is still the host's answer and not this
  * module's: the event catalog owns that vocabulary and `validateSubscription`
  * checks it, so a second copy here would go stale as the catalog grows. What
- * is checked here is what this module owns — the shape, and the four ops.
+ * is checked here is what this module owns — the shape, the four ops, and
+ * the shape of the value an op compares against.
  */
 function readFilters(
   raw: unknown,
@@ -416,12 +432,21 @@ function readFilters(
       );
       return;
     }
+    // A value of the wrong shape fails the file for the same reason a bad op
+    // does. Kept, it would arrive at the matcher as no value at all, and a
+    // filter with no value tests nothing — the whole entry then widens the
+    // subscription instead of narrowing it.
+    const value = entry.value;
+    if (value !== undefined && typeof value !== 'string' && !isStringArray(value)) {
+      errors.push(
+        `${at} declares value: ${describe(value)}, which Valet cannot match on. Write a string, or a list of strings.`,
+      );
+      return;
+    }
     filters.push({
       field: entry.field.trim(),
       op: entry.op,
-      ...(typeof entry.value === 'string' || isStringArray(entry.value)
-        ? { value: entry.value }
-        : {}),
+      ...(typeof value === 'string' || isStringArray(value) ? { value } : {}),
       ...(typeof entry.fromInput === 'string' ? { fromInput: entry.fromInput } : {}),
     });
   });
