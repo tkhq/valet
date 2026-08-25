@@ -4,11 +4,15 @@
  * A list route that scopes to the nav's workspace switcher takes the owner
  * as one pair of query parameters. The pair is all-or-nothing: half of it
  * names no principal, so the route answers 400 and the message says what to
- * send. Copied from the identical reader in `routes/assistants.ts`, which
- * keeps its local copy, as does `routes/memory.ts` — the two differ in
- * whether they return or throw, and converting them changes error handling
- * in ten route bodies. New owner-scoped routers import this one instead of
- * adding a fourth copy, the same rule `_org-admin.ts` states.
+ * send. Extracted from `routes/assistants.ts`, which now imports it.
+ *
+ * Three more readers of this shape stay where they are, because each
+ * differs materially: `routes/memory.ts` throws instead of returning,
+ * `routes/skills.ts` returns a status with the error, and
+ * `routes/workflows.ts` returns a workflow owner ref rather than a
+ * principal. `routes/sessions.ts` reads the pair inline and admits only
+ * `user` and `team`. New owner-scoped routers import this one instead of
+ * adding another copy, the same rule `_org-admin.ts` states.
  *
  * The reader validates shape only. A route that must also authorize the
  * named owner does that itself, because the bar differs: the memory routes

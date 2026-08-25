@@ -33,6 +33,7 @@ import {
   toAssistantSummary,
 } from "../assistants/service.js";
 import { assistantOwner, canAdministerAssistantOwner, canViewAssistantOwner } from "../assistants/access.js";
+import { readOwnerFilter } from "./_owner-filter.js";
 import { listTeamsForUser } from "../services/teams.js";
 import type {
   AssistantOwner,
@@ -50,22 +51,6 @@ const OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
 
 function isOwnerType(value: string): value is AssistantOwner["type"] {
   return OWNER_TYPES.has(value);
-}
-
-/** The `?ownerType=&ownerId=` filter, or undefined when absent. Returns an
- * error string when one half is present and the other is not. */
-function readOwnerFilter(
-  ownerType: string | undefined,
-  ownerId: string | undefined,
-): { owner?: Principal; error?: string } {
-  if (ownerType === undefined && ownerId === undefined) return {};
-  if (ownerType === undefined || ownerId === undefined) {
-    return { error: "Filter by owner with both ownerType and ownerId, or send neither." };
-  }
-  if (!isOwnerType(ownerType)) {
-    return { error: "ownerType must be 'user', 'team' or 'org'." };
-  }
-  return { owner: { type: ownerType, id: ownerId } };
 }
 
 // ── List ──────────────────────────────────────────────────────────────────
