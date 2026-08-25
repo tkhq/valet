@@ -23,20 +23,34 @@ import type {
 } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
 
+/** Marks the key of a query that asks about ONE workspace and cannot name
+ * its owner yet. Any string works; this one is not a valid `ownerType`, so
+ * it can never collide with a real owner pair. */
+const UNRESOLVED_OWNER = "owner-unresolved";
+
 /** The workspace, as trailing key elements. Same shape as `qkMemory`'s:
  * trailing, so the bare prefix stays the key that invalidates every
  * workspace at once. An absent owner adds nothing, which is the key an
- * unscoped list already had. */
-function ownerKey(owner?: OwnerFilter): readonly string[] {
-  return owner ? [owner.ownerType, owner.ownerId] : [];
+ * unscoped list already had.
+ *
+ * `held` is the third state, and it is why this factory differs from
+ * `qkMemory`'s. A scoped list whose owner has not resolved sends no owner
+ * either, but it does NOT mean the unscoped list and must not read its
+ * cache entry: a warm org-wide answer would render under a "This
+ * workspace" label. The marker is trailing like an owner, so the bare
+ * prefix still invalidates it along with every workspace. */
+function ownerKey(owner: OwnerFilter | undefined, held: boolean): readonly string[] {
+  if (owner) return [owner.ownerType, owner.ownerId];
+  return held ? [UNRESOLVED_OWNER] : [];
 }
 
 export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
-  feed: (service?: string, key?: string, owner?: OwnerFilter) =>
-    ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner)] as const,
+  feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
+    ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  subscriptions: (owner?: OwnerFilter) => ["events", "subscriptions", ...ownerKey(owner)] as const,
+  subscriptions: (owner?: OwnerFilter, held = false) =>
+    ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
 
 export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogResponse>>) {
@@ -51,14 +65,17 @@ export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogRe
 
 /** `owner` narrows the feed to events delivered to that owner's
  * subscriptions. Undefined keeps the whole org's feed, which is what the
- * page's "All" state sends. */
+ * page's "All" state sends — unless the caller also disabled the query,
+ * which is how the page says "one workspace, owner still unknown". */
 export function useEvents(
   params?: { service?: string; key?: string },
   owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventsResponse>>,
 ) {
+  // Held for a missing owner, not unscoped on purpose — see `ownerKey`.
+  const held = owner === undefined && opts?.enabled === false;
   return useQuery<ListEventsResponse>({
-    queryKey: qkEvents.feed(params?.service, params?.key, owner),
+    queryKey: qkEvents.feed(params?.service, params?.key, owner, held),
     queryFn: () => api.listEvents(params, owner),
     // New events arrive from external webhooks at any time.
     refetchInterval: 30_000,
@@ -93,13 +110,17 @@ export function useRedeliverEvent(id: string) {
 
 /** `owner` scopes the list to one workspace — your own subscriptions, or one
  * team's — plus every org-owned subscription, which belongs to no single
- * workspace. Undefined lists every subscription in the org. */
+ * workspace. Undefined lists every subscription in the org, which is what
+ * `redeliver-button.tsx` asks for; an undefined owner on a DISABLED query
+ * is the held workspace list instead. */
 export function useEventSubscriptions(
   owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventSubscriptionsResponse>>,
 ) {
+  // Held for a missing owner, not unscoped on purpose — see `ownerKey`.
+  const held = owner === undefined && opts?.enabled === false;
   return useQuery<ListEventSubscriptionsResponse>({
-    queryKey: qkEvents.subscriptions(owner),
+    queryKey: qkEvents.subscriptions(owner, held),
     queryFn: () => api.listEventSubscriptions(owner),
     ...opts,
   });
