@@ -7,9 +7,10 @@
  * 403 (same "an owned row and a missing row are indistinguishable" rule as
  * `routes/workflows.ts`). Inside that org scope, the feed and the
  * subscriptions list both take an optional `?ownerType=&ownerId=` pair that
- * narrows to one workspace — the feed to that workspace alone, the
- * subscriptions list to that workspace plus the org's own rows. See the two
- * docstrings below. Subscription bodies are validated against the merged plugin
+ * narrows to one workspace — each of them to that workspace plus the org's
+ * own rows, so a subscription the list shows and an event that subscription
+ * received are never in different workspaces. See the two docstrings
+ * below. Subscription bodies are validated against the merged plugin
  * trigger catalog before any row is written — the ingest matcher
  * (`events/ingest.ts`) trusts the `event_keys`/`filters` jsonb shapes this
  * file writes.
@@ -276,6 +277,13 @@ eventsRouter.get("/events/catalog", (c) => {
  * deliveries at all matches no owner, which is correct: nobody's
  * subscription acted on it.
  *
+ * The owner predicate is the SAME union the subscriptions list uses: the
+ * named owner's rows, or the org's own. The two surfaces are read side by
+ * side — one tab lists the subscriptions, the other lists what they
+ * received — so a difference between them reads as a bug in the page. Drop
+ * the org branch here and an org-owned subscription is listed in a
+ * workspace whose feed hides every event it acted on.
+ *
  * The probe is cheap; the NUMBER of probes is not, because the `LIMIT` no
  * longer stops the scan early when nothing matches. The filtered query
  * therefore also carries the `OWNER_FEED_WINDOW_MS` lower bound — see that
@@ -314,8 +322,15 @@ eventsRouter.get("/events", async (c) => {
               // the subquery, so the join cannot reach a subscription row
               // from another org even if a delivery ever crossed one.
               eq(eventSubscriptions.orgId, user.orgId),
-              eq(eventSubscriptions.ownerType, owner.type),
-              eq(eventSubscriptions.ownerId, owner.id),
+              or(
+                and(
+                  eq(eventSubscriptions.ownerType, owner.type),
+                  eq(eventSubscriptions.ownerId, owner.id),
+                ),
+                // Org-owned subscriptions belong to every workspace, so
+                // the events they received do too.
+                eq(eventSubscriptions.ownerType, "org"),
+              ),
             ),
           ),
       ),

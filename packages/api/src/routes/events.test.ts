@@ -703,6 +703,49 @@ describe("GET /api/events", () => {
     expect(all.events.map((e) => e.id)).toEqual(["ev_mine", "ev_theirs", "ev_undelivered"]);
   });
 
+  // The subscriptions list returns org-owned rows in every workspace, so the
+  // feed beside it has to show what those rows received. A workspace that
+  // lists a subscription and hides its events contradicts the tab next to it.
+  it("with an owner, also returns events delivered to an ORG-owned subscription", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_org", "local-org", {
+      ownerType: "org",
+      ownerId: "local-org",
+    });
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { ownerId: "someone" });
+
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_org", receivedAt: now - 3_000 });
+    await seedEventRow(a, { id: "ev_theirs", receivedAt: now - 4_000 });
+    await a.providers.db.insert(eventDeliveries).values([
+      {
+        id: "del_org",
+        eventId: "ev_org",
+        subscriptionId: "sub_org",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+      {
+        id: "del_theirs",
+        eventId: "ev_theirs",
+        subscriptionId: "sub_colleague",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+    ]);
+
+    // The caller owns no subscription at all here: the org-owned row is the
+    // only reason this event joins their workspace.
+    const scoped = (await (
+      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
+    ).json()) as ListEventsResponse;
+    expect(scoped.events.map((e) => e.id)).toEqual(["ev_org"]);
+  });
+
   it("combines the owner filter with the service and key filters", async () => {
     const a = await boot();
     await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });

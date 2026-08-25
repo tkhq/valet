@@ -108,7 +108,9 @@ listed so the next pass starts here.
   owner. The page filters to the active workspace on first load instead:
   its scope control starts at "This workspace" and sends the switcher's
   owner, which narrows the feed to events delivered to that workspace's
-  subscriptions, and "All" drops the owner again. The choice lives in the
+  subscriptions and to the org's own, and "All" drops the owner again. The
+  two owner sets match on purpose: the subscriptions list carries the same
+  union, and the tabs are read side by side. The choice lives in the
   route's `?scope=` search param, because the two tabs unmount each other.
   The scoped feed also looks back 30 days only, which the page states; the
   owner filter rejects rows no index can pre-select, so without a bound one

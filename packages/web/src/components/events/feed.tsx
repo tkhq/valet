@@ -43,8 +43,9 @@ const SCOPE_OPTIONS = [
  * answerable from this page alone.
  *
  * The scope control decides which events the question is asked about. It
- * starts at "This workspace", the events that reached the active
- * workspace's own subscriptions. "All" restores the org-wide feed, and it
+ * starts at "This workspace", the events that reached the subscriptions
+ * the tab beside this one lists for that workspace — its own rows and the
+ * org's. "All" restores the org-wide feed, and it
  * must stay available: an event that matched nothing you own is precisely
  * the row you open when your subscription never fired.
  *
