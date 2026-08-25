@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags } from "../output.js";
-import { formatBytes, parseUploadArgs, prepareUploadFiles, shortSha256 } from "./upload.js";
+import { errorMessage, formatBytes, parseUploadArgs, prepareUploadFiles, shortSha256 } from "./upload.js";
 
 describe("upload command", () => {
   describe("parseUploadArgs", () => {
@@ -175,6 +175,20 @@ describe("upload command", () => {
     it("formats megabytes", () => {
       expect(formatBytes(5242880)).toBe("5 MB");
       expect(formatBytes(2621440)).toBe("2.5 MB");
+    });
+  });
+
+  describe("errorMessage", () => {
+    it("prefers the server corrective", () => {
+      expect(errorMessage(409, { error: "File already exists", corrective: "Retry with overwrite=true." })).toBe(
+        "Retry with overwrite=true.",
+      );
+    });
+
+    it("falls back to the error field, then the status", () => {
+      expect(errorMessage(422, { error: "bad zip" })).toBe("upload failed: bad zip");
+      expect(errorMessage(500, "not json")).toBe("upload failed: HTTP 500");
+      expect(errorMessage(500, undefined)).toBe("upload failed: HTTP 500");
     });
   });
 

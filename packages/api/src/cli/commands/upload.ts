@@ -15,7 +15,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { formatBytes } from "@valet/shared";
 import { InstanceClient } from "../client.js";
-import { ExitCode } from "../exit.js";
+import { ApiError, ExitCode } from "../exit.js";
 import { emitNdjson, parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession, type StreamSessionOpts } from "../stream.js";
@@ -32,7 +32,6 @@ import { consumeSend, outcomeToExit } from "./send.js";
 export interface UploadClient {
   uploadFiles(sessionId: string, files: UploadFileInfo[]): Promise<UploadResponse>;
   sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse>;
-  ensureOrchestrator(): Promise<{ sessionId: string }>;
 }
 
 /** Info about one file to upload. */
@@ -138,7 +137,7 @@ export async function prepareUploadFiles(
       throw new Error(`${p}: ${msg}`);
     }
     if (!stat.isFile()) {
-      throw new Error(`${p} is not a file`);
+      throw new Error(`${p} is not a file. Pass a regular file path, not a directory.`);
     }
     files.push({
       sourcePath: abs,
@@ -169,9 +168,10 @@ export function shortSha256(full: string): string {
 export function printUploadResult(file: UploadedFile): void {
   const sha = shortSha256(file.sha256);
   printLine(`  ${path.basename(file.path)} → ${file.path} (${formatBytes(file.bytes)}, sha256:${sha})`);
-  if (file.extracted) {
-    // Mirrors the server's extract root: <dest dir>/<zip name without .zip>/
-    printLine(`    extracted ${file.extracted.length} file${file.extracted.length === 1 ? "" : "s"} to ${file.path.replace(/\.zip$/i, "")}/`);
+  if (file.extracted && file.extractedTo) {
+    // The extract root is server-computed (`extractedTo`); printing it
+    // verbatim keeps the CLI correct when the server's naming rule changes.
+    printLine(`    extracted ${file.extracted.length} file${file.extracted.length === 1 ? "" : "s"} to ${file.extractedTo}`);
   }
 }
 
@@ -221,6 +221,18 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
       }
     }
   } catch (err) {
+    if (err instanceof ApiError) {
+      // Surface the server's corrective (errorMessage prefers it) instead
+      // of the generic "API request failed with status N".
+      let body: unknown;
+      try {
+        body = JSON.parse(err.body);
+      } catch {
+        body = undefined;
+      }
+      printErr(`valet upload: ${errorMessage(err.status, body)}`);
+      return ExitCode.TurnError;
+    }
     const message = err instanceof Error ? err.message : String(err);
     printErr(`valet upload: ${message}`);
     return ExitCode.TurnError;
@@ -311,9 +323,5 @@ class RealUploadClient implements UploadClient {
 
   async sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse> {
     return this.instanceClient.sendPrompt(id, body);
-  }
-
-  async ensureOrchestrator() {
-    return this.instanceClient.ensureOrchestrator();
   }
 }

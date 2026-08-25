@@ -213,7 +213,7 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
     t.unref();
   });
   const follow = consumeSend(
-    { client: deps.client, stream: deps.stream, url: deps.url, apiKey: deps.apiKey },
+    { stream: deps.stream, url: deps.url, apiKey: deps.apiKey },
     { sessionId, messageId: sentMessageId, threadId: sent.threadId, json: flags.json },
   );
   return Promise.race([follow, timeout]);
