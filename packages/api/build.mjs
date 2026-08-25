@@ -23,6 +23,23 @@ const external = [
   // Workers runtime; it's a virtual module that only exists on CF and is
   // guarded behind a runtime check on node.
   "cloudflare:sockets",
+  // @firecrawl/pdf-inspector and its platform-specific siblings ship native
+  // .node binaries that cannot be bundled by esbuild. The main package
+  // dispatches at runtime to the platform-suffixed variant; both the main
+  // and each platform sibling must be externalized. The import is LAZY
+  // (services/pdf-extract.ts): a bundle run without node_modules still
+  // serves — only PDF text extraction is unavailable.
+  "@firecrawl/pdf-inspector",
+  "@firecrawl/pdf-inspector-linux-x64-gnu",
+  "@firecrawl/pdf-inspector-linux-x64-musl",
+  "@firecrawl/pdf-inspector-linux-arm64-gnu",
+  "@firecrawl/pdf-inspector-linux-arm64-musl",
+  "@firecrawl/pdf-inspector-darwin-x64",
+  "@firecrawl/pdf-inspector-darwin-arm64",
+  "@firecrawl/pdf-inspector-win32-x64-msvc",
+  // yauzl is deliberately NOT external: it is pure JS and statically
+  // imported on the serve path — externalizing it would make the bundle
+  // require node_modules at load time.
 ];
 
 await build({

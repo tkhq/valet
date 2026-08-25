@@ -114,7 +114,7 @@ interface ConsumeCtx {
  * close or grace expiry) — turns are sequential per thread, so a turn_end on
  * our thread does mean our turn ended.
  */
-export async function consumeSend(deps: SendDeps, ctx: ConsumeCtx): Promise<number> {
+export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCtx): Promise<number> {
   const stream = deps.stream({ url: deps.url, apiKey: deps.apiKey, sessionId: ctx.sessionId });
   const graceMs = ctx.settleGraceMs ?? 3_000;
   const iter = stream[Symbol.asyncIterator]();

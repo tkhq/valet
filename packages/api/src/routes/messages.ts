@@ -30,6 +30,7 @@ import type {
   MessagePart,
   MessageRole,
   PatchThreadRequest,
+  PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
   SendPromptRequest,
@@ -43,6 +44,11 @@ import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import type { Providers } from "../providers/types.js";
 import { canViewSession } from "../services/session-access.js";
+import {
+  getAttachmentRefStore,
+  UnknownAttachmentError,
+  type AttachmentInfo,
+} from "../services/attachment-refs.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -54,7 +60,7 @@ export const messagesRouter = new Hono<AppEnv>();
  * model change — in `routes/sessions.ts`) are NOT widened by this; talking
  * to a team's orchestrator is not the same decision as reconfiguring it.
  */
-async function loadOwnedSession(c: Context<AppEnv>) {
+export async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
@@ -100,31 +106,47 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
  * accepts today) or `{ data: Uint8Array }` (some day, when a plugin drops a
  * raw buffer in). The wire ships one canonical string per attachment; if
  * neither field is set, drop the entry rather than emit an empty img.
+ *
+ * File attachments (type: "file") are projected as `PromptFileAttachment`
+ * carrying the absolute sandbox path, size, hash, and optional markdown sidecar.
  */
 function projectAttachments(
   attachments: NonNullable<Extract<SessionEntry, { type: "message" }>["attachments"]> | undefined,
-): PromptImageAttachment[] {
+): Array<PromptImageAttachment | PromptFileAttachment> {
   if (!attachments || attachments.length === 0) return [];
-  const out: PromptImageAttachment[] = [];
+  const out: Array<PromptImageAttachment | PromptFileAttachment> = [];
   for (const att of attachments) {
-    if (att.type !== "image") continue;
-    let url: string | undefined;
-    if (typeof att.url === "string" && att.url.startsWith("data:")) {
-      url = att.url;
-    } else if (att.data) {
-      url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
-    } else if (typeof att.url === "string") {
-      // Non-data URL (e.g. an http url) is passed through as-is; harmless
-      // if the client happens to already resolve it.
-      url = att.url;
+    if (att.type === "image") {
+      let url: string | undefined;
+      if (typeof att.url === "string" && att.url.startsWith("data:")) {
+        url = att.url;
+      } else if (att.data) {
+        url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
+      } else if (typeof att.url === "string") {
+        // Non-data URL (e.g. an http url) is passed through as-is; harmless
+        // if the client happens to already resolve it.
+        url = att.url;
+      }
+      if (!url) continue;
+      out.push({
+        kind: "image",
+        url,
+        mimeType: att.mimeType,
+        name: att.name ?? "image",
+      });
+    } else if (att.type === "file") {
+      out.push({
+        kind: "file",
+        path: att.path,
+        bytes: att.bytes,
+        sha256: att.sha256,
+        mimeType: att.mimeType,
+        markdownPath: att.markdownPath,
+        extractedTo: att.extractedTo,
+        extractedFiles: att.extractedFiles,
+        name: att.name,
+      });
     }
-    if (!url) continue;
-    out.push({
-      kind: "image",
-      url,
-      mimeType: att.mimeType,
-      name: att.name ?? "image",
-    });
   }
   return out;
 }
@@ -408,6 +430,7 @@ export async function submitSessionPrompt(
   text: string,
   threadId?: string,
   attachments?: SendPromptRequest["attachments"],
+  fileRefs?: SendPromptRequest["fileRefs"],
 ): Promise<SendPromptResponse | null> {
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -419,6 +442,26 @@ export async function submitSessionPrompt(
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+
+  // Resolve file attachment refs. Consumption is atomic for the whole
+  // batch: the loop is synchronous, so two concurrent submits can never
+  // both take the same ref (single-use holds under races). A bad ref in
+  // the batch — or any failure before the prompt is queued — restores
+  // every ref this request took, so the good refs survive for a retry.
+  const attachmentRefStore = getAttachmentRefStore();
+  const resolvedFileAttachments: AttachmentInfo[] = [];
+
+  // The same ref listed twice in one request attaches its file once.
+  const uniqueRefs = [...new Set((fileRefs ?? []).map((r) => r.ref))];
+  for (const ref of uniqueRefs) {
+    const info = attachmentRefStore.consume(row.id, ref);
+    if (!info) {
+      // Ref not found, expired, already used, or wrong session.
+      attachmentRefStore.restore(resolvedFileAttachments);
+      throw new UnknownAttachmentError(ref);
+    }
+    resolvedFileAttachments.push(info);
+  }
 
   // Resolve "/"-text against the registry BEFORE choosing a path. Every
   // path targets the REQUESTED thread — never silently rerouted:
@@ -433,7 +476,10 @@ export async function submitSessionPrompt(
   // Build the prompt content once per text variant: plain text, or text +
   // attachments. The expand path swaps only the text; the attachment
   // mapping must stay identical on both paths.
-  const mappedAttachments =
+  //
+  // Image attachments map to the existing shape; file attachments add a
+  // system-authored note and persist on MessageEntry.attachments.
+  const imageAttachments =
     attachments && attachments.length > 0
       ? attachments.map((att) => ({
           type: "image" as const,
@@ -442,12 +488,46 @@ export async function submitSessionPrompt(
           name: att.name,
         }))
       : undefined;
-  const withAttachments = (t: string) => (mappedAttachments ? { text: t, attachments: mappedAttachments } : t);
 
-  const receipt =
-    outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(withAttachments(text), { threadId: thread.id })
-      : await thread.submitPrompt(withAttachments(outcome?.kind === "expand" ? outcome.text : text), {});
+  // Build final attachment array: images + files
+  const allAttachments = [
+    ...(imageAttachments ?? []),
+    ...resolvedFileAttachments.map((info) => ({
+      type: "file" as const,
+      path: info.path,
+      bytes: info.bytes,
+      sha256: info.sha256,
+      mimeType: info.mimeType ?? "application/octet-stream",
+      markdownPath: info.markdownPath,
+      extractedTo: info.extractedTo,
+      extractedFiles: info.extractedFiles,
+      name: info.name,
+    })),
+  ];
+
+  // The file-attachment note is NOT baked into the prompt text here: the
+  // engine renders it at transcript-build time from the persisted
+  // MessageEntry.attachments (see `userContentBlocks` in the engine), so
+  // the persisted user text stays clean and slash-command dispatch below
+  // still sees text that starts with "/".
+  const promptText = outcome?.kind === "expand" ? outcome.text : text;
+
+  const withAttachments = (t: string) =>
+    allAttachments.length > 0 ? { text: t, attachments: allAttachments } : t;
+
+  // A submit failure hands the consumed refs back so a retry can resend
+  // them. Once the prompt is queued the refs stay consumed — the
+  // attachments are already part of the persisted prompt.
+  let receipt;
+  try {
+    receipt =
+      outcome && outcome.kind === "execute"
+        ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
+        : await thread.submitPrompt(withAttachments(promptText), {});
+  } catch (err) {
+    attachmentRefStore.restore(resolvedFileAttachments);
+    throw err;
+  }
 
   await db
     .update(agentSessions)
@@ -487,10 +567,41 @@ messagesRouter.post("/:id/messages", async (c) => {
       );
     }
   }
+  if (body.fileRefs !== undefined) {
+    const valid =
+      Array.isArray(body.fileRefs) &&
+      body.fileRefs.every((a) => a !== null && typeof a === "object" && typeof a.ref === "string");
+    if (!valid) {
+      return c.json(
+        { error: "fileRefs must be an array of { ref } objects. Re-upload the files and retry." },
+        400,
+      );
+    }
+  }
 
-  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId, body.attachments);
-  if (!resp) return c.json({ error: "thread not found" }, 404);
-  return c.json(resp, 202);
+  try {
+    const resp = await submitSessionPrompt(
+      c.var.providers,
+      row,
+      body.text,
+      body.threadId,
+      body.attachments,
+      body.fileRefs,
+    );
+    if (!resp) return c.json({ error: "thread not found" }, 404);
+    return c.json(resp, 202);
+  } catch (err) {
+    if (err instanceof UnknownAttachmentError) {
+      return c.json(
+        {
+          error: err.message,
+          corrective: "Re-upload the file and retry.",
+        },
+        400,
+      );
+    }
+    throw err;
+  }
 });
 
 // ── Thread abort ──────────────────────────────────────────────────────────

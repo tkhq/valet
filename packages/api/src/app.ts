@@ -50,6 +50,7 @@ import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
 import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
@@ -231,8 +232,9 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
 
   app.route("/api/sessions", sessionsRouter);
-  // Messages + threads share /api/sessions/:id/* — mounted under same prefix.
+  // Messages + threads + file uploads share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
+  app.route("/api/sessions", fileUploadRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);

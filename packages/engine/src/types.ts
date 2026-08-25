@@ -254,7 +254,27 @@ export type PromptContent =
 
 export type PromptAttachment =
   | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
-  | { type: "file"; url?: string; data?: Uint8Array; mimeType: string; name: string }
+  | {
+      /**
+       * A file attachment. Two producer shapes share this variant:
+       * - Channel media (`data` + `mimeType`): raw bytes fetched from a
+       *   channel transport.
+       * - Sandbox files (`path` + `bytes` + `sha256`): a file that already
+       *   lives in the session sandbox (upload subsystem). These persist as
+       *   the `type: "file"` variant of `MessageEntry.attachments`.
+       */
+      type: "file";
+      url?: string;
+      data?: Uint8Array;
+      mimeType?: string;
+      path?: string; // absolute path inside the sandbox
+      bytes?: number;
+      sha256?: string;
+      markdownPath?: string; // for PDFs with a text sidecar
+      extractedTo?: string; // extract root for a zip that was extracted
+      extractedFiles?: string[]; // full listing of extracted files
+      name: string;
+    }
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
@@ -363,10 +383,24 @@ export interface MessageEntry extends BaseEntry {
   /** Present only when the model is in pi-ai's pricing registry; unpriced turns omit. */
   cost?: MessageCost;
   /**
-   * Image attachments on a user message. Only present on user entries with
-   * attached images; never on assistant, tool, or system entries.
+   * Attachments on a user message (images or files). Only present on user
+   * entries with attached content; never on assistant, tool, or system entries.
+   * File attachments carry sandbox paths; image attachments carry URLs or data.
    */
-  attachments?: Array<{ type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }>;
+  attachments?: Array<
+    | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
+    | {
+        type: "file";
+        path: string; // absolute path inside the sandbox
+        bytes: number;
+        sha256: string;
+        mimeType?: string;
+        markdownPath?: string; // for PDFs with a text sidecar
+        extractedTo?: string; // extract root for a zip that was extracted (e.g. "/workspace/uploads/data/")
+        extractedFiles?: string[]; // full listing of extracted files (may be truncated by producer)
+        name: string; // display name (basename of path)
+      }
+  >;
   /**
    * Present when this user entry originated from a `SignalContent` prompt.
    * `content` holds the raw (unescaped) body; rendering into LLM context

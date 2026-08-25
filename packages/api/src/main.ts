@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { createApp, type AuthWiring } from "./app.js";
 import { selectServerAdapter } from "./server-adapter.js";
 import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
+import { getAttachmentRefStore } from "./services/attachment-refs.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
@@ -468,6 +469,10 @@ const webDistDir = webDistPath();
 // (`Bun.serve` + `hono/bun`) inside a `bun --compile` binary. See
 // server-adapter.ts.
 const adapter = await selectServerAdapter();
+// Attachment ref store initialization: start the TTL sweep that cleans up
+// expired refs every 60 seconds. The interval is `.unref()`'d inside.
+getAttachmentRefStore().startSweep();
+
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
 const { startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);

@@ -45,6 +45,9 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.0
         version: 0.5.4
+      '@firecrawl/pdf-inspector':
+        specifier: ^1.17.0
+        version: 1.17.0
       '@hono/node-server':
         specifier: ^1.13.0
         version: 1.19.14(hono@4.11.4)
@@ -195,6 +198,9 @@ importers:
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
+      yauzl:
+        specifier: ^3.4.0
+        version: 3.4.0
     devDependencies:
       '@opentelemetry/context-async-hooks':
         specifier: ^2.10.0
@@ -211,6 +217,9 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+      '@types/yauzl':
+        specifier: ^3.4.0
+        version: 3.4.0
       drizzle-kit:
         specifier: ^0.31.9
         version: 0.31.9
@@ -347,6 +356,9 @@ importers:
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       typebox:
         specifier: ^1.1.24
         version: 1.1.37
@@ -1047,6 +1059,9 @@ importers:
       '@valet/api':
         specifier: workspace:*
         version: link:../api
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@valet/workflow':
         specifier: workspace:*
         version: link:../workflow
@@ -2509,6 +2524,50 @@ packages:
   '@fastify/busboy@2.1.1':
     resolution: {integrity: sha512-vBZP4NlzfOlerQTnba4aqZoMhE/a9HY7HRqoOPaETQcSQuWEIyZMHGfVu6w9wGtGK5fED5qRs2DteVCjOH60sA==}
     engines: {node: '>=14'}
+
+  '@firecrawl/pdf-inspector-darwin-arm64@1.17.0':
+    resolution: {integrity: sha512-1Bbri4vHGAmsCot/wHHku9BiXO1DQMy3N2aSEK4vDpWrkV/n7hyuSt/0ErE1k/3952/Ng4Z7Dxrw5gsYFxDXAw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@firecrawl/pdf-inspector-linux-arm64-gnu@1.17.0':
+    resolution: {integrity: sha512-ssduGacOBq1MoZJANAovcb6wLQFqnIx7bvnkZ64ZgUxK6tXPwZoW0JWVb2EKjB/EnHNrEplAGs/GNE36Hl68Vw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@firecrawl/pdf-inspector-linux-arm64-musl@1.17.0':
+    resolution: {integrity: sha512-bR/crKWcJZWT7bZfMC9+GWEWrbfrE8m2x3azMUUAFWwpRChNJzHCMQeat8X6/JHilWJKMABV2aghwilgTU1Gqw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@firecrawl/pdf-inspector-linux-x64-gnu@1.17.0':
+    resolution: {integrity: sha512-S38w/sigwvTPk57hGBPjYyogPdmHvUCdsi4OU6xzOo3pyJVjvXO7lCpywU1QhzDH1l5a3weCzgK3+zZPiIb3kQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@firecrawl/pdf-inspector-linux-x64-musl@1.17.0':
+    resolution: {integrity: sha512-Ow1zQgS0vroLXxXdvDq4KMXhqE5n9TtqnQ8O2SQxTqi/o8WEzDdFAylGQ95WMZg/Nbddyi89eEFTpOdfn1P7nA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@firecrawl/pdf-inspector-win32-x64-msvc@1.17.0':
+    resolution: {integrity: sha512-P4Z9s34DHoG6g/b9zcvmCGhg1RB7yilLRo1+p1GVSW9RBh+IN4ZWqZpgBDErcQ0eHjPKw0spzZ9mGex8tHewKA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  '@firecrawl/pdf-inspector@1.17.0':
+    resolution: {integrity: sha512-qSXKbJ6s3psJSjwFopssxUzUfpdwwTJ0f0IFj8xqzF/ZeO4dDTpZG0mpo+D8iLlfH+ks3CEIC72dedzevnoohQ==}
+    hasBin: true
 
   '@floating-ui/core@1.7.3':
     resolution: {integrity: sha512-sGnvb5dmrJaKEZ+LDIpguvdX3bDlEllmv4/ClQ9awcmCZrlx5jQyyMWFM5kBI+EyNOCDDiKk8il0zeuX3Zlg/w==}
@@ -4270,6 +4329,9 @@ packages:
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
+
+  '@types/yauzl@3.4.0':
+    resolution: {integrity: sha512-NRPn5w6h8dhcnmx3YIRQcqMywY/+nND/uOkJessedcrowO3C0AssHp3tMJpxKAwOhFOo0OV1y9VtsC5hbKKBAw==}
 
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
@@ -6271,6 +6333,9 @@ packages:
     resolution: {integrity: sha512-//nshmD55c46FuFw26xV/xFAaB5HF9Xdap7HJBBnrKdAd6/GxDBaNA1870O79+9ueg61cZLSVc+OaFlfmObYVQ==}
     engines: {node: '>= 14.16'}
 
+  pend@1.2.0:
+    resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
+
   pg-cloudflare@1.4.0:
     resolution: {integrity: sha512-Vo7z/6rrQYxpNRylp4Tlob2elzbh+N/MOQbxFVWCxS7oEx6jF53GTJFxK2WWpKuBRkmiin4Mt+xofFDjx09R0A==}
 
@@ -7430,6 +7495,10 @@ packages:
     resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
     engines: {node: '>= 14.6'}
     hasBin: true
+
+  yauzl@3.4.0:
+    resolution: {integrity: sha512-jIH9yLR9wqr0wOS0TpBvo/g/2UgZH5qePVbjgRliiF0BYvOZyaBknKsF+x9Iht0O6sqgnB93rCICdOZFecJuDw==}
+    engines: {node: '>=12'}
 
   yocto-queue@1.2.2:
     resolution: {integrity: sha512-4LCcse/U2MHZ63HAJVE+v71o7yOdIe4cZ70Wpf8D/IyjDKYQLV5GD46B+hSTjJsvV5PztjvHoU580EftxjDZFQ==}
@@ -8629,6 +8698,33 @@ snapshots:
     optional: true
 
   '@fastify/busboy@2.1.1': {}
+
+  '@firecrawl/pdf-inspector-darwin-arm64@1.17.0':
+    optional: true
+
+  '@firecrawl/pdf-inspector-linux-arm64-gnu@1.17.0':
+    optional: true
+
+  '@firecrawl/pdf-inspector-linux-arm64-musl@1.17.0':
+    optional: true
+
+  '@firecrawl/pdf-inspector-linux-x64-gnu@1.17.0':
+    optional: true
+
+  '@firecrawl/pdf-inspector-linux-x64-musl@1.17.0':
+    optional: true
+
+  '@firecrawl/pdf-inspector-win32-x64-msvc@1.17.0':
+    optional: true
+
+  '@firecrawl/pdf-inspector@1.17.0':
+    optionalDependencies:
+      '@firecrawl/pdf-inspector-darwin-arm64': 1.17.0
+      '@firecrawl/pdf-inspector-linux-arm64-gnu': 1.17.0
+      '@firecrawl/pdf-inspector-linux-arm64-musl': 1.17.0
+      '@firecrawl/pdf-inspector-linux-x64-gnu': 1.17.0
+      '@firecrawl/pdf-inspector-linux-x64-musl': 1.17.0
+      '@firecrawl/pdf-inspector-win32-x64-msvc': 1.17.0
 
   '@floating-ui/core@1.7.3':
     dependencies:
@@ -10547,6 +10643,10 @@ snapshots:
   '@types/use-sync-external-store@0.0.6': {}
 
   '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 22.20.1
+
+  '@types/yauzl@3.4.0':
     dependencies:
       '@types/node': 22.20.1
 
@@ -12828,6 +12928,8 @@ snapshots:
 
   pathval@2.0.1: {}
 
+  pend@1.2.0: {}
+
   pg-cloudflare@1.4.0:
     optional: true
 
@@ -14316,6 +14418,10 @@ snapshots:
   yallist@3.1.1: {}
 
   yaml@2.9.0: {}
+
+  yauzl@3.4.0:
+    dependencies:
+      pend: 1.2.0
 
   yocto-queue@1.2.2: {}
 
