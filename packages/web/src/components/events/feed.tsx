@@ -49,6 +49,11 @@ export function EventFeed() {
   const eventsQ = useEvents(
     { service: service || undefined, key: key || undefined },
     scope === "workspace" ? owner : undefined,
+    // `useListOwner` answers undefined while the caller's identity loads,
+    // and an owner-less request IS the org-wide feed. A control that says
+    // "This workspace" must not show the org's events for that one frame,
+    // so hold the query until the owner resolves.
+    { enabled: scope === "all" || owner !== undefined },
   );
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -106,7 +111,9 @@ export function EventFeed() {
         </Button>
       </div>
 
-      {eventsQ.isLoading && <LoadingRow label="Loading events…" />}
+      {/* `isPending`, not `isLoading`: the query is held (not fetching)
+          while the owner resolves, and a held feed is still loading. */}
+      {eventsQ.isPending && <LoadingRow label="Loading events…" />}
       {eventsQ.error != null && (
         <ErrorRow>Failed to load events. Press refresh to try again.</ErrorRow>
       )}

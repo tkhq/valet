@@ -51,12 +51,15 @@ const eventsData = { events: [] };
 let subscriptionsOwner: OwnerFilter | undefined;
 let feedOwner: OwnerFilter | undefined;
 let feedCalls = 0;
+/** Whether the feed query was allowed to run on the last render. */
+let feedEnabled: boolean | undefined;
 
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
-  useEvents: (_params: unknown, owner?: OwnerFilter) => {
+  useEvents: (_params: unknown, owner?: OwnerFilter, opts?: { enabled?: boolean }) => {
     feedOwner = owner;
     feedCalls += 1;
+    feedEnabled = opts?.enabled;
     return { data: eventsData, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
   },
   useEventSubscriptions: (owner?: OwnerFilter) => {
@@ -72,8 +75,15 @@ vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: { workflows: [] }, isLoading: false, error: null }),
 }));
 
+// The caller's identity, mutable per case: undefined is the frame before
+// `useMe` lands, which is what the feed's scope gate has to survive.
+let meId: string | undefined = "u1";
 vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
+  useMe: () => ({
+    data: meId === undefined ? undefined : { id: meId, orgRole: "member" },
+    isLoading: meId === undefined,
+    error: null,
+  }),
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
 }));
@@ -104,6 +114,7 @@ beforeEach(() => {
 
 afterEach(() => {
   scopeTeamId = undefined;
+  meId = "u1";
 });
 
 describe("SubscriptionsPanel", () => {
@@ -132,7 +143,17 @@ describe("EventFeed scope control", () => {
     render(<EventFeed />);
     expect(feedCalls).toBeGreaterThan(0);
     expect(feedOwner).toEqual({ ownerType: "user", ownerId: "u1" });
+    expect(feedEnabled).toBe(true);
     expect(screen.getByRole("button", { name: "Scope: This workspace" })).toBeTruthy();
+  });
+
+  it("holds the workspace-scoped query until the owner resolves", () => {
+    meId = undefined;
+    render(<EventFeed />);
+    // An owner-less request is the org-wide feed, so a control that reads
+    // "This workspace" must ask for nothing until the owner is known.
+    expect(feedOwner).toBeUndefined();
+    expect(feedEnabled).toBe(false);
   });
 
   it("drops the owner when the reader selects All", async () => {
