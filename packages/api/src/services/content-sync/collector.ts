@@ -108,6 +108,11 @@ export interface CollectorReconcileResult {
   warnings: string[];
 }
 
+/** What one pass needs to write its message about the REPOSITORY. The two
+ * counts are THIS pass's own, from the `CollectorReconcileResult` it
+ * returned, and never the sweep's total — otherwise a sync that deleted one
+ * workflow would tell the reader it deleted one skill. Both read zero and
+ * empty for a poll that stopped at a compare and reconciled nothing. */
 export interface CollectorNoticeContext {
   source: ContentSourceRow;
   discovery: ContentDiscoveryMode;

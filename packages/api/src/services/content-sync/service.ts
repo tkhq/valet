@@ -142,6 +142,7 @@ import {
   contentManifestHash,
   DISCOVERY_RULES_VERSION,
   type CollectorPass,
+  type CollectorReconcileResult,
   type ContentCollector,
   type ContentDiscoveryMode,
 } from "./collector.js";
@@ -259,6 +260,25 @@ interface SyncScan {
   passes: CollectorPass[];
   discovery: ContentDiscoveryMode;
 }
+
+/** One pass and what its OWN reconcile wrote. The two travel together so
+ * that one collector's counts cannot reach another collector's notice: a
+ * sweep-wide `deleted` would report the workflows a sync removed as skills
+ * the sync removed. */
+interface AppliedPass {
+  pass: CollectorPass;
+  result: CollectorReconcileResult;
+}
+
+/** What a pass wrote when no reconcile ran, for a poll that stopped at a
+ * compare. Read-only: a `notice` reads this and never writes it. */
+const NOTHING_RECONCILED: CollectorReconcileResult = {
+  imported: 0,
+  updated: 0,
+  deleted: 0,
+  keptStale: [],
+  warnings: [],
+};
 
 export class ContentSyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -392,16 +412,21 @@ export class ContentSyncService {
         excluded: totalExcluded(scan),
         discovery: scan.discovery,
         warnings: scan.passes.flatMap((pass) => pass.warnings),
-        notice: noticeOf(scan, { source, deleted: 0, keptStale: [] }),
+        notice: noticeOf(
+          scan.discovery,
+          source,
+          scan.passes.map((pass) => ({ pass, result: NOTHING_RECONCILED })),
+        ),
       });
     }
 
     const read = await this.readContents(source, head.sha, reader, scan);
     const applied = await this.reconcile(source, scan, read.text);
+    const totals = totalOf(applied);
     return this.recordSuccess(source, {
       headSha: head.sha,
       manifestHash,
-      changed: applied.imported + applied.updated + applied.deleted > 0,
+      changed: totals.imported + totals.updated + totals.deleted > 0,
       // A file discovery found and the sync could not read leaves the
       // manifest hash describing files nobody read. Recording it would make
       // compare 2 skip the whole commit forever, so this sync is incomplete
@@ -410,15 +435,15 @@ export class ContentSyncService {
       discovered: totalDiscovered(scan),
       excluded: totalExcluded(scan),
       discovery: scan.discovery,
-      imported: applied.imported,
-      updated: applied.updated,
-      deleted: applied.deleted,
-      warnings: [...scan.passes.flatMap((pass) => pass.warnings), ...read.warnings, ...applied.warnings],
-      notice: noticeOf(scan, {
-        source,
-        deleted: applied.deleted,
-        keptStale: applied.keptStale,
-      }),
+      imported: totals.imported,
+      updated: totals.updated,
+      deleted: totals.deleted,
+      warnings: [
+        ...scan.passes.flatMap((pass) => pass.warnings),
+        ...read.warnings,
+        ...applied.flatMap(({ result }) => result.warnings),
+      ],
+      notice: noticeOf(scan.discovery, source, applied),
     });
   }
 
@@ -536,23 +561,15 @@ export class ContentSyncService {
     }
   }
 
-  /** Runs every pass's reconcile and adds up what they wrote. */
+  /** Runs every pass's reconcile, keeping each result WITH the pass that
+   * produced it. The row's counts are the sum; a pass's own notice reads its
+   * own result and never the sum. */
   private async reconcile(
     source: ContentSourceRow,
     scan: SyncScan,
     text: Map<string, string>,
-  ): Promise<{
-    imported: number;
-    updated: number;
-    deleted: number;
-    keptStale: string[];
-    warnings: string[];
-  }> {
-    let imported = 0;
-    let updated = 0;
-    let deleted = 0;
-    const keptStale: string[] = [];
-    const warnings: string[] = [];
+  ): Promise<AppliedPass[]> {
+    const applied: AppliedPass[] = [];
     for (const pass of scan.passes) {
       const result = await pass.reconcile({
         db: this.deps.db,
@@ -561,13 +578,9 @@ export class ContentSyncService {
         discovery: scan.discovery,
         now: this.now,
       });
-      imported += result.imported;
-      updated += result.updated;
-      deleted += result.deleted;
-      keptStale.push(...result.keptStale);
-      warnings.push(...result.warnings);
+      applied.push({ pass, result });
     }
-    return { imported, updated, deleted, keptStale, warnings };
+    return applied;
   }
 
   private async recordSuccess(
@@ -698,14 +711,36 @@ function totalExcluded(scan: SyncScan): number {
   return scan.passes.reduce((sum, pass) => sum + pass.excluded, 0);
 }
 
-/** Every collector's message about the repository, in collector order. Null
- * when no collector has anything to say. */
+/** What every pass wrote, added up. This is the row's report; it is not
+ * what any one pass's notice is allowed to read. */
+function totalOf(applied: AppliedPass[]): {
+  imported: number;
+  updated: number;
+  deleted: number;
+} {
+  return applied.reduce(
+    (sum, { result }) => ({
+      imported: sum.imported + result.imported,
+      updated: sum.updated + result.updated,
+      deleted: sum.deleted + result.deleted,
+    }),
+    { imported: 0, updated: 0, deleted: 0 },
+  );
+}
+
+/** Every collector's message about the repository, in collector order. Each
+ * pass is handed its OWN reconcile result: a message that named the sweep's
+ * total would report one kind's deletions as another kind's. Null when no
+ * collector has anything to say. */
 function noticeOf(
-  scan: SyncScan,
-  ctx: { source: ContentSourceRow; deleted: number; keptStale: string[] },
+  discovery: ContentDiscoveryMode,
+  source: ContentSourceRow,
+  applied: AppliedPass[],
 ): string | null {
-  const lines = scan.passes
-    .map((pass) => pass.notice({ ...ctx, discovery: scan.discovery }))
+  const lines = applied
+    .map(({ pass, result }) =>
+      pass.notice({ source, discovery, deleted: result.deleted, keptStale: result.keptStale }),
+    )
     .filter((line): line is string => line !== null);
   return lines.length === 0 ? null : lines.join("\n");
 }

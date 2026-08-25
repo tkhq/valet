@@ -38,6 +38,7 @@ import { MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
 import { DISCOVERY_RULES_VERSION } from "./collector.js";
 import type {
   CollectorDiscoverContext,
+  CollectorNoticeContext,
   CollectorPass,
   CollectorReconcileContext,
   ContentCollector,
@@ -1648,12 +1649,17 @@ Read the reference.
       readonly kind = "workflows" as const;
       /** One entry per reconcile call, holding what `readContents` merged. */
       readonly handed: Array<Map<string, string>> = [];
+      /** What this collector's next reconcile reports it removed and kept.
+       * A test sets it to prove that these numbers reach THIS collector's
+       * notice and no other's. */
+      deleted = 0;
+      keptStale: string[] = [];
 
       discover({ entries }: CollectorDiscoverContext): CollectorPass {
         const found = entries
           .filter((entry) => entry.path.endsWith(".txt"))
           .map((entry) => ({ name: entry.path, path: entry.path, blobSha: entry.sha }));
-        const handed = this.handed;
+        const collector = this;
         return {
           kind: this.kind,
           readEntries: found,
@@ -1663,10 +1669,17 @@ Read the reference.
           discovered: found.length,
           excluded: 0,
           async reconcile(ctx: CollectorReconcileContext) {
-            handed.push(new Map(ctx.text));
-            return { imported: found.length, updated: 0, deleted: 0, keptStale: [], warnings: [] };
+            collector.handed.push(new Map(ctx.text));
+            return {
+              imported: found.length,
+              updated: 0,
+              deleted: collector.deleted,
+              keptStale: collector.keptStale,
+              warnings: [],
+            };
           },
-          notice: () => `Valet mirrored ${found.length} text file.`,
+          notice: (ctx: CollectorNoticeContext) =>
+            `Valet mirrored ${found.length} text file. It removed ${ctx.deleted} and kept ${ctx.keptStale.length}.`,
           unreadWarning: (path: string) => `${path} could not be read.`,
         };
       }
@@ -1710,12 +1723,21 @@ Read the reference.
       expect(text.handed).toHaveLength(2);
 
       // Both collectors report on the same repository, so the row carries
-      // both lines rather than whichever one ran last.
+      // both lines rather than whichever one ran last — and each line counts
+      // what ITS OWN pass did. The skills pass deletes the one skill it
+      // mirrored; the text pass reports two deletes of its own. A sweep-wide
+      // count would tell the reader that three skills were removed.
       repo.sha = "commit-3";
       repo.skills = {};
+      text.deleted = 2;
+      text.keptStale = ["archive.txt"];
       const third = await service.syncOnce(source.id);
       expect(third?.notice).toContain("found no SKILL.md file");
-      expect(third?.notice).toContain("Valet mirrored 1 text file.");
+      expect(third?.notice).toContain("Valet removed the 1 skill it had mirrored");
+      expect(third?.notice).toContain("Valet mirrored 1 text file. It removed 2 and kept 1.");
+      // The row's own counts are still the sum, which is what a reader of the
+      // source row expects.
+      expect(third?.deleted).toBe(3);
     });
   });
 
