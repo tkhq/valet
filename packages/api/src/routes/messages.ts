@@ -443,21 +443,24 @@ export async function submitSessionPrompt(
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
 
-  // Resolve file attachment refs. Two phases so a bad ref in the batch (or
-  // a submit failure below) does not burn the good refs: peek everything
-  // first — nothing is consumed until the prompt is queued.
+  // Resolve file attachment refs. Consumption is atomic for the whole
+  // batch: the loop is synchronous, so two concurrent submits can never
+  // both take the same ref (single-use holds under races). A bad ref in
+  // the batch — or any failure before the prompt is queued — restores
+  // every ref this request took, so the good refs survive for a retry.
   const attachmentRefStore = getAttachmentRefStore();
   const resolvedFileAttachments: AttachmentInfo[] = [];
 
-  if (fileRefs && fileRefs.length > 0) {
-    for (const { ref } of fileRefs) {
-      const info = attachmentRefStore.peek(row.id, ref);
-      if (!info) {
-        // Ref not found, expired, already used, or wrong session
-        throw new UnknownAttachmentError(ref);
-      }
-      resolvedFileAttachments.push(info);
+  // The same ref listed twice in one request attaches its file once.
+  const uniqueRefs = [...new Set((fileRefs ?? []).map((r) => r.ref))];
+  for (const ref of uniqueRefs) {
+    const info = attachmentRefStore.consume(row.id, ref);
+    if (!info) {
+      // Ref not found, expired, already used, or wrong session.
+      attachmentRefStore.restore(resolvedFileAttachments);
+      throw new UnknownAttachmentError(ref);
     }
+    resolvedFileAttachments.push(info);
   }
 
   // Resolve "/"-text against the registry BEFORE choosing a path. Every
@@ -512,15 +515,18 @@ export async function submitSessionPrompt(
   const withAttachments = (t: string) =>
     allAttachments.length > 0 ? { text: t, attachments: allAttachments } : t;
 
-  const receipt =
-    outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
-      : await thread.submitPrompt(withAttachments(promptText), {});
-
-  // Prompt queued — now consume the refs (single-use). A ref raced away by
-  // a concurrent submit is already resolved into this prompt; ignore.
-  for (const { ref } of fileRefs ?? []) {
-    attachmentRefStore.consume(row.id, ref);
+  // A submit failure hands the consumed refs back so a retry can resend
+  // them. Once the prompt is queued the refs stay consumed — the
+  // attachments are already part of the persisted prompt.
+  let receipt;
+  try {
+    receipt =
+      outcome && outcome.kind === "execute"
+        ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
+        : await thread.submitPrompt(withAttachments(promptText), {});
+  } catch (err) {
+    attachmentRefStore.restore(resolvedFileAttachments);
+    throw err;
   }
 
   await db

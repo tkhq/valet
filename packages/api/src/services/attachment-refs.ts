@@ -71,9 +71,10 @@ class AttachmentRefStore {
 
   /**
    * Read a ref without consuming it. Returns the info if found and not
-   * expired, null otherwise. Callers that need all-or-nothing semantics
-   * peek every ref first, then consume only after the whole operation
-   * succeeds — a bad ref in a batch must not burn the good ones.
+   * expired, null otherwise. Callers that need all-or-nothing batch
+   * semantics use `consume` + `restore` instead: consuming up front keeps
+   * single-use atomic under concurrent submits, and `restore` hands refs
+   * back when the batch fails.
    */
   peek(sessionId: string, ref: string): AttachmentInfo | null {
     const sessionMap = this.store.get(sessionId);
@@ -110,6 +111,21 @@ class AttachmentRefStore {
     }
 
     return info;
+  }
+
+  /**
+   * Re-insert consumed refs after a failed submit. Keeps the original
+   * `createdAt`, so a restore never extends the TTL.
+   */
+  restore(infos: readonly AttachmentInfo[]): void {
+    for (const info of infos) {
+      let sessionMap = this.store.get(info.sessionId);
+      if (!sessionMap) {
+        sessionMap = new Map();
+        this.store.set(info.sessionId, sessionMap);
+      }
+      sessionMap.set(info.ref, info);
+    }
   }
 
   /**
