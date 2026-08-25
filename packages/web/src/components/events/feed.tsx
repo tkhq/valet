@@ -19,8 +19,9 @@ const ALL = "";
 const FEED_PAGE_SIZE = 50;
 
 /** Which events the feed asks for: those delivered to the active
- * workspace's subscriptions, or every event the org ingested. */
-type FeedScope = "workspace" | "all";
+ * workspace's subscriptions, or every event the org ingested. The route
+ * owns the value, in `?scope=` — see `routes/events.index.tsx`. */
+export type FeedScope = "workspace" | "all";
 
 const SCOPE_OPTIONS = [
   { value: "workspace", label: "This workspace" },
@@ -39,11 +40,22 @@ const SCOPE_OPTIONS = [
  * workspace's own subscriptions. "All" restores the org-wide feed, and it
  * must stay available: an event that matched nothing you own is precisely
  * the row you open when your subscription never fired.
+ *
+ * `scope` is a prop, not local state, because the Activity and
+ * Subscriptions tabs unmount each other. The round trip that needs "All" —
+ * find an unmatched event, open the Subscriptions tab to read the rule,
+ * come back — is exactly the one that would discard it. The route holds it
+ * in `?scope=`.
  */
-export function EventFeed() {
+export function EventFeed({
+  scope,
+  onScopeChange,
+}: {
+  scope: FeedScope;
+  onScopeChange: (next: FeedScope) => void;
+}) {
   const [service, setService] = useState(ALL);
   const [key, setKey] = useState(ALL);
-  const [scope, setScope] = useState<FeedScope>("workspace");
   const owner = useListOwner();
   const catalogQ = useEventCatalog();
   const eventsQ = useEvents(
@@ -67,7 +79,7 @@ export function EventFeed() {
       <div className="flex flex-wrap items-center gap-2">
         <SelectMenu
           value={scope}
-          onChange={setScope}
+          onChange={onScopeChange}
           // The trigger sits beside "All services" and "All events", so it
           // names the dimension it filters.
           triggerLabel={`Scope: ${scope === "all" ? "All" : "This workspace"}`}

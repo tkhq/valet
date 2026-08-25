@@ -128,8 +128,18 @@ const patchMutate = vi.fn();
 const createMutate = vi.fn();
 const deleteMutate = vi.fn();
 
+/** The route's search params, as a module variable the navigate stub
+ * writes. Mutating it does NOT re-render — nothing subscribes — so a case
+ * that needs the new value on screen must cause a render of its own, which
+ * is what a tab click does. Reset in `afterEach`. */
+let searchState: Record<string, unknown> = {};
+
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+  useSearch: () => searchState,
+  useNavigate: () => (opts: { search?: Record<string, unknown> }) => {
+    searchState = opts.search ?? {};
+  },
   Link: ({
     children,
     to,
@@ -231,6 +241,7 @@ beforeEach(() => {
 afterEach(() => {
   teamsData = { teams: [] };
   scopeTeamId = undefined;
+  searchState = {};
 });
 
 describe("EventsPage — Activity", () => {
@@ -272,6 +283,32 @@ describe("EventsPage — Activity", () => {
     render(<EventsPage />);
     fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
     expect(screen.getByText(LONG_ERROR)).toBeTruthy();
+  });
+
+  // The diagnosis this page exists for is a round trip: select All to find
+  // an event that matched nothing, open Subscriptions to read the rule,
+  // come back. The tabs unmount each other, so a local-state scope would
+  // hide the event again on the way back.
+  it("keeps an explicit All across a tab round trip", async () => {
+    render(<EventsPage />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), {
+      key: "Enter",
+    });
+    fireEvent.click(await screen.findByText("All"));
+    // The choice went to the URL, not into the component.
+    expect(searchState).toEqual({ scope: "all" });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
+    expect(screen.queryByRole("button", { name: /^Scope: / })).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
+  });
+
+  it("starts a fresh mount from the scope the URL carries", () => {
+    searchState = { scope: "all" };
+    render(<EventsPage />);
+    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
   });
 });
 

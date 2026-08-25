@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
-import { EventFeed } from "~/components/events/feed";
+import { EventFeed, type FeedScope } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
 
 /**
@@ -19,9 +19,28 @@ import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
  * a deep link to a tab has no use yet. Promote to routes when one does. One
  * event DOES have its own URL — `/events/$eventId` — because an event that
  * broke a run has to be paste-able into a ticket.
+ *
+ * The feed's scope is NOT local state. The two tabs unmount each other, and
+ * the round trip a diagnosis needs — select "All" to find an unmatched
+ * event, read its rule on the Subscriptions tab, come back — would discard
+ * it. It lives in `?scope=`, the same way the workflows hub keeps `?tab=`,
+ * so it also survives a reload and pastes into a ticket.
  */
+interface EventsSearch {
+  scope?: FeedScope;
+}
+
+/** Only "all" is written to the URL. An absent or hand-edited value reads
+ * as the default workspace scope, which is the honest answer for a value
+ * that names no scope. */
+function readEventsSearch(raw: unknown): EventsSearch {
+  const scope = (raw as Record<string, unknown> | null)?.scope;
+  return scope === "all" ? { scope: "all" } : {};
+}
+
 export const Route = createFileRoute("/events/")({
   component: EventsPage,
+  validateSearch: readEventsSearch,
 });
 
 const TABS_LABEL = "Events sections";
@@ -34,6 +53,12 @@ type TabId = (typeof TABS)[number]["id"];
 
 export function EventsPage() {
   const [tab, setTab] = useState<TabId>("activity");
+  // The top-level hooks, not `Route.useSearch()`: the route suite mocks
+  // this module and never builds a real router context. Same call shape as
+  // `skills.index.tsx`.
+  const search = readEventsSearch(useSearch({ strict: false }));
+  const navigate = useNavigate();
+  const scope: FeedScope = search.scope ?? "workspace";
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -58,7 +83,16 @@ export function EventsPage() {
           aria-labelledby={`${tabPanelId(TABS_LABEL, tab)}-tab`}
           className="mt-6"
         >
-          {tab === "activity" ? <EventFeed /> : <SubscriptionsPanel />}
+          {tab === "activity" ? (
+            <EventFeed
+              scope={scope}
+              onScopeChange={(next) =>
+                void navigate({ to: "/events", search: next === "all" ? { scope: "all" } : {} })
+              }
+            />
+          ) : (
+            <SubscriptionsPanel />
+          )}
         </div>
       </div>
     </div>

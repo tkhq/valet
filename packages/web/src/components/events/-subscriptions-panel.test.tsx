@@ -117,7 +117,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   };
 });
 
-import { EventFeed } from "./feed";
+import { EventFeed, type FeedScope } from "./feed";
 import { SubscriptionsPanel } from "./subscriptions-panel";
 
 beforeEach(() => {
@@ -202,9 +202,17 @@ describe("SubscriptionsPanel", () => {
   });
 });
 
+/** The route owns the scope now, so the cases pass it in and read back
+ * what the control reports. */
+function renderFeed(scope: FeedScope = "workspace") {
+  const onScopeChange = vi.fn();
+  render(<EventFeed scope={scope} onScopeChange={onScopeChange} />);
+  return onScopeChange;
+}
+
 describe("EventFeed scope control", () => {
   it("starts on the workspace and asks for the switcher's owner", () => {
-    render(<EventFeed />);
+    renderFeed();
     expect(feedCalls).toBeGreaterThan(0);
     expect(feedOwner).toEqual({ ownerType: "user", ownerId: "u1" });
     expect(feedEnabled).toBe(true);
@@ -213,29 +221,34 @@ describe("EventFeed scope control", () => {
 
   it("holds the workspace-scoped query until the owner resolves", () => {
     meId = undefined;
-    render(<EventFeed />);
+    renderFeed();
     // An owner-less request is the org-wide feed, so a control that reads
     // "This workspace" must ask for nothing until the owner is known.
     expect(feedOwner).toBeUndefined();
     expect(feedEnabled).toBe(false);
   });
 
-  it("drops the owner when the reader selects All", async () => {
-    render(<EventFeed />);
+  it("reports All to the route instead of keeping it locally", async () => {
+    const onScopeChange = renderFeed();
     // Radix dropdown triggers do not open from jsdom's plain click; the
     // keyboard path (Enter) is the reliable way to open one in tests.
     fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
     fireEvent.click(await screen.findByText("All"));
 
+    expect(onScopeChange).toHaveBeenCalledWith("all");
+  });
+
+  it("drops the owner on All", () => {
+    renderFeed("all");
     expect(feedOwner).toBeUndefined();
-    // The org-wide state must be reachable AND legible: the trigger now
-    // reads All, so a reader can tell which feed they are looking at.
+    // The org-wide state must be reachable AND legible: the trigger reads
+    // All, so a reader can tell which feed they are looking at.
     expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
   });
 
   it("scopes to the team in a team workspace", () => {
     scopeTeamId = "t_eng";
-    render(<EventFeed />);
+    renderFeed();
     expect(feedOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
   });
 });
