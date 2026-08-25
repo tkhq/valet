@@ -52,6 +52,16 @@ describe("resolveUploadDest", () => {
       const result = resolveUploadDest("evil.txt", "/workspace/uploads/../../etc/passwd");
       expect(result.ok).toBe(false);
     });
+
+    it("accepts a filename that contains consecutive dots (not a traversal segment)", () => {
+      const result = resolveUploadDest("report..v2.pdf");
+      expect(result).toEqual({ ok: true, path: "/workspace/uploads/report..v2.pdf" });
+    });
+
+    it("accepts a dest whose basename contains consecutive dots", () => {
+      const result = resolveUploadDest("x.txt", "/workspace/uploads/v1..2/x.txt");
+      expect(result).toEqual({ ok: true, path: "/workspace/uploads/v1..2/x.txt" });
+    });
   });
 
   describe("null byte injection", () => {

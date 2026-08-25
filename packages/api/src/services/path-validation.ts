@@ -27,8 +27,10 @@ export function resolveUploadDest(
   }
 
   // Step 3: Normalize and validate.
-  // First check the raw string for .. before normalizing, to catch explicit traversals
-  if (target.includes("..")) {
+  // Check raw path SEGMENTS for ".." before normalizing, to catch explicit
+  // traversals. A substring check would also reject legitimate filenames
+  // that merely contain consecutive dots ("report..v2.pdf").
+  if (target.split("/").some((segment) => segment === "..")) {
     return {
       ok: false,
       error: "Path contains .. traversal",

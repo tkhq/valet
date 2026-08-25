@@ -11,7 +11,10 @@
  * 6. Central directory vs local header mismatch — reject when they disagree.
  *
  * On any abort, extractZip deletes every file it wrote before returning.
- * The raw uploaded zip remains in place at archivePath.
+ * Directories created during extraction remain (provider `rm` cannot remove
+ * a directory non-recursively, and a recursive delete could take
+ * pre-existing content with it). The raw uploaded zip remains in place at
+ * archivePath.
  */
 
 import { dirname, normalize, resolve as resolvePath } from "node:path";
@@ -69,6 +72,13 @@ export async function extractZip(
   let entryCount = 0;
 
   try {
+    // Create the extract root before any entry work. The sandbox handle is
+    // the RAW provider Sandbox: its writeBinary does not create parent
+    // directories, and a flat zip (no directory entries) never triggers a
+    // per-entry mkdir. Provider mkdir is recursive (mkdir -p semantics).
+    const rootPath = rootDir.slice(0, -1);
+    await sandbox.mkdir(rootPath);
+    madeDirs.add(rootPath);
     // Open zip per spec (lazyEntries for streaming)
     const zipfile = await new Promise<ZipFile>((resolve, reject) => {
       fromBuffer(zipBuffer, { lazyEntries: true }, (err, zf) => {
@@ -166,7 +176,7 @@ export async function extractZip(
 
           // Create parent directory (once per directory)
           const parentDir = dirname(entryPath);
-          if (parentDir && parentDir !== rootDir.slice(0, -1) && !madeDirs.has(parentDir)) {
+          if (parentDir && !madeDirs.has(parentDir)) {
             await sandbox.mkdir(parentDir);
             madeDirs.add(parentDir);
           }
@@ -275,8 +285,9 @@ function validateEntryPath(
     return new ArchiveGuardError("absolute_path", "Archive entry is an absolute path.");
   }
 
-  // Reject .. segments
-  if (entryName.includes("..")) {
+  // Reject ".." path segments. A substring check would also reject benign
+  // entry names that merely contain consecutive dots ("notes..old.txt").
+  if (entryName.split("/").some((segment) => segment === "..")) {
     return new ArchiveGuardError("traversal", "Archive entry contains .. path traversal.");
   }
 

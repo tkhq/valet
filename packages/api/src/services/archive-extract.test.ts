@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { dirname } from "node:path";
 import { extractZip } from "./archive-extract.js";
 import type { Sandbox, ExecOpts, ExecResult } from "@valet/engine";
 
@@ -15,11 +16,22 @@ class MockSandbox implements Sandbox {
   }
 
   async writeBinary(path: string, data: Uint8Array): Promise<void> {
+    // Real providers do NOT create parent directories on write (docker/local
+    // are bare fs.writeFile; k8s is `base64 -d > path`). Enforce that here so
+    // extraction has to create every directory itself.
+    if (!this.dirs.has(dirname(path))) {
+      throw new Error(`ENOENT: no such directory: ${dirname(path)}`);
+    }
     this.files.set(path, data);
   }
 
   async mkdir(path: string): Promise<void> {
-    this.dirs.add(path);
+    // mkdir -p semantics, like every real provider.
+    let cur = path;
+    while (cur && cur !== "/" && !this.dirs.has(cur)) {
+      this.dirs.add(cur);
+      cur = dirname(cur);
+    }
   }
 
   async rm(path: string): Promise<void> {
@@ -55,7 +67,64 @@ const ZIP_WITH_DIR_ENTRIES = Buffer.from(
   "base64",
 );
 
+// A flat `zip -X` archive: a.txt + b.txt at the root, NO directory entries.
+// The regression surface: nothing but extractZip itself creates the extract
+// root, and raw provider writes fail on a missing parent.
+const ZIP_FLAT = Buffer.from(
+  "UEsDBAoAAAAAAPh+GF3sbmCfBgAAAAYAAAAFAAAAYS50eHRhbHBoYQpQSwMECgAAAAAA+H4YXXWn4+YFAAAABQAAAAUAAABiLnR4dGJldGEKUEsBAh4DCgAAAAAA+H4YXexuYJ8GAAAABgAAAAUAAAAAAAAAAQAAAKSBAAAAAGEudHh0UEsBAh4DCgAAAAAA+H4YXXWn4+YFAAAABQAAAAUAAAAAAAAAAQAAAKSBKQAAAGIudHh0UEsFBgAAAAACAAIAZgAAAFEAAAAAAA==",
+  "base64",
+);
+
+// An archive with one entry named "notes..old.txt" — consecutive dots in a
+// filename, not a traversal segment. Must extract, not trip the guard.
+const ZIP_DOTTED_NAME = Buffer.from(
+  "UEsDBAoAAAAAAPh+GF1iwup+BQAAAAUAAAAOAAAAbm90ZXMuLm9sZC50eHRkb3RzClBLAQIeAwoAAAAAAPh+GF1iwup+BQAAAAUAAAAOAAAAAAAAAAEAAACkgQAAAABub3Rlcy4ub2xkLnR4dFBLBQYAAAAAAQABADwAAAAxAAAAAAA=",
+  "base64",
+);
+
 describe("extractZip", () => {
+  it("extracts a flat zip with no directory entries (creates the extract root)", async () => {
+    const sandbox = new MockSandbox();
+    sandbox.files.set("/workspace/uploads/flat.zip", new Uint8Array(ZIP_FLAT));
+
+    const result = await extractZip({
+      sandbox,
+      archivePath: "/workspace/uploads/flat.zip",
+      extractRoot: "/workspace/uploads/flat/",
+      maxTotalUncompressed: 100 * 1024 * 1024,
+      maxEntries: 10000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.extracted.sort()).toEqual([
+        "/workspace/uploads/flat/a.txt",
+        "/workspace/uploads/flat/b.txt",
+      ]);
+    }
+    expect(sandbox.dirs.has("/workspace/uploads/flat")).toBe(true);
+    const a = sandbox.files.get("/workspace/uploads/flat/a.txt");
+    expect(a && new TextDecoder().decode(a)).toBe("alpha\n");
+  });
+
+  it("extracts an entry whose name contains consecutive dots", async () => {
+    const sandbox = new MockSandbox();
+    sandbox.files.set("/workspace/uploads/dots.zip", new Uint8Array(ZIP_DOTTED_NAME));
+
+    const result = await extractZip({
+      sandbox,
+      archivePath: "/workspace/uploads/dots.zip",
+      extractRoot: "/workspace/uploads/dots/",
+      maxTotalUncompressed: 100 * 1024 * 1024,
+      maxEntries: 10000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.extracted).toEqual(["/workspace/uploads/dots/notes..old.txt"]);
+    }
+  });
+
   it("extracts a standard zip with explicit directory entries", async () => {
     const sandbox = new MockSandbox();
     sandbox.files.set("/workspace/uploads/data.zip", new Uint8Array(ZIP_WITH_DIR_ENTRIES));
