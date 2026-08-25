@@ -187,7 +187,7 @@ docs/plans/         # implementation plans
 docs/guides/        # contributor guides — read these before a first change
 ```
 
-- Two guides carry the conventions this file only summarizes: [docs/guides/placement.md](docs/guides/placement.md) decides which package a new file belongs to, and [docs/guides/building-a-feature.md](docs/guides/building-a-feature.md) is the golden path for a change that cuts through the stack.
+- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, and performance.
 - Web tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry — new renderer file + list it before the fallback in `index.ts`.
 - Optimistic UI messages must carry the active `threadId` (null + fallback matching leaked bubbles across threads).
 - Superpowers design specs → `docs/specs/YYYY-MM-DD-<topic>-design.md`; plans → `docs/plans/YYYY-MM-DD-<topic>.md`.
