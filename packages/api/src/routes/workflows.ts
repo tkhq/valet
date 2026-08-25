@@ -617,7 +617,7 @@ workflowsRouter.get("/:id/schedules", async (c) => {
   const id = c.req.param("id");
   const summary = await getWorkflowDefinition(deps, owner, id);
   if (!summary) return c.json({ error: "workflow not found" }, 404);
-  const schedules = await listWorkflowSchedules(deps.db, owner.orgId, id);
+  const schedules = await listWorkflowSchedules(deps.db, owner, id);
   const resp: ListWorkflowSchedulesResponse = {
     schedules: schedules.map((s) => toScheduleWire(s, id)),
   };
@@ -669,7 +669,7 @@ workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
   const scheduleId = c.req.param("scheduleId");
   const summary = await getWorkflowDefinition(deps, owner, id);
   if (!summary) return c.json({ error: "workflow not found" }, 404);
-  const result = await deleteWorkflowSchedule(deps.db, owner.orgId, scheduleId, id);
+  const result = await deleteWorkflowSchedule(deps.db, owner, scheduleId, id);
   if (result === "not_found") return c.json({ error: "schedule not found" }, 404);
   const resp: DeleteWorkflowScheduleResponse = { deleted: true };
   return c.json(resp);

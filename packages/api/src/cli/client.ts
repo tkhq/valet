@@ -24,10 +24,13 @@ import type {
   ListSessionsResponse,
   ListThreadsResponse,
   MeResponse,
+  PostSessionFileUploadResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
 } from "../wire/types.js";
+import * as fs from "fs";
+import * as path from "path";
 
 export interface InstanceClientOpts {
   url: string;
@@ -56,21 +59,24 @@ export class InstanceClient {
     return this.base;
   }
 
-  private headers(): Record<string, string> {
+  private headers(json: boolean): Record<string, string> {
     return {
-      "content-type": "application/json",
+      // A FormData body sets its own multipart content-type (with boundary);
+      // only JSON bodies get one here.
+      ...(json ? { "content-type": "application/json" } : {}),
       ...(this.apiKey ? { "x-api-key": this.apiKey } : {}),
     };
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
+    const isForm = body instanceof FormData;
     let res: Response;
     try {
       res = await fetch(url, {
         method,
-        headers: this.headers(),
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        headers: this.headers(!isForm),
+        body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
       // fetch rejects only on transport/network failure (DNS, refused, reset).
@@ -181,6 +187,45 @@ export class InstanceClient {
       "POST",
       `/api/sessions/${encodeURIComponent(id)}/decisions/${encodeURIComponent(gateId)}/resolve`,
       body,
+    );
+  }
+
+  // ── file uploads ───────────────────────────────────────────────────────
+
+  /**
+   * `POST /api/sessions/:id/files` — upload files to a session's sandbox.
+   * Accepts one file per request via multipart/form-data. Returns uploaded
+   * file metadata including the attachment ref.
+   */
+  async uploadFile(
+    sessionId: string,
+    sourcePath: string,
+    dest?: string,
+    extract?: "auto" | "true" | "false",
+    overwrite?: boolean,
+  ): Promise<PostSessionFileUploadResponse> {
+    const file = await fs.promises.readFile(sourcePath);
+    const filename = path.basename(sourcePath);
+
+    // Build the multipart body; request() ships FormData as-is.
+    const form = new FormData();
+    const blob = new Blob([file], { type: "application/octet-stream" });
+    form.append("file", blob, filename);
+
+    if (dest !== undefined) {
+      form.append("dest", dest);
+    }
+    if (extract !== undefined) {
+      form.append("extract", extract);
+    }
+    if (overwrite) {
+      form.append("overwrite", "true");
+    }
+
+    return this.request<PostSessionFileUploadResponse>(
+      "POST",
+      `/api/sessions/${encodeURIComponent(sessionId)}/files`,
+      form,
     );
   }
 }

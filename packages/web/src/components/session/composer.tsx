@@ -8,9 +8,10 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { ImagePlus, Send, Square } from "lucide-react";
+import { Paperclip, Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
+import { ApiError } from "~/api/client";
 import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
@@ -22,11 +23,13 @@ import {
 } from "~/lib/command-recency";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
+import { ComposerFileErrors, ComposerFileStrip } from "./composer-file-strip";
 import { useComposerDrop } from "./composer-drop-context";
 import {
   acceptImages,
   filesFromClipboard,
   filesFromList,
+  isSupportedImageType,
   readFailure,
   readImage,
   toPromptAttachments,
@@ -36,6 +39,16 @@ import {
   MAX_IMAGES,
   type ComposerImage,
 } from "./composer-images";
+import {
+  acceptFiles,
+  createComposerFile,
+  isFileUploading,
+  toFileRefs,
+  FILE_UPLOADS_ENABLED,
+  MAX_FILES,
+  type ComposerFile,
+} from "./composer-files";
+import { useFileUpload } from "~/hooks/use-file-upload";
 
 /**
  * What the submit button does with the text in the composer.
@@ -112,6 +125,16 @@ export function Composer({
     imagesRef.current = images;
   }, [images]);
   const [imageErrors, setImageErrors] = useState<string[]>([]);
+  // Files held for the next message. Non-image drops, pastes, and picks
+  // land here and upload to the sandbox immediately; the send request
+  // carries only their attachment refs.
+  const [files, setFiles] = useState<ComposerFile[]>([]);
+  const filesRef = useRef<ComposerFile[]>([]);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+  const [fileErrors, setFileErrors] = useState<string[]>([]);
+  const { uploadFile } = useFileUpload(sessionId);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Form element ref for the page-level drop target — used to skip
@@ -241,17 +264,24 @@ export function Composer({
     : queueState?.mode === "steer"
       ? "steer"
       : "queue";
-  const canSend = !send.isPending && !!threadId && text.trim().length > 0;
-  // An image alone cannot go out: the route requires text on the prompt.
-  // Say so on the disabled button instead of leaving the user guessing.
+  // A send with a still-uploading file would drop it (the ref does not
+  // exist yet), so the button waits for the uploads.
+  const uploadsPending = files.some(isFileUploading);
+  const canSend = !send.isPending && !!threadId && text.trim().length > 0 && !uploadsPending;
+  // An attachment alone cannot go out: the route requires text on the
+  // prompt. Say so on the disabled button instead of leaving the user
+  // guessing.
   const sendTitle = working
     ? ACTION_HINT[action]
-    : images.length > 0 && text.trim().length === 0
-      ? "Add a message to send with the images."
-      : undefined;
+    : uploadsPending
+      ? "Wait for the file uploads to finish."
+      : (images.length > 0 || files.length > 0) && text.trim().length === 0
+        ? "Add a message to send with the attachments."
+        : undefined;
 
   /** True while the composer refuses new files. */
-  const intakeBlocked = !IMAGE_ATTACHMENTS_ENABLED || send.isPending || !threadId;
+  const intakeBlocked =
+    (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
 
   /**
    * Take files from a paste, a drop, or the picker. Refused files leave a
@@ -262,10 +292,44 @@ export function Composer({
    * page-level drop target reads this via the ComposerDropContext, and a
    * stable callback keeps the intake object it publishes stable too.
    */
+  /** Kick off one upload and fold its result back into the strip. A file
+   * removed mid-upload maps to nothing — the result is dropped. */
+  const startUpload = useCallback(
+    (composerFile: ComposerFile) => {
+      void uploadFile(composerFile).then((updated) => {
+        setFiles((prev) => prev.map((f) => (f.id === composerFile.id ? updated : f)));
+      });
+    },
+    [uploadFile],
+  );
+
   const addFiles = useCallback(
-    async (files: File[]) => {
-      if (intakeBlocked || files.length === 0) return;
-      const { accepted, rejected } = acceptImages(imagesRef.current, files);
+    async (incoming: File[]) => {
+      if (intakeBlocked || incoming.length === 0) return;
+      // Supported image types keep the inline data-URL path; everything
+      // else uploads to the sandbox. With uploads disabled, every file
+      // goes through the image intake so an unsupported type still earns
+      // a message instead of vanishing.
+      const imageFiles = FILE_UPLOADS_ENABLED
+        ? incoming.filter((f) => isSupportedImageType(f.type))
+        : incoming;
+      const uploadable = FILE_UPLOADS_ENABLED
+        ? incoming.filter((f) => !isSupportedImageType(f.type))
+        : [];
+
+      if (uploadable.length > 0) {
+        const { accepted, rejected } = acceptFiles(filesRef.current, uploadable);
+        setFileErrors(rejected);
+        const created = accepted.map(createComposerFile);
+        if (created.length > 0) {
+          // Cap re-applied at the state edge, mirroring the image intake.
+          setFiles((prev) => [...prev, ...created].slice(0, MAX_FILES));
+          created.forEach(startUpload);
+        }
+      }
+
+      if (imageFiles.length === 0) return;
+      const { accepted, rejected } = acceptImages(imagesRef.current, imageFiles);
       setImageErrors(rejected);
       const read: ComposerImage[] = [];
       const failures: string[] = [];
@@ -284,7 +348,7 @@ export function Composer({
       // edge, where the real list is.
       setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
     },
-    [intakeBlocked],
+    [intakeBlocked, startUpload],
   );
 
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
@@ -336,26 +400,52 @@ export function Composer({
     setImages((prev) => prev.filter((image) => image.id !== id));
   }
 
+  function removeFile(id: string) {
+    setFiles((prev) => prev.filter((f) => f.id !== id));
+  }
+
+  function retryFile(id: string) {
+    const target = filesRef.current.find((f) => f.id === id);
+    if (!target) return;
+    // A fresh ComposerFile (no error, no ref) reads as "uploading" again.
+    const reset: ComposerFile = {
+      id: target.id,
+      name: target.name,
+      bytes: target.bytes,
+      file: target.file,
+    };
+    setFiles((prev) => prev.map((f) => (f.id === id ? reset : f)));
+    startUpload(reset);
+  }
+
   async function submit() {
     const t = text.trim();
-    if (!t || send.isPending || !threadId) return;
+    if (!t || send.isPending || !threadId || uploadsPending) return;
     // Held images go with the message. Convert them to the wire format
     // and pass them in the request body.
     const pendingImages = images;
     const attachments = pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined;
+    // Uploaded files ride as refs; a file whose upload failed is dropped
+    // (its chip showed the error and offered a retry before send).
+    const pendingFiles = files;
+    const fileRefs = toFileRefs(pendingFiles);
     setText("");
     setImages([]);
     setImageErrors([]);
+    setFiles([]);
+    setFileErrors([]);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
-    // the server's persisted copy.
+    // the server's persisted copy. File chips are not rendered optimistically
+    // — the server owns their sandbox paths; they appear on the next init.
     const localId = addUserMessage(sessionId, t, threadId, attachments);
     try {
       const res = await send.mutateAsync({
         text: t,
         threadId,
         attachments,
+        fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
@@ -378,9 +468,44 @@ export function Composer({
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
       // message stays visible — they can see what they sent + retry; on the
-      // next reload it'll be reconciled against server truth.
+      // next reload it'll be reconciled against server truth. The server
+      // restores consumed refs when a submit fails, so restored chips stay
+      // sendable — EXCEPT when the failure is the refs themselves.
       setText(t);
       setImages(pendingImages);
+      const payload =
+        err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
+          ? (err.payload as Record<string, unknown>)
+          : undefined;
+      // An unknown-attachment 400 means a ref is dead (15-minute TTL, or an
+      // api restart emptied the ref store). A restored chip must not read
+      // as uploaded: flip uploaded chips to the error state, whose retry
+      // button re-uploads the held File and mints a fresh ref.
+      const refsDead =
+        err instanceof ApiError &&
+        err.status === 400 &&
+        typeof payload?.error === "string" &&
+        payload.error.startsWith("unknown attachment");
+      setFiles(
+        refsDead
+          ? pendingFiles.map((f) =>
+              f.attachmentRef !== undefined
+                ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
+                : f,
+            )
+          : pendingFiles,
+      );
+      // The failure must be visible — a console-only error reads as a dead
+      // send button.
+      const detail =
+        typeof payload?.corrective === "string"
+          ? payload.corrective
+          : typeof payload?.error === "string"
+            ? payload.error
+            : err instanceof Error
+              ? err.message
+              : "Unknown error.";
+      setFileErrors([`The message did not send. ${detail}`]);
       console.error("send failed:", err);
     }
   }
@@ -503,9 +628,15 @@ export function Composer({
       )}
     >
       <QueueIndicator queueState={queueState} />
-      {dragActive && <p className="mb-2 text-xs text-muted">Drop the images to attach them.</p>}
+      {dragActive && (
+        <p className="mb-2 text-xs text-muted">
+          {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
+        </p>
+      )}
       <ComposerImageErrors messages={imageErrors} onDismiss={() => setImageErrors([])} />
       <ComposerImageStrip images={images} onRemove={removeImage} />
+      <ComposerFileErrors messages={fileErrors} onDismiss={() => setFileErrors([])} />
+      <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
       {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
       {/* `relative` anchors the command popup to the input row, so the hint
           above it never moves the popup. */}
@@ -535,12 +666,14 @@ export function Composer({
           className="flex-1"
           disabled={send.isPending || !threadId}
         />
-        {IMAGE_ATTACHMENTS_ENABLED && (
+        {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
           <>
             <input
               ref={fileInputRef}
               type="file"
-              accept={IMAGE_ACCEPT_ATTRIBUTE}
+              // With file uploads on, the picker accepts anything; images
+              // still route to the inline image path in `addFiles`.
+              accept={FILE_UPLOADS_ENABLED ? undefined : IMAGE_ACCEPT_ATTRIBUTE}
               multiple
               className="hidden"
               onChange={onPickFiles}
@@ -552,10 +685,10 @@ export function Composer({
               size="lg"
               onClick={() => fileInputRef.current?.click()}
               disabled={intakeBlocked}
-              aria-label="Attach images"
-              title="Attach images"
+              aria-label={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+              title={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
             >
-              <ImagePlus className="h-4 w-4" />
+              <Paperclip className="h-4 w-4" />
             </Button>
           </>
         )}

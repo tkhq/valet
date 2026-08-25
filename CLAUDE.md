@@ -184,8 +184,10 @@ deploy/             # helm chart + vendored agent-sandbox controller
 docs/specs/         # dated YYYY-MM-DD-*-design.md = v2 (current, maintain these);
                     #   undated = legacy-stack specs (accurate for frozen code only)
 docs/plans/         # implementation plans
+docs/guides/        # contributor guides — read these before a first change
 ```
 
+- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, and performance.
 - Web tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry — new renderer file + list it before the fallback in `index.ts`.
 - Optimistic UI messages must carry the active `threadId` (null + fallback matching leaked bubbles across threads).
 - Superpowers design specs → `docs/specs/YYYY-MM-DD-<topic>-design.md`; plans → `docs/plans/YYYY-MM-DD-<topic>.md`.

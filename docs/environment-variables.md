@@ -226,6 +226,7 @@ by hand as each user signs in. No wipe and no re-import is needed.
 
 | Variable | Description |
 |----------|-------------|
+| `VALET_MAX_UPLOAD_BYTES` | Per-upload size cap in bytes (default 52428800 = 50 MB). A request whose Content-Length exceeds the cap returns 413 before the body is parsed. A chunked body (no Content-Length) is buffered in memory before the cap check, so the cap bounds well-formed clients, not parser memory. Size the cap to your api memory budget. |
 | `VALET_SANDBOX_BACKEND` | `docker` (default) \| `local` \| `kubernetes` |
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
 | `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |

@@ -124,6 +124,9 @@ usageRouter.get("/summary", async (c) => {
           name: nameById.get(row.user_id) ?? row.user_id,
           ...toWindow(row),
         }))
+        // Keep this comparator in sync with `topMembers` in
+        // packages/web/src/components/assistant/usage-card.tsx, which
+        // re-sorts with the same rule before capping the list.
         .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
     };
   }

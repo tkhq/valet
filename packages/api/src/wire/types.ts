@@ -441,12 +441,12 @@ export interface Message {
    */
   model?: string;
   /**
-   * Image attachments on a user message. Populated for user entries with
-   * attached images; never on assistant, tool, or system entries. The
+   * Attachments on a user message (images or files). Populated for user entries
+   * with attached content; never on assistant, tool, or system entries. The
    * engine's `MessageEntry.attachments` is the source of truth; this is
    * the wire projection.
    */
-  attachments?: PromptImageAttachment[];
+  attachments?: Array<PromptImageAttachment | PromptFileAttachment>;
 }
 
 export interface ListMessagesResponse {
@@ -463,12 +463,26 @@ export interface PromptImageAttachment {
   name: string;
 }
 
+export interface PromptFileAttachment {
+  kind: "file";
+  path: string;
+  bytes: number;
+  sha256: string;
+  mimeType?: string;
+  markdownPath?: string;
+  extractedTo?: string;
+  extractedFiles?: string[];
+  name: string;
+}
+
 export interface SendPromptRequest {
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
   /** Image attachments for the message. */
   attachments?: PromptImageAttachment[];
+  /** File attachment refs (from POST /sessions/:id/files). Single-use. */
+  fileRefs?: Array<{ ref: string }>;
 }
 
 export interface SendPromptResponse {
@@ -3249,4 +3263,33 @@ export interface GetSlackAppResponse {
   /** Requested scopes the installed app did not grant, from the scope list
    * recorded at connect time. Empty when nothing is missing. */
   missingScopes: string[];
+}
+
+// ── Sandbox file upload ──────────────────────────────────────────────────
+
+export interface PostSessionFileUploadPdfInfo {
+  type: "TextBased" | "Scanned" | "ImageBased" | "Mixed";
+  confidence: number;
+  pages: number;
+  pagesNeedingOcr: number[];
+  /** Path to markdown sidecar. Present only when PDF has extractable text. */
+  markdownPath?: string;
+  needsOcr: boolean;
+}
+
+export interface PostSessionFileUploadResponse {
+  path: string;
+  bytes: number;
+  sha256: string;
+  attachmentRef: string;
+  /** Extracted file paths. Present only when a zip extracted at least one file. */
+  extracted?: string[];
+  /**
+   * Server-computed extract root (ends with "/"). Present exactly when
+   * `extracted` is. Clients print this verbatim — the naming rule lives on
+   * the server.
+   */
+  extractedTo?: string;
+  /** PDF metadata. Present only when the upload is a PDF. */
+  pdf?: PostSessionFileUploadPdfInfo;
 }

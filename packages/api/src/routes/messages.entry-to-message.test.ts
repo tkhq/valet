@@ -98,4 +98,133 @@ describe("entryToMessage — attachments projection", () => {
     const msg = entryToMessage(entry, "sess", "th");
     expect(msg && "attachments" in msg).toBe(false);
   });
+
+  it("projects file attachments to the wire format", () => {
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "file",
+          path: "/workspace/uploads/report.pdf",
+          bytes: 843 * 1024,
+          sha256: "abc123def456",
+          mimeType: "application/pdf",
+          markdownPath: "/workspace/uploads/report.pdf.md",
+          name: "report.pdf",
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments).toEqual([
+      {
+        kind: "file",
+        path: "/workspace/uploads/report.pdf",
+        bytes: 843 * 1024,
+        sha256: "abc123def456",
+        mimeType: "application/pdf",
+        markdownPath: "/workspace/uploads/report.pdf.md",
+        name: "report.pdf",
+      },
+    ]);
+  });
+
+  it("handles mixed image and file attachments", () => {
+    const entry = baseEntry({
+      attachments: [
+        { type: "image", url: "data:image/png;base64,AAAA", mimeType: "image/png", name: "img.png" },
+        {
+          type: "file",
+          path: "/workspace/uploads/data.zip",
+          bytes: 2048000,
+          sha256: "xyz789",
+          mimeType: "application/zip",
+          name: "data.zip",
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments).toHaveLength(2);
+    expect(msg?.attachments?.[0].kind).toBe("image");
+    expect(msg?.attachments?.[1].kind).toBe("file");
+  });
+
+  it("preserves optional file fields (mimeType, markdownPath, extractedTo, extractedFiles)", () => {
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "file",
+          path: "/workspace/uploads/plain.txt",
+          bytes: 1024,
+          sha256: "txt123",
+          name: "plain.txt",
+          // mimeType, markdownPath, extractedTo, extractedFiles omitted
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments?.[0]).toEqual({
+      kind: "file",
+      path: "/workspace/uploads/plain.txt",
+      bytes: 1024,
+      sha256: "txt123",
+      name: "plain.txt",
+      // optional fields not present
+    });
+  });
+
+  it("projects extractedTo and extractedFiles through to wire shape", () => {
+    const extractedFiles = [
+      "/workspace/uploads/bundle/file1.txt",
+      "/workspace/uploads/bundle/file2.txt",
+      "/workspace/uploads/bundle/subdir/file3.txt",
+    ];
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "file",
+          path: "/workspace/uploads/bundle.tar.gz",
+          bytes: 5120,
+          sha256: "tar123",
+          name: "bundle.tar.gz",
+          extractedTo: "/workspace/uploads/bundle/",
+          extractedFiles: extractedFiles,
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments?.[0]).toEqual({
+      kind: "file",
+      path: "/workspace/uploads/bundle.tar.gz",
+      bytes: 5120,
+      sha256: "tar123",
+      name: "bundle.tar.gz",
+      extractedTo: "/workspace/uploads/bundle/",
+      extractedFiles: extractedFiles,
+    });
+  });
+
+  it("projects image and file attachments side by side", () => {
+    // MessageEntry.attachments admits only image and file variants, so
+    // there is no third kind to filter at the type level; this covers the
+    // mixed projection.
+    const entry = baseEntry({
+      attachments: [
+        {
+          type: "image",
+          url: "data:image/png;base64,AAAA",
+          mimeType: "image/png",
+          name: "img.png",
+        },
+        {
+          type: "file",
+          path: "/workspace/uploads/file.txt",
+          bytes: 512,
+          sha256: "file123",
+          name: "file.txt",
+        },
+      ],
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.attachments).toHaveLength(2);
+    expect(msg?.attachments?.every((a) => a.kind === "image" || a.kind === "file")).toBe(true);
+  });
 });

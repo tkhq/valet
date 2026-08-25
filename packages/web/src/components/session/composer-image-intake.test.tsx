@@ -119,14 +119,14 @@ describe("Composer — image intake", () => {
     await waitFor(() => expect(screen.getByAltText("picked.png")).toBeDefined());
   });
 
-  it("refuses an unsupported file and says which types work", async () => {
+  it("routes an unsupported image type to the file-upload path", async () => {
+    // Since sandbox file uploads shipped, a non-image file is not refused —
+    // it becomes a file chip and uploads to the sandbox instead.
     renderComposer();
     const file = new File(["x"], "holiday.heic", { type: "image/heic" });
     pasteFiles(screen.getByPlaceholderText(/Send a message/i), [file]);
     await waitFor(() => {
-      expect(screen.getByRole("alert").textContent).toContain(
-        "holiday.heic is not a supported image. Attach a PNG, JPEG, GIF, or WebP image.",
-      );
+      expect(screen.getByLabelText("Attached files").textContent).toContain("holiday.heic");
     });
     expect(screen.queryByAltText("holiday.heic")).toBeNull();
   });
@@ -145,8 +145,11 @@ describe("Composer — image intake", () => {
 
   it("drops the refusal notice on request", async () => {
     renderComposer();
-    const file = new File(["x"], "holiday.heic", { type: "image/heic" });
-    pasteFiles(screen.getByPlaceholderText(/Send a message/i), [file]);
+    // An oversized image produces the refusal; non-image types now route
+    // to the file-upload path instead of a refusal.
+    const big = new File(["x"], "huge.png", { type: "image/png" });
+    Object.defineProperty(big, "size", { value: 6 * 1024 * 1024 });
+    pasteFiles(screen.getByPlaceholderText(/Send a message/i), [big]);
     await waitFor(() => expect(screen.getByRole("alert")).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Dismiss image errors" }));
     expect(screen.queryByRole("alert")).toBeNull();
@@ -166,7 +169,7 @@ describe("Composer — image intake", () => {
     await waitFor(() => expect(screen.getByAltText("pasted.png")).toBeDefined());
     const send = screen.getByRole("button", { name: /send/i }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
-    expect(send.getAttribute("title")).toBe("Add a message to send with the images.");
+    expect(send.getAttribute("title")).toBe("Add a message to send with the attachments.");
   });
 
   it("clears the held images after the message goes out", async () => {

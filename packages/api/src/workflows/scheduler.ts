@@ -21,7 +21,8 @@ import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
-import { nextFireAt } from "./schedule-service.js";
+import { accessibleScheduleRow, nextFireAt } from "./schedule-service.js";
+import type { WorkflowOwner } from "./service.js";
 import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
 
 const POLL_MS = 30_000;
@@ -191,23 +192,21 @@ export class WorkflowScheduler {
 
   /** Manual fire from the API. Uses `now` as the slot (distinct idempotent
    * runId per press), updates lastFiredAt, never moves nextFireAt, and
-   * works on disabled schedules (firing by hand is how you test one). */
-  async fireNow(orgId: string, scheduleId: string): Promise<"ok" | "not_found" | { error: string }> {
+   * works on disabled schedules (firing by hand is how you test one).
+   * Owner-scoped like every schedule read: a schedule the caller cannot
+   * access answers `not_found`, so an org member cannot fire a colleague's
+   * personal automation. */
+  async fireNow(owner: WorkflowOwner, scheduleId: string): Promise<"ok" | "not_found" | { error: string }> {
     const { db } = this.deps;
     const now = (this.deps.now ?? Date.now)();
-    const rows = await db
-      .select()
-      .from(workflowSchedules)
-      .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
-      .limit(1);
-    const schedule = rows[0];
+    const schedule = await accessibleScheduleRow(db, owner, scheduleId);
     if (!schedule) return "not_found";
     const result = await this.dispatch(schedule, now);
     if (result !== "ok") return result;
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, updatedAt: now })
-      .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)));
+      .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)));
     return "ok";
   }
 }

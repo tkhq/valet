@@ -25,6 +25,7 @@
     "@earendil-works/pi-agent-core": "0.84.2",
     "@earendil-works/pi-ai": "0.84.2",
     "@opentelemetry/api": "^1.9.1",
+    "@valet/shared": "workspace:*",
     "typebox": "^1.3.7",
     "yaml": "^2.9.0"
   },

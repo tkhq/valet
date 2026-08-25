@@ -91,8 +91,8 @@ describe("createWorkflowTrigger authorization", () => {
   });
 });
 
-describe("listWorkflowTriggers / deleteWorkflowTrigger scope (documented, deliberately unchanged by this fix)", () => {
-  it("any org member can list and delete a trigger they didn't create — org-shared visibility, matching event_subscriptions' own documented model everywhere else in this route family, NOT the creation-time ownership bug fixed above", async () => {
+describe("listWorkflowTriggers / deleteWorkflowTrigger owner scoping (TKAI-227)", () => {
+  it("another org member cannot list or delete a trigger on a workflow they cannot reach; the owner can do both", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
     const created = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "owner-user", orgId: "org-1" }, {
       workflowId: "wf_1",
@@ -102,10 +102,16 @@ describe("listWorkflowTriggers / deleteWorkflowTrigger scope (documented, delibe
     expect(created.ok).toBe(true);
     if (!created.ok) return;
 
-    const listedByOther = await listWorkflowTriggers(db, "org-1");
-    expect(listedByOther.map((t) => t.triggerId)).toContain(created.trigger.triggerId);
+    const other = { userId: "other-org-member", orgId: "org-1" };
+    const listedByOther = await listWorkflowTriggers(db, other);
+    expect(listedByOther.map((t) => t.triggerId)).not.toContain(created.trigger.triggerId);
+    const deletedByOther = await deleteWorkflowTrigger(db, other, created.trigger.triggerId);
+    expect(deletedByOther).toBe("not_found");
 
-    const deletedByOther = await deleteWorkflowTrigger(db, "org-1", created.trigger.triggerId);
-    expect(deletedByOther).toBe("ok");
+    const owner = { userId: "owner-user", orgId: "org-1" };
+    const listedByOwner = await listWorkflowTriggers(db, owner);
+    expect(listedByOwner.map((t) => t.triggerId)).toContain(created.trigger.triggerId);
+    const deletedByOwner = await deleteWorkflowTrigger(db, owner, created.trigger.triggerId);
+    expect(deletedByOwner).toBe("ok");
   });
 });

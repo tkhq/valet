@@ -16,6 +16,7 @@ let db: AppDb;
 let cleanup: () => Promise<void>;
 
 const USER = { id: "user_1", orgId: "org_1" };
+const OWNER = { userId: "user_1", orgId: "org_1" };
 const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
 
 beforeAll(async () => {
@@ -41,7 +42,7 @@ describe("updateWorkflowSchedule", () => {
 
     const updated = await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       created.schedule.scheduleId,
       { name: "morning digest", enabled: false },
       NOW + 1000,
@@ -64,7 +65,7 @@ describe("updateWorkflowSchedule", () => {
 
     const updated = await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       created.schedule.scheduleId,
       { cron: "0 18 * * *" },
       NOW,
@@ -86,7 +87,7 @@ describe("updateWorkflowSchedule", () => {
     if (!created.ok) throw new Error(created.error);
     await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       created.schedule.scheduleId,
       { enabled: false },
       NOW,
@@ -95,7 +96,7 @@ describe("updateWorkflowSchedule", () => {
     const later = NOW + 7 * 24 * 3600 * 1000;
     const updated = await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       created.schedule.scheduleId,
       { enabled: true },
       later,
@@ -115,7 +116,7 @@ describe("updateWorkflowSchedule", () => {
     if (!created.ok) throw new Error(created.error);
     const updated = await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       created.schedule.scheduleId,
       { cron: "not a cron" },
       NOW,
@@ -129,7 +130,7 @@ describe("updateWorkflowSchedule", () => {
   it("returns 404 for an unknown id or another org's schedule", async () => {
     const missing = await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       "nope",
       { name: "x" },
       NOW,
@@ -146,7 +147,7 @@ describe("updateWorkflowSchedule", () => {
     if (!created.ok) throw new Error(created.error);
     const crossOrg = await updateWorkflowSchedule(
       db,
-      "org_other",
+      { userId: USER.id, orgId: "org_other" },
       created.schedule.scheduleId,
       { name: "x" },
       NOW,
@@ -177,7 +178,7 @@ describe("updateWorkflowSchedule", () => {
     if (!created.ok) throw new Error(created.error);
     const updated = await updateWorkflowSchedule(
       db,
-      USER.orgId,
+      OWNER,
       created.schedule.scheduleId,
       { prompt: "nope" },
       NOW,

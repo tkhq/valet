@@ -18,6 +18,7 @@ let db: AppDb;
 let cleanup: () => Promise<void>;
 
 const USER = { id: "user_1", orgId: "org_1" };
+const OWNER = { userId: "user_1", orgId: "org_1" };
 
 beforeAll(async () => {
   const boot = await freshTestPgDb();
@@ -51,7 +52,7 @@ describe("updateWorkflowTrigger", () => {
     if (!created.ok) throw new Error(created.error);
     const triggerId = created.trigger.triggerId;
 
-    const updated = await updateWorkflowTrigger(db, [githubPlugin], "org_1", triggerId, {
+    const updated = await updateWorkflowTrigger(db, [githubPlugin], OWNER, triggerId, {
       name: "renamed",
       enabled: false,
     });
@@ -71,7 +72,7 @@ describe("updateWorkflowTrigger", () => {
     if (!created.ok) throw new Error(created.error);
     const triggerId = created.trigger.triggerId;
 
-    const updated = await updateWorkflowTrigger(db, [githubPlugin], "org_1", triggerId, {
+    const updated = await updateWorkflowTrigger(db, [githubPlugin], OWNER, triggerId, {
       eventKeys: ["github.no_such_event"],
     });
     expect(updated.ok).toBe(false);
@@ -80,7 +81,7 @@ describe("updateWorkflowTrigger", () => {
 
   it("404s for unknown ids, cross-org rows, and non-workflow subscriptions", async () => {
     // Unknown id
-    const missing = await updateWorkflowTrigger(db, [githubPlugin], "org_1", "nope", {
+    const missing = await updateWorkflowTrigger(db, [githubPlugin], OWNER, "nope", {
       name: "x",
     });
     expect(missing.ok).toBe(false);
@@ -96,7 +97,7 @@ describe("updateWorkflowTrigger", () => {
     const crossOrg = await updateWorkflowTrigger(
       db,
       [githubPlugin],
-      "org_other",
+      { userId: USER.id, orgId: "org_other" },
       created.trigger.triggerId,
       { name: "x" },
     );
@@ -120,7 +121,7 @@ describe("updateWorkflowTrigger", () => {
       createdAt: now,
       updatedAt: now,
     });
-    const orchUpdate = await updateWorkflowTrigger(db, [githubPlugin], "org_1", orchId, {
+    const orchUpdate = await updateWorkflowTrigger(db, [githubPlugin], OWNER, orchId, {
       name: "should-fail",
     });
     expect(orchUpdate.ok).toBe(false);

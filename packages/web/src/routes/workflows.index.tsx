@@ -304,7 +304,7 @@ function DefinitionRow({
           <span
             aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}
             title={nextFireAt ? `next fire ${new Date(nextFireAt).toLocaleString()}` : undefined}
-            className="inline-flex items-center gap-1 rounded-full bg-muted/10 px-2 py-0.5 text-xs text-muted"
+            className="inline-flex items-center gap-1 rounded-full bg-ink-wash-strong px-2 py-0.5 text-xs text-muted"
           >
             <Clock className="h-3 w-3" /> {scheduleCount}
           </span>
@@ -312,7 +312,7 @@ function DefinitionRow({
         {eventCount > 0 && (
           <span
             aria-label={`${eventCount} event trigger${eventCount === 1 ? "" : "s"}`}
-            className="inline-flex items-center gap-1 rounded-full bg-muted/10 px-2 py-0.5 text-xs text-muted"
+            className="inline-flex items-center gap-1 rounded-full bg-ink-wash-strong px-2 py-0.5 text-xs text-muted"
           >
             <Zap className="h-3 w-3" /> {eventCount}
           </span>

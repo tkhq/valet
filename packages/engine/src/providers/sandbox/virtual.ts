@@ -94,7 +94,9 @@ export class VirtualSandbox implements Sandbox {
 
   async stat(path: string): Promise<{ isFile: boolean; isDirectory: boolean; size: number }> {
     const e = this.fs.get(normalize(path));
-    if (!e) throw new Error(`ENOENT: ${path}`);
+    // Carry `code` like node:fs does — callers distinguish not-found from
+    // transport errors by it.
+    if (!e) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
     return {
       isFile: e.type === "file",
       isDirectory: e.type === "dir",

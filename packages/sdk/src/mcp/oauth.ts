@@ -24,6 +24,9 @@ export interface TokenResponse {
   refresh_token?: string;
   expires_in?: number;
   token_type?: string;
+  /** Granted scopes, space-delimited (RFC 6749 §5.1). May be narrower than
+   * the request, or "" for a token with no scopes. */
+  scope?: string;
 }
 
 // ─── RFC 9728 + RFC 8414: Authorization Server Metadata Discovery ───────────
