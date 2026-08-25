@@ -6,8 +6,8 @@
  * The rule under test: an unpriced turn must never read as $0 of spend.
  */
 import { describe, expect, it } from "vitest";
-import type { UsageWindow } from "@valet/api/wire";
-import { windowCostDisplay } from "./usage-card";
+import type { UsageMemberSummary, UsageWindow } from "@valet/api/wire";
+import { ORG_MEMBER_CAP, topMembers, windowCostDisplay } from "./usage-card";
 
 function window(partial: Partial<UsageWindow>): UsageWindow {
   return {
@@ -21,6 +21,10 @@ function window(partial: Partial<UsageWindow>): UsageWindow {
     unpricedTurns: 0,
     ...partial,
   };
+}
+
+function member(userId: string, costUsd: number, totalTokens = 0): UsageMemberSummary {
+  return { userId, name: userId, ...window({ costUsd, totalTokens }) };
 }
 
 describe("windowCostDisplay", () => {
@@ -54,5 +58,37 @@ describe("windowCostDisplay", () => {
       text: "<$0.01+",
       note: "1 unpriced",
     });
+  });
+});
+
+describe("topMembers", () => {
+  it("returns everyone with no hidden count when at or under the cap", () => {
+    const members = [member("a", 5), member("b", 3)];
+    expect(topMembers(members)).toEqual({ shown: members, hidden: 0 });
+  });
+
+  it("caps the list and counts the members it hides", () => {
+    const members = Array.from({ length: ORG_MEMBER_CAP + 7 }, (_, i) =>
+      member(`u${i}`, ORG_MEMBER_CAP + 7 - i),
+    );
+    const { shown, hidden } = topMembers(members);
+    expect(shown).toHaveLength(ORG_MEMBER_CAP);
+    expect(hidden).toBe(7);
+  });
+
+  it("keeps the highest spenders, not the first rows, when input is unsorted", () => {
+    const members = [
+      ...Array.from({ length: ORG_MEMBER_CAP }, (_, i) => member(`small${i}`, 1)),
+      member("big", 100),
+    ];
+    const { shown, hidden } = topMembers(members);
+    expect(shown[0]?.userId).toBe("big");
+    expect(shown).toHaveLength(ORG_MEMBER_CAP);
+    expect(hidden).toBe(1);
+  });
+
+  it("breaks cost ties by token volume, like the API's own ordering", () => {
+    const { shown } = topMembers([member("fewer", 2, 10), member("more", 2, 90)]);
+    expect(shown.map((m) => m.userId)).toEqual(["more", "fewer"]);
   });
 });

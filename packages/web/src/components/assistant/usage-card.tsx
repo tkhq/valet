@@ -22,7 +22,8 @@ export function UsageCard() {
   });
 
   const data = usageQ.data;
-  const maxMemberCost = Math.max(0, ...(data?.org?.members.map((m) => m.costUsd) ?? []));
+  const org = data?.org ? topMembers(data.org.members) : null;
+  const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
@@ -56,7 +57,7 @@ export function UsageCard() {
               <WindowStat label="30 days" window={data.me.month} />
             </div>
 
-            {data.org && data.org.members.length > 1 && (
+            {data.org && org && data.org.members.length > 1 && (
               <div className="pt-1 space-y-1.5">
                 {/* These rows are `data.org.members` — the whole org
                     roster, never a team's. "Team" now names a real,
@@ -65,7 +66,7 @@ export function UsageCard() {
                 <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
                   Organization
                 </div>
-                {data.org.members.map((m) => (
+                {org.shown.map((m) => (
                   <MemberBar
                     key={m.userId}
                     member={m}
@@ -73,6 +74,9 @@ export function UsageCard() {
                     isMe={m.userId === me.data?.id}
                   />
                 ))}
+                {org.hidden > 0 && (
+                  <div className="text-[10px] text-muted">+ {org.hidden} more</div>
+                )}
               </div>
             )}
           </>
@@ -80,6 +84,31 @@ export function UsageCard() {
       </div>
     </section>
   );
+}
+
+/**
+ * Max org rows the card shows. Past this depth the list pushes the card
+ * far below the fold and the tail bars flatten into noise; the personal
+ * windows above already cover the viewer's own spend if they fall outside
+ * the top spenders.
+ */
+export const ORG_MEMBER_CAP = 15;
+
+/**
+ * Top spenders for the org list, capped at ORG_MEMBER_CAP. Re-sorts with
+ * the API's own comparator (cost desc, then tokens) instead of trusting
+ * wire order, so the cap always drops the cheapest rows. Exported pure
+ * function so the cap is testable without rendering React.
+ */
+export function topMembers(members: UsageMemberSummary[]): {
+  shown: UsageMemberSummary[];
+  hidden: number;
+} {
+  const sorted = [...members].sort(
+    (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
+  );
+  const shown = sorted.slice(0, ORG_MEMBER_CAP);
+  return { shown, hidden: members.length - shown.length };
 }
 
 export interface WindowCostDisplay {
@@ -139,8 +168,11 @@ function MemberBar({
         {isMe ? "You" : member.name}
       </span>
       <div className="flex-1 h-1.5 rounded-full bg-ink-wash overflow-hidden">
+        {/* `bg-muted-wash`, never `bg-muted/50`: the slash modifier on a
+            `var()` token emits no rule, which shipped these bars invisible
+            for everyone but the viewer. See theme.css's trap note. */}
         <div
-          className={cn("h-full rounded-full", isMe ? "bg-moss" : "bg-muted/50")}
+          className={cn("h-full rounded-full", isMe ? "bg-moss" : "bg-muted-wash")}
           style={{ width: `${Math.max(2, Math.round(fraction * 100))}%` }}
         />
       </div>
