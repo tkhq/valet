@@ -57,12 +57,13 @@ import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
+import { getUserModelPreferences } from "../services/user.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
-import { hasOrgKey } from "../services/model-catalog.js";
+import { hasOrgKey, preferenceModelResolvable } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orgs, users } from "../schema/index.js";
+import { agentSessions, orgs, users, type LlmProviderRow } from "../schema/index.js";
 import { loadAssistant } from "../assistants/service.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -1886,57 +1887,74 @@ export class EngineHost {
   }
 
   /**
-   * `orgs.modelPreferences`, walked in preference order to find the first
-   * entry backed by an ACTIVE provider, or `undefined` when unset, the host
-   * has no `db`, or every preference's provider is inactive (disabled, or
-   * deleted/unknown for custom namespaces). Uncached — a preferences change
-   * applies on the very next session build (split-settings decision 9).
+   * `users.modelPreferences` then `orgs.modelPreferences`, walked in
+   * preference order to find the first entry backed by an ACTIVE provider,
+   * or `undefined` when unset, the host has no `db`, or every preference's
+   * provider is inactive (disabled, or deleted/unknown for custom
+   * namespaces). Uncached — a preferences change applies on the very next
+   * session build (split-settings decision 9).
    *
    * Spec: new sessions must never resolve to an inactive provider (llm-
    * providers design doc decision 6) — disabling the provider behind
-   * `orgPreferences[0]` must fall through to the next preference, not throw.
-   * This only guards the new-session default tier; `overrideId` and the
-   * user's explicit `defaultModel` still resolve straight through to
-   * `resolveModelObject` and throw on a disabled provider, per the spec's
-   * failure semantics for an explicit pick. Restore is untouched — it never
-   * consults preferences at all (persisted model always wins).
+   * preference `[0]` must fall through to the next preference, then the
+   * other list, not throw. This only guards the new-session default tier;
+   * `overrideId` and the user's explicit `defaultModel` still resolve
+   * straight through to `resolveModelObject` and throw on a disabled
+   * provider, per the spec's failure semantics for an explicit pick.
+   * Restore is untouched — it never consults preferences at all (persisted
+   * model always wins).
    *
-   * One `listLlmProviders` query total (not one per preference / no full
-   * catalog build), plus one credential read per CUSTOM-namespaced
-   * preference entry (acceptable — preference lists are short and this only
-   * runs at session-build time, never per turn). "Active" mirrors the
-   * catalog's own `resolvable` definition (`services/model-catalog.ts`),
-   * which in turn mirrors `resolveModelSpec`'s throw condition:
-   *   - known kind (anthropic/openai/google), no row → always active
-   *     (zero-config path, same as `resolveModelSpec`'s no-row branch).
-   *   - known kind WITH a row → active iff `row.enabled`. A row with
-   *     neither an org key nor an env key is still "active" here even
-   *     though `resolveModelSpec` now throws `NoCredentialsError` for that
-   *     case — session build goes through `resolveModelObject`, which
-   *     swallows `NoCredentialsError` and returns the attached model, so a
-   *     keyless org still builds; keylessness is a turn-time concern (the
-   *     engine's pre-run release/cap path), not a reason to skip this
-   *     preference entry.
-   *   - custom (`openai_compatible`) row → active iff `row.enabled` AND an
-   *     org credential exists at `llm:{row.id}` — custom providers have NO
-   *     env fallback, so a keyless custom row is exactly the case
-   *     `resolveModelSpec` throws `provider {name} has no API key` for, and
-   *     must not be treated as active here either (this is the key-delete
-   *     bug this fell through: an admin could delete the key backing
-   *     `orgPreferences[0]`, leaving new sessions with no key AND no
-   *     fallback until the array was rewritten).
+   * One `listLlmProviders` query covers both lists (not one per list, not
+   * one per preference / no full catalog build), plus one credential read
+   * per CUSTOM-namespaced preference entry (acceptable — preference lists
+   * are short and this only runs at session-build time, never per turn).
+   * "Active" mirrors `resolveModelSpec`'s throw condition, except
+   * `NoCredentialsError` (session build swallows that):
+   *   - known kind (anthropic/openai/google/openrouter), no row → active
+   *     iff the model is still in the pi-ai registry (zero-config path).
+   *     OpenRouter is a known kind; skipping it here dropped env-only
+   *     `openrouter/…` prefs that `PATCH /api/me` had accepted.
+   *   - known kind WITH a row → active iff `row.enabled` AND the model is
+   *     still in the registry (or, for openrouter, on the row selection).
+   *     A keyless known-kind row stays active: `resolveModelObject`
+   *     swallows `NoCredentialsError`.
+   *   - custom (`openai_compatible`) row → active iff `row.enabled` AND a
+   *     non-empty org credential exists at `llm:{row.id}` AND `modelId` is
+   *     still on the row's declared `models` list. Whitespace-only keys
+   *     count as missing (same as `resolveModelSpec`'s `orgKey`).
    */
-  private async orgPreferredModel(orgId: string): Promise<string | undefined> {
+  private async preferredModel(userId: string, orgId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
-    const prefs = await getOrgModelPreferences(this.opts.db, orgId);
-    if (prefs.length === 0) return undefined;
+    const userPrefs = await getUserModelPreferences(this.opts.db, userId);
+    const orgPrefs = await getOrgModelPreferences(this.opts.db, orgId);
+    if (userPrefs.length === 0 && orgPrefs.length === 0) return undefined;
     const rows = await listLlmProviders(this.opts.db, orgId);
+    return (
+      (await this.firstActivePreference(orgId, userPrefs, rows)) ??
+      (await this.firstActivePreference(orgId, orgPrefs, rows))
+    );
+  }
+
+  /**
+   * Shared walker for user + org preference lists. First entry that is
+   * still resolvable and whose provider row (when present) is enabled
+   * wins; disabled/deleted/keyless custom rows, whitespace-only custom
+   * keys, removed custom models, and stale registry ids are skipped.
+   * Caller loads `rows` once and passes them for both lists.
+   */
+  private async firstActivePreference(
+    orgId: string,
+    prefs: readonly string[],
+    rows: readonly LlmProviderRow[],
+  ): Promise<string | undefined> {
+    if (prefs.length === 0) return undefined;
     for (const pref of prefs) {
-      const { namespace } = parseModelId(pref);
+      const { namespace, modelId } = parseModelId(pref);
       const row = rows.find((r) => providerNamespace(r) === namespace);
+      if (!preferenceModelResolvable(namespace, modelId, row)) continue;
       let active: boolean;
       if (!row) {
-        active = namespace === "anthropic" || namespace === "openai" || namespace === "google";
+        active = true;
       } else if (row.kind === "openai_compatible") {
         active = row.enabled && (await hasOrgKey(this.opts.engineCredentials, orgId, row.id));
       } else {
@@ -1975,10 +1993,11 @@ export class EngineHost {
    * `session.setModel(...)` override would get silently clobbered the next
    * time the session's cache entry is evicted and rebuilt (e.g.
    * `evictAll()` on shutdown, or an idle sweep). So on restore
-   * (`existing` present), the *persisted* model always wins over both
-   * `overrideId` and the user default — that persisted value already
-   * reflects whatever `setModel` (or the original create-time model) set.
-   * Only on create does `overrideId ?? userDefault ?? hardcoded-default`
+   * (`existing` present), the *persisted* model always wins over
+   * `overrideId`, the user default, and both preference lists — that
+   * persisted value already reflects whatever `setModel` (or the original
+   * create-time model) set. Only on create does
+   * `overrideId ?? userDefault ?? userPrefs ?? orgPrefs ?? hardcoded-default`
    * apply.
    */
   private async resolveModelForBuild(
@@ -1988,10 +2007,22 @@ export class EngineHost {
     overrideId?: string,
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
+    // New-session precedence (restored per-user preferences PR):
+    //   1. explicit override (child/workflow spawner)
+    //   2. `users.default_model` (explicit user pick, throws on inactive)
+    //   3. `users.model_preferences[first-active]` (implicit user fallback)
+    //   4. `orgs.model_preferences[first-active]` (implicit org fallback)
+    //   5. host `defaultModelId`
+    //   6. hardcoded `claude-haiku-4-5`
+    // Steps 3–4 use the shared active-preference walker (see
+    // `preferredModel` / `firstActivePreference`), so a keyless/disabled
+    // provider at position 0 is skipped instead of throwing — same
+    // fail-forward semantics the org list has always had. One
+    // `listLlmProviders` query covers both lists.
     const id =
       overrideId ??
       (await this.userDefaultModel(userId)) ??
-      (await this.orgPreferredModel(orgId)) ??
+      (await this.preferredModel(userId, orgId)) ??
       this.opts.defaultModelId ??
       "claude-haiku-4-5";
     return this.resolveModelObject(orgId, id);

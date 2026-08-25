@@ -49,6 +49,7 @@ vi.mock("~/api/settings", () => ({
       orgId: "o1",
       orgRole: "member",
       defaultModel: null,
+      modelPreferences: [],
     },
   }),
   useTeams: () => ({ data: { teams } }),

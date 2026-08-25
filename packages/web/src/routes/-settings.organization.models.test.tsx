@@ -403,7 +403,7 @@ describe("ModelPreferencesSection", () => {
     // Closed until focused — no flat catalog dump on the page.
     expect(screen.queryByText("GPT One")).toBeNull();
 
-    const search = screen.getByRole("textbox", { name: "Search models to add" });
+    const search = screen.getByRole("combobox", { name: "Search models to add" });
     await user.type(search, "gpt");
     await user.click(screen.getByText("GPT One"));
     expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
@@ -416,7 +416,7 @@ describe("ModelPreferencesSection", () => {
     const user = userEvent.setup();
     preferencesData = { preferences: [] };
     render(<ModelPreferencesSection />);
-    const search = screen.getByRole("textbox", { name: "Search models to add" });
+    const search = screen.getByRole("combobox", { name: "Search models to add" });
     await user.type(search, "claude");
     expect(screen.getByText("Claude One")).toBeTruthy();
     expect(screen.queryByText("GPT One")).toBeNull();

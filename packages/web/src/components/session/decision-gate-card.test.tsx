@@ -60,7 +60,7 @@ function renderCard(g: DecisionGate = gate()) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null };
+  meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, modelPreferences: [] };
 });
 
 describe("DecisionGateCard — action rendering", () => {
@@ -105,7 +105,7 @@ describe("DecisionGateCard — always_allow admin gate", () => {
   });
 
   it("enables Always allow for an org admin and submits actionId on click", async () => {
-    meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "admin", defaultModel: null };
+    meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "admin", defaultModel: null, modelPreferences: [] };
     const user = userEvent.setup();
     renderCard();
 

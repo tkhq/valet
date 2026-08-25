@@ -155,6 +155,16 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
   // fail-closed, same as an empty list.
   await db.query('ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb');
 
+  // Per-user ordered `modelPreferences` (restore of the v1 feature that
+  // regressed to a single `defaultModel` in dev-v2). NOT NULL DEFAULT '[]'
+  // is safe as an in-place ADD because Postgres backfills every existing
+  // row with the default in a single catalog write. Consulted by
+  // `EngineHost.resolveModelForBuild` between `users.default_model` and
+  // `orgs.model_preferences`.
+  await db.query(
+    `ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "model_preferences" jsonb NOT NULL DEFAULT '[]'::jsonb`,
+  );
+
   // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills every
   // pre-existing org row to `false` — anonymous sharing stays off until an
   // admin opts in, the same fail-closed answer a fresh database gets.
