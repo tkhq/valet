@@ -22,7 +22,10 @@ export function UsageCard() {
   });
 
   const data = usageQ.data;
-  const org = data?.org ? topMembers(data.org.members, me.data?.id) : null;
+  // Rank only after the viewer's identity settles (loaded or errored).
+  // Ranking while /api/me is still in flight would paint the list without
+  // the "You" row, then append it and shift the layout when the id lands.
+  const org = data?.org && !me.isPending ? topMembers(data.org.members, me.data?.id) : null;
   const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
 
   return (
@@ -57,12 +60,14 @@ export function UsageCard() {
               <WindowStat label="30 days" window={data.me.month} />
             </div>
 
-            {data.org && org && data.org.members.length > 1 && (
+            {org && org.shown.length > 1 && (
               <div className="pt-1 space-y-1.5">
-                {/* These rows are `data.org.members` — the whole org
-                    roster, never a team's. "Team" now names a real,
-                    narrower thing in this product, so calling this that
-                    would misreport whose spend is on screen. */}
+                {/* These rows rank `data.org.members` — the whole org
+                    roster, never a team's — capped at the top spenders,
+                    with the viewer always included (see topMembers).
+                    "Team" now names a real, narrower thing in this
+                    product, so calling this that would misreport whose
+                    spend is on screen. */}
                 <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
                   Organization
                 </div>
@@ -94,12 +99,16 @@ export const ORG_MEMBER_CAP = 15;
 
 /**
  * Top spenders for the org list, capped at ORG_MEMBER_CAP. Re-sorts with
- * the API's own comparator (cost desc, then tokens) instead of trusting
- * wire order, so the cap always drops the cheapest rows. A viewer who
- * falls outside the cap is appended as one extra row at the bottom — the
- * comparison against the org is the point of the list, so the viewer must
- * always be on it. Exported pure function so the behavior is testable
- * without rendering React.
+ * the API's own comparator (cost desc, then tokens — the other copy lives
+ * in packages/api/src/routes/usage.ts; keep them in sync) instead of
+ * trusting wire order, so the cap always drops the cheapest rows.
+ *
+ * When meId is known the viewer is always on the list: a viewer ranked
+ * below the cap is appended as one extra row, and a viewer with no spend
+ * at all gets a synthesized $0 row — the API aggregates only users with
+ * usage rows, so a zero-spend viewer is absent from `members` entirely.
+ * Exported pure function so the behavior is testable without rendering
+ * React.
  */
 export function topMembers(
   members: UsageMemberSummary[],
@@ -111,12 +120,27 @@ export function topMembers(
   const sorted = [...members].sort(
     (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
   );
+  const meIdx = meId === undefined ? -1 : sorted.findIndex((m) => m.userId === meId);
   const shown = sorted.slice(0, ORG_MEMBER_CAP);
-  if (meId !== undefined && !shown.some((m) => m.userId === meId)) {
-    const me = sorted.find((m) => m.userId === meId);
-    if (me) shown.push(me);
+  if (meIdx >= ORG_MEMBER_CAP) shown.push(sorted[meIdx]);
+  // `hidden` counts real members only, so it is fixed before the
+  // synthetic $0 row (which hides nobody) is appended.
+  const hidden = members.length - shown.length;
+  if (meId !== undefined && meIdx === -1) {
+    shown.push({
+      userId: meId,
+      name: "",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      turns: 0,
+      unpricedTurns: 0,
+    });
   }
-  return { shown, hidden: members.length - shown.length };
+  return { shown, hidden };
 }
 
 export interface WindowCostDisplay {

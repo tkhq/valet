@@ -114,10 +114,32 @@ describe("topMembers", () => {
     expect(hidden).toBe(3);
   });
 
-  it("changes nothing when the viewer id is unknown or absent from the org", () => {
+  it("synthesizes a $0 viewer row when the viewer has no spend in the window", () => {
+    // The API aggregates only users with usage rows, so a zero-spend
+    // viewer is absent from members entirely.
     const members = Array.from({ length: ORG_MEMBER_CAP + 2 }, (_, i) =>
       member(`u${i}`, 100 - i),
     );
-    expect(topMembers(members, "not-a-member")).toEqual(topMembers(members));
+    const { shown, hidden } = topMembers(members, "viewer");
+    expect(shown).toHaveLength(ORG_MEMBER_CAP + 1);
+    expect(shown[ORG_MEMBER_CAP]).toMatchObject({ userId: "viewer", costUsd: 0, turns: 0 });
+    // The synthetic row hides nobody: the count still reflects real members.
+    expect(hidden).toBe(2);
+  });
+
+  it("synthesizes the $0 viewer row in small orgs too", () => {
+    const members = [member("a", 5), member("b", 3)];
+    const { shown, hidden } = topMembers(members, "viewer");
+    expect(shown.map((m) => m.userId)).toEqual(["a", "b", "viewer"]);
+    expect(hidden).toBe(0);
+  });
+
+  it("synthesizes no row when no viewer id is given", () => {
+    const members = Array.from({ length: ORG_MEMBER_CAP + 2 }, (_, i) =>
+      member(`u${i}`, 100 - i),
+    );
+    const { shown, hidden } = topMembers(members);
+    expect(shown).toHaveLength(ORG_MEMBER_CAP);
+    expect(hidden).toBe(2);
   });
 });
