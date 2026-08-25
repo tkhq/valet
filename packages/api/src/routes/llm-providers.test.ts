@@ -220,7 +220,8 @@ describe("POST /api/org/llm-providers", () => {
     expect(body.kind).toBe("openrouter");
     expect(body.baseUrl).toBeUndefined();
     expect(body.models.map((m) => m.id)).toEqual([...OPENROUTER_DEFAULT_MODEL_IDS]);
-    expect(body.models.map((m) => m.id)).toContain("deepseek/deepseek-v4-pro");
+    // Verify only Anthropic and OpenAI models are included
+    expect(body.models.every((m) => m.id.startsWith("anthropic/") || m.id.startsWith("openai/"))).toBe(true);
   });
 
   it("openrouter is a per-org singleton (second create 409s)", async () => {

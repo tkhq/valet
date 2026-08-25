@@ -167,7 +167,8 @@ describe("model catalog", () => {
         }
         // Nested-slash ids must validate for defaultModel/preferences.
         const validIds = catalogValidIds(entries);
-        expect(validIds.has("openrouter/deepseek/deepseek-v4-pro")).toBe(true);
+        // Verify one of the Anthropic models is present (as an example of valid nested-slash id)
+        expect(validIds.has("openrouter/anthropic/claude-opus-4.7")).toBe(true);
       } finally {
         vi.unstubAllEnvs();
       }
