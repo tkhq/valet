@@ -182,6 +182,31 @@ describe("discoverFromTree", () => {
       expect(found.excludedCandidates).toEqual([]);
     });
 
+    it("leaves .valet/prompts to the repository's own slash commands", () => {
+      // `.valet/prompts/*.md` is an existing Valet convention that has
+      // nothing to do with this sync: the repository's own slash commands,
+      // read from the prepared sandbox by `engine/command-providers.ts`.
+      // Mirroring them as prompt skills would change what an already-tracked
+      // repository holds on upgrade, and a name held by both `.claude/prompts`
+      // and `.valet/prompts` would collide on the owner-name index. `.valet`
+      // is open for `skills` and for nothing else.
+      const found = discoverFromTree(
+        [
+          blob(".valet/prompts/deploy.md"),
+          blob(".valet/templates/nightly.yaml"),
+          blob(".claude/prompts/triage.md"),
+          blob(".valet/skills/release/SKILL.md"),
+        ],
+        "",
+      );
+
+      expect(found.accepted.map((c) => c.path)).toEqual([
+        ".valet/skills/release/SKILL.md",
+        ".claude/prompts/triage.md",
+      ]);
+      expect(found.discovered).toBe(2);
+    });
+
     it("keeps a skill whose OWN directory carries an excluded name", () => {
       // The rule judges ancestors, never the directory the skill is named
       // after. Junk arrives nested — `dist/skills/x/SKILL.md` — while a

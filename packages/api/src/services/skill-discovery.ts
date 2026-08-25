@@ -41,13 +41,13 @@
  * excluded, so it is imported. Junk arrives nested; a skill name does not.
  *
  * A dot-prefixed ancestor is excluded too, because `.github`, `.vscode` and
- * `.venv` hold tooling. `.claude` and `.valet` are the two exceptions:
- * `.claude/skills/<name>/SKILL.md` is the most likely place for a real
- * skill, and `.valet` is Valet's own per-repository folder, which already
- * carries `prebuild.yaml`, `prompts/`, and the workflow files the 2026-08-24
- * workflows MVP design adds. Neither may be lost. Opening `.claude` is also
- * what makes the plugin-tree names below matter, because a downloaded
- * plugin's skills sit under `.claude/plugins`.
+ * `.venv` hold tooling. Two paths are the exceptions, and they are paths
+ * rather than directory names: the whole `.claude` tree, and `.valet/skills`
+ * alone. `.claude/skills/<name>/SKILL.md` is the most likely place for a real
+ * skill, and opening `.claude` is what makes the plugin-tree names below
+ * matter, because a downloaded plugin's skills sit under `.claude/plugins`.
+ * `.valet` is Valet's own per-repository folder, and only its `skills`
+ * subtree holds skills — see `SCANNED_DOT_PATHS`.
  *
  * Over-exclusion is recoverable without a new setting. The rules run on the
  * part of the path BELOW the subdirectory, so a source whose subdirectory is
@@ -126,13 +126,28 @@ export const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   "external_plugins",
 ]);
 
-/** The dot-prefixed directories that are scanned. `.claude/skills/<name>/
- * SKILL.md` is where an agent runtime keeps a repository's own skills.
- * `.valet` is Valet's own per-repository folder, and the 2026-08-24
- * workflows MVP design puts workflow files under it — a folder the sync
- * reads for one kind and skips for another would be hard to explain, and a
- * repository that keeps its skills there means them. */
-const SCANNED_DOT_DIRECTORIES: ReadonlySet<string> = new Set([".claude", ".valet"]);
+/**
+ * The dot-prefixed PATHS this scan opens. Everything under one of them is
+ * scanned; every other dot-prefixed ancestor is skipped.
+ *
+ * `.claude/skills/<name>/SKILL.md` is where an agent runtime keeps a
+ * repository's own skills, so the whole `.claude` tree is open.
+ *
+ * `.valet` is open for `skills` and for nothing else. It is Valet's own
+ * per-repository folder, and it already carries three conventions that are
+ * not skills: `prebuild.yaml` configures the sandbox image, `persona` is
+ * written by the runner, and `prompts/*.md` are the repository's own slash
+ * commands, read from the prepared sandbox by
+ * `engine/command-providers.ts`. Mirroring those prompt files as skills
+ * would change what an already-tracked repository holds the moment it
+ * upgraded, and a name held by both `.claude/prompts` and `.valet/prompts`
+ * would collide on the owner-name unique index. Whether `.valet/prompts`
+ * should become skills is a product question, and it is open.
+ *
+ * A source may still reach any of it deliberately, by naming the directory
+ * as its `subpath` — the rules run below the subdirectory.
+ */
+const SCANNED_DOT_PATHS: readonly string[] = [".claude", ".valet/skills"];
 
 /** Git's mode for a symbolic link. The blob behind one holds a path string,
  * not the file it points at, so a symlinked `SKILL.md` is not readable as a
@@ -339,15 +354,25 @@ function candidateKind(fileName: string, segments: string[]): "skill" | "prompt"
 
 /** True when a directory ABOVE the candidate's own directory is not scanned.
  * The last two segments are the candidate's own directory and its file name,
- * and neither is judged here — see the file comment. */
+ * and neither is judged here — see the file comment.
+ *
+ * A dot-prefixed ancestor is judged on the whole path BELOW it, not on its
+ * own name, because `.valet` is open for one subtree and shut for the rest
+ * of itself. */
 function hasExcludedAncestor(segments: string[]): boolean {
-  return segments
-    .slice(0, -2)
-    .some(
-      (segment) =>
-        EXCLUDED_DIRECTORIES.has(segment) ||
-        (segment.startsWith(".") && !SCANNED_DOT_DIRECTORIES.has(segment)),
-    );
+  return segments.slice(0, -2).some((segment, index) => {
+    if (EXCLUDED_DIRECTORIES.has(segment)) return true;
+    if (!segment.startsWith(".")) return false;
+    return !isScannedDotPath(segments.slice(index).join("/"));
+  });
+}
+
+/** True when a path that starts at a dot-prefixed directory is one the scan
+ * opens. */
+function isScannedDotPath(fromDotDirectory: string): boolean {
+  return SCANNED_DOT_PATHS.some(
+    (open) => fromDotDirectory === open || fromDotDirectory.startsWith(`${open}/`),
+  );
 }
 
 function byPath(a: SkillCandidate, b: SkillCandidate): number {
