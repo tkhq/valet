@@ -878,8 +878,15 @@ describe("POST /webhooks/github-app", () => {
       .from(eventDeliveries)
       .where(eq(eventDeliveries.eventId, eventRows[0].id));
     expect(deliveryRows).toHaveLength(1);
-    expect(deliveryRows[0].status).toBe("pending");
     expect(deliveryRows[0].subscriptionId).toBe("sub_gh");
+    // Ingest nudges the in-process dispatcher fire-and-forget
+    // (`events/ingest.ts` calls `deps.onIngest?.()` outside the transaction),
+    // so the row is "pending" only until the dispatcher wins the race. What
+    // this case pins is that ingest MATCHED the subscription and wrote one
+    // delivery for it; the terminal status is the dispatcher's own suite
+    // (`events/dispatcher.test.ts`). Asserting "pending" here made the case
+    // fail whenever delivery landed first.
+    expect(["pending", "delivered"]).toContain(deliveryRows[0].status);
   });
 
   it("ingests forwarded events with no matching subscription (event row, zero deliveries)", async () => {
