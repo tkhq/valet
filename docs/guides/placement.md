@@ -183,39 +183,41 @@ One package per integration. A plugin declares itself through a `ValetPlugin`
 manifest default-exported from `./plugin`:
 
 ```ts
-// packages/plugin-typefully/src/plugin.ts
-import { mcpActionPlugin } from '@valet/sdk/mcp';
-import type { ValetPlugin } from '@valet/engine';
+// packages/plugin-openai/src/plugin.ts
+import type { ValetPlugin } from "@valet/engine";
+import { openaiPlugin } from "./actions.js";
 
+/**
+ * No `credentials` declaration on purpose: the OpenAI key is not a
+ * user-connectable integration. The api's session credential resolver
+ * answers `credentials.get("openai")` from the org's OpenAI LLM-provider
+ * key, a stored "openai" credential, or the OPENAI_API_KEY env var.
+ */
 const plugin: ValetPlugin = {
-  name: 'typefully',
-  version: '0.1.0',
-  description: 'Typefully integration for social media content management',
-  actions: [
-    mcpActionPlugin({
-      mcpUrl: 'https://mcp.typefully.com/mcp',
-      serviceName: 'typefully',
-      defaultRiskLevel: 'medium',
-      authQueryParam: 'TYPEFULLY_API_KEY',
-    }),
-  ],
-  credentials: [
-    { type: 'api_key', configKeys: ['accessToken'], connectLabel: 'Typefully API key' },
-  ],
+  name: "openai",
+  version: "0.1.0",
+  description: "OpenAI media tools — image generation and editing, transcription, text to speech",
+  actions: [openaiPlugin],
 };
 
 export default plugin;
 ```
 
+A plugin that *is* user-connectable adds a `credentials` array describing what
+the user connects, and the MCP-backed integrations build their whole `actions`
+array from one `mcpActionPlugin({ … })` call. The doc comment above is the
+convention worth copying: when a manifest omits a field other plugins carry,
+say why.
+
 A plugin never imports another plugin:
 
 ```ts
 // Wrong — plugin-to-plugin import.
-import { formatIssue } from '@valet/plugin-linear';
+import { formatIssue } from "@valet/plugin-linear";
 
 // Right — the shared contract lives in sdk, the shared type in shared.
-import { mcpActionPlugin } from '@valet/sdk/mcp';
-import type { IssueRef } from '@valet/shared';
+import { mcpActionPlugin } from "@valet/sdk/mcp";
+import type { IssueRef } from "@valet/shared";
 ```
 
 Run `make generate-registries` after you add one, and follow the full setup in
@@ -286,7 +288,9 @@ routes/settings.test.tsx     # Wrong — publishes a /settings.test route
 routes/-settings.test.tsx    # Right — excluded from the route tree
 ```
 
-Never edit `routeTree.gen.ts` by hand; rename the route file instead. Import
+`routeTree.gen.ts` is generated and gitignored — it is never committed, so a
+hand edit does not survive and does not appear in your diff. Rename the route
+file instead. Import
 web's own modules through the `~` alias, which resolves to `packages/web/src`.
 
 **No → read the escape hatch.**
@@ -412,7 +416,7 @@ from both sides.
 **A new export in `api/package.json` to reach one server function.** Either the
 function is pure and earns its own export, or its result belongs on the wire.
 
-**A hand edit to `routeTree.gen.ts`.** It is generated. Rename the route file.
+**A hand edit to `routeTree.gen.ts`.** It is generated and gitignored. Rename the route file.
 
 **"I'll promote it later."** Speculative placement in a shared package rarely
 gets undone, because nobody can tell who depends on it. Co-locate instead, and
@@ -424,7 +428,7 @@ existing package unless you are adding a genuine integration.
 
 ## How boundaries are enforced
 
-Valet has no import lint rule. The workspace enforces layering through package
+Valet has no import lint rule. Layering is enforced through package
 dependencies and TypeScript project references: a package imports only what its
 `package.json` declares, and `pnpm typecheck` runs `tsc --build` across the
 references in the root `tsconfig.json`.

@@ -29,7 +29,7 @@ const queryClient = new QueryClient({
 ```
 
 Override per query when a surface needs something different. Do not change the
-defaults to fix one screen.
+defaults to fix one page.
 
 ## Query key factories
 
@@ -186,7 +186,7 @@ void qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
 `use-invalidate-messages-on-queue-state.ts` and `use-workflow-patch-watch.ts`
 follow the same shape. Keep new ones beside them, named for the event they
 listen to and the thing they refresh. A hook named for its trigger is greppable
-when a screen goes stale; an `invalidateQueries` inside a `useEffect` in a
+when a page goes stale; an `invalidateQueries` inside a `useEffect` in a
 component is not.
 
 ## Mutations
@@ -259,4 +259,4 @@ server result you cannot predict. Show a pending state instead.
 | Redeclaring a response type | Drifts silently on the next server change | Import from `@valet/api/wire` |
 | Owner or filter first in a key | Destroys the invalidation prefix | Broad to narrow |
 | Optimistic write without `cancelQueries` | An in-flight refetch clobbers it | Cancel, then write |
-| Raising the global `staleTime` for one screen | Changes every other screen too | Override on that query |
+| Raising the global `staleTime` for one page | Changes every other page too | Override on that query |

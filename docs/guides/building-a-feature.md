@@ -34,7 +34,7 @@ Most features cut through the stack in the same order.
 | 3 | Agent behavior that acts on it | `engine/src/` |
 | 4 | The response shape the browser reads | `api/src/wire/types.ts` |
 | 5 | The route that returns it | `api/src/routes/` + `app.ts` |
-| 6 | The data hook and the screen | `web/src/api/`, `web/src/routes/` |
+| 6 | The data hook and the page | `web/src/api/`, `web/src/routes/` |
 
 Skip the steps your feature does not need. Do not reorder them. Writing the
 route before the wire type means writing the response shape twice.
@@ -185,16 +185,24 @@ const resp: ListModelsResponse = { models };
 return c.json(resp);
 ```
 
-**Relative imports end in `.js`.** This holds throughout `packages/api`, which is
-ESM — 1802 relative imports carry the extension against a single exception.
-`packages/web` is bundled by Vite and does not use it. The rule is per package:
+**Relative imports end in `.js`.** `packages/api` is ESM, and 1802 of its 1803
+relative specifiers carry the extension. `packages/web` is bundled by Vite and
+resolves without one. The rule is per package, and mixing them fails the build:
 
 ```ts
-// packages/api — right
+// packages/api — relative, always with the extension
 import type { AppEnv } from "../env.js";
-// packages/web — right
-import { Button } from "../components/button";
+
+// packages/web — `~` for anything crossing a directory, no extension
+import { Button } from "~/components/primitives";
+// packages/web — `./` for a sibling
+import { fallbackRenderer } from "./fallback";
 ```
+
+Web reaches for `~` (699 uses) far more than `../` (23), so treat a `../` in
+web as a hint that the alias is the better spelling. The one place web does use
+`.js` on relative paths is `components/primitives/`, whose 22 specifiers are
+self-consistent — follow the local file when you edit inside it.
 
 **The router is mounted in `app.ts`:**
 
@@ -263,7 +271,8 @@ useQuery({ queryKey: qkSettings.models(), queryFn: api.listModels });
 Pages are file-routed. A file in `src/routes/` becomes a URL, and the router
 generates `src/routeTree.gen.ts` from that directory. Two consequences:
 
-- Never hand-edit `routeTree.gen.ts`. Rename the route file instead.
+- Never hand-edit `routeTree.gen.ts`. It is generated and gitignored, so the
+  edit neither survives nor shows up in your diff. Rename the route file.
 - Prefix any non-route file in `routes/` with `-`:
 
 ```text
@@ -309,7 +318,7 @@ compiler walks you to every call site.
 file rather than creating a new one. A new router file means a new mount in
 `app.ts`, and mounts that share a prefix are where ordering bugs live.
 
-**Adding a query to an existing screen.** Add a key to the factory and a hook
+**Adding a query to an existing page.** Add a key to the factory and a hook
 beside its siblings in the same `src/api/` file. No new file is needed.
 
 ```ts
