@@ -28,7 +28,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, asc, eq } from "drizzle-orm";
-import { completeSimple, getModel } from "@mariozechner/pi-ai";
+import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
 import { parsePrincipal, type Principal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";

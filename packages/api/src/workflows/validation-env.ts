@@ -4,7 +4,7 @@
  * run": unknown model specs and unknown tool service/actions fail at SAVE
  * with an actionable message, instead of at run time inside a node.
  */
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@earendil-works/pi-ai/compat";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { ValidateEnvironment } from "@valet/workflow";
 

@@ -22,7 +22,7 @@
  * namespaced catalog id nests: `openrouter/deepseek/deepseek-v4-pro`.
  * `parseModelId` splits on the FIRST slash, so the round-trip holds.
  */
-import { getModels, type Api, type Model } from "@mariozechner/pi-ai";
+import { getModels, type Api, type Model } from "@earendil-works/pi-ai/compat";
 import type { LlmProviderModel } from "../schema/index.js";
 
 /** Registry entry type — openrouter models are all `openai-completions`,
@@ -45,7 +45,7 @@ export const OPENROUTER_DEFAULT_MODEL_IDS: readonly string[] = [
   "deepseek/deepseek-r1",
   "moonshotai/kimi-k2.6",
   "moonshotai/kimi-k2-thinking",
-  "x-ai/grok-4",
+  "x-ai/grok-4.6",
   "meta-llama/llama-3.3-70b-instruct",
 ];
 

@@ -1,5 +1,5 @@
-import { completeSimple } from "@mariozechner/pi-ai";
-import type { Message, Model } from "@mariozechner/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import type { CompactionConfig, SessionEntry } from "./types.js";
 
 /**

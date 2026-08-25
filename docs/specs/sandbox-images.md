@@ -30,7 +30,7 @@ This spec covers:
 | Path | File | Used In |
 |------|------|---------|
 | **Modal SDK** (production) | `backend/images/base.py` | All production sandboxes |
-| **Dockerfile** (reference) | `docker/Dockerfile.sandbox` | Not used in production; reference/local testing |
+| **Dockerfile** (reference) | `Dockerfile` | Local dev only (OpenCode standalone) |
 | **Docker Compose** (local dev) | `Dockerfile` + `docker-compose.yml` | Local dev only (OpenCode standalone) |
 
 Production sandboxes are built exclusively via `backend/images/base.py` using Modal's Python image API. The Dockerfile exists for reference but has drifted from the Modal image.
@@ -63,7 +63,7 @@ Debian 12 (Bookworm) slim, GLIBC 2.36, Python 3.12 (added by Modal).
 | 1 | System packages | `.apt_install()` | Latest from apt |
 | 2 | Node.js | `.run_commands()` | 22 (pinned via `NODE_VERSION`) |
 | 3 | Bun | `.run_commands()` | Latest (curl installer, unpinned) |
-| 4 | OpenCode CLI + agent-browser | `.run_commands()` | `1.1.52` (pinned via `OPENCODE_VERSION`) |
+| 4 | OpenCode CLI + agent-browser | `.run_commands()` | `1.18.18` (pinned via `OPENCODE_VERSION`) |
 | 5 | Playwright Chromium | `.run_commands()` | Matches agent-browser's Playwright |
 | 6 | code-server | `.run_commands()` | Latest (installer, unpinned) |
 | 7 | VNC stack + Chromium | `.apt_install()` | Latest from apt |
@@ -97,7 +97,7 @@ chromium, imagemagick, xdotool, ffmpeg
 |----------|---------|-------|-------|
 | Node.js | 22.x | NodeSource apt repo | Pinned major version |
 | Bun | Latest | `bun.sh/install` | Unpinned |
-| OpenCode (`opencode-ai`) | 1.1.52 | npm global install | Pinned |
+| OpenCode (`opencode-ai`) | 1.18.18 | npm global install | Pinned |
 | agent-browser | Latest | npm global install | Unpinned |
 | Playwright + Chromium | Matches agent-browser | `npx playwright install` | |
 | code-server | Latest | install.sh | Unpinned |
@@ -314,7 +314,7 @@ image = modal.Image.from_id(snapshot_image_id)
 
 | Aspect | Modal Image | Dockerfile |
 |--------|-------------|-----------|
-| OpenCode package | `opencode-ai@1.1.52` | `@opencode-ai/cli` (old name, unpinned) |
+| OpenCode package | `opencode-ai@1.18.18` | `@opencode-ai/cli` (old name, unpinned) |
 | whisper.cpp | Included | Not included |
 | imagemagick, xdotool, ffmpeg | Included | Not included |
 | Runner build | Source copy + `bun install` | Multi-stage `bun build` to dist |
@@ -380,7 +380,7 @@ New image deploys only affect **new** sandboxes. Existing running or hibernated 
 
 ### Fully Implemented
 - Single base image via Modal Python SDK with 16 build layers
-- Full dev environment: Node 22, Bun, OpenCode 1.1.52, code-server, VNC, TTYD, Chromium, whisper.cpp
+- Full dev environment: Node 22, Bun, OpenCode 1.18.18, code-server, VNC, TTYD, Chromium, whisper.cpp
 - 63 custom OpenCode tools + 3 skills baked into image
 - Runner from local source with dependency install
 - Environment variable assembly from org keys, user credentials, GitHub OAuth, custom providers

@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProviders } from "../schema/index.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";

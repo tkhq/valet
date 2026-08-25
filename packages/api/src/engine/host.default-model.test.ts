@@ -29,14 +29,14 @@ describe("EngineHost default model", () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
 
-    await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
     const session = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
 
-    expect(session.options.model.id).toBe("claude-opus-4-1");
+    expect(session.options.model.id).toBe("claude-opus-4-5");
   });
 
   it("falls back to claude-haiku-4-5 when no default_model is set", async () => {
@@ -55,7 +55,7 @@ describe("EngineHost default model", () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
 
-    await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
     const parent = await engineHost.sessionFor("parent-default-model", {
       userId: "local-user",
@@ -81,7 +81,7 @@ describe("EngineHost default model", () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
 
-    await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
     const parent = await engineHost.sessionFor("parent-default-model-2", {
       userId: "local-user",
@@ -99,7 +99,7 @@ describe("EngineHost default model", () => {
       workspace: "/tmp",
     });
 
-    expect(child.options.model.id).toBe("claude-opus-4-1");
+    expect(child.options.model.id).toBe("claude-opus-4-5");
   });
 
   it("restore-no-clobber: an explicit setModel override survives eviction + a changed user default", async () => {
@@ -115,7 +115,7 @@ describe("EngineHost default model", () => {
 
     engineHost.evictAll();
 
-    await db.update(users).set({ defaultModel: "claude-opus-4-1" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
     const restored = await defaultAssistantSessionFor(api.providers, 
       { type: "user", id: "local-user" },

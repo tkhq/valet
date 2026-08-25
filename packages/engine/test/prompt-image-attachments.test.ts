@@ -6,7 +6,7 @@
  * 2. Attachments are converted to image content blocks in agent messages
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

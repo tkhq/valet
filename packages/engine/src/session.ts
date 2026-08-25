@@ -17,7 +17,7 @@ import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
 import { recordCredentialRead } from "./metrics.js";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 import type {
   BusEvent,
   CommandResultEntry,

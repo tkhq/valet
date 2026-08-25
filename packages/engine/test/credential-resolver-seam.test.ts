@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { registerFauxProvider } from "@mariozechner/pi-ai";
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

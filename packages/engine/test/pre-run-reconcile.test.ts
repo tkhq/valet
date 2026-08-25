@@ -9,7 +9,7 @@
  * real. A spy on `session.attachment.reconcile` records calls.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

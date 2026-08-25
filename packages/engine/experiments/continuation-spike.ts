@@ -17,7 +17,7 @@ import {
   type AgentEvent,
   type AgentLoopConfig,
   type AgentTool,
-} from "@mariozechner/pi-agent-core";
+} from "@earendil-works/pi-agent-core";
 import {
   completeSimple,
   getModel,
@@ -26,7 +26,7 @@ import {
   type ToolCall,
   type ToolResultMessage,
   type UserMessage,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) {

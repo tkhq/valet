@@ -1,5 +1,5 @@
-import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { TextContent, ImageContent } from "@mariozechner/pi-ai";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
 import { attrTruncate, withSpan } from "./tracing.js";
 import { recordToolExecution } from "./metrics.js";
