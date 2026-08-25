@@ -73,9 +73,16 @@ function describeTarget(
  *
  * The list is held until the workspace owner resolves, for the same reason
  * the feed holds its own query: an owner-less request is the org-wide list.
+ * The owner never resolves when identity itself fails, so the panel reads
+ * the identity query directly and reports that instead of holding for ever.
  */
 export function SubscriptionsPanel() {
   const owner = useListOwner();
+  const meQ = useMe();
+  // `useListOwner` answers undefined both while identity loads AND when it
+  // fails, so a held list would otherwise sit on "Loading subscriptions…"
+  // for ever. Read the identity query directly to tell the two apart.
+  const ownerFailed = owner === undefined && meQ.isError;
   const subsQ = useEventSubscriptions(owner, {
     // `useListOwner()` answers undefined while the caller's identity is in
     // flight, and an owner-less request lists every subscription in the
@@ -85,7 +92,6 @@ export function SubscriptionsPanel() {
     enabled: owner !== undefined,
   });
   const workflowsQ = useWorkflows();
-  const meQ = useMe();
   const teamsQ = useTeams();
   const [creating, setCreating] = useState(false);
 
@@ -123,8 +129,17 @@ export function SubscriptionsPanel() {
 
       {/* `isPending`, not `isLoading`: the query is held (not fetching)
           while the owner resolves, and a held list is still loading. */}
-      {subsQ.isPending && <LoadingRow label="Loading subscriptions…" />}
+      {subsQ.isPending && !ownerFailed && <LoadingRow label="Loading subscriptions…" />}
       {subsQ.error != null && <ErrorRow>Failed to load subscriptions.</ErrorRow>}
+      {/* This tab has no unscoped state to fall back to — the feed's "All"
+          control has no counterpart here — so the only move left is to load
+          the page again. */}
+      {ownerFailed && (
+        <ErrorRow>
+          Could not load your workspace, so subscriptions cannot be listed for it. Reload the page
+          to try again.
+        </ErrorRow>
+      )}
 
       {subsQ.data && subsQ.data.subscriptions.length === 0 && (
         <EmptyRow>No subscriptions yet. Create one above.</EmptyRow>

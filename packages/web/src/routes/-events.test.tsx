@@ -181,7 +181,14 @@ vi.mock("~/api/workflows", () => ({
 // target. Mutable so team cases can add fixtures; reset in afterEach.
 let teamsData: { teams: TeamSummary[] } = { teams: [] };
 vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
+  // `isError` is read by both events surfaces: it is what separates an
+  // owner that has not resolved YET from one that never will.
+  useMe: () => ({
+    data: { id: "u1", orgRole: "member" },
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({
     data: { features: { organizations: true } },

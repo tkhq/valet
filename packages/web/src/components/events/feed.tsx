@@ -74,6 +74,10 @@ export function EventFeed({
   // workspace" must not show the org's events for that one frame, so hold
   // the query until the owner resolves.
   const canFetch = scope === "all" || owner !== undefined;
+  // A hold that identity failure caused never ends, so it is reported
+  // instead of shown as loading. Same value, same name, in
+  // `subscriptions-panel.tsx`.
+  const ownerFailed = !canFetch && me.isError;
   const eventsQ = useEvents(
     { service: service || undefined, key: key || undefined },
     scope === "workspace" ? owner : undefined,
@@ -141,11 +145,11 @@ export function EventFeed({
 
       {/* `isPending`, not `isLoading`: the query is held (not fetching)
           while the owner resolves, and a held feed is still loading. */}
-      {eventsQ.isPending && !(!canFetch && me.isError) && <LoadingRow label="Loading events…" />}
+      {eventsQ.isPending && !ownerFailed && <LoadingRow label="Loading events…" />}
       {eventsQ.error != null && (
         <ErrorRow>Failed to load events. Press refresh to try again.</ErrorRow>
       )}
-      {!canFetch && me.isError && (
+      {ownerFailed && (
         <ErrorRow>
           Could not load your workspace, so this feed cannot narrow to it. Select All to see every
           event the organization received.

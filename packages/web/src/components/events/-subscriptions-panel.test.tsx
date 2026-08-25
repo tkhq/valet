@@ -68,9 +68,12 @@ vi.mock("~/api/events", () => ({
     feedOwner = owner;
     feedCalls += 1;
     feedEnabled = opts?.enabled;
+    // A held query has no data, which is what react-query answers while
+    // `enabled` is false.
+    const held = opts?.enabled === false;
     return {
-      data: eventsData,
-      isPending: opts?.enabled === false,
+      data: held ? undefined : eventsData,
+      isPending: held,
       isFetching: false,
       error: null,
       refetch: feedRefetch,
@@ -100,11 +103,16 @@ vi.mock("~/api/workflows", () => ({
 // The caller's identity, mutable per case: undefined is the frame before
 // `useMe` lands, which is what the feed's scope gate has to survive.
 let meId: string | undefined = "u1";
+// Whether `useMe` has FAILED rather than being in flight. `useListOwner`
+// answers undefined for both, so this flag is the only thing that tells a
+// hold that ends from a hold that does not.
+let meFailed = false;
 vi.mock("~/api/settings", () => ({
   useMe: () => ({
     data: meId === undefined ? undefined : { id: meId, orgRole: "member" },
-    isLoading: meId === undefined,
-    error: null,
+    isLoading: meId === undefined && !meFailed,
+    isError: meFailed,
+    error: meFailed ? new Error("identity unavailable") : null,
   }),
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
@@ -139,6 +147,7 @@ beforeEach(() => {
 afterEach(() => {
   scopeTeamId = undefined;
   meId = "u1";
+  meFailed = false;
 });
 
 describe("SubscriptionsPanel", () => {
@@ -174,6 +183,25 @@ describe("SubscriptionsPanel", () => {
     expect(subscriptionsEnabled).toBe(false);
     expect(screen.queryByText("PR alerts")).toBeNull();
     expect(screen.getByText("Loading subscriptions…")).toBeTruthy();
+  });
+
+  // A permanent `useMe` failure resolves no owner ever, so the hold has no
+  // end: without a terminal state the tab reads "Loading subscriptions…"
+  // for the length of the session.
+  it("reports a failed identity instead of holding for ever", () => {
+    meId = undefined;
+    meFailed = true;
+    render(
+      <TooltipProvider>
+        <SubscriptionsPanel />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByText("Loading subscriptions…")).toBeNull();
+    // The tab has no unscoped state to offer, so the message names the one
+    // move the reader has.
+    expect(
+      screen.getByText(/subscriptions cannot be listed for it\. Reload the page to try again\./),
+    ).toBeTruthy();
   });
 
   // An org-owned subscription belongs to no single workspace. The route
@@ -235,6 +263,14 @@ describe("EventFeed scope control", () => {
     // "This workspace" must ask for nothing until the owner is known.
     expect(feedOwner).toBeUndefined();
     expect(feedEnabled).toBe(false);
+  });
+
+  it("reports a failed identity and names the All control", () => {
+    meId = undefined;
+    meFailed = true;
+    renderFeed();
+    expect(screen.queryByText("Loading events…")).toBeNull();
+    expect(screen.getByText(/this feed cannot narrow to it\. Select All/)).toBeTruthy();
   });
 
   it("reports All to the route instead of keeping it locally", async () => {
