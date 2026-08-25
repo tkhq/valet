@@ -22,8 +22,9 @@ const FEED_PAGE_SIZE = 50;
 /** How far back the workspace-scoped feed reaches. The route bounds the
  * owner-filtered query so it cannot walk the org's whole event history —
  * see `OWNER_FEED_WINDOW_MS` in `packages/api/src/routes/events.ts`, which
- * this number must match. "All" has no window. */
-const WORKSPACE_WINDOW_DAYS = 30;
+ * this number must match. "All" has no window. Exported for the case that
+ * holds the two together (`feed-window.test.ts`). */
+export const WORKSPACE_WINDOW_DAYS = 30;
 
 /** Which events the feed asks for: those delivered to the active
  * workspace's subscriptions, or every event the org ingested. The route
@@ -45,9 +46,9 @@ const SCOPE_OPTIONS = [
  * The scope control decides which events the question is asked about. It
  * starts at "This workspace", the events that reached the subscriptions
  * the tab beside this one lists for that workspace — its own rows and the
- * org's. "All" restores the org-wide feed, and it
- * must stay available: an event that matched nothing you own is precisely
- * the row you open when your subscription never fired.
+ * org's. "All" restores the org-wide feed, and it must stay available: an
+ * event that matched nothing you own is precisely the row you open when
+ * your subscription never fired.
  *
  * `scope` is a prop, not local state, because the Activity and
  * Subscriptions tabs unmount each other. The round trip that needs "All" —

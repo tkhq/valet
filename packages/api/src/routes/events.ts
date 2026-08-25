@@ -106,7 +106,8 @@ const FEED_MAX_LIMIT = 100;
  * workspace whose newest matching event is older than this window sees an
  * empty feed. `components/events/feed.tsx` names the window in its empty
  * state and beside a scoped list, and "All" carries no window at all.
- * Change the two together.
+ * Change the two together: `feed-window.test.ts` in the web package reads
+ * this declaration and fails when only one of them moves.
  */
 const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
