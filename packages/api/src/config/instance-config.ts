@@ -654,9 +654,17 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
         entry.authQueryParam = assertNonEmptyString(v, `mcpServers[${i}].authQueryParam`, path);
       } else if (key === "scopes") {
         const raw = assertArray(v, `mcpServers[${i}].scopes`, path);
-        entry.scopes = raw.map((s, j) =>
-          assertNonEmptyString(s, `mcpServers[${i}].scopes[${j}]`, path),
-        );
+        entry.scopes = raw.map((s, j) => {
+          const scope = assertNonEmptyString(s, `mcpServers[${i}].scopes[${j}]`, path);
+          // The authorize request joins scopes with spaces (RFC 6749), so a
+          // space inside one entry would silently become two scopes.
+          if (/\s/.test(scope)) {
+            err(
+              `${path}: mcpServers[${i}].scopes[${j}] must not contain whitespace, got ${JSON.stringify(scope)}. Split it into separate list items.`,
+            );
+          }
+          return scope;
+        });
       } else if (key === "connectLabel") {
         entry.connectLabel = assertString(v, `mcpServers[${i}].connectLabel`, path);
       } else if (key === "description") {

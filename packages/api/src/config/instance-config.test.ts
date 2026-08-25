@@ -377,6 +377,15 @@ describe("mcpServers validation", () => {
     );
   });
 
+  it("rejects a scopes entry containing whitespace", () => {
+    const yaml = base(
+      '  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    scopes: ["agent:query agent:search"]',
+    );
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      'mcpServers[0].scopes[0] must not contain whitespace, got "agent:query agent:search". Split it into separate list items.',
+    );
+  });
+
   it("rejects an empty displayName", () => {
     const yaml = base(
       '  - name: x\n    url: https://x.example/mcp\n    auth: none\n    displayName: ""',
