@@ -36,7 +36,9 @@ export function ComposerFileErrors({ messages, onDismiss }: FileErrorsProps) {
   if (messages.length === 0) return null;
 
   return (
-    <div className="mb-2 p-2 bg-danger-50 dark:bg-danger-900/20 rounded text-sm text-danger-600">
+    // role="alert" for parity with ComposerImageErrors — screen readers
+    // must announce file errors the same way they announce image errors.
+    <div role="alert" className="mb-2 p-2 bg-danger-50 dark:bg-danger-900/20 rounded text-sm text-danger-600">
       <div className="flex justify-between items-start gap-2">
         <div>
           {messages.map((msg, i) => (

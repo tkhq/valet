@@ -11,6 +11,7 @@ import {
 import { Paperclip, Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
+import { ApiError } from "~/api/client";
 import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useCommands } from "~/hooks/use-commands";
@@ -467,12 +468,44 @@ export function Composer({
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
       // message stays visible — they can see what they sent + retry; on the
-      // next reload it'll be reconciled against server truth. Attachment
-      // refs are consumed only when the server queues the prompt, so the
-      // restored chips stay sendable.
+      // next reload it'll be reconciled against server truth. The server
+      // restores consumed refs when a submit fails, so restored chips stay
+      // sendable — EXCEPT when the failure is the refs themselves.
       setText(t);
       setImages(pendingImages);
-      setFiles(pendingFiles);
+      const payload =
+        err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
+          ? (err.payload as Record<string, unknown>)
+          : undefined;
+      // An unknown-attachment 400 means a ref is dead (15-minute TTL, or an
+      // api restart emptied the ref store). A restored chip must not read
+      // as uploaded: flip uploaded chips to the error state, whose retry
+      // button re-uploads the held File and mints a fresh ref.
+      const refsDead =
+        err instanceof ApiError &&
+        err.status === 400 &&
+        typeof payload?.error === "string" &&
+        payload.error.startsWith("unknown attachment");
+      setFiles(
+        refsDead
+          ? pendingFiles.map((f) =>
+              f.attachmentRef !== undefined
+                ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
+                : f,
+            )
+          : pendingFiles,
+      );
+      // The failure must be visible — a console-only error reads as a dead
+      // send button.
+      const detail =
+        typeof payload?.corrective === "string"
+          ? payload.corrective
+          : typeof payload?.error === "string"
+            ? payload.error
+            : err instanceof Error
+              ? err.message
+              : "Unknown error.";
+      setFileErrors([`The message did not send. ${detail}`]);
       console.error("send failed:", err);
     }
   }

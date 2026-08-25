@@ -47,7 +47,7 @@ export function useFileUpload(sessionId: string) {
         const data = (await res.json()) as Record<string, unknown>;
         const attachmentRef = typeof data.attachmentRef === "string" ? data.attachmentRef : undefined;
         if (!attachmentRef) {
-          return { ...file, error: "Invalid response from server" };
+          return { ...file, error: "The server response had no attachment ref. Try uploading again." };
         }
         return { ...file, attachmentRef };
       } catch (err) {

@@ -12,6 +12,7 @@
  * Everything here is pure or DOM-agnostic, so it's testable without a browser.
  */
 
+import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
 import { formatSize, readFailure } from "./composer-images";
 
 export {
@@ -47,8 +48,8 @@ export interface ComposerFile {
 /** Max files per message — matches the limit for images. */
 export const MAX_FILES = 5;
 
-/** Largest single file, in bytes (default 50 MB). */
-export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+/** Largest single file, in bytes — the shared server default (50 MB). */
+export const MAX_FILE_BYTES = DEFAULT_MAX_UPLOAD_BYTES;
 
 /** Largest total for all files, in bytes. */
 export const MAX_TOTAL_BYTES = 250 * 1024 * 1024;

@@ -10,6 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ApiError } from "~/api/client";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import type { ComposerFile } from "./composer-files";
 
@@ -111,6 +112,33 @@ describe("Composer — file intake", () => {
     };
     expect(arg.fileRefs).toEqual([{ ref: "att_notes.txt" }]);
     expect(screen.queryByLabelText("Attached files")).toBeNull();
+  });
+
+  it("marks chips errored and shows the failure when a send hits a dead ref", async () => {
+    renderComposer();
+    const textarea = screen.getByPlaceholderText(/Send a message/i);
+    pasteFiles(textarea, [textFile("notes.txt")]);
+    await waitFor(() => expect(screen.getByText("✓")).toBeDefined());
+
+    // The refs are process-local on the api (15-minute TTL, lost on restart):
+    // the send comes back 400 unknown-attachment.
+    sendMutateAsync.mockRejectedValueOnce(
+      new ApiError(400, "POST /messages → 400", {
+        error: "unknown attachment: att_notes.txt",
+        corrective: "Re-upload the file and retry.",
+      }),
+    );
+    fireEvent.change(textarea, { target: { value: "read this file" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    // The failure is visible, not console-only.
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("The message did not send.");
+    });
+    // The restored chip must not read as uploaded: its ref is dead, so it
+    // flips to the error state and offers the re-upload retry.
+    expect(screen.getByRole("button", { name: "Retry upload" })).toBeDefined();
+    expect(screen.queryByText("✓")).toBeNull();
   });
 
   it("removes a chip on request without sending its ref", async () => {
