@@ -564,6 +564,7 @@ describe("pg app schema + migrations", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
       { table: "skill_sources", column: "created_by" },
       { table: "skill_sources", column: "kinds" },
+      { table: "skill_sources", column: "discovery_rules_version" },
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },

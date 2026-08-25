@@ -166,6 +166,14 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
     `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
   );
 
+  // Which discovery rules a source last synced under. Null on every row
+  // written before the column existed, which reads as "not the current
+  // rules" and makes that source re-scan once — see
+  // `services/content-sync/collector.ts`.
+  await db.query(
+    'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "discovery_rules_version" integer',
+  );
+
   // The per-group team-sync allowlist. Null on every row written before the
   // column existed, which the sync and Settings read as "never set" —
   // fail-closed, same as an empty list.

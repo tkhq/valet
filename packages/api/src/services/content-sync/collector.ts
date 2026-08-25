@@ -31,6 +31,29 @@ import type { AppDb } from "../../lib/drizzle.js";
 import type { ContentKind, ContentSourceRow } from "../../schema/index.js";
 import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
 
+/**
+ * The version of the discovery RULES — which paths in a repository the
+ * collectors claim.
+ *
+ * Compare 1 in `service.ts` stops a poll whose head commit has not moved, and
+ * that is what makes polling affordable. It is only sound while the rules
+ * that read a commit are the rules that read it last time. A release that
+ * opens a new folder to discovery would otherwise never re-scan a repository
+ * nobody pushes to, and its newly discoverable content would appear only
+ * after some unrelated commit landed.
+ *
+ * So a source records the version it last synced under, and compare 1
+ * short-circuits only when the two match. A source at a stale version reads
+ * the tree once more and then goes back to costing one call per poll.
+ *
+ * Raise this by one when a change makes the SAME commit yield a different
+ * candidate set for any collector: a newly scanned directory, a new file
+ * extension, a changed exclusion rule, a new kind. Do not raise it for a
+ * change to what a collector writes from a file it already found — the
+ * manifest hash covers that.
+ */
+export const DISCOVERY_RULES_VERSION = 1;
+
 /** One tracked file as the repository holds it. `name` comes from the PATH,
  * because it is the only identity available before the file body is read. */
 export interface ContentManifestEntry {

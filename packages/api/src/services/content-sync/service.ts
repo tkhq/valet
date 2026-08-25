@@ -27,10 +27,14 @@
  *
  * ## Change detection is two cheap compares
  *
- * 1. Read the head commit of the tracked ref. If it equals `last_sha`, stop.
- *    That is the whole cost of a poll on a repository nobody touched: ONE
- *    API call. An anonymous read gets 60 calls per hour per IP, so this is
- *    not a micro-optimisation, it is what makes polling affordable.
+ * 1. Read the head commit of the tracked ref. If it equals `last_sha` AND
+ *    the source last synced under the current discovery rules, stop. That is
+ *    the whole cost of a poll on a repository nobody touched: ONE API call.
+ *    An anonymous read gets 60 calls per hour per IP, so this is not a
+ *    micro-optimisation, it is what makes polling affordable. The rules half
+ *    of the test is what lets a release change which paths a collector claims
+ *    without waiting for an unrelated commit — see `DISCOVERY_RULES_VERSION`
+ *    in `content-sync/collector.ts`.
  * 2. Only when the commit moved: read the tree, ask every enabled collector
  *    to discover over it, and hash ONE manifest over the union of what they
  *    found. If the hash equals `last_manifest_hash`, record the new commit
@@ -136,6 +140,7 @@ import {
 import { treeHoldsSubpath, MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
 import {
   contentManifestHash,
+  DISCOVERY_RULES_VERSION,
   type CollectorPass,
   type ContentCollector,
   type ContentDiscoveryMode,
@@ -342,9 +347,16 @@ export class ContentSyncService {
     // the report from the repository instead of from the previous row.
     const reportIsStale = source.status === "error";
 
+    // A release can change which paths a collector claims. The head commit
+    // then says nothing about whether this source is up to date: the commit
+    // has not moved, and the rules that read it have. Such a source takes no
+    // short-circuit, re-scans once, and records the version it ran under —
+    // see `DISCOVERY_RULES_VERSION`.
+    const rulesAreStale = source.discoveryRulesVersion !== DISCOVERY_RULES_VERSION;
+
     // Compare 1 — the head commit.
     const head = await reader.head(source.repoFullName, source.ref);
-    if (head.sha === source.lastSha && !reportIsStale) {
+    if (head.sha === source.lastSha && !reportIsStale && !rulesAreStale) {
       // Nothing was re-read, so this poll learned nothing that could clear
       // what the last one reported. `carryWarning` keeps that report on the
       // row; without it a source whose files are all broken flips to a
@@ -609,6 +621,12 @@ export class ContentSyncService {
         nextAttemptAt: now + SYNC_INTERVAL_MS,
         lastSha: result.complete ? result.headSha : source.lastSha,
         lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
+        // Recorded with the commit and for the same reason: an incomplete
+        // sync did not read the commit it is about to record, so it has not
+        // finished reading the repository under these rules either.
+        discoveryRulesVersion: result.complete
+          ? DISCOVERY_RULES_VERSION
+          : source.discoveryRulesVersion,
         lastSyncedAt: now,
         lastError: message,
         updatedAt: now,

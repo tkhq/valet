@@ -35,6 +35,7 @@ import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../content-source-credential.js";
 import { MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
+import { DISCOVERY_RULES_VERSION } from "./collector.js";
 import type {
   CollectorDiscoverContext,
   CollectorPass,
@@ -762,6 +763,61 @@ Read the reference.
     expect(outcome?.changed).toBe(false);
     expect(f.calls).toHaveLength(1);
     expect(f.calls[0]?.path).toBe("/repos/tkhq/skills/commits/HEAD");
+  });
+
+  describe("a release that changes the discovery rules", () => {
+    // Compare 1 stops a poll whose head commit has not moved. A release that
+    // opens a new folder to discovery makes that answer wrong: the commit is
+    // the same, and what the rules find in it is not. Without the version
+    // test, a repository nobody pushes to would never mirror the newly
+    // discoverable files.
+    it("re-scans a source that last synced under older rules", async () => {
+      const repo: FakeRepo = { sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } };
+      const f = serve(repo);
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const service = serviceFor(f);
+      await service.syncOnce(source.id);
+
+      // Play the upgrade: the row was written by the release before this one,
+      // and the repository has not moved since.
+      await db
+        .update(contentSources)
+        .set({ discoveryRulesVersion: null })
+        .where(eq(contentSources.id, source.id));
+      // The file the older rules did not look at.
+      repo.skills = { ...repo.skills, triage: skillMd("triage", "Triage it.") };
+      f.calls.length = 0;
+
+      const outcome = await service.syncOnce(source.id);
+
+      expect(f.calls.map((call) => call.path)).toContain(
+        "/repos/tkhq/skills/git/trees/tree-commit-1",
+      );
+      expect(outcome?.imported).toBe(1);
+      expect((await db.select().from(skills)).map((r) => r.name).sort()).toEqual([
+        "deploy",
+        "triage",
+      ]);
+
+      // The re-scan is once, not every poll: the sync records the version it
+      // ran under, so the next poll is back to one call.
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
+      expect(row?.discoveryRulesVersion).toBe(DISCOVERY_RULES_VERSION);
+    });
+
+    it("still costs one call for a source already at the current rules", async () => {
+      const repo: FakeRepo = { sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } };
+      const f = serve(repo);
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const service = serviceFor(f);
+      await service.syncOnce(source.id);
+
+      f.calls.length = 0;
+      const outcome = await service.syncOnce(source.id);
+
+      expect(outcome?.changed).toBe(false);
+      expect(f.calls).toHaveLength(1);
+    });
   });
 
   it("records a moved commit that carries the same skills, and writes no skill rows", async () => {
