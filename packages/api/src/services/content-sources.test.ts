@@ -1,5 +1,5 @@
 /**
- * Tracked repositories — the `content_sources` rows a person adds, and
+ * Tracked repositories — the `skill_sources` rows a person adds, and
  * the repo-spec parsing that turns what they paste into one row.
  *
  * Ownership mirrors `services/skills.ts` exactly (your own rows plus the rows

@@ -142,31 +142,28 @@ export async function applyAppMigrations(db: PgDb): Promise<void> {
  * a computed value cannot be repaired this way and does need a real
  * migration.
  *
+ * Every statement here must also be safe to ROLL BACK, because a repair
+ * runs on a database the previous release may boot again. Adding a column
+ * or a table is safe: the older release ignores what it does not know.
+ * RENAMING or dropping is not: the older release repairs the old name, and
+ * every statement in this function that names a missing table stops the
+ * boot. Do not rename a table or a column here.
+ *
  * Delete this function at 1.0, when numbered migrations take over.
  */
 async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
-  // The 2026-08-24 workflows MVP design renamed `skill_sources` to
-  // `content_sources`, because the sweep now mirrors more than skills. The
-  // renames are idempotent: after the first boot the old names are gone and
-  // these statements do nothing. The table rename must run BEFORE the two
-  // column repairs below, which name the new table. The three index renames
-  // keep an upgraded database in lockstep with `0000_app.sql`, which names
-  // the indexes `content_sources_*`.
-  await db.query('ALTER TABLE IF EXISTS "skill_sources" RENAME TO "content_sources"');
-  await db.query('ALTER INDEX IF EXISTS "skill_sources_owner" RENAME TO "content_sources_owner"');
-  await db.query('ALTER INDEX IF EXISTS "skill_sources_due" RENAME TO "content_sources_due"');
-  await db.query('ALTER INDEX IF EXISTS "skill_sources_repo" RENAME TO "content_sources_repo"');
-
   // Records which person's GitHub credential a team source may use. Null on
   // every row written before the column existed, which the sync reads as
   // "no credential" rather than climbing to the org's App.
-  await db.query('ALTER TABLE "content_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
+  await db.query('ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
 
   // Which content kinds a source collects. The DEFAULT backfills every
   // pre-existing row to skills only, so a repository tracked before workflow
-  // sync existed keeps mirroring exactly what it mirrored.
+  // sync existed keeps mirroring exactly what it mirrored. A release that
+  // does not know the column ignores it, so this repair is safe to roll
+  // back — which is the test every statement in this function must pass.
   await db.query(
-    `ALTER TABLE "content_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
+    `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
   );
 
   // The per-group team-sync allowlist. Null on every row written before the

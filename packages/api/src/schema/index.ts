@@ -839,7 +839,7 @@ export const artifacts = pgTable(
 // `content_sha` is the SHA-256 of `content`. The repo importer will compare
 // it to decide whether an upstream body changed.
 //
-// `source_id` names the `content_sources` row this skill is mirrored from.
+// `source_id` names the `contentSources` row this skill is mirrored from.
 // It carries no foreign key, and `services/content-sources.ts` deletes the
 // mirrored rows with the source.
 //
@@ -912,8 +912,16 @@ export type ContentKind = "skills" | "workflows" | "templates";
 // ladder. `last_error` carries whatever the last sync needs to tell the
 // reader: the failure for `status='error'`, and the per-file warnings for
 // `status='warning'` (a sync that succeeded but skipped a malformed file).
+//
+// The SQL name is `skill_sources`, and its three indexes keep the same
+// prefix. The name predates the content-sync generalization and stays,
+// because renaming a table costs the rollback path: the release before this
+// one repairs `skill_sources` by name at boot, so a database carrying the
+// new name crash-loops the api it is rolled back onto. A physical name
+// nobody sees is not worth that, and the TypeScript name says what the
+// table now holds.
 export const contentSources = pgTable(
-  "content_sources",
+  "skill_sources",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
@@ -949,9 +957,9 @@ export const contentSources = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [
-    index("content_sources_owner").on(t.orgId, t.ownerType, t.ownerId),
-    index("content_sources_due").on(t.enabled, t.nextAttemptAt),
-    uniqueIndex("content_sources_repo").on(
+    index("skill_sources_owner").on(t.orgId, t.ownerType, t.ownerId),
+    index("skill_sources_due").on(t.enabled, t.nextAttemptAt),
+    uniqueIndex("skill_sources_repo").on(
       t.orgId,
       t.ownerType,
       t.ownerId,

@@ -98,7 +98,7 @@ const ANONYMOUS: SkillRepoCredential = { kind: "none" };
  * raw crypto error through `CredentialStore.get`, for instance. That fault
  * is reported as `unavailable` and logged here, because letting it propagate
  * would fail the whole sync and write the crypto error onto
- * `content_sources.last_error`, where it names no corrective action.
+ * `skill_sources.last_error`, where it names no corrective action.
  *
  * A membership query that throws lands in the same catch, which is the safe
  * direction: an unconfirmed membership must not hand out a token.

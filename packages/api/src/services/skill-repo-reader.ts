@@ -34,7 +34,7 @@
  *
  * ## A token goes in the header and nowhere else
  *
- * `content_sources.last_error` holds this module's error text, and the product
+ * `skill_sources.last_error` holds this module's error text, and the product
  * shows that column to every reader of the source. So a token must never
  * reach an error message, a log line, a query string, or the database. The
  * reader keeps the token inside its own header map and keeps only the KIND
@@ -124,7 +124,7 @@ export function describeCredential(
  *
  * ## The message must fit the person who READS it
  *
- * This text goes to `content_sources.last_error`, and the product shows that
+ * This text goes to `skill_sources.last_error`, and the product shows that
  * column to everyone who can see the source. On a personal source the reader
  * and the credential holder are the same person, so "get access to the
  * repository" is an action they can do. On a TEAM source they are usually

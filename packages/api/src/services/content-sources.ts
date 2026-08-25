@@ -1,5 +1,5 @@
 /**
- * Tracked repositories — CRUD over the `content_sources` table, plus the
+ * Tracked repositories — CRUD over the `skill_sources` table, plus the
  * parsing that turns a pasted repository address into one row.
  *
  * A source is a subscription to a GitHub repository. `kinds` says what the
@@ -53,9 +53,10 @@ export class ContentSourceConflictError extends Error {
   }
 }
 
-/** The `skillsrc_` prefix predates the table rename and stays. Ids are
- * persisted, `services/config-reconcile.ts` matches on the prefix, and a new
- * prefix would split one table's ids into two shapes for no gain. */
+/** The `skillsrc_` prefix predates the content-sync generalization and
+ * stays. Ids are persisted, `services/config-reconcile.ts` matches on the
+ * prefix, and a new prefix would split one table's ids into two shapes for
+ * no gain. */
 export function newContentSourceId(): string {
   return `skillsrc_${randomUUID()}`;
 }
@@ -236,7 +237,7 @@ export async function createContentSource(
       });
     }
   } catch (err) {
-    // The only unique index on this table is `content_sources_repo` (ids are
+    // The only unique index on this table is `skill_sources_repo` (ids are
     // freshly minted UUIDs), so a unique violation is always a repeat.
     if (isPgUniqueViolation(err)) throw new ContentSourceConflictError(parsed.repoFullName);
     throw err;

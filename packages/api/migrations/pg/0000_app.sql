@@ -517,7 +517,7 @@ CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
 --> statement-breakpoint
-CREATE TABLE "content_sources" (
+CREATE TABLE "skill_sources" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"owner_type" text NOT NULL,
@@ -539,11 +539,11 @@ CREATE TABLE "content_sources" (
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "content_sources_owner" ON "content_sources" ("org_id","owner_type","owner_id");
+CREATE INDEX "skill_sources_owner" ON "skill_sources" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
-CREATE INDEX "content_sources_due" ON "content_sources" ("enabled","next_attempt_at");
+CREATE INDEX "skill_sources_due" ON "skill_sources" ("enabled","next_attempt_at");
 --> statement-breakpoint
-CREATE UNIQUE INDEX "content_sources_repo" ON "content_sources" ("org_id","owner_type","owner_id","repo_full_name","subpath");
+CREATE UNIQUE INDEX "skill_sources_repo" ON "skill_sources" ("org_id","owner_type","owner_id","repo_full_name","subpath");
 --> statement-breakpoint
 CREATE TABLE "workflow_definitions" (
 	"id" text PRIMARY KEY NOT NULL,
