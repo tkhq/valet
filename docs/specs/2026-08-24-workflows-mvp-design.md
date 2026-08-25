@@ -275,7 +275,7 @@ The platform engineer performs this sequence against a manually rolled deploymen
 
 ## Deviations from this design (recorded at implementation)
 
-Tasks 1, 2, and 3 have shipped. Tasks 4 through 13 have not, so the repository sync mirrors no workflow yet: the rail is generalized, `.valet` is open to discovery, and the file envelope has one parser, which is the ground the workflow collector stands on.
+Tasks 1, 2, and 3 have shipped. Tasks 4 through 13 have not, so the repository sync mirrors no workflow yet: the rail is generalized, `.valet/skills` is open to discovery, and the file envelope has one parser, which is the ground the workflow collector stands on.
 
 1. **The sync service is `ContentSyncService`, not `RepoContentSyncService`.** Decision 1 and tasks 1 and 8 first named the class `RepoContentSyncService`, and its options `RepoContentSyncDeps`. What ships in `packages/api/src/services/content-sync/service.ts` is `ContentSyncService` and `ContentSyncServiceDeps`. This repository names an exported class for the path it sits at — `events/dispatcher.ts` exports `EventDispatcher`, `workflows/scheduler.ts` exports `WorkflowScheduler` — so a `Repo` prefix on a file that already sits in `content-sync/` says the directory twice. Every place this design named the class carries the shipped name.
 
