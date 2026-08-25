@@ -95,6 +95,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/workflow-github-credential.e2e.test.ts",
   "src/integration/usage-summary.test.ts",
   "src/integration/design-acceptance.test.ts",
+  "src/integration/design-exports-security.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [

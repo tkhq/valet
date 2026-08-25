@@ -14,7 +14,9 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...actual,
-    createFileRoute: () => (opts: unknown) => opts,
+    // The runtime shape only needs `.options` — the test reads the route's
+    // component through the real Route type's `options` field.
+    createFileRoute: () => (options: unknown) => ({ options }),
     useNavigate: () => navigate,
     Link: ({ children }: { children?: React.ReactNode }) => <a>{children}</a>,
   };
@@ -50,7 +52,8 @@ vi.mock("~/components/workspace-clause", () => ({ WorkspaceClause: () => null })
 import { Route } from "./design.index";
 
 function Page() {
-  const Component = (Route as unknown as { component: React.ComponentType }).component;
+  const Component = Route.options.component;
+  if (!Component) throw new Error("design.index route has no component");
   return <Component />;
 }
 
