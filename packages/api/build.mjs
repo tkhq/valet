@@ -26,7 +26,9 @@ const external = [
   // @firecrawl/pdf-inspector and its platform-specific siblings ship native
   // .node binaries that cannot be bundled by esbuild. The main package
   // dispatches at runtime to the platform-suffixed variant; both the main
-  // and each platform sibling must be externalized.
+  // and each platform sibling must be externalized. The import is LAZY
+  // (services/pdf-extract.ts): a bundle run without node_modules still
+  // serves — only PDF text extraction is unavailable.
   "@firecrawl/pdf-inspector",
   "@firecrawl/pdf-inspector-linux-x64-gnu",
   "@firecrawl/pdf-inspector-linux-x64-musl",
@@ -35,10 +37,9 @@ const external = [
   "@firecrawl/pdf-inspector-darwin-x64",
   "@firecrawl/pdf-inspector-darwin-arm64",
   "@firecrawl/pdf-inspector-win32-x64-msvc",
-  // yauzl is pure JS today but has an optional native accelerator
-  // (fd-slicer on some builds). Externalize to avoid bundling issues on
-  // future dep bumps if the optional accelerator is ever added as a default.
-  "yauzl",
+  // yauzl is deliberately NOT external: it is pure JS and statically
+  // imported on the serve path — externalizing it would make the bundle
+  // require node_modules at load time.
 ];
 
 await build({

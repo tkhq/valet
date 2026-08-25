@@ -6,12 +6,30 @@
  * - Mixed with confidence >= 0.5 → same as TextBased.
  * - Mixed with confidence < 0.5, Scanned, ImageBased → markdown: null, needsOcr: true.
  *
- * The native binaries required by @firecrawl/pdf-inspector must be available
- * for linux-x64 and linux-arm64. If a target platform's binary is missing,
- * boot fails loudly at API startup — this is a real dependency, not best-effort.
+ * @firecrawl/pdf-inspector ships native .node binaries and stays external to
+ * the esbuild bundle. The import is lazy so the bundled api can serve
+ * without it: a missing binary fails the first PDF extraction with a clear
+ * error (extract=true → 422; extract=auto degrades to no sidecar), not api
+ * boot.
  */
 
-import { processPdfAsync } from "@firecrawl/pdf-inspector";
+type PdfInspector = typeof import("@firecrawl/pdf-inspector");
+
+let inspectorPromise: Promise<PdfInspector> | null = null;
+
+function loadInspector(): Promise<PdfInspector> {
+  inspectorPromise ??= import("@firecrawl/pdf-inspector").catch((err) => {
+    // A failed load must not stick: the module may be installed later
+    // (e.g. the operator adds the platform package) without an api restart.
+    inspectorPromise = null;
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `PDF extraction is unavailable: @firecrawl/pdf-inspector did not load (${detail}). ` +
+        `Install the package beside the api bundle to enable PDF text extraction.`,
+    );
+  });
+  return inspectorPromise;
+}
 
 export interface PdfExtractionResult {
   type: "TextBased" | "Scanned" | "ImageBased" | "Mixed";
@@ -31,8 +49,10 @@ export interface PdfExtractionResult {
  * Throws if the PDF is malformed or the binary is unavailable.
  */
 export async function extractPdf(bytes: Uint8Array): Promise<PdfExtractionResult> {
-  // Convert Uint8Array to Buffer for processPdfAsync
-  const buffer = Buffer.from(bytes);
+  const { processPdfAsync } = await loadInspector();
+  // View, not copy: processPdfAsync only reads the bytes, and the caller's
+  // buffer can be 50 MB.
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const result = await processPdfAsync(buffer);
 
   // Route on pdfType: TextBased or Mixed with high confidence can write markdown.
