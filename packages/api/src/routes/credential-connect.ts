@@ -127,7 +127,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   if (found.oauth.mode === "mcp") {
     let clientRow;
     try {
-      clientRow = await ensureMcpOAuthClient({ db }, service, found.oauth.serverUrl, redirectUri);
+      clientRow = await ensureMcpOAuthClient({ db }, service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
     } catch (err) {
       console.error(`oauth connect: MCP client registration failed for ${service}:`, err);
       return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
@@ -225,7 +225,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   try {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${returnTo}/integrations?error=oauth_state`, 302);
-      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri);
+      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,

@@ -19,7 +19,7 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { drizzle as drizzleNodePg } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
-import { applyEngineMigrations, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
+import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
 import * as schema from "../schema/index.js";
 
@@ -127,47 +127,64 @@ export async function applyAppMigrations(db: PgDb): Promise<void> {
 }
 
 /**
- * Add columns that a pre-1.0 edit put into an ALREADY-APPLIED migration.
- *
- * Before 1.0 this repo edits `0000_app.sql` in place instead of adding a
- * numbered migration. A fresh database therefore gets the edit, but an
- * existing one never does: the tracker sees `0000_app.sql` recorded and
- * skips the file. The documented remedy is to delete the data directory,
- * which is acceptable for a scratch database and not acceptable for one
- * holding work somebody wants to keep.
- *
- * Each statement here is idempotent, so it costs one catalog lookup per
- * boot after the first. Add a line when an in-place edit adds a NULLABLE
- * (or DEFAULT-backfilled) column or a whole new table; a column that needs
- * a computed value cannot be repaired this way and does need a real
- * migration.
- *
- * Delete this function at 1.0, when numbered migrations take over.
+ * One schema element that a pre-1.0 in-place edit added to an
+ * ALREADY-APPLIED `0000_app.sql`, plus the catalog probe that tells whether
+ * this database still lacks it. The probe is the point (TKAI-244): a no-op
+ * `ALTER TABLE ... IF NOT EXISTS` still takes an ACCESS EXCLUSIVE lock, and
+ * during a rolling update that lock queues behind the old api pod's open
+ * transactions — the new pod hangs, the queued lock blocks the old pod's
+ * reads, and the deploy deadlocks. Probing the catalog first means a boot
+ * where nothing is missing issues no DDL at all.
  */
-async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
-  // Records which person's GitHub credential a team skill source may use.
-  // Null on every row written before the column existed, which the sync
-  // reads as "no credential" rather than climbing to the org's App.
-  await db.query('ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text');
+interface SchemaRepair {
+  /** Names the element in logs and errors, e.g. "orgs.sso_team_groups column". */
+  describe: string;
+  probe:
+    | { kind: "column"; table: string; column: string }
+    | { kind: "table"; table: string }
+    | { kind: "index"; index: string };
+  sql: string;
+}
 
-  // The per-group team-sync allowlist. Null on every row written before the
-  // column existed, which the sync and Settings read as "never set" —
-  // fail-closed, same as an empty list.
-  await db.query('ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb');
-
-  // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills every
-  // pre-existing org row to `false` — anonymous sharing stays off until an
-  // admin opts in, the same fail-closed answer a fresh database gets.
-  await db.query(
-    'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_public_artifacts" boolean NOT NULL DEFAULT false',
-  );
-
-  // The artifacts table itself (artifacts design) — a whole-table sibling of
-  // the column repairs above, for the same reason: the tracker sees
-  // `0000_app.sql` applied and never replays the in-place edit that added
-  // this table. Keep the definition in lockstep with `0000_app.sql`.
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS "artifacts" (
+/**
+ * The pre-1.0 in-place-edit repair list. Add an entry when an edit to
+ * `0000_app.sql` adds a NULLABLE (or DEFAULT-backfilled) column, a table,
+ * or an index; a column that needs a computed value cannot be repaired this
+ * way and does need a real migration. Keep each `sql` in lockstep with
+ * `0000_app.sql`. Delete this list at 1.0, when numbered migrations take
+ * over.
+ */
+const SCHEMA_REPAIRS: SchemaRepair[] = [
+  {
+    // Records which person's GitHub credential a team skill source may use.
+    // Null on every row written before the column existed, which the sync
+    // reads as "no credential" rather than climbing to the org's App.
+    describe: "skill_sources.created_by column",
+    probe: { kind: "column", table: "skill_sources", column: "created_by" },
+    sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text',
+  },
+  {
+    // The per-group team-sync allowlist. Null on every row written before
+    // the column existed, which the sync and Settings read as "never set" —
+    // fail-closed, same as an empty list.
+    describe: "orgs.sso_team_groups column",
+    probe: { kind: "column", table: "orgs", column: "sso_team_groups" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb',
+  },
+  {
+    // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills
+    // every pre-existing org row to `false` — anonymous sharing stays off
+    // until an admin opts in, the same answer a fresh database gets.
+    describe: "orgs.allow_public_artifacts column",
+    probe: { kind: "column", table: "orgs", column: "allow_public_artifacts" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_public_artifacts" boolean NOT NULL DEFAULT false',
+  },
+  {
+    // The artifacts table itself (artifacts design) — a whole-table sibling
+    // of the column repairs, for the same reason.
+    describe: "artifacts table",
+    probe: { kind: "table", table: "artifacts" },
+    sql: `CREATE TABLE IF NOT EXISTS "artifacts" (
       "id" text PRIMARY KEY NOT NULL,
       "token" text NOT NULL,
       "owner_type" text NOT NULL,
@@ -183,21 +200,150 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
       "created_at" bigint NOT NULL,
       "updated_at" bigint NOT NULL,
       "revoked_at" bigint
-    )
-  `);
-  await db.query('CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_token_unique" ON "artifacts" ("token")');
-  await db.query(
-    'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
+    )`,
+  },
+  {
+    describe: "artifacts_token_unique index",
+    probe: { kind: "index", index: "artifacts_token_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_token_unique" ON "artifacts" ("token")',
+  },
+  {
+    describe: "artifacts_owner_path_unique index",
+    probe: { kind: "index", index: "artifacts_owner_path_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
+  },
+  {
+    // Hibernated-sandbox reaper bookkeeping. Null on rows hibernated before
+    // the columns existed — the reaper falls back to a derived handle for
+    // those (engine/hibernation-reaper.ts).
+    describe: "agent_sessions.hibernated_sandbox_id column",
+    probe: { kind: "column", table: "agent_sessions", column: "hibernated_sandbox_id" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "hibernated_sandbox_id" text',
+  },
+  {
+    describe: "agent_sessions.sandbox_reclaimed_at column",
+    probe: { kind: "column", table: "agent_sessions", column: "sandbox_reclaimed_at" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint',
+  },
+  {
+    // Settled-run sandbox reclaim bookkeeping (workflows/sandbox-reclaim.ts).
+    // Null on every run settled before the column existed — exactly the rows
+    // the reclaim sweep must pick up.
+    describe: "workflow_runs.sandbox_reclaimed_at column",
+    probe: { kind: "column", table: "workflow_runs", column: "sandbox_reclaimed_at" },
+    sql: 'ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint',
+  },
+  {
+    // The RFC 7591 scope set an MCP OAuth client was registered with
+    // (integration-oauth.ts, TKAI-243). Null on rows registered before
+    // scopes support, which the compare reads as "no scopes" — a declared
+    // scope set then re-registers the client.
+    describe: "mcp_oauth_clients.registered_scopes column",
+    probe: { kind: "column", table: "mcp_oauth_clients", column: "registered_scopes" },
+    sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "registered_scopes" jsonb',
+  },
+  {
+    // The server's advertised scopes_supported, captured at registration or
+    // lazily backfilled (integration-oauth.ts). Null on rows from before the
+    // column existed — exactly the rows the backfill fills in.
+    describe: "mcp_oauth_clients.scopes_supported column",
+    probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
+    sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
+  },
+];
+
+/** The repairs this database still lacks, by catalog probe — one query per
+ * probe kind (3 round-trips), not one per repair. Exported for the schema
+ * tests: steady state must return [] — that is the no-locks contract.
+ * The probe lists ride as JSON strings so both drivers (node-postgres,
+ * PGlite) bind them identically. */
+export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
+  const columnTables = new Set<string>();
+  const tableNames: string[] = [];
+  const indexNames: string[] = [];
+  for (const { probe } of SCHEMA_REPAIRS) {
+    if (probe.kind === "column") columnTables.add(probe.table);
+    else if (probe.kind === "table") tableNames.push(probe.table);
+    else indexNames.push(probe.index);
+  }
+
+  const present = new Set<string>();
+  const collect = async (sql: string, names: string[], toKey: (row: Record<string, unknown>) => string) => {
+    if (names.length === 0) return;
+    const result = await db.query(sql, [JSON.stringify(names)]);
+    for (const row of result.rows) present.add(toKey(row));
+  };
+  await collect(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND table_name IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    [...columnTables],
+    (row) => `column:${String(row["table_name"])}.${String(row["column_name"])}`,
+  );
+  await collect(
+    `SELECT table_name FROM information_schema.tables
+     WHERE table_schema = current_schema()
+       AND table_name IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    tableNames,
+    (row) => `table:${String(row["table_name"])}`,
+  );
+  await collect(
+    `SELECT indexname FROM pg_indexes
+     WHERE schemaname = current_schema()
+       AND indexname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    indexNames,
+    (row) => `index:${String(row["indexname"])}`,
   );
 
-  // Hibernated-sandbox reaper bookkeeping. Null on rows hibernated before
-  // the columns existed — the reaper falls back to a derived handle for
-  // those (engine/hibernation-reaper.ts).
-  await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "hibernated_sandbox_id" text');
-  await db.query('ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint');
+  return SCHEMA_REPAIRS.filter(({ probe: p }) => {
+    const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
+    return !present.has(key);
+  });
+}
 
-  // Settled-run sandbox reclaim bookkeeping (workflows/sandbox-reclaim.ts).
-  // Null on every run settled before the column existed — exactly the rows
-  // the reclaim sweep must pick up.
-  await db.query('ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint');
+const REPAIR_LOCK_TIMEOUT = "5s";
+const REPAIR_ATTEMPTS = 3;
+
+/**
+ * Repair the schema gaps that in-place `0000_app.sql` edits leave in an
+ * already-migrated database. Steady state (nothing missing) runs catalog
+ * probes only — no DDL, no exclusive locks (TKAI-244). A repair that must
+ * run does so under `lock_timeout`, retries briefly, and then fails naming
+ * the wait — a hung boot with nothing in the log is the failure mode this
+ * replaces.
+ */
+async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
+  for (const repair of await missingSchemaRepairs(db)) {
+    await runSchemaRepair(db, repair);
+  }
+}
+
+async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
+  for (let attempt = 1; attempt <= REPAIR_ATTEMPTS; attempt++) {
+    try {
+      await db.transaction(async (tx) => {
+        // SET LOCAL scopes the timeout to this transaction. Without it the
+        // ALTER waits forever behind any open transaction on the table —
+        // during a rolling update, the previous api pod's.
+        await tx.query(`SET LOCAL lock_timeout = '${REPAIR_LOCK_TIMEOUT}'`);
+        await tx.query(repair.sql);
+      });
+      console.log(`schema repair: added ${repair.describe}`);
+      return;
+    } catch (err) {
+      if (!isPgLockTimeout(err)) throw err;
+      if (attempt < REPAIR_ATTEMPTS) {
+        console.warn(
+          `schema repair: ${repair.describe} waited ${REPAIR_LOCK_TIMEOUT} for a table lock (attempt ${attempt}/${REPAIR_ATTEMPTS}); retrying`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+        continue;
+      }
+      throw new Error(
+        `schema repair: ${repair.describe} could not get a table lock after ${REPAIR_ATTEMPTS} attempts of ${REPAIR_LOCK_TIMEOUT}. ` +
+          `Another connection holds a conflicting lock — usually an open transaction from a previous api process. ` +
+          `End that process (or its transaction in pg_stat_activity), then restart the api.`,
+      );
+    }
+  }
 }
