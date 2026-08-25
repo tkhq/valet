@@ -35,6 +35,13 @@ import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../content-source-credential.js";
 import { MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
+import type {
+  CollectorDiscoverContext,
+  CollectorPass,
+  CollectorReconcileContext,
+  ContentCollector,
+} from "./collector.js";
+import { SkillCollector } from "./skill-collector.js";
 import { claimDueContentSources, ContentSyncService, SYNC_INTERVAL_MS } from "./service.js";
 
 const ORG = "org1";
@@ -1572,6 +1579,88 @@ Read the reference.
     const rows = await db.select().from(skills);
     expect(rows.some((r) => r.name === "good")).toBe(true);
     expect(rows.some((r) => r.name === "status")).toBe(false);
+  });
+
+  // `deps.collectors` has no caller outside this block, so every other case
+  // in this file runs the single default and the interface buys nothing it
+  // can be held to. These are the four properties it exists for.
+  describe("two collectors on one sweep", () => {
+    /** A second collector. It collects `.txt` files, which the skills
+     * collector never looks at, and it keeps the text map reconcile was
+     * handed so the merge is observable. */
+    class TextCollector implements ContentCollector {
+      readonly kind = "workflows" as const;
+      /** One entry per reconcile call, holding what `readContents` merged. */
+      readonly handed: Array<Map<string, string>> = [];
+
+      discover({ entries }: CollectorDiscoverContext): CollectorPass {
+        const found = entries
+          .filter((entry) => entry.path.endsWith(".txt"))
+          .map((entry) => ({ name: entry.path, path: entry.path, blobSha: entry.sha }));
+        const handed = this.handed;
+        return {
+          kind: this.kind,
+          readEntries: found,
+          manifestEntries: found,
+          text: new Map(),
+          warnings: [],
+          discovered: found.length,
+          excluded: 0,
+          async reconcile(ctx: CollectorReconcileContext) {
+            handed.push(new Map(ctx.text));
+            return { imported: found.length, updated: 0, deleted: 0, keptStale: [], warnings: [] };
+          },
+          notice: () => `Valet mirrored ${found.length} text file.`,
+          unreadWarning: (path: string) => `${path} could not be read.`,
+        };
+      }
+    }
+
+    it("shares one tree read, one manifest, one text map, and both notices", async () => {
+      const repo: FakeRepo = {
+        sha: "commit-1",
+        skills: { deploy: skillMd("deploy", "Deploy it.") },
+        extra: { "notes.txt": "one" },
+      };
+      const f = serve(repo);
+      const text = new TextCollector();
+      const service = new ContentSyncService({
+        db,
+        reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
+        collectors: [new SkillCollector(), text],
+      });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      await db
+        .update(contentSources)
+        .set({ kinds: ["skills", "workflows"] })
+        .where(eq(contentSources.id, source.id));
+
+      const first = await service.syncOnce(source.id);
+
+      // One tree read serves both collectors, which is the whole reason the
+      // sweep discovers before it reads anything.
+      expect(f.calls.filter((call) => call.path.includes("/git/trees/"))).toHaveLength(1);
+      expect(first?.imported).toBe(2);
+      // `readContents` merges both passes by PATH into one map, so each
+      // collector's reconcile sees the other's file bodies.
+      expect([...(text.handed[0]?.keys() ?? [])].sort()).toEqual(["deploy/SKILL.md", "notes.txt"]);
+
+      // The manifest hash covers the UNION: the commit moves and only the
+      // text file changes, so compare 2 must not stop this poll.
+      repo.sha = "commit-2";
+      repo.extra = { "notes.txt": "two" };
+      const second = await service.syncOnce(source.id);
+      expect(second?.changed).toBe(true);
+      expect(text.handed).toHaveLength(2);
+
+      // Both collectors report on the same repository, so the row carries
+      // both lines rather than whichever one ran last.
+      repo.sha = "commit-3";
+      repo.skills = {};
+      const third = await service.syncOnce(source.id);
+      expect(third?.notice).toContain("found no SKILL.md file");
+      expect(third?.notice).toContain("Valet mirrored 1 text file.");
+    });
   });
 
   describe("the sweep", () => {
