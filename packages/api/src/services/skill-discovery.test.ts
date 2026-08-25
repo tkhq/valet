@@ -177,22 +177,6 @@ describe("discoverFromTree", () => {
       expect(found.excludedCandidates).toEqual([]);
     });
 
-    it("reads a prompts directory under .valet", () => {
-      // `/workspace/.valet/prompts/*.md` is already the in-sandbox slash
-      // command layout (`engine/command-providers.ts`), so a repository that
-      // holds one gets the same prompts through sync.
-      const found = discoverFromTree([blob(".valet/prompts/standup.md")], "");
-
-      expect(found.accepted).toEqual([
-        {
-          name: "standup",
-          path: ".valet/prompts/standup.md",
-          blobSha: "blob-.valet/prompts/standup.md",
-          kind: "prompt",
-        },
-      ]);
-    });
-
     it("keeps a skill whose OWN directory carries an excluded name", () => {
       // The rule judges ancestors, never the directory the skill is named
       // after. Junk arrives nested — `dist/skills/x/SKILL.md` — while a

@@ -76,7 +76,7 @@ describe("parseRepoInput", () => {
   });
 });
 
-describe("skill sources service", () => {
+describe("content sources service", () => {
   let db: AppDb;
 
   beforeEach(async () => {
@@ -104,6 +104,9 @@ describe("skill sources service", () => {
     expect(created.status).toBe("pending");
     expect(created.lastSha).toBeNull();
     expect(created.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+    // Skills only until a caller asks for more, so a source added today
+    // mirrors exactly what a source added before `kinds` existed mirrors.
+    expect(created.kinds).toEqual(["skills"]);
   });
 
   it("hides another user's source behind the null a missing id returns", async () => {

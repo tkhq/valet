@@ -1621,5 +1621,25 @@ Read the reference.
       // The sync's own schedule replaces the claim lease.
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + SYNC_INTERVAL_MS);
     });
+
+    it("runs no collector for a source that collects no kind it has one for", async () => {
+      // `kinds` selects the collectors, so an empty list and a kind with no
+      // collector registered yet are the same answer: nothing runs, nothing
+      // is mirrored, and the sweep does not throw.
+      const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
+      const empty = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const unknown = await createContentSource(db, owner("u2"), { repo: "tkhq/skills" });
+      await db.update(contentSources).set({ kinds: [] }).where(eq(contentSources.id, empty.id));
+      await db
+        .update(contentSources)
+        .set({ kinds: ["workflows"] })
+        .where(eq(contentSources.id, unknown.id));
+
+      const service = serviceFor(f);
+      expect((await service.syncOnce(empty.id))?.imported).toBe(0);
+      expect((await service.syncOnce(unknown.id))?.imported).toBe(0);
+
+      expect(await db.select().from(skills)).toEqual([]);
+    });
   });
 });
