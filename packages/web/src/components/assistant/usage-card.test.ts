@@ -91,4 +91,33 @@ describe("topMembers", () => {
     const { shown } = topMembers([member("fewer", 2, 10), member("more", 2, 90)]);
     expect(shown.map((m) => m.userId)).toEqual(["more", "fewer"]);
   });
+
+  it("appends the viewer at the bottom when they fall outside the cap", () => {
+    const members = [
+      ...Array.from({ length: ORG_MEMBER_CAP + 5 }, (_, i) => member(`u${i}`, 100 - i)),
+      member("viewer", 0.5),
+    ];
+    const { shown, hidden } = topMembers(members, "viewer");
+    expect(shown).toHaveLength(ORG_MEMBER_CAP + 1);
+    expect(shown[ORG_MEMBER_CAP]?.userId).toBe("viewer");
+    // The viewer's row is on screen, so the hidden count excludes them.
+    expect(hidden).toBe(5);
+  });
+
+  it("does not duplicate the viewer when they are already in the top rows", () => {
+    const members = Array.from({ length: ORG_MEMBER_CAP + 3 }, (_, i) =>
+      member(`u${i}`, 100 - i),
+    );
+    const { shown, hidden } = topMembers(members, "u0");
+    expect(shown).toHaveLength(ORG_MEMBER_CAP);
+    expect(shown.filter((m) => m.userId === "u0")).toHaveLength(1);
+    expect(hidden).toBe(3);
+  });
+
+  it("changes nothing when the viewer id is unknown or absent from the org", () => {
+    const members = Array.from({ length: ORG_MEMBER_CAP + 2 }, (_, i) =>
+      member(`u${i}`, 100 - i),
+    );
+    expect(topMembers(members, "not-a-member")).toEqual(topMembers(members));
+  });
 });

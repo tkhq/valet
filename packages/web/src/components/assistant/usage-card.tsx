@@ -22,7 +22,7 @@ export function UsageCard() {
   });
 
   const data = usageQ.data;
-  const org = data?.org ? topMembers(data.org.members) : null;
+  const org = data?.org ? topMembers(data.org.members, me.data?.id) : null;
   const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
 
   return (
@@ -88,19 +88,23 @@ export function UsageCard() {
 
 /**
  * Max org rows the card shows. Past this depth the list pushes the card
- * far below the fold and the tail bars flatten into noise; the personal
- * windows above already cover the viewer's own spend if they fall outside
- * the top spenders.
+ * far below the fold and the tail bars flatten into noise.
  */
 export const ORG_MEMBER_CAP = 15;
 
 /**
  * Top spenders for the org list, capped at ORG_MEMBER_CAP. Re-sorts with
  * the API's own comparator (cost desc, then tokens) instead of trusting
- * wire order, so the cap always drops the cheapest rows. Exported pure
- * function so the cap is testable without rendering React.
+ * wire order, so the cap always drops the cheapest rows. A viewer who
+ * falls outside the cap is appended as one extra row at the bottom — the
+ * comparison against the org is the point of the list, so the viewer must
+ * always be on it. Exported pure function so the behavior is testable
+ * without rendering React.
  */
-export function topMembers(members: UsageMemberSummary[]): {
+export function topMembers(
+  members: UsageMemberSummary[],
+  meId?: string,
+): {
   shown: UsageMemberSummary[];
   hidden: number;
 } {
@@ -108,6 +112,10 @@ export function topMembers(members: UsageMemberSummary[]): {
     (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
   );
   const shown = sorted.slice(0, ORG_MEMBER_CAP);
+  if (meId !== undefined && !shown.some((m) => m.userId === meId)) {
+    const me = sorted.find((m) => m.userId === meId);
+    if (me) shown.push(me);
+  }
   return { shown, hidden: members.length - shown.length };
 }
 
