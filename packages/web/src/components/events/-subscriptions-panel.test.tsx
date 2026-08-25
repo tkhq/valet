@@ -59,6 +59,8 @@ let feedCalls = 0;
 /** Whether each query was allowed to run on the last render. */
 let feedEnabled: boolean | undefined;
 let subscriptionsEnabled: boolean | undefined;
+/** One stable spy, so a case can assert that Refresh did NOT fetch. */
+const feedRefetch = vi.fn();
 
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
@@ -66,7 +68,13 @@ vi.mock("~/api/events", () => ({
     feedOwner = owner;
     feedCalls += 1;
     feedEnabled = opts?.enabled;
-    return { data: eventsData, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
+    return {
+      data: eventsData,
+      isPending: opts?.enabled === false,
+      isFetching: false,
+      error: null,
+      refetch: feedRefetch,
+    };
   },
   useEventSubscriptions: (owner?: OwnerFilter, opts?: { enabled?: boolean }) => {
     subscriptionsOwner = owner;
@@ -125,6 +133,7 @@ beforeEach(() => {
   feedOwner = undefined;
   feedCalls = 0;
   subscriptionsData = { subscriptions: [subscription()] };
+  feedRefetch.mockClear();
 });
 
 afterEach(() => {
@@ -250,5 +259,24 @@ describe("EventFeed scope control", () => {
     scopeTeamId = "t_eng";
     renderFeed();
     expect(feedOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
+  });
+
+  // `refetch()` ignores `enabled`, so the hold is only as good as the
+  // control that can trigger one.
+  it("refuses to refresh while the owner is unresolved", () => {
+    meId = undefined;
+    renderFeed();
+    const refresh = screen.getByRole("button", { name: "Refresh events" }) as HTMLButtonElement;
+    expect(refresh.disabled).toBe(true);
+    fireEvent.click(refresh);
+    expect(feedRefetch).not.toHaveBeenCalled();
+  });
+
+  it("refreshes once the owner has resolved", () => {
+    renderFeed();
+    const refresh = screen.getByRole("button", { name: "Refresh events" }) as HTMLButtonElement;
+    expect(refresh.disabled).toBe(false);
+    fireEvent.click(refresh);
+    expect(feedRefetch).toHaveBeenCalledTimes(1);
   });
 });

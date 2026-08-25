@@ -58,14 +58,15 @@ export function EventFeed({
   const [key, setKey] = useState(ALL);
   const owner = useListOwner();
   const catalogQ = useEventCatalog();
+  // `useListOwner` answers undefined while the caller's identity loads, and
+  // an owner-less request IS the org-wide feed. A control that says "This
+  // workspace" must not show the org's events for that one frame, so hold
+  // the query until the owner resolves.
+  const canFetch = scope === "all" || owner !== undefined;
   const eventsQ = useEvents(
     { service: service || undefined, key: key || undefined },
     scope === "workspace" ? owner : undefined,
-    // `useListOwner` answers undefined while the caller's identity loads,
-    // and an owner-less request IS the org-wide feed. A control that says
-    // "This workspace" must not show the org's events for that one frame,
-    // so hold the query until the owner resolves.
-    { enabled: scope === "all" || owner !== undefined },
+    { enabled: canFetch },
   );
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -111,12 +112,16 @@ export function EventFeed({
         )}
 
         <div className="flex-1" />
+        {/* `refetch()` ignores `enabled`, so an unheld press during the
+            hold would fetch the org-wide feed and render it under a control
+            reading "This workspace". Disable the control for that window
+            instead of letting the press through. */}
         <Button
           type="button"
           variant="ghost"
           size="sm"
           aria-label="Refresh events"
-          disabled={eventsQ.isFetching}
+          disabled={!canFetch || eventsQ.isFetching}
           onClick={() => void eventsQ.refetch()}
         >
           <RefreshCw className={`h-3.5 w-3.5 ${eventsQ.isFetching ? "animate-spin" : ""}`} aria-hidden />

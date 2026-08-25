@@ -161,7 +161,7 @@ vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useEvents: () => ({
     data: eventsData,
-    isLoading: false,
+    isPending: false,
     isFetching: false,
     error: null,
     refetch: vi.fn(),
