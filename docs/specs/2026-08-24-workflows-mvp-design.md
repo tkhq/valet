@@ -279,7 +279,10 @@ The platform engineer performs this sequence against a manually rolled deploymen
 
 ## Deviations from this design (recorded at implementation)
 
-Tasks 1 and 2 ship on `feat/workflows-repo-sync`: the rail is generalized, and `.valet/skills` is open to discovery. Task 3 — one parser for the workflow file envelope — ships on `feat/workflow-file-envelope` and is reviewed separately; that branch carries no spec of its own, so this document governs it too, and deviations 7, 8, and 10 below record what changed there. Tasks 4 through 13 have not shipped, so the repository sync mirrors no workflow yet. Together the two branches are the ground the workflow collector stands on.
+Task 1 ships on `feat/content-sync-rail`, which generalizes the rail with no behaviour
+change for a skills-only source. Task 2 ships on `feat/valet-skills-discovery`, stacked on
+it, which opens `.valet/skills` to discovery and re-scans a source when the discovery rules
+change. Task 3 — one parser for the workflow file envelope — ships on `feat/workflow-file-envelope` and is reviewed separately; that branch carries no spec of its own, so this document governs it too, and deviations 7, 8, and 10 below record what changed there. Tasks 4 through 13 have not shipped, so the repository sync mirrors no workflow yet. Together the two branches are the ground the workflow collector stands on.
 
 1. **The sync service is `ContentSyncService`, not `RepoContentSyncService`.** Decision 1 and tasks 1 and 8 first named the class `RepoContentSyncService`, and its options `RepoContentSyncDeps`. What ships in `packages/api/src/services/content-sync/service.ts` is `ContentSyncService` and `ContentSyncServiceDeps`. This repository names an exported class for the path it sits at — `events/dispatcher.ts` exports `EventDispatcher`, `workflows/scheduler.ts` exports `WorkflowScheduler` — so a `Repo` prefix on a file that already sits in `content-sync/` says the directory twice. Every place this design named the class carries the shipped name.
 
