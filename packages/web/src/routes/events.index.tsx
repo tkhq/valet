@@ -4,6 +4,7 @@ import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { EventFeed, type FeedScope } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
+import { textParam } from "~/lib/search-params";
 
 /**
  * `/events` — the UI over the event system (feed, catalog, subscriptions;
@@ -34,8 +35,7 @@ interface EventsSearch {
  * as the default workspace scope, which is the honest answer for a value
  * that names no scope. */
 function readEventsSearch(raw: unknown): EventsSearch {
-  const scope = (raw as Record<string, unknown> | null)?.scope;
-  return scope === "all" ? { scope: "all" } : {};
+  return textParam(raw, "scope") === "all" ? { scope: "all" } : {};
 }
 
 export const Route = createFileRoute("/events/")({
