@@ -59,6 +59,94 @@ export interface DesignRenderHealth {
   scriptsStripped: number;
 }
 
+/**
+ * Heartbeat period for render-health reports. The server keeps the report
+ * in memory with a reportedAt timestamp — an api restart loses it, and the
+ * agent-side reader treats reports older than ~10 minutes as expired. A
+ * mounted canvas re-measures and re-posts at this period so its report
+ * stays fresh across both.
+ */
+export const HEALTH_HEARTBEAT_MS = 60_000;
+
+/** How long a deferred re-measure waits for running animations to finish
+ * before it measures anyway — a looping animation must not block the
+ * report forever. */
+const ANIMATION_SETTLE_CAP_MS = 2_000;
+
+/** FNV-1a 32-bit — a tiny stable hash for the measured verdict. */
+function fnv1a(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+/**
+ * Dedupe key for a health report: revision PLUS a hash of the measured
+ * verdict. Two contradictory measurements of the same revision (pre- and
+ * post-animation, fonts late) get different keys, so the second posts
+ * instead of being swallowed by a revision-only key.
+ */
+export function healthReportKey(revision: string, health: DesignRenderHealth): string {
+  const verdict = JSON.stringify([
+    health.totalSlides,
+    health.hiddenSlides,
+    health.overflowingSlides,
+    health.sparseSlides,
+    health.scriptsStripped,
+  ]);
+  return `${revision}:${fnv1a(verdict)}`;
+}
+
+/**
+ * Gate for posting health reports. Admits a post when the key changed OR
+ * the last admitted post is older than maxAgeMs. The age clause is the
+ * heartbeat path: without it, a once-per-key dedupe suppresses every
+ * re-post after an api restart wipes the server-side report, and the
+ * agent reads "no canvas has rendered this artifact" while the user
+ * stares at a live canvas.
+ */
+export function createHealthPostGate(
+  maxAgeMs: number = HEALTH_HEARTBEAT_MS,
+): (key: string, now?: number) => boolean {
+  let lastKey = "";
+  let lastAt = Number.NEGATIVE_INFINITY;
+  return (key, now = Date.now()) => {
+    if (key === lastKey && now - lastAt < maxAgeMs) return false;
+    lastKey = key;
+    lastAt = now;
+    return true;
+  };
+}
+
+/**
+ * Hidden-slide verdict for the health lint, from computed style + rect.
+ * `display: none` is a hard hide (it cannot animate to visible). The soft
+ * causes — `visibility: hidden`, near-zero opacity, near-zero rect height
+ * — are exactly the pre-animation state of reveal-on-scroll decks, so
+ * they only count as hidden when nothing is animating the element:
+ * mid-flight elements are re-judged by the post-animation re-measure.
+ */
+export function isSectionHidden(s: {
+  display: string;
+  visibility: string;
+  opacity: string;
+  heightPx: number;
+  hasLiveAnimation: boolean;
+}): boolean {
+  if (s.display === "none") return true;
+  const soft =
+    s.visibility === "hidden" || parseFloat(s.opacity) < 0.05 || s.heightPx < 8;
+  return soft && !s.hasLiveAnimation;
+}
+
+/** Running or play-pending — the states that mean "judgment is premature". */
+function isLiveAnimation(a: Animation): boolean {
+  return a.playState === "running" || a.pending;
+}
+
 export interface DesignRendererProps {
   /** The full `.dc.html` document (unsanitized — sanitized here). */
   content: string;
@@ -141,6 +229,9 @@ export function DesignRenderer({
   const shadowRef = useRef<ShadowRoot | null>(null);
   const healthRef = useRef(onRenderHealth);
   healthRef.current = onRenderHealth;
+  // Latest mount's measure function, for the heartbeat interval. The mount
+  // effect replaces it on every content change; a no-op before first mount.
+  const measureRef = useRef<() => void>(() => {});
   const slidesModeRef = useRef(activeSlideIndex !== undefined);
   slidesModeRef.current = activeSlideIndex !== undefined;
   // Fit scale for the fixed stage (slides mode): stage width → container
@@ -227,12 +318,42 @@ export function DesignRenderer({
     if (slidesModeRef.current) {
       applyStageSizing(topLevelSections(shadow));
     }
+    let cancelled = false;
+    const timers: number[] = [];
+    const schedule = (fn: () => void, ms: number) => {
+      timers.push(window.setTimeout(fn, ms));
+    };
+    // Animation probes. jsdom (tests) has no getAnimations; treat that as
+    // "nothing animating". `subtree: true` covers entrance animations on a
+    // slide's children; the ancestor walk covers a wrapper fading the whole
+    // deck in. The walk ends at `.vd-body` (its parent is the shadow root).
+    const sectionAnimated = (el: HTMLElement): boolean => {
+      if (typeof el.getAnimations !== "function") return false;
+      try {
+        if (el.getAnimations({ subtree: true }).some(isLiveAnimation)) return true;
+        for (let p = el.parentElement; p; p = p.parentElement) {
+          if (p.getAnimations().some(isLiveAnimation)) return true;
+        }
+      } catch {
+        return false;
+      }
+      return false;
+    };
+    const liveCanvasAnimations = (): Animation[] => {
+      const body = shadow.querySelector(".vd-body");
+      if (!body || typeof body.getAnimations !== "function") return [];
+      try {
+        return body.getAnimations({ subtree: true }).filter(isLiveAnimation);
+      } catch {
+        return [];
+      }
+    };
     // Measure artifact-intrinsic visibility HERE, before the slide-toggle
     // effect adds its own inline display/vd-active overrides — then once
     // more after fonts load and images decode (a slide that is one big
     // image measures empty at mount and would falsely report sparse).
     const measureHealth = () => {
-      if (!healthRef.current) return;
+      if (cancelled || !healthRef.current) return;
       const sections = topLevelSections(shadow);
       // The slide-toggle effect hides every non-active slide with an inline
       // display:none (tagged data-vd-toggled-off). The post-load re-measures
@@ -253,10 +374,13 @@ export function DesignRenderer({
         const cs = getComputedStyle(el);
         const rect = el.getBoundingClientRect();
         if (
-          cs.display === "none" ||
-          cs.visibility === "hidden" ||
-          parseFloat(cs.opacity) < 0.05 ||
-          rect.height < 8
+          isSectionHidden({
+            display: cs.display,
+            visibility: cs.visibility,
+            opacity: cs.opacity,
+            heightPx: rect.height,
+            hasLiveAnimation: sectionAnimated(el),
+          })
         ) {
           hiddenSlides.push(i);
           return;
@@ -292,16 +416,50 @@ export function DesignRenderer({
         scriptsStripped: (content.match(/<script\b/gi) ?? []).length,
       });
     };
+    // Deferred re-measure: judging mid-animation produces false hidden and
+    // sparse verdicts, so wait for running animations to finish first — with
+    // a hard cap, because a looping animation never finishes and must not
+    // block reporting forever.
+    const measureWhenSettled = (capMs: number) => {
+      if (cancelled) return;
+      const anims = liveCanvasAnimations();
+      if (anims.length === 0) {
+        measureHealth();
+        return;
+      }
+      let fired = false;
+      const go = () => {
+        if (fired || cancelled) return;
+        fired = true;
+        measureHealth();
+      };
+      schedule(go, capMs);
+      // `finished` of an infinite animation never settles; the cap fires.
+      void Promise.allSettled(anims.map((a) => a.finished)).then(go);
+    };
     measureHealth();
+    measureRef.current = measureHealth;
     // Post-load re-measure: fonts.ready settles webfont reflow; the timer
     // catches image decode. The canvas dedupes identical reports.
-    void document.fonts?.ready.then(() => measureHealth()).catch(() => {});
-    const remeasure = window.setTimeout(measureHealth, 1200);
+    void document.fonts?.ready.then(() => measureWhenSettled(ANIMATION_SETTLE_CAP_MS)).catch(() => {});
+    schedule(() => measureWhenSettled(ANIMATION_SETTLE_CAP_MS), 1200);
     setDomVersion((v) => v + 1);
-    return () => window.clearTimeout(remeasure);
+    return () => {
+      cancelled = true;
+      for (const id of timers) window.clearTimeout(id);
+    };
     // `version.ok` is derived from `content`; content is the real input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content]);
+
+  // Health heartbeat: re-measure (and so re-deliver a report) every 60s
+  // while the canvas is mounted. See HEALTH_HEARTBEAT_MS for why a
+  // once-per-key post is not enough. Cleared on unmount; a no-op when the
+  // caller passes no onRenderHealth (thumbnails).
+  useEffect(() => {
+    const id = window.setInterval(() => measureRef.current(), HEALTH_HEARTBEAT_MS);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Design tokens as CSS custom properties on the host — they inherit
   // through the shadow boundary, so the artifact's `var(--…)` reads them.
