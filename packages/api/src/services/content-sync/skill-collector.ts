@@ -1,17 +1,13 @@
 /**
  * The skills collector — every rule that is true of skills and of nothing
  * else. `services/content-sync/service.ts` runs the sweep around it and holds
- * no skill rule at all.
- *
- * ## Discovery
+ * no skill rule at all. That file also states, once, the rules every
+ * collector holds to: what a transport failure, a file the sync could not
+ * read, a narrowed scan, and a delete may each do. Read it first.
  *
  * One recursive tree read finds every `SKILL.md` in the repository, at any
  * depth. `services/skill-discovery.ts` holds the rules about which of those
  * paths is a skill, and its file comment is where they are explained.
- *
- * `subpath` is a filter over that scan, not the place the sync is told to
- * look. An empty subdirectory scans the whole repository, which is what makes
- * "import a repository and get its skills" work with nothing else typed.
  *
  * `walkDirectory` is the pre-tree discovery path: list the configured
  * subdirectory, read `<subdirectory>/<entry>/SKILL.md` under each directory
@@ -20,33 +16,9 @@
  * directory. It stays for one case: a repository with more than 100,000
  * files, where GitHub cuts the tree read.
  *
- * ## A malformed SKILL.md is not a failure
- *
- * It is a per-skill warning on an otherwise successful sync, so the new
- * commit IS recorded and the next poll stops after one call. Treating it as a
- * failure would re-read a file that will never parse, on every retry, for as
- * long as the source exists. The same rule covers a name the owner already
- * holds: the sync warns, and the skill already there is left alone.
- *
- * "Not there" for a file discovery DID find is not normal and is not a
- * failure either: the other skills still mirror, and `unreadWarning` names
- * the file. The sweep makes that pass incomplete, so the next poll re-reads.
- *
- * ## A delete needs a listing as wide as the one that imported
- *
- * Every path above can produce a listing NARROWER than the one that mirrored
- * the rows, and a narrower listing must not read as "deleted upstream". The
- * two narrowings, and what each does instead, are in `reconcile`. The rule
- * behind both: a stale mirror is recoverable on the next sync, and a deleted
- * skill is not.
- *
- * ## A sync that imports nothing says why
- *
- * "The repository could not be read", "the repository holds no SKILL.md" and
- * "the repository holds skills and they all failed" are three outcomes, and
- * `status: "ok"` with zero counts described all three. `notice` turns what
- * discovery found into one message that names what to do, including how many
- * mirrored skills the sync removed.
+ * One skill rule has no counterpart on the rail. A name the owner already
+ * holds is a per-skill warning, not a failure, and the skill already there is
+ * left alone — the same answer a malformed `SKILL.md` gets.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import {

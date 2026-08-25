@@ -367,7 +367,7 @@ const DEFAULT_REF = "HEAD";
 
 /**
  * Deadline for one GitHub request. A hung connection must not pin the sweep:
- * `RepoContentSyncService.pollOnce` holds its `draining` flag for a whole pass, so
+ * `ContentSyncService.pollOnce` holds its `draining` flag for a whole pass, so
  * one stalled read stops every other source from syncing until the socket
  * gives up on its own.
  */

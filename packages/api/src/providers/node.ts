@@ -35,7 +35,7 @@ import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
-import { RepoContentSyncService } from "../services/content-sync/service.js";
+import { ContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
@@ -672,7 +672,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // credential falls back to the anonymous `reader`, which is what every
   // public repository uses. `start()`/`stop()` are called from `main.ts`
   // alongside the other loops.
-  const contentSync = new RepoContentSyncService({
+  const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader(),
     readerFor: skillRepoReaderFactory({

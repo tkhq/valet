@@ -189,7 +189,7 @@ export interface ContentSyncOutcome {
   error: string | null;
 }
 
-export interface RepoContentSyncDeps {
+export interface ContentSyncServiceDeps {
   db: AppDb;
   /** The reader used when `readerFor` is not supplied. Anonymous in every
    * caller that ships, which is what a public repository needs. */
@@ -255,14 +255,14 @@ interface SyncScan {
   discovery: ContentDiscoveryMode;
 }
 
-export class RepoContentSyncService {
+export class ContentSyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private draining = false;
   private stopped = false;
   private readonly now: () => number;
   private readonly collectors: ContentCollector[];
 
-  constructor(private readonly deps: RepoContentSyncDeps) {
+  constructor(private readonly deps: ContentSyncServiceDeps) {
     this.now = deps.now ?? Date.now;
     this.collectors = deps.collectors ?? [new SkillCollector()];
   }

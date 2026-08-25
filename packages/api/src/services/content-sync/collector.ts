@@ -8,14 +8,9 @@
  * It knows nothing about `SKILL.md`, about a workflow envelope, or about any
  * table a mirror lands in. A `ContentCollector` holds all of that.
  *
- * ## One sweep, one tree read, one manifest
- *
- * The sweep resolves the credential once, compares the head commit, reads one
- * tree, and asks every enabled collector to discover over that listing. It
- * then hashes ONE manifest over the union of what they found, so a commit
- * that moved a README skips every collector after a single tree read. Only
- * then does it read the file bodies the collectors asked for, and only then
- * does it call each collector's reconcile.
+ * That file also states, once, the rules every collector holds to: what a
+ * transport failure, a file the sync could not read, a narrowed scan, and a
+ * delete may each do. Read it before you write a collector.
  *
  * ## Why discovery returns an object and not plain data
  *
@@ -30,33 +25,11 @@
  * sweep, nothing stops one collector's manifest reaching another collector's
  * reconcile. Binding the two at discovery makes that unrepresentable, with no
  * generic parameter and no cast.
- *
- * ## What a collector must hold to
- *
- * These rules are the reason the rail is shared rather than copied, and a new
- * collector inherits all of them:
- *
- *   - A transport failure reconciles NOTHING. The sweep fails the whole sync
- *     rather than let a GitHub outage read as "every file was deleted
- *     upstream".
- *   - A file discovery found and the sync could not read makes the pass
- *     INCOMPLETE, so neither the commit nor the manifest hash is recorded and
- *     the next poll reads that file again.
- *   - A narrowed scan deletes nothing. `CollectorReconcileContext.discovery`
- *     says `directory-walk` when GitHub cut the tree and the sync fell back
- *     to listing one directory. That listing is narrower than the one that
- *     mirrored the rows, so its absences prove nothing: report `deleted: 0`
- *     and name the rows kept in `keptStale`.
- *   - Every delete is scoped by `source_id` AND `origin='repo'`, twice, so it
- *     can never reach a row somebody wrote in the product or a row another
- *     source mirrors.
  */
 import { createHash } from "node:crypto";
 import type { AppDb } from "../../lib/drizzle.js";
 import type { ContentKind, ContentSourceRow } from "../../schema/index.js";
 import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
-
-export type { ContentKind };
 
 /** One tracked file as the repository holds it. `name` comes from the PATH,
  * because it is the only identity available before the file body is read. */

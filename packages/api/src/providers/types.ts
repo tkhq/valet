@@ -21,7 +21,7 @@ import type { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
-import type { RepoContentSyncService } from "../services/content-sync/service.js";
+import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 
 /**
@@ -84,7 +84,7 @@ export interface Providers {
    * `start()`/`stop()` from main.ts. `routes/skills.ts` calls its `syncOnce`
    * for the create and "sync now" routes, so there is one sync
    * implementation. */
-  contentSync: RepoContentSyncService;
+  contentSync: ContentSyncService;
   /** Per-workflow in-memory limiter for the public webhook-trigger route
    * (`routes/workflow-hooks.ts`, overhaul design decision 5) — single-
    * process, coarse, not shared across API instances. */

@@ -171,7 +171,7 @@ export async function resolveContentSourceCredential(
 }
 
 /**
- * The reader factory `RepoContentSyncService` calls once per sync. Both the server
+ * The reader factory `ContentSyncService` calls once per sync. Both the server
  * (`providers/node.ts`) and the integration harness build it from here, so
  * neither can hold its own copy of the rule above.
  */

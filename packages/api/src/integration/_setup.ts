@@ -34,7 +34,7 @@ import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
-import { RepoContentSyncService } from "../services/content-sync/service.js";
+import { ContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
@@ -466,7 +466,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // Repository content sync. Constructed with the same real deps
   // `buildNodeProviders` uses, but NEVER started on its timer — tests drive
   // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
-  const contentSync = new RepoContentSyncService({
+  const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader({ apiUrl: opts.githubApiUrl }),
     readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),

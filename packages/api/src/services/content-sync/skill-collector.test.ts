@@ -35,7 +35,7 @@ import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../content-source-credential.js";
 import { MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
-import { claimDueContentSources, RepoContentSyncService, SYNC_INTERVAL_MS } from "./service.js";
+import { claimDueContentSources, ContentSyncService, SYNC_INTERVAL_MS } from "./service.js";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -187,15 +187,15 @@ describe("skill collector", () => {
     fixture = undefined;
   });
 
-  function serviceFor(f: GithubFixture): RepoContentSyncService {
-    return new RepoContentSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }) });
+  function serviceFor(f: GithubFixture): ContentSyncService {
+    return new ContentSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }) });
   }
 
   /** The service as `providers/node.ts` builds it: a per-source reader that
    * carries the credential the source's owner holds. */
-  function credentialedServiceFor(f: GithubFixture): RepoContentSyncService {
+  function credentialedServiceFor(f: GithubFixture): ContentSyncService {
     const deps = { db, credentials, key: deriveSecretKey("cache-key"), apiUrl: f.url };
-    return new RepoContentSyncService({
+    return new ContentSyncService({
       db,
       reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
       readerFor: skillRepoReaderFactory(deps, { apiUrl: f.url }),

@@ -24,7 +24,7 @@
  *
  * `/sources` holds the tracked repositories Valet mirrors skills from. Those
  * routes are owner-scoped the same way, and both the create route and the
- * "sync now" route call the one `RepoContentSyncService.syncOnce` the background
+ * "sync now" route call the one `ContentSyncService.syncOnce` the background
  * sweep calls (`services/content-sync/service.ts`).
  *
  * Both listings take the same optional `?ownerType=&ownerId=` filter, for a
