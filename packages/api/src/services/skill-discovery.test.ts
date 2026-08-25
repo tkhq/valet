@@ -136,21 +136,75 @@ describe("discoverFromTree", () => {
       expect(found.excludedCandidates).toHaveLength(6);
     });
 
-    it("drops a candidate under a dot-directory, and keeps .claude", () => {
+    it("drops a candidate under a dot-directory, and keeps .claude and .valet", () => {
+      // `.github/skills/x/SKILL.md` is the case the two exceptions invite:
+      // the canonical skills layout under a dot-directory that stays shut.
+      // Which dot-directory the path names is the whole rule.
       const found = discoverFromTree(
         [
+          blob(".github/skills/x/SKILL.md"),
           blob(".github/workflows/ci/SKILL.md"),
           blob(".venv/lib/pkg/a/SKILL.md"),
           blob(".claude/skills/triage/SKILL.md"),
+          blob(".valet/skills/deploy/SKILL.md"),
         ],
         "",
       );
 
-      expect(found.accepted.map((c) => c.path)).toEqual([".claude/skills/triage/SKILL.md"]);
+      expect(found.accepted.map((c) => c.path)).toEqual([
+        ".valet/skills/deploy/SKILL.md",
+        ".claude/skills/triage/SKILL.md",
+      ]);
       expect(found.excludedCandidates.map((c) => c.path)).toEqual([
+        ".github/skills/x/SKILL.md",
         ".github/workflows/ci/SKILL.md",
         ".venv/lib/pkg/a/SKILL.md",
       ]);
+    });
+
+    it("reads nothing beside a SKILL.md out of .valet", () => {
+      // `.valet` already carries three unrelated conventions:
+      // `prebuild.yaml` configures the sandbox image, `persona` is written
+      // by the runner, and `workflows/` holds workflow files. Opening the
+      // directory must not turn any of them into a skill candidate.
+      const found = discoverFromTree(
+        [
+          blob(".valet/prebuild.yaml"),
+          blob(".valet/persona"),
+          blob(".valet/workflows/nightly.yaml"),
+          blob(".valet/skills/deploy/SKILL.md"),
+        ],
+        "",
+      );
+
+      expect(found.accepted.map((c) => c.path)).toEqual([".valet/skills/deploy/SKILL.md"]);
+      expect(found.discovered).toBe(1);
+      expect(found.excludedCandidates).toEqual([]);
+    });
+
+    it("leaves .valet/prompts to the repository's own slash commands", () => {
+      // `.valet/prompts/*.md` is an existing Valet convention that has
+      // nothing to do with this sync: the repository's own slash commands,
+      // read from the prepared sandbox by `engine/command-providers.ts`.
+      // Mirroring them as prompt skills would change what an already-tracked
+      // repository holds on upgrade, and a name held by both `.claude/prompts`
+      // and `.valet/prompts` would collide on the owner-name index. `.valet`
+      // is open for `skills` and for nothing else.
+      const found = discoverFromTree(
+        [
+          blob(".valet/prompts/deploy.md"),
+          blob(".valet/templates/nightly.yaml"),
+          blob(".claude/prompts/triage.md"),
+          blob(".valet/skills/release/SKILL.md"),
+        ],
+        "",
+      );
+
+      expect(found.accepted.map((c) => c.path)).toEqual([
+        ".valet/skills/release/SKILL.md",
+        ".claude/prompts/triage.md",
+      ]);
+      expect(found.discovered).toBe(2);
     });
 
     it("keeps a skill whose OWN directory carries an excluded name", () => {
@@ -256,6 +310,39 @@ describe("resolveNameCollisions", () => {
     expect([...resolved.reservedNames]).toEqual(["review"]);
     expect(resolved.warnings).toHaveLength(1);
     expect(resolved.warnings[0]).toContain("a/review/SKILL.md and b/review/SKILL.md");
+    expect(resolved.warnings[0]).toContain("Two skills cannot share a name");
+  });
+
+  it("lets .valet/skills outrank the same skill name anywhere else", () => {
+    // Opening `.valet/skills` made this collision reachable: a repository
+    // that serves two agent runtimes keeps one skill in both folders, and
+    // import-neither would drop a skill both copies agree on. `.valet` is
+    // Valet's own folder, so the copy written for this product wins.
+    const resolved = resolveNameCollisions([
+      candidate("deploy", ".claude/skills/deploy/SKILL.md"),
+      candidate("deploy", ".valet/skills/deploy/SKILL.md"),
+    ]);
+
+    expect(resolved.accepted.map((c) => c.path)).toEqual([".valet/skills/deploy/SKILL.md"]);
+    // The name is imported, so nothing has to be reserved to keep the row.
+    expect(resolved.reservedNames.size).toBe(0);
+    expect(resolved.warnings[0]).toContain(
+      ".claude/skills/deploy/SKILL.md and .valet/skills/deploy/SKILL.md",
+    );
+    expect(resolved.warnings[0]).toContain("Valet imported .valet/skills/deploy/SKILL.md");
+    expect(resolved.warnings[0]).toContain("Delete the other copies");
+  });
+
+  it("imports neither of two skills that both sit under .valet/skills", () => {
+    // The precedence rule ranks ONE fixed path against everything else. Two
+    // copies inside that path are as unrankable as any other pair.
+    const resolved = resolveNameCollisions([
+      candidate("deploy", ".valet/skills/deploy/SKILL.md"),
+      candidate("deploy", ".valet/skills/team/deploy/SKILL.md"),
+    ]);
+
+    expect(resolved.accepted).toEqual([]);
+    expect([...resolved.reservedNames]).toEqual(["deploy"]);
     expect(resolved.warnings[0]).toContain("Two skills cannot share a name");
   });
 

@@ -926,11 +926,13 @@ export type ContentKind = "skills" | "workflows" | "templates";
 // the repository root. Both are part of the UNIQUE key, so one repository can
 // be tracked twice from two different subdirectories.
 //
-// The last four sync columns are the whole change-detection state:
-// `last_sha` is the commit the last sync read, and `last_manifest_hash` is a
-// hash over the tracked files that commit held. A poll that finds the same
-// commit stops after one API call; a poll that finds a moved commit with the
-// same manifest records the commit and writes no mirrored rows.
+// The sync columns are the whole change-detection state: `last_sha` is the
+// commit the last sync read, `last_manifest_hash` is a hash over the tracked
+// files that commit held, and `discovery_scan` names the version of the path
+// rules that read them together with the commit they read. A poll that finds
+// the same commit under the same rules stops after one API call; a poll that
+// finds a moved commit with the same manifest records the commit and writes
+// no mirrored rows.
 //
 // `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
 // and retry state, shaped like `event_deliveries` — see
@@ -973,6 +975,13 @@ export const contentSources = pgTable(
     nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
     lastSha: text("last_sha"),
     lastManifestHash: text("last_manifest_hash"),
+    /** What the last complete sync scanned: the discovery-rules version and
+     * the commit those rules read, as `<version>:<sha>`. NULL on a row that
+     * predates the column, and on a source that never synced. A row whose
+     * value does not describe the current head takes no head-commit
+     * short-circuit, which is what makes the mechanism survive a release
+     * that does not write it — see `services/content-sync/collector.ts`. */
+    discoveryScan: text("discovery_scan"),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
     lastError: text("last_error"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),

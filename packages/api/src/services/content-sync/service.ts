@@ -13,8 +13,11 @@
  *
  * ## Two cheap compares
  *
- * 1. The head commit. Equal to `last_sha` means stop, so an unchanged poll
- *    costs ONE API call — an anonymous read gets 60 per hour per IP.
+ * 1. The head commit, AND that the last complete sync read it under the
+ *    current discovery rules. Both equal means stop, so an unchanged poll
+ *    costs ONE API call — an anonymous read gets 60 per hour per IP. The
+ *    rules half lets a release change which paths a collector claims without
+ *    waiting for an unrelated commit — see `discoveryScanMark`.
  * 2. The hash of one manifest over what every enabled collector found. Equal
  *    to `last_manifest_hash` means record the commit and touch no mirrored
  *    row. The per-file key is the git blob sha the tree read already carries,
@@ -55,6 +58,7 @@ import {
 import { treeHoldsSubpath, MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
 import {
   contentManifestHash,
+  discoveryScanMark,
   type CollectorPass,
   type CollectorReconcileResult,
   type ContentCollector,
@@ -305,7 +309,14 @@ export class ContentSyncService {
 
     // Compare 1 — the head commit.
     const head = await reader.head(source.repoFullName, source.ref);
-    if (head.sha === source.lastSha && !reportIsStale) {
+
+    // A release can change which paths a collector claims, and the head
+    // commit then says nothing about whether this source is current. The row
+    // carries the commit its rules read rather than a bare version, because a
+    // release that does not know the column still advances `last_sha`.
+    const scanIsStale = source.discoveryScan !== discoveryScanMark(head.sha);
+
+    if (head.sha === source.lastSha && !reportIsStale && !scanIsStale) {
       // Nothing was re-read, so this poll learned nothing that could clear the
       // last report. Without `carryWarning` a source whose files are all broken
       // flips to a silent "ok" one interval later.
@@ -541,6 +552,10 @@ export class ContentSyncService {
           syncIntervalMs(source.ownerType, { orgWebhookLive: this.deps.orgWebhookLive?.() === true }),
         lastSha: result.complete ? result.headSha : source.lastSha,
         lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
+        // Recorded with the commit and for the same reason: an incomplete
+        // sync did not read the commit it is about to record, so it has not
+        // finished reading the repository under these rules either.
+        discoveryScan: result.complete ? discoveryScanMark(result.headSha) : source.discoveryScan,
         lastSyncedAt: now,
         lastError: message,
         updatedAt: now,
