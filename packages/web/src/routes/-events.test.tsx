@@ -441,6 +441,37 @@ describe("EventsPage — Subscriptions", () => {
     );
   });
 
+  // Ownership follows the TARGET, so a workflow or a personal-assistant
+  // target created in a team workspace is filed personally and vanishes
+  // from the list it was created in. The dialog says so.
+  it("in a team workspace, says a personally-filed subscription lands elsewhere", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    scopeTeamId = "t_eng";
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+
+    // The team default is filed to the team, so nothing to warn about.
+    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: /Notify your assistant/ }));
+    expect(screen.getByText(/not in Engineering/)).toBeTruthy();
+
+    // A workflow target is filed to the caller too, whoever owns the workflow.
+    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
+    expect(screen.getByText(/not in Engineering/)).toBeTruthy();
+
+    // The org assistant files an org-owned row, which lists in every
+    // workspace — no note.
+    fireEvent.click(screen.getByRole("radio", { name: /Notify the org assistant/ }));
+    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+  });
+
+  it("personal workspace: the filing note never appears", () => {
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+  });
+
   it("personal workspace: no team target is offered", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     openSubscriptionsTab();
