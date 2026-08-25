@@ -525,16 +525,20 @@ Auth modes:
 - **`oauth`** — per-user MCP OAuth against `url` (RFC 8414 discovery +
   RFC 7591 dynamic registration, PKCE). Each user connects in the
   integrations UI, exactly like the bundled Linear plugin. `scopes` go
-  into the authorize request, and must name at least one scope — an empty
-  list behaves like an absent key, so validation refuses it. Declare them
-  for a scope-gated server: Metabase, for one, grants a token with no
-  scopes when the request names none — the server does not fall back to
-  the registered client's default scope set — and then lists zero tools
-  with no error anywhere. The callback stores the scopes the token
-  response grants (RFC 6749 `scope`), not the declared list, so a
-  narrower or empty grant is visible on the credential. A connected
-  zero-scope credential cannot be upgraded by refresh; the user must
-  disconnect and reconnect after scopes are added.
+  into the authorize request AND the RFC 7591 registration, and must name
+  at least one scope — an empty list behaves like an absent key, so
+  validation refuses it. Declare them for a scope-gated server: Metabase,
+  for one, grants a token with no scopes when the request names none —
+  the server does not fall back to the registered client's default scope
+  set — and then lists zero tools with no error anywhere. A scope-less
+  entry against a server that advertises `scopes_supported` logs a
+  warning at connect naming the entry and the fix. The callback stores
+  the scopes the token response grants (RFC 6749 `scope`), not the
+  declared list, so a narrower or empty grant is visible on the
+  credential. Changing `scopes` re-registers the dynamic client
+  (integration-oauth design); connected credentials cannot be upgraded by
+  refresh either way — the user must disconnect and reconnect after
+  scopes change.
 - **`api_key`** — per-user manual token entry in the connect UI.
 - **`bearer`** — one instance-wide token, read from `tokenEnv` at boot.
   The file never holds secrets, so the entry names the env var. A `bearer`

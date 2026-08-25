@@ -233,6 +233,15 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "workflow_runs", column: "sandbox_reclaimed_at" },
     sql: 'ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint',
   },
+  {
+    // The RFC 7591 scope set an MCP OAuth client was registered with
+    // (integration-oauth.ts, TKAI-243). Null on rows registered before
+    // scopes support, which the compare reads as "no scopes" — a declared
+    // scope set then re-registers the client.
+    describe: "mcp_oauth_clients.registered_scopes column",
+    probe: { kind: "column", table: "mcp_oauth_clients", column: "registered_scopes" },
+    sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "registered_scopes" jsonb',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe. Exported for the

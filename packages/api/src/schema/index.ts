@@ -1117,6 +1117,10 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
   authorizationEndpoint: text("authorization_endpoint").notNull(),
   tokenEndpoint: text("token_endpoint").notNull(),
   registrationEndpoint: text("registration_endpoint"),
+  // The RFC 7591 scope set the client was registered with (sorted). Null on
+  // rows registered before scopes support; a declared-scope change
+  // re-registers and replaces the row (integration-oauth.ts).
+  registeredScopes: jsonb("registered_scopes").$type<string[]>(),
   metadata: jsonb("metadata"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

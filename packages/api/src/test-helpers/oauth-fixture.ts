@@ -11,7 +11,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 export interface FakeOAuthServer {
   url: string; // http://127.0.0.1:{port}
-  registrations: Array<{ redirect_uris: string[] }>;
+  registrations: Array<{ redirect_uris: string[]; scope?: string }>;
   tokenRequests: Array<Record<string, string>>;
   /** Next token response body (default below). */
   tokenResponse: Record<string, unknown>;
@@ -28,7 +28,11 @@ function listenAddress(server: ServerType): number {
 
 /** Starts a fake OAuth authorization server on port 0. Callers MUST `await
  * close()` (e.g. in `finally`/`afterEach`) — nothing else stops the listener. */
-export function startFakeOAuthServer(opts?: { omitRegistration?: boolean }): FakeOAuthServer {
+export function startFakeOAuthServer(opts?: {
+  omitRegistration?: boolean;
+  /** When set, discovery advertises these as `scopes_supported`. */
+  scopesSupported?: string[];
+}): FakeOAuthServer {
   const registrations: FakeOAuthServer["registrations"] = [];
   const tokenRequests: FakeOAuthServer["tokenRequests"] = [];
   const state: { tokenResponse: Record<string, unknown>; tokenFailure?: number } = {
@@ -43,12 +47,16 @@ export function startFakeOAuthServer(opts?: { omitRegistration?: boolean }): Fak
       authorization_endpoint: `${url}/authorize`,
       token_endpoint: `${url}/token`,
       ...(opts?.omitRegistration ? {} : { registration_endpoint: `${url}/register` }),
+      ...(opts?.scopesSupported ? { scopes_supported: opts.scopesSupported } : {}),
     }),
   );
 
   app.post("/register", async (c) => {
-    const body = (await c.req.json()) as { redirect_uris: string[] };
-    registrations.push({ redirect_uris: body.redirect_uris });
+    const body = (await c.req.json()) as { redirect_uris: string[]; scope?: string };
+    registrations.push({
+      redirect_uris: body.redirect_uris,
+      ...(typeof body.scope === "string" ? { scope: body.scope } : {}),
+    });
     return c.json({ client_id: `client-${registrations.length}` }, 201);
   });
 

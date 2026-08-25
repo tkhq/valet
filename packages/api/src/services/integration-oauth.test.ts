@@ -51,6 +51,68 @@ describe("ensureMcpOAuthClient", () => {
     expect(a.clientId).toBe(b.clientId);
   });
 
+  it("registers with the declared scopes as the RFC 7591 scope string", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+      "agent:query",
+      "agent:search",
+    ]);
+    expect(fake.registrations).toHaveLength(1);
+    expect(fake.registrations[0]?.scope).toBe("agent:query agent:search");
+  });
+
+  it("re-registers when the declared scopes change, replacing the stored client", async () => {
+    const first = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb");
+    expect(first.clientId).toBe("client-1");
+
+    // Scopes appear (the TKAI-242 rollout shape: row registered pre-scopes).
+    const second = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+      "agent:query",
+    ]);
+    expect(second.clientId).toBe("client-2");
+    expect(fake.registrations).toHaveLength(2);
+    expect(fake.registrations[1]?.scope).toBe("agent:query");
+
+    // Same scopes again → stored client reused.
+    const third = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+      "agent:query",
+    ]);
+    expect(third.clientId).toBe("client-2");
+    expect(fake.registrations).toHaveLength(2);
+  });
+
+  it("scope order does not trigger re-registration", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["a", "b"]);
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["b", "a"]);
+    expect(fake.registrations).toHaveLength(1);
+  });
+
+  it("warns when no scopes are declared but the server advertises scopes_supported", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query", "mb:full"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("metabase") && m.includes("scopes"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
+  it("does not warn when scopes are declared", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb", [
+        "agent:query",
+      ]);
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("scopes_supported"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
   it("throws when discovery reports no registration_endpoint", async () => {
     const bare = await startFakeOAuthServer({ omitRegistration: true });
     try {

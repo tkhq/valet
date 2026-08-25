@@ -646,6 +646,7 @@ CREATE TABLE "mcp_oauth_clients" (
 	"authorization_endpoint" text NOT NULL,
 	"token_endpoint" text NOT NULL,
 	"registration_endpoint" text,
+	"registered_scopes" jsonb,
 	"metadata" jsonb,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
