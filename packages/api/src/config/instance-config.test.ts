@@ -294,6 +294,33 @@ skillSources:
     );
   });
 
+  it("allows skillSources with the same repo when they name different teams", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: owner/skills
+    subpath: skills
+    team: Platform
+  - repo: owner/skills
+    subpath: skills
+    team: Design
+`.trim();
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.skillSources).toHaveLength(2);
+    expect(cfg.skillSources?.[0]?.team).toBe("Platform");
+    expect(cfg.skillSources?.[1]?.team).toBe("Design");
+  });
+
+  it("throws when skillSources names a team with an empty string", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: owner/skills
+    team: ""
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow("skillSources[0].team");
+  });
+
   it("allows skillSources with same repo but different subpaths", () => {
     const yaml = `
 version: 1
