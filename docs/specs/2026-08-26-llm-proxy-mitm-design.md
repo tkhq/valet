@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-26
 **Status:** Approved design (revised after adversarial review), not yet implemented
-**Scope:** Adds a transparent recording gateway in `packages/api` that presents Anthropic Messages and OpenAI Responses endpoints to external agent harnesses (Claude Code, Codex CLI). The harness points its base URL at valet and authenticates with a per-user `vlt_` key. Valet forwards each request verbatim to the real provider, swaps in the org's real upstream key, streams the response back unbuffered, and records the full request/response plus token usage and cost. Every proxied call is attributed to a user. A usage dashboard aggregates spend per user, model, and harness. Reuses the `vlt_` API-key identity (auth middleware rung 4), the `llm_providers` + `CredentialStore` upstream-key path, and the `cost_entries` cost-attribution invariant.
+**Scope:** Adds a transparent recording gateway in `packages/api` that presents Anthropic Messages and OpenAI Responses endpoints to external agent harnesses (Claude Code, Codex CLI). The harness points its base URL at valet and authenticates with a per-user `vlt_` key. Valet forwards each request verbatim to the real provider, swaps in the org's real upstream key, streams the response back unbuffered, and records the full request/response plus token usage and cost. It also normalizes each call into a provider-agnostic `Sample` (messages, system, tools, output) for analysis and a future training-data pipeline. Every proxied call is attributed to a user. A usage dashboard aggregates spend per user, model, and harness. Reuses the `vlt_` API-key identity (auth middleware rung 4), the `llm_providers` + `CredentialStore` upstream-key path, and the `cost_entries` cost-attribution invariant.
 
 **Not MITM.** The name "MITM" was the original framing, but this is not TLS interception: no CA cert, no transparent capture of traffic that still points at the real provider. It is an explicit opt-in reverse proxy — the harness is reconfigured (`base_url`) to send its traffic to valet. This document calls it the "recording gateway."
 
@@ -43,7 +43,7 @@ This is LiteLLM's pass-through mode, not its unified mode. LiteLLM's unified `/c
 
 ## Decisions (locked)
 
-1. **Transparent pass-through, not normalization.** Valet forwards request and response bytes untouched. It parses the response only to extract usage. This survives wire-format changes in either harness and sidesteps the Codex Responses-API requirement entirely — valet proxies to OpenAI, which already speaks Responses.
+1. **Transparent pass-through on the forwarding path.** Valet forwards request and response bytes untouched — parsing NEVER alters, blocks, or delays what the harness sends or receives. This survives wire-format changes in either harness and sidesteps the Codex Responses-API requirement entirely: valet proxies to OpenAI, which already speaks Responses. All parsing (for usage AND for analysis, decision 9) happens off the forwarding path, on the recorder's tee branch, over bytes valet has already delivered.
 2. **Identity is the `vlt_` key.** No new key system. The proxy accepts the key in either the `x-api-key` header (Anthropic form) or the `Authorization: Bearer` header (OpenAI/Codex form, and Claude Code's `ANTHROPIC_AUTH_TOKEN`). Both resolve through the existing `verifyApiKey`.
 3. **Valet holds the upstream key.** The user configures only a `vlt_` key on the laptop. Valet swaps in the org's real provider key from `CredentialStore` on the outbound hop. The real key never reaches the laptop.
 4. **Env auto-provisions a provider.** If `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are present at boot and no matching provider row exists, valet seeds one. The local success-criteria demo works with zero manual setup; production still resolves through the normal provider path.
@@ -51,6 +51,7 @@ This is LiteLLM's pass-through mode, not its unified mode. LiteLLM's unified `/c
 6. **`cost_entries` stays the one cost definition.** The view gains a `UNION ALL` of proxy rows mapped into its columns, so Grafana and `/api/usage` pick up proxy spend without a second definition.
 7. **Record per request, not per conversation — but store the chaining ids.** Codex Responses is stateful; a request may carry `previous_response_id` instead of the full transcript. Valet records exactly what crosses the wire and does not reconstruct conversations at MVP. It DOES persist `provider_response_id` and `previous_response_id` (finding 5) so a later stitcher can walk the chain — the alternative (not storing them) makes reconstruction impossible to backfill.
 8. **A per-key spend metric and alert ship with the MVP (finding 7).** A recording gateway whose purpose is spend management must not itself be blind to a runaway or leaked key. Hard budget caps are deferred (they fit "alert, don't auto-repair" poorly), but a per-key/per-user spend metric plus a threshold alert is in scope. Emit it through the existing OTEL meter (`valet.cost.usd`-style counter, tagged by key and user).
+9. **Raw is source of truth; the parse is a derived, versioned layer.** Beyond usage, the recorder normalizes each request/response into a provider-agnostic `Sample` (messages, system, tools, output, params) for analysis and a future training-data pipeline. This parse is best-effort and NEVER authoritative: raw bytes are always stored, the parser is a pure function tagged with `parse_version`, and a schema improvement re-runs it over stored raw to backfill. A parse failure leaves the sample null and the raw intact. The `Sample` schema is deliberately NOT the engine's internal message model — coupling the gateway to `@valet/engine`'s parts model would drift with the engine and violate its portability boundary. It is a small, stable, own schema.
 
 ## Architecture
 
@@ -142,6 +143,34 @@ If the model is unpriced (custom/unknown) or usage parsing fails, `cost_usd` is 
 
 The recorder writes exactly one row per recorded call. A parse or DB failure is logged and swallowed — a recording failure must never break the client's stream, which has already been delivered.
 
+#### Normalized samples (analysis + future training data)
+
+Beyond usage, the recorder runs `parseSample(kind, requestBody, responseBody): Sample | null` and stores the result in the `parsed` column with the current `parse_version` (decision 9). The `Sample` is a small, provider-agnostic record designed for querying and export, NOT the engine's message model:
+
+```
+Sample {
+  schema: "valet.llm-sample/v1"
+  provider: "anthropic" | "openai"
+  model: string
+  params: { max_tokens?, temperature?, top_p?, stop?, reasoning_effort?, ... }   // provider params, best-effort
+  system: ContentBlock[]                       // Anthropic top-level system; OpenAI system/developer input items
+  tools: ToolDef[]                             // declared tool/function schemas, if any
+  input: Message[]                             // prior turns as sent on the wire (may be partial for Codex — see below)
+  output: Message                              // the assistant turn: text + tool_use/function_call blocks
+  stop_reason: string | null
+  usage: { input, output, cacheRead, cacheWrite, total }
+}
+Message      { role: "system"|"user"|"assistant"|"tool", content: ContentBlock[] }
+ContentBlock { type: "text"|"image"|"tool_use"|"tool_result"|"reasoning", ... }   // union normalized across both wires
+```
+
+Parsing rules:
+- **Streaming responses** are reassembled from the tee branch: Anthropic `content_block_delta` events concatenate into the final `output` blocks; OpenAI `response.output_*`/`response.completed` events assemble the output items. So a streamed turn produces the same `Sample` a non-streamed one would.
+- **Codex partial input.** When a Codex request carries `previous_response_id`, `input` holds only the turns actually on the wire, and `Sample` records `previous_response_id` (already a column) so a later stitcher can splice the full conversation. The sample is honest about being partial rather than faking a complete transcript.
+- **Best-effort, versioned, reprocessable.** `parseSample` is pure over the stored raw bodies. A parser bug or a new wire field never corrupts data — it is a `parse_version` bump and a reprocess pass over `llm_proxy_requests`. Unknown block types are preserved as `{ type: "unknown", raw }` rather than dropped, so nothing analysis might need is silently lost.
+
+**Governance note.** The `parsed` samples are the substrate for a future training-data pipeline, but that pipeline (consent, redaction, opt-out, export) is a separate spec. This spec only produces and stores the normalized record inside valet, under the same org-scoped access control and plaintext posture as the raw bodies. No export surface ships here.
+
 ### 6. Data model
 
 New app-schema table (`packages/api/src/schema/index.ts` Drizzle + `packages/api/migrations/pg/0000_app.sql`, edited in place per the pre-1.0 rule):
@@ -170,7 +199,10 @@ CREATE TABLE "llm_proxy_requests" (
   "total_tokens"      bigint NOT NULL DEFAULT 0,
   "cost_usd"          double precision,         -- NULL = unpriced, never 0-for-free
   "latency_ms"        integer,
-  "error"            text
+  "error"            text,
+  "parsed"            jsonb,                     -- normalized Sample (decision 9); NULL if parse failed/pending
+  "parse_version"     integer,                   -- parser version that produced `parsed`; drives reprocessing
+  "parse_error"       text
 );
 CREATE INDEX "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at");
 CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at");
@@ -208,7 +240,7 @@ New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under se
 - **Time-series** — spend (USD) and tokens over the selected window, stacked by model.
 - **Breakdown tables** — by user (admin view), by model, and by harness; each row shows requests, tokens, and cost.
 - **Request log** — a paginated table with filters (user, model, harness, date range); each row links to drill-down.
-- **Drill-down** — the full request and response, rendered with the existing session message-rendering components where the body is a recognizable Messages/Responses shape, with a raw-JSON fallback.
+- **Drill-down** — renders the normalized `Sample` (`parsed`) with the existing session message-rendering components: system, tools, input turns, and the assistant output as readable message blocks. Falls back to raw request/response JSON when `parsed` is null (parse failed or pending reprocess). The raw bodies stay available behind a "view raw" toggle.
 
 ### 9. Onboarding panel
 
@@ -259,7 +291,8 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 - **Usage parser** — fixture SSE streams for Anthropic (`message_start` + `message_delta`) and OpenAI Responses (`response.completed`), plus non-streaming JSON; assert the actual token numbers are reachable (not just "defined" — the tool-call-persistence lesson: assert real values).
 - **Pricing** — `priceUsage(model, usage)` returns a non-null cost for a real Anthropic model AND a real OpenAI Responses fixture (finding 3 acceptance: Codex rows must price, including cached-token discount); unknown model returns null.
 - **Header fidelity** — `outboundHeaders` forwards `anthropic-version`/`anthropic-beta`/`x-stainless-*` unchanged, drops the valet key and hop-by-hop headers, and sets the real upstream auth (finding 4).
-- **Recorder integration** — a fake upstream serving a canned SSE stream; drive `proxyCompletion` and assert one `llm_proxy_requests` row with the recorded **request body** (finding 1), correct usage, cost, latency, `provider_response_id`, and full response body; assert the client received the identical stream bytes.
+- **Recorder integration** — a fake upstream serving a canned SSE stream; drive `proxyCompletion` and assert one `llm_proxy_requests` row with the recorded **request body** (finding 1), correct usage, cost, latency, `provider_response_id`, full response body, and a non-null `parsed` sample; assert the client received the identical stream bytes.
+- **Sample parser** — `parseSample` fixtures for both wires: a plain text turn, a tool-use/function-call turn, an image input, and a streamed response reassembled to the same `Sample` as its non-streamed twin. Assert `system`, `tools`, `input`, and `output` blocks are populated; assert an unknown block type is preserved as `{type:"unknown"}` not dropped; assert a Codex request with `previous_response_id` yields a partial `input` plus the recorded pointer.
 - **cost_entries union** — insert a proxy row; assert `/api/usage/summary` includes its cost.
 - **API authorization** — a member cannot read another member's drill-down; an admin can; a cross-org row 404s.
 
@@ -272,11 +305,12 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 3. Upstream resolution + `ensureEnvProviders` boot step, with tests.
 4. `resolveProxyPrincipal` (org via `resolveOrgId`) + `wireError`, with tests.
 5. Forward (request buffered once) + strip-list `outboundHeaders` + tee + recorder + usage parser, with the fake-upstream integration test.
-6. `/proxy` router mount for both kinds; wire into `app.ts`.
-7. Per-key spend metric + alert through the OTEL meter (decision 8).
-8. `/api/proxy/*` endpoints, with authorization tests.
-9. Web dashboard + onboarding panel.
-10. Manual success-criteria run + `make e2e`.
+6. `parseSample` (both wires, streaming reassembly, tool/image/unknown blocks) writing `parsed`/`parse_version`, with the parser fixtures.
+7. `/proxy` router mount for both kinds; wire into `app.ts`.
+8. Per-key spend metric + alert through the OTEL meter (decision 8).
+9. `/api/proxy/*` endpoints, with authorization tests.
+10. Web dashboard (Sample drill-down) + onboarding panel.
+11. Manual success-criteria run + `make e2e`.
 
 ## Out of scope
 
@@ -285,3 +319,5 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 - Google/OpenRouter and other provider kinds (the mount is per-kind; adding one is a follow-up).
 - Retention/TTL automation (schema supports it; the sweep is later).
 - A pricing backfill job for rows recorded while unpriced.
+- The training-data pipeline itself — consent, redaction/PII handling, opt-out, and any export surface. This spec produces the normalized `parsed` samples in-place under org-scoped access; turning them into a training corpus is a separate spec with its own governance (decision 9 governance note).
+- A conversation-stitcher that reconstructs full transcripts from `previous_response_id` chains (the ids are stored; the join is later).
