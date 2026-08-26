@@ -6,11 +6,6 @@
  * machine-written JSON, and committing one unseen is how a workflow nobody
  * recognises ends up in the list.
  *
- * The review step also names what the file carries and the import does not
- * create — a schedule, event triggers, a description. `POST /api/workflows`
- * writes a name and a definition, so a file whose schedule was dropped in
- * silence would import as a workflow that never runs.
- *
  * Nothing is created until the review step is confirmed, and a refusal
  * shows the validator's own messages, node by node. `POST /api/workflows`
  * validates again with the plugin catalog this deployment actually has, so
@@ -90,26 +85,20 @@ export function ImportWorkflowDialog({
   const [name, setName] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   /**
-   * Which open this dialog is on. Reading a file, loading the YAML chunk and
-   * reading a repository all take time the reader can spend on Cancel, and a
-   * task that lands after the close would write the step it computed over
-   * the cleared form — so the next open starts on a review step for a file
-   * nobody chose. Every task holds the count it started under and writes
-   * nothing once `close` has moved it on.
+   * Which open this dialog is on. Every async task below holds the count it
+   * started under and writes no state once `close` has moved it on —
+   * otherwise a read that lands after a cancel leaves the next open on a
+   * review step for a file nobody chose.
    */
   const opened = useRef(0);
 
   /** Parsed text → the review step, or the parser's messages. `from` names
    * the origin on screen; `fileName` seeds the name field when the file
-   * carried no name of its own. Pasted text has no file name.
+   * carried no name of its own.
    *
-   * Async because a YAML file loads its parser on demand. A JSON file
-   * resolves on the first tick, so the review step still appears at once.
-   *
-   * The parser answers with a result for every input, so the catch is not a
-   * branch this expects to take. It is here because the two callers below
-   * start it with `void`: a rejected promise would leave the dialog on the
-   * step it was on, and the button that started it looking dead. */
+   * The parser returns a result for every input; the catch is here because
+   * the callers start this with `void`, and a rejection would leave the
+   * dialog on the step it was on with its button looking dead. */
   async function review(fileText: string, from: string, fileName?: string): Promise<void> {
     const open = opened.current;
     let parsed: ParsedWorkflowImport;
@@ -200,8 +189,7 @@ export function ImportWorkflowDialog({
 
   /** Closing clears the form. A half-typed repository address left over from
    * a failed read reads as the state of the NEXT import, which it is not.
-   * The count moves on for the same reason: a read still in flight belongs
-   * to the import that was cancelled, and it writes nothing after this. */
+   * The count moves on so a read still in flight writes nothing. */
   function close(): void {
     opened.current += 1;
     setPhase({ kind: "idle" });

@@ -1,25 +1,11 @@
 /**
- * The workflow file envelope — one shape for a workflow kept in a file,
- * and one parser that every source reads it through.
+ * The workflow file envelope, and the one parser every source reads it
+ * through: the import dialog, the repository sync, and the export route.
  *
- * The import dialog turns a file into a workflow: a pasted or uploaded file,
- * and a repository file the api hands back as text. The repository sync and
- * the export route are the two doors the 2026-08-24 workflows MVP design adds
- * on this same parser (`docs/specs/2026-08-24-workflows-mvp-design.md`, tasks
- * 5 and 9). A second parser anywhere in that set would drift into accepting a
- * shape the others refuse, and the author would learn about it from whichever
- * door they happened to use.
- *
- * ## Text stays out of this file
- *
- * `parseWorkflowFileValue` takes an ALREADY-PARSED value. It holds no text
- * decoder, so YAML and JSON both reach it through the same door: the api
- * composes it with `yaml.parse`, and the web composes it with `JSON.parse`
- * plus a dynamically imported YAML chunk. YAML 1.2 is a superset of JSON, so
- * one decoder answers both — but which decoder ran is the caller's business,
- * and putting either one here would drag it into every bundle.
- *
- * ## The envelope
+ * `parseWorkflowFileValue` takes an ALREADY-PARSED value and holds no text
+ * decoder, so the caller picks one — `yaml.parse` on the api, `JSON.parse`
+ * plus a lazy YAML chunk in the browser. A decoder here would land in every
+ * bundle that imports this module.
  *
  * ```yaml
  * valet: workflow/v1
@@ -33,33 +19,14 @@
  *   name: Nightly
  *   cron: "0 3 * * *"
  *   timezone: UTC
- *   description: Every day at 03:00 UTC
  * events:
  *   - name: On push
  *     eventKeys: [github.push]
  *     filters: [{ field: repo, op: eq, value: acme/service }]
- *     description: When someone pushes to the service repository
  * ```
  *
  * A template file uses `valet: workflow-template/v1` and adds the gallery
  * fields a template card renders.
- *
- * ## The discriminator does real work
- *
- * A top-level `workflows/` folder belongs to the repository and may hold
- * anything, so a file there without a `valet:` key must be ignorable in
- * silence. Under `.valet/workflows/` the same file is a mistake worth
- * naming. This parser does not know which folder it is reading, so it
- * reports the difference as a `code` on the failure, and the caller decides
- * what to do about it.
- *
- * ## Two shapes predate the envelope
- *
- * The import dialog accepts a bare definition (what the editor's JSON view
- * shows) and `{ name, definition }` (what `GET /api/workflows/:id` answers
- * with). Both still parse, and both come back `labeled: false`, so the
- * repository collector can refuse a file that never claimed to be a workflow
- * while the dialog keeps accepting one somebody exported by hand.
  */
 import type {
   WorkflowTemplateEventFilter,
@@ -74,17 +41,11 @@ export const WORKFLOW_FILE_KIND = 'workflow/v1';
 /** The `valet:` value of a workflow template file. */
 export const WORKFLOW_TEMPLATE_FILE_KIND = 'workflow-template/v1';
 
-/**
- * File extensions the repository sync reads. YAML first, because a
- * hand-authored definition wants comments and multi-line prompt text; JSON
- * stays valid because YAML 1.2 parses it.
- */
+/** File extensions the repository sync reads. */
 export const WORKFLOW_FILE_EXTENSIONS = ['.yaml', '.yml', '.json'] as const;
 
-/**
- * The gallery half of a template file: every `WorkflowTemplate` field except
- * the definition and the triggers, which the file carries beside it.
- */
+/** The gallery half of a template file: every `WorkflowTemplate` field except
+ * the definition and the triggers, which the file carries beside it. */
 export interface WorkflowTemplateFileMeta {
   id: string;
   name: string;
@@ -100,8 +61,8 @@ export interface WorkflowTemplateFileMeta {
 /** One workflow definition file. */
 export interface WorkflowFile {
   kind: 'workflow';
-  /** True when the file declared `valet: workflow/v1`. False for one of the
-   * two shapes that predate the envelope. */
+  /** True when the file declared `valet: workflow/v1`; false for a shape that
+   * predates the envelope. */
   labeled: boolean;
   name?: string;
   description?: string;
@@ -124,13 +85,12 @@ export interface WorkflowTemplateFile {
 /**
  * Why a value is not a workflow file.
  *
- *   - `unlabeled` — no `valet:` key, and not one of the two shapes that
- *     predate the envelope. A caller reading a folder the repository owns
- *     ignores this; a caller reading `.valet/workflows/` reports it.
- *   - `unknown-kind` — the `valet:` key names a kind this version does not
- *     read. Always worth reporting: the author meant this file for Valet.
- *   - `invalid` — the file claims to be a workflow and is wrong. The errors
- *     are the validator's own wherever the graph is what is wrong.
+ *   - `unlabeled` — no `valet:` key, and not a shape that predates the
+ *     envelope. A caller reading a folder the repository owns ignores this;
+ *     a caller reading `.valet/workflows/` reports it.
+ *   - `unknown-kind` — the `valet:` key names a kind this version cannot
+ *     read. Always worth reporting.
+ *   - `invalid` — the file claims to be a workflow and is wrong.
  */
 export type WorkflowFileParseFailureCode = 'unlabeled' | 'unknown-kind' | 'invalid';
 
@@ -140,20 +100,12 @@ export type WorkflowFileParseResult =
 
 /**
  * One already-parsed value → a workflow file, or the messages to show.
+ * Returns a result for EVERY input and never throws: each caller has to put
+ * a message on screen or into a per-file warning.
  *
- * `path` names the file in every message, because the person who can fix it
- * is reading a repository and not this code.
- *
- * `env` is the validator's environment. The api passes the full one, so a
- * file naming an unknown model or an unknown tool service fails at sync with
- * the validator's own text instead of at run time inside a node. The browser
- * has no plugin catalog and passes none, so a file that parses there can
- * still be refused by the server.
- *
- * This function returns a result for EVERY input, and never throws. Its
- * callers are a sync that must record a per-file warning, an import dialog
- * that must show a message, and an export route; none of them has anything
- * to do with a value that arrives as an exception.
+ * `path` names the file in every message. `env` is the validator's
+ * environment — the api passes the full one, the browser passes none, so a
+ * file that parses in the browser can still be refused by the server.
  */
 export function parseWorkflowFileValue(
   value: unknown,
@@ -163,17 +115,9 @@ export function parseWorkflowFileValue(
   try {
     return readWorkflowFileValue(value, path, env);
   } catch (err) {
-    // Every branch below returns a result, and this catch is what makes that
-    // true of the FUNCTION rather than of its branches. Callers here show a
-    // result; one handed a throw has no message to put on screen.
-    //
-    // Two inputs reach it, and nothing here can tell them apart. The
-    // validator dereferences an entry it expected to be a mapping — a YAML
-    // list item left empty writes `null` into `nodes` — and it builds most
-    // of its messages with `JSON.stringify`, which throws on a value that
-    // refers to itself through an anchor. So the message reports the throw
-    // and names both checks, rather than naming one cause as if it were
-    // known.
+    // The message names both known causes because nothing here can tell them
+    // apart: a null entry the validator dereferences, and a self-referential
+    // YAML anchor its `JSON.stringify` calls choke on.
     const detail = err instanceof Error ? `: ${err.message}` : '';
     return {
       ok: false,
@@ -244,14 +188,9 @@ function readWorkflowFileValue(
 
 /**
  * The two shapes that predate the envelope: a bare definition, and
- * `{ name, definition }`. Neither producer writes a schedule, events or a
- * description, but a file that carries one anyway is read here exactly as
- * the labelled path reads it.
- *
- * A caller can only report a block this parser hands it: the import dialog
- * lists what it does not create, and a block dropped here is a block that
- * list cannot name. That is how a file declaring a nightly schedule imports
- * as a workflow that never runs, with nothing on screen to say so.
+ * `{ name, definition }`. A schedule or events block on one of them is read
+ * as the labelled path reads it, because a caller can only report a block
+ * this parser hands it.
  */
 function parseLegacyShape(
   value: Record<string, unknown>,
@@ -308,11 +247,10 @@ function readDefinition(
   return { ok: true, value: raw };
 }
 
-/** The optional `schedule` and `events` blocks, shape-checked only. The cron
- * expression and the filter FIELD names are checked by the host that arms
- * them, so one file cannot pass here and fail there. What this checks is the
- * shape, and it refuses rather than drops: a trigger block Valet reads only
- * in part is a trigger that fires on something the author did not ask for. */
+/** The optional `schedule` and `events` blocks, shape-checked only: the cron
+ * expression and the filter FIELD names belong to the host that arms them.
+ * A block this cannot read fails the file rather than being dropped, because
+ * a trigger read in part fires on something the author did not ask for. */
 function readTriggers(
   value: Record<string, unknown>,
   path: string,
@@ -374,7 +312,7 @@ function readTriggers(
   };
 }
 
-/** The ops a filter may declare. Named because the refusal prints them. */
+/** The ops a filter may declare. The refusal message prints them. */
 const FILTER_OPS: ReadonlyArray<WorkflowTemplateEventFilter['op']> = [
   'eq',
   'in',
@@ -383,20 +321,14 @@ const FILTER_OPS: ReadonlyArray<WorkflowTemplateEventFilter['op']> = [
 ];
 
 /**
- * The optional `filters` list. A filter this cannot read FAILS the file, and
- * it adds to `errors` rather than answering, so one pass names every bad
- * entry.
- *
- * Dropping the entry was the dangerous answer. An empty filter list matches
- * EVERY event of its key, so one misspelled `equals` would arm a
+ * The optional `filters` list. Every bad entry adds to `errors`, so one pass
+ * names them all, and any of them FAILS the file: an empty filter list
+ * matches EVERY event of its key, so a dropped entry would arm a
  * subscription on every push in the org instead of on the one repository the
- * author named — and the file would report no problem at all.
+ * author named.
  *
- * Which FIELDS an event key declares is still the host's answer and not this
- * module's: the event catalog owns that vocabulary and `validateSubscription`
- * checks it, so a second copy here would go stale as the catalog grows. What
- * is checked here is what this module owns — the shape, the four ops, and
- * the shape of the value an op compares against.
+ * Which FIELDS an event key declares stays with the event catalog and
+ * `validateSubscription`; a copy here would go stale.
  */
 function readFilters(
   raw: unknown,
@@ -432,10 +364,8 @@ function readFilters(
       );
       return;
     }
-    // A value of the wrong shape fails the file for the same reason a bad op
-    // does. Kept, it would arrive at the matcher as no value at all, and a
-    // filter with no value tests nothing — the whole entry then widens the
-    // subscription instead of narrowing it.
+    // A filter with no value tests nothing, so a value of the wrong shape
+    // widens the subscription the same way a dropped entry does.
     const value = entry.value;
     if (value !== undefined && typeof value !== 'string' && !isStringArray(value)) {
       errors.push(
@@ -457,8 +387,7 @@ function isFilterOp(value: unknown): value is WorkflowTemplateEventFilter['op'] 
   return FILTER_OPS.some((op) => op === value);
 }
 
-/** The gallery fields. Every one is named in the failure, so an author fixes
- * a thin template file in one edit rather than in four. */
+/** The gallery fields. One failure names every missing one. */
 function readTemplateMeta(
   value: Record<string, unknown>,
   path: string,
@@ -500,11 +429,8 @@ function readTemplateMeta(
   };
 }
 
-/**
- * Structural narrowing to `WorkflowDefinition`. The validator reads every
- * field, so this only has to get the value past the type boundary without a
- * cast; anything wrong below the top level comes back as a validator error.
- */
+/** Structural narrowing only. The validator reads every field, so anything
+ * wrong below the top level comes back as a validator error. */
 function isDefinitionShape(value: unknown): value is WorkflowDefinition {
   if (!isRecord(value)) return false;
   return (
@@ -531,12 +457,8 @@ function optionalString(field: 'name' | 'description', value: unknown): Record<s
 }
 
 /**
- * A value as a message names it, with no quoting surprise for a number or a
- * list somebody wrote where a kind belongs.
- *
- * Total, deliberately. `JSON.stringify` was here and it throws on a value
- * that refers to itself, which a YAML anchor writes in two lines. A message
- * must never be the thing that fails.
+ * A value as a message names it. Total on purpose: `JSON.stringify` was here,
+ * and it throws on a value that refers to itself through a YAML anchor.
  */
 function describe(value: unknown): string {
   if (typeof value === 'string') return value;
