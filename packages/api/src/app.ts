@@ -91,11 +91,12 @@ export interface CreateAppOpts {
   webDistDir?: string;
   /**
    * Readiness source for `GET /api/ready`. `main.ts` passes a callback that
-   * flips true once the background boot chain (restore, reconcile, hosts)
-   * completes — the k8s readinessProbe reads it, so a new pod takes traffic
-   * only after boot work is done, while `/api/health` (liveness/startup)
-   * answers from the moment the port binds. Absent → always ready (test
-   * harnesses and embedded callers have no boot chain).
+   * flips true once the boot chain's traffic-protecting steps (session
+   * restore, child-watch re-arm, config reconcile) complete — the k8s
+   * readinessProbe reads it, so a new pod takes traffic only after that
+   * work is done, while `/api/health` (liveness/startup) answers from the
+   * moment the port binds. Absent → always ready (test harnesses and
+   * embedded callers have no boot chain).
    */
   isReady?: () => boolean;
 }

@@ -121,7 +121,16 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
       // (the app row column is non-null), satisfying `RestoreSessionMeta`.
       return { ...(await loadSessionMeta(providers.db, row)), profile: row.profile };
     },
-    sessionFor: (sessionId, meta) => providers.engineHost.sessionFor(sessionId, meta),
+    sessionFor: async (sessionId, meta) => {
+      const session = await providers.engineHost.sessionFor(sessionId, meta);
+      // A timed-out restore keeps running after the pass abandons it, so it
+      // can resolve AFTER close() already ran evictAll() — re-inserting a
+      // live session (timers, claim loop) into the host cache on a closed
+      // server. Evict it on arrival; evictCache is a no-op for uncached ids
+      // and never touches durable state, so the next boot restores it.
+      if (shouldStop()) providers.engineHost.evictCache(sessionId);
+      return session;
+    },
   };
   const result = await runBoundedRestore(ids, (id) => restoreOneSession(id, deps), {
     concurrency: BOOT_RESTORE_CONCURRENCY,
@@ -348,10 +357,13 @@ let installationSweep: InstallationSweepHandle | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
+// `isReady` includes `!closed`: the chain's ready flip sits several awaits
+// past its last `closed` check, so without the conjunction a shutdown racing
+// the chain tail could flip /api/ready to 200 on a torn-down server.
 const { startServer: startListening, webServed } = createApp(
   providers,
   authWiring,
-  { webDistDir, isReady: () => bootReady },
+  { webDistDir, isReady: () => bootReady && !closed },
   adapter,
 );
 // A set-but-unmounted dist means the bundled image shipped without a valid
@@ -386,17 +398,24 @@ const server = startListening({
 // rollout showed why that ordering is fatal: `restoreUnsettledSessions` ran a
 // `git fetch` inside a wedged sandbox, boot crossed the 300s startup budget,
 // and the kubelet killed the pod before the port ever bound. The invariant
-// now: the listener binds within seconds of process start, and boot-restore /
-// reconcile work costs READINESS only (`/api/ready` stays 503, the pod stays
-// NotReady) — never liveness. `syncAllAppWebhookUrls` below was already
-// deliberately off the port's critical path for exactly this reason; the
-// whole chain now follows it.
+// now: the listener binds within seconds of process start, and boot work
+// costs READINESS only (`/api/ready` stays 503, the pod stays NotReady) —
+// never liveness. `syncAllAppWebhookUrls` below was already deliberately off
+// the port's critical path for exactly this reason; the whole chain now
+// follows it.
 //
-// Steps keep their pre-existing relative order. Each one already tolerates
-// failure (logged-and-continue), except `reconcileInstanceConfig`, which
-// keeps its fail-fast `process.exit(1)` — it runs before `bootReady` flips,
-// so a pod with a bad config dies while still NotReady and never takes
-// traffic.
+// The chain has two halves around the `bootReady` flip:
+//   1. Traffic-protecting steps — session restore, child-watch re-arm, the
+//      config reconcile (fail-fast `process.exit(1)`: a bad config dies
+//      while still NotReady and never takes traffic), team-sync report.
+//   2. Best-effort service starts — channel host, webhook sync, workflow
+//      hosts, prebuild, token/installation sweeps. These tolerate failure
+//      (logged-and-continue), so readiness does not wait on them: a hanging
+//      provider must not stall a rollout for work the pod serves fine
+//      without.
+//
+// `closed` is checked after every await: a shutdown mid-chain must not start
+// services that `close()` already swept.
 async function runBootChain(): Promise<void> {
   // Eager boot restore: pick up any submissions left unsettled by a prior
   // process. A restore failure must never prevent `serve` — any unexpected
@@ -407,6 +426,8 @@ async function runBootChain(): Promise<void> {
   await restoreUnsettledSessions(providers, () => closed).catch((err) => {
     console.error("boot restore: unexpected failure (continuing to serve):", err);
   });
+
+  if (closed) return;
 
   // Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
   // restart-mid-child-run survival mechanism. Alongside
@@ -443,6 +464,64 @@ async function runBootChain(): Promise<void> {
   // only reaps hibernated rows, so these were stranded with running pods.
   providers.idleHibernationSweep.start();
 
+  // Instance config reconciliation: apply the declarative config to the live
+  // database (org name, members, teams, skill sources, etc.). Runs after the
+  // restore passes so the db is settled before we write to it, and BEFORE the
+  // ready flip so a bad config exits a still-NotReady pod: the rollout
+  // crash-loops with the corrective message and traffic never moves. It only
+  // needs `prebuildService` as a passive collaborator (`seedDefaultBasesIfMissing`
+  // is plain DB writes), so it does not wait for the service starts below.
+  if (instanceConfig) {
+    // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
+    // no admin, or duplicate skill sources). Exit with the corrective-action
+    // message only — no stack spam; an unexpected error exits with its detail.
+    // The pre-reorder code rethrew non-InstanceConfigError and relied on the
+    // direct-entry guard to exit 1; the chain has no such guard, so both
+    // shapes exit here directly — same outcome, done locally.
+    try {
+      await reconcileInstanceConfig(
+        { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
+        instanceConfig,
+      );
+    } catch (e) {
+      console.error(e instanceof InstanceConfigError ? e.message : `FATAL: instance config reconcile failed: ${e}`);
+      process.exit(1);
+    }
+  }
+
+  if (closed) return;
+
+  // Team mirroring is off unless an operator asks for it, so say once what it
+  // will do. This runs AFTER the reconcile above, which is what applies
+  // `org.features.ssoTeamSync` from the file. It reads and prints; it never
+  // creates an org and never deletes a team.
+  {
+    const org = await findOrg(providers.db);
+    if (org) {
+      const features = await getOrgFeatures(providers.db, org.id);
+      await reportTeamSyncState(providers.db, {
+        orgId: org.id,
+        enabled: features.ssoTeamSync,
+        ssoConfigured: authConfig?.oidc !== undefined,
+        // The column, not the file: the reconcile above already wrote the
+        // file's list over it, and Settings edits land here too.
+        mirroredGroups: (await getSsoTeamGroups(providers.db, org.id)) ?? [],
+        configPath: process.env.VALET_CONFIG,
+      });
+    }
+  }
+
+  if (closed) return;
+
+  // Ready flips here, after the steps that protect traffic (session restore,
+  // child-watch re-arm, config reconcile) and BEFORE the best-effort service
+  // starts below. Those tolerate failure (logged-and-continue), so gating
+  // readiness on them bought no guarantee — but a HANGING one (a webhook
+  // registration against a slow provider) would stall every rolling pod's
+  // readiness for work the pod serves fine without.
+  bootReady = true;
+  console.log("boot chain: traffic-critical steps complete — /api/ready now reports ready");
+
   // Channel ingress (Task 8): resolves credentials into transports, then
   // starts webhook registration or the long-poll loop per transport. A
   // failure here must never block boot — channels are best-effort.
@@ -459,7 +538,7 @@ async function runBootChain(): Promise<void> {
   // see `syncAppWebhookUrl`'s doc comment for that guard.
   //
   // Deliberately NOT awaited: this makes up to two GitHub round trips, and a
-  // slow or unreachable GitHub must not hold up readiness. The function
+  // slow or unreachable GitHub must not hold up the chain. The function
   // swallows every failure, so the floating promise cannot reject.
   void syncAllAppWebhookUrls(
     { db: providers.db, credentials: providers.engineCredentials },
@@ -521,65 +600,22 @@ async function runBootChain(): Promise<void> {
     key: deriveSecretKey(encryptionKey),
     publicUrl: publicUrlFromEnv(process.env),
   });
-
-  // Instance config reconciliation: apply the declarative config to the live
-  // database (org name, members, teams, skill sources, etc.). Runs after all
-  // boot-restore passes so the db is settled before we write to it. Failure
-  // here still exits the process — a half-reconciled config is worse than no
-  // config — and because it precedes the `bootReady` flip, the pod dies
-  // NotReady: the rollout crash-loops with the corrective message, and
-  // traffic never moves.
-  if (instanceConfig) {
-    // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
-    // no admin, or duplicate skill sources). Exit with the corrective-action
-    // message only — no stack spam. Anything else is unexpected: print it and
-    // exit too, preserving the pre-reorder "reconcile failure fails boot"
-    // contract.
-    try {
-      await reconcileInstanceConfig(
-        { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
-        instanceConfig,
-      );
-    } catch (e) {
-      if (e instanceof InstanceConfigError) {
-        console.error(e.message);
-        process.exit(1);
-      }
-      console.error("FATAL: instance config reconcile failed:", e);
-      process.exit(1);
-    }
-  }
-
-  // Team mirroring is off unless an operator asks for it, so say once what it
-  // will do. This runs AFTER the reconcile above, which is what applies
-  // `org.features.ssoTeamSync` from the file. It reads and prints; it never
-  // creates an org and never deletes a team.
-  {
-    const org = await findOrg(providers.db);
-    if (org) {
-      const features = await getOrgFeatures(providers.db, org.id);
-      await reportTeamSyncState(providers.db, {
-        orgId: org.id,
-        enabled: features.ssoTeamSync,
-        ssoConfigured: authConfig?.oidc !== undefined,
-        // The column, not the file: the reconcile above already wrote the
-        // file's list over it, and Settings edits land here too.
-        mirroredGroups: (await getSsoTeamGroups(providers.db, org.id)) ?? [],
-        configPath: process.env.VALET_CONFIG,
-      });
-    }
-  }
-
-  bootReady = true;
-  console.log("boot chain complete — /api/ready now reports ready");
 }
 
 // Kick the chain off the listener's critical path. An unexpected rejection
-// is logged and the pod stays NotReady — that IS the alert (CLAUDE.md:
-// alert, don't auto-repair); flipping ready over a half-booted process would
-// hide it.
+// exits the process (unless a shutdown caused it): the pre-reorder code ran
+// these steps inside startServer, where a throw reached the caller's FATAL
+// handler and exited 1 — and on Kubernetes that exit IS the retry, because
+// the pod restarts and reruns the chain. Logging-and-parking instead would
+// strand a single-replica install NotReady forever on a transient DB blip,
+// with liveness green and nothing restarting it.
 void runBootChain().catch((err) => {
-  console.error("boot chain: unexpected failure — /api/ready will stay 503:", err);
+  if (closed) {
+    console.error("boot chain: failed during shutdown (ignored):", err);
+    return;
+  }
+  console.error("FATAL: boot chain failed before completing — exiting for a clean retry:", err);
+  process.exit(1);
 });
 
 // ── Graceful shutdown — evict live sandboxes so containers don't leak. This

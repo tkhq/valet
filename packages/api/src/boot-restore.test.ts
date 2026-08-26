@@ -160,6 +160,33 @@ describe("runBoundedRestore", () => {
     hung?.(); // settle the abandoned promise so the test leaves nothing pending
   });
 
+  it("logs a post-timeout failure instead of swallowing it", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let rejectHung: ((err: Error) => void) | undefined;
+    const restore = vi.fn((id: string) => {
+      if (id === "wedged") return new Promise<void>((_res, rej) => (rejectHung = rej));
+      return Promise.resolve();
+    });
+
+    const result = await runBoundedRestore(["wedged", "b"], restore, {
+      concurrency: 1,
+      timeoutMs: 20,
+    });
+    expect(result.timedOut).toBe(1);
+    expect(result.restored).toBe(1);
+
+    // The abandoned attempt fails AFTER the pass completed — the late error
+    // must still reach the log (it is the only trail for a session that
+    // never came back), and it must not surface as an unhandledRejection.
+    rejectHung?.(new Error("late auth failure"));
+    await new Promise((r) => setTimeout(r, 0));
+    const logged = errSpy.mock.calls.some(
+      (call) => String(call[0]).includes("later failed in the background") && String(call[1]).includes("late auth failure"),
+    );
+    expect(logged).toBe(true);
+    errSpy.mockRestore();
+  });
+
   it("never runs more sessions at once than the concurrency cap", async () => {
     let inFlight = 0;
     let maxInFlight = 0;

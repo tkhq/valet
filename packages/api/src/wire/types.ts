@@ -2982,9 +2982,10 @@ export interface HealthResponse {
 }
 
 /** `GET /api/ready` — readiness, distinct from `/api/health` liveness. 200
- * with `ready: true` once the background boot chain (restore, reconcile,
- * hosts) completes; 503 with `ready: false` before that. The k8s
- * readinessProbe consumes the status code; `ready` mirrors it for humans. */
+ * with `ready: true` once the boot chain's traffic-protecting steps
+ * (session restore, config reconcile) complete; 503 with `ready: false`
+ * before that. The k8s readinessProbe consumes the status code; `ready`
+ * mirrors it for humans. */
 export interface ReadyResponse {
   ready: boolean;
 }

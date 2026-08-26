@@ -154,8 +154,13 @@ verification should use:
 
 ```sh
 kubectl --context rancher-desktop -n valet port-forward svc/valet-api 8080:80
-curl -s http://localhost:8080/api/health
+curl -s http://localhost:8080/api/health   # liveness: port bound
+curl -s http://localhost:8080/api/ready    # readiness: boot restore + reconcile done
 ```
+
+`/api/health` answers as soon as the port binds. Use `/api/ready` to
+verify a deploy: a pod whose boot chain is stuck or failed answers 503
+there while health stays green.
 
 Or use the ingress at `https://valet.localdev`. Traefik terminates TLS
 there with a self-signed cert. `BETTER_AUTH_URL` must stay `https://`

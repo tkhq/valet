@@ -114,6 +114,13 @@ export async function runBoundedRestore(
 ): Promise<BoundedRestoreResult> {
   const result: BoundedRestoreResult = { restored: 0, failed: 0, timedOut: 0, stopped: false };
   let next = 0;
+  // Abandoned (timed-out) attempts that have not settled yet. Real in-flight
+  // work is `concurrency + abandonedInFlight`; the refresh-path exec timeout
+  // (workspace-prep.ts's GIT_REFRESH_TIMEOUT_MS, plus each provider's own
+  // exec bound) makes abandoned attempts self-terminate, which caps the
+  // overlap at roughly `concurrency * (execTimeout / timeoutMs)`. Reported
+  // in the timeout log line so a pile-up is visible as it happens.
+  let abandonedInFlight = 0;
 
   async function worker(): Promise<void> {
     while (next < ids.length) {
@@ -129,15 +136,27 @@ export async function runBoundedRestore(
       });
       try {
         const attempt = restore(id).then(() => "done" as const);
-        // An abandoned (timed-out) session that later rejects must not
-        // surface as an unhandledRejection; the race below already reports
-        // pre-timeout rejections.
-        attempt.catch(() => {});
         const raced = await Promise.race([attempt, timeout]);
         if (raced === "timeout") {
           result.timedOut++;
+          abandonedInFlight++;
+          // The attempt is now unobserved by the race; keep watching it so
+          // its outcome is never silent — a late failure logged here is the
+          // only trail an operator gets for a session that never came back.
+          // Attached synchronously in the same tick the race settles, so a
+          // later rejection cannot surface as an unhandledRejection.
+          attempt
+            .then(
+              () => console.log(`boot restore: abandoned session ${id} finished restoring in the background`),
+              (err: unknown) =>
+                console.error(`boot restore: abandoned session ${id} later failed in the background:`, err),
+            )
+            .finally(() => {
+              abandonedInFlight--;
+            });
           console.error(
-            `boot restore: session ${id} exceeded ${opts.timeoutMs}ms — abandoning the wait (its restore keeps running in the background)`,
+            `boot restore: session ${id} exceeded ${opts.timeoutMs}ms — abandoning the wait ` +
+              `(${abandonedInFlight} abandoned restore${abandonedInFlight === 1 ? "" : "s"} still running)`,
           );
         } else {
           result.restored++;

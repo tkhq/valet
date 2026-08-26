@@ -132,8 +132,9 @@ spec:
           #
           # /api/health answers as soon as the port binds — the api binds
           # the listener BEFORE boot-restore/reconcile work, which runs in
-          # a background chain. /api/ready stays 503 until that chain
-          # completes.
+          # a background chain. /api/ready stays 503 until the chain's
+          # traffic-protecting steps (session restore, config reconcile)
+          # finish; best-effort service starts run after the ready flip.
           #
           #   startup + liveness → /api/health ("port bound, event loop
           #     alive"). Pre-bind work is only DB connect + migrations +

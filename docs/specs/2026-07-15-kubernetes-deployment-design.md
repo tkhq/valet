@@ -82,22 +82,34 @@ the pod before the port ever bound.
 
 The fix changes both the api and the chart (0.10.2):
 
-- `main.ts` binds the listener right after provider construction. Restore,
-  child-watch re-arm, channel host, prebuild sweep, instance-config
-  reconcile, and the team-sync report run in a background chain after the
-  port binds. The restore pass is bounded: 60s per session, 4 sessions at a
-  time (`runBoundedRestore` in `boot-restore.ts`).
-- `GET /api/ready` (new) reports 503 until the background chain completes.
-  `reconcileInstanceConfig` keeps its fail-fast `process.exit(1)`; it runs
-  before the ready flip, so a pod with a bad config dies NotReady and never
-  takes traffic.
+- `main.ts` binds the listener right after provider construction. The old
+  boot steps run in a background chain after the port binds, in two halves:
+  traffic-protecting steps first (session restore, child-watch re-arm,
+  instance-config reconcile, team-sync report), then the ready flip, then
+  best-effort service starts (channel host, webhook sync, workflow hosts,
+  prebuild, token/installation sweeps). The restore pass is bounded: 60s
+  per session, 4 sessions at a time (`runBoundedRestore` in
+  `boot-restore.ts`), and the refresh-path git execs carry their own 180s
+  exec timeout (`workspace-prep.ts`), so a wedged sandbox exec terminates
+  instead of hanging boot, routes, or reconcile.
+- `GET /api/ready` (new) reports 503 until the traffic-protecting steps
+  complete. `reconcileInstanceConfig` keeps its fail-fast
+  `process.exit(1)`; it runs before the ready flip, so a pod with a bad
+  config dies NotReady and never takes traffic. An unexpected chain failure
+  also exits 1 — on Kubernetes the restart IS the retry; parking NotReady
+  instead would strand a single-replica install on a transient error.
 - Probes: startup + liveness stay on `/api/health` ("port bound"); the
   startup window shrinks from 300s to 90s because pre-bind work is now only
-  DB connect + migrations + provider construction. Readiness moves to
-  `/api/ready`, so a pod still restoring holds traffic without being killed.
+  DB connect + migrations + provider construction (boot-time ALTERs are
+  already lock-bounded at 5s x 3 attempts). Readiness moves to
+  `/api/ready`, so a pod still restoring holds traffic without being
+  killed.
+- Shutdown during boot: the chain checks `closed` after every await, a
+  restore that resolves after `close()` is evicted on arrival, and
+  `ChannelHost.start()` re-checks its own stop flag so a stop that
+  completes mid-start cannot leave poll loops running.
 
-Follow-ups recorded, not done here: lazy workspace refresh (take `git fetch`
-out of restore-time prep entirely) and sandbox disk-exhaustion hygiene.
+Follow-up recorded, not done here: sandbox disk-exhaustion hygiene.
 
 ## Non-goals
 

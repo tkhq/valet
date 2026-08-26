@@ -220,6 +220,13 @@ export class ChannelHost {
     const orgId = this.orgId;
     for (const plugin of this.deps.plugins) {
       for (const factory of plugin.transports ?? []) {
+        // start() now runs on the api's background boot chain, so stop()
+        // (shutdown) can complete while this loop is awaiting a credential
+        // read or a getMe probe. stop() flips `started` back to false;
+        // without this check the loop would keep spawning poll loops and
+        // the outbound queue below AFTER stop() already swept them, leaving
+        // ingress running on a closed server with nothing left to stop it.
+        if (!this.started) return;
         const credential = await this.deps.engineCredentials.get({ type: "org", id: orgId }, factory.channelType);
         if (!credential) {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
@@ -247,9 +254,14 @@ export class ChannelHost {
             console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
           }
         }
+        // Re-check after the getMe await for the same stop-mid-start race
+        // as the loop-top check: this is the last gate before a poll loop
+        // (or webhook registration) is spawned for this transport.
+        if (!this.started) return;
         await this.startIngress(factory.channelType, transport);
       }
     }
+    if (!this.started) return;
     this.startOutbound();
     this.streamBridge.start();
     // Close streams a previous boot left open. Runs after the transports are
