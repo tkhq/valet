@@ -41,17 +41,13 @@ function filedOwner(
 }
 
 /**
- * Where the row will be listed, when that is NOT the workspace on screen —
- * and null when the two agree, so the notice suppresses itself.
+ * Where the row will be listed, when that is not the workspace on screen;
+ * null when the two agree, so the notice suppresses itself.
  *
- * BOTH directions matter, and only one of them was obvious. A personal
- * target armed in a team workspace leaves that team's tab; a TEAM workflow
- * armed from the personal workspace leaves the personal tab just as
- * completely. A notice gated on a team being active would say nothing in
- * the second case, which is the one where the row is most surprising.
- *
- * An org-owned row is listed in every workspace, so it never lands
- * elsewhere.
+ * Both directions count. A team workflow armed from the personal workspace
+ * leaves that tab just as a personal target armed in a team workspace leaves
+ * the team's, and there is no team on screen to gate a warning on. An
+ * org-owned row lists everywhere, so it never lands elsewhere.
  */
 function filedElsewhere(
   filed: { type: "user" | "team" | "org"; teamId?: string },

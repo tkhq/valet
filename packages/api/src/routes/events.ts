@@ -462,10 +462,8 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   // foreign, unowned, or missing id all fail identically (never reveals
   // whether the id exists at all).
   //
-  // Orchestrator targets instead choose the owning orchestrator: the
-  // caller's own (the default), a team they are on, or the org's. The owner
-  // decides which default assistant the dispatcher delivers into, so a team
-  // target is the whole reason a team can be event-driven at all.
+  // An orchestrator target names its own owner instead: the caller's, a team
+  // they are on, or the org's.
   //
   // Membership, not team-admin, is the bar — the same bar team workflows and
   // team sessions already use. A subscription is automation the team shares,
@@ -478,24 +476,11 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     if (!owned) {
       return c.json({ error: `unknown workflow: ${body.target.workflowId}` }, 400);
     }
-    // Follow the workflow's own owner — the rule `schedule-service.ts`
-    // already applies to a schedule on the same workflow. These fields say
-    // WHICH WORKSPACE the automation belongs to; `created_by` says who
-    // armed it. Stamping the creator filed a team workflow's automation in
-    // that person's personal workspace, where the team that owns the
-    // workflow could not find it, and left a departed member as the only
-    // principal who could change it.
-    //
-    // Only the team arm is copied. An org-owned definition cannot reach
-    // here (`isAuthorizedForOwner` has no org arm, so `ownedDefinitionRow`
-    // returns null and the check above already refused), and a user-owned
-    // one is the caller's by that same check, so the default below is
-    // already its owner. The narrowing is not a hole this closes but one it
-    // declines to open: the sibling copy in `schedule-service.ts` can copy
-    // all three values safely because its reader (`isAuthorizedForOwnerWith`)
-    // has no org arm and fails CLOSED, while `canMutateSubscription` above
-    // returns true for EVERY org member on an org-owned row. Same line,
-    // opposite failure mode.
+    // The owner names the workspace; `created_by` names who armed it. Team
+    // only: `canMutateSubscription` lets any org member mutate an org-owned
+    // row, so copying `owned.ownerType` wholesale would fail open here even
+    // though the same copy is safe in `schedule-service.ts`. A user-owned
+    // definition is already the caller's, so the default stands.
     if (owned.ownerType === "team") {
       ownerType = "team";
       ownerId = owned.ownerId;

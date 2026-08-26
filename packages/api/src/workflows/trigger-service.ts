@@ -92,12 +92,8 @@ export async function createWorkflowTrigger(
     .values({
       id: randomUUID(),
       orgId: user.orgId,
-      // Follow the workflow's own owner, the same rule a schedule on that
-      // workflow follows (`schedule-service.ts`). These fields say which
-      // workspace the trigger belongs to; `created_by` below says who armed
-      // it. Only the team arm is taken — see the matching note in
-      // `routes/events.ts` for why this one narrows where the schedules
-      // writer does not.
+      // Filed with the workflow; `created_by` records who armed it. Team
+      // only, for the reason `routes/events.ts` gives at its own insert.
       ownerType: owned.ownerType === "team" ? "team" : "user",
       ownerId: owned.ownerType === "team" ? owned.ownerId : user.id,
       name: input.name,
@@ -115,11 +111,10 @@ export async function createWorkflowTrigger(
   return { ok: true, trigger };
 }
 
-/** The row shape `canAccessTriggerRow` judges. The row's own owner now
- * follows the workflow's owner, so the owner arm admits teammates by
- * itself; the workflow-reach arm stays because rows written before that
- * change still carry their creator. One builder so the list filter and the
- * single-row loader can never disagree about that shape. */
+/** The row shape `canAccessTriggerRow` judges. The owner arm now admits
+ * teammates by itself; the workflow-reach arm stays for rows written before
+ * that change, which still carry their creator. One builder so the list
+ * filter and the single-row loader cannot disagree about the shape. */
 function triggerAccessRow(
   row: typeof eventSubscriptions.$inferSelect,
   trigger: WorkflowTriggerSummary,
