@@ -19,10 +19,13 @@ import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
  * The version of the discovery RULES — which paths the collectors claim.
  *
  * Raise it when a change makes the SAME commit yield a different candidate
- * set: a new directory, extension, exclusion rule or kind. Not for a change
- * to what a collector writes from a file it already found — the manifest hash
- * covers that. Every source then re-scans once — see compare 1 in
- * `content-sync/service.ts`.
+ * set: a new directory, extension, exclusion rule or kind. Raising it makes
+ * every source re-scan once — see compare 1 in `content-sync/service.ts`.
+ *
+ * It does NOT reach a change to what a collector WRITES from a file it
+ * already found. `contentManifestHash` covers name, path and blob sha only,
+ * so compare 2 still short-circuits while the files are unchanged. Nothing
+ * re-renders mirrored rows today.
  */
 export const DISCOVERY_RULES_VERSION = 1;
 
