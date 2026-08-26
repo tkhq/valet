@@ -1,23 +1,10 @@
 /**
- * The shared `?ownerType=&ownerId=` reader (small-fixes design, task 1).
- *
- * A list route that scopes to the nav's workspace switcher takes the owner
- * as one pair of query parameters. The pair is all-or-nothing: half of it
- * names no principal, so the route answers 400 and the message says what to
- * send. Extracted from `routes/assistants.ts`, which now imports it.
- *
- * Three more readers of this shape stay where they are, because each
- * differs materially: `routes/memory.ts` throws instead of returning,
- * `routes/skills.ts` returns a status with the error, and
- * `routes/workflows.ts` returns a workflow owner ref rather than a
- * principal. `routes/sessions.ts` reads the pair inline and admits only
- * `user` and `team`. New owner-scoped routers import this one instead of
- * adding another copy, the same rule `_org-admin.ts` states.
+ * Shared reader for the `?ownerType=&ownerId=` filter that owner-scoped list
+ * routes take. Extracted from `routes/assistants.ts`. New owner-scoped
+ * routers import this one instead of adding another copy.
  *
  * The reader validates shape only. A route that must also authorize the
- * named owner does that itself, because the bar differs: the memory routes
- * gate on `canViewSession`, while a route whose rows are already visible to
- * the whole org needs no gate at all.
+ * named owner does that itself, because the bar differs per route.
  */
 import type { Principal } from "@valet/engine";
 

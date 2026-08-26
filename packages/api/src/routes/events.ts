@@ -7,13 +7,10 @@
  * 403 (same "an owned row and a missing row are indistinguishable" rule as
  * `routes/workflows.ts`). Inside that org scope, the feed and the
  * subscriptions list both take an optional `?ownerType=&ownerId=` pair that
- * narrows to one workspace — each of them to that workspace plus the org's
- * own rows, so a subscription the list shows and an event that subscription
- * received are never in different workspaces. See the two docstrings
- * below. Subscription bodies are validated against the merged plugin
- * trigger catalog before any row is written — the ingest matcher
- * (`events/ingest.ts`) trusts the `event_keys`/`filters` jsonb shapes this
- * file writes.
+ * narrows to one workspace plus the org's own rows. Subscription bodies are
+ * validated against the merged plugin trigger catalog before any row is
+ * written — the ingest matcher (`events/ingest.ts`) trusts the
+ * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
@@ -52,23 +49,8 @@ export const eventsRouter = new Hono<AppEnv>();
  * fails this gets the same 404 as a missing row, so a subscription id never
  * confirms a team the caller is not on.
  *
- * Visibility is a different rule, and it changed on 2026-08-24 (small-fixes
- * design, decision 1). The list scopes to the owner the caller names in
- * `?ownerType=&ownerId=`, which the web page fills from the nav's workspace
- * switcher, PLUS every org-owned row. The personal workspace lists your own
- * subscriptions and the org's; a team workspace lists that team's and the
- * org's. Org-owned rows join every workspace because an org-owned
- * subscription is org-wide by construction — this route creates one for a
- * target of `orchestrator: "org"` — and a row that appears in no workspace
- * could never be disabled or deleted from the page that created it. A
- * colleague's personal row still does not join, which is the point of the
- * filter. A caller who sends no owner gets every subscription in the org,
- * which is what the list did for every caller before that date. The
- * org-wide default is safe to keep because the rows were already
- * org-visible; the filter answers "whose automations am I looking at", not
- * "what may I see". This gate stays mutation-only, so a colleague's
- * personal subscription is still un-toggleable when an unscoped list shows
- * it.
+ * Mutation only. Visibility is a separate, wider rule — see the list route
+ * below.
  */
 async function canMutateSubscription(
   db: AppDb,
@@ -91,23 +73,15 @@ const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
 
 /**
- * How far back the OWNER-FILTERED feed looks.
+ * How far back the OWNER-FILTERED feed looks. No index can pre-select the
+ * owner, so without this bound a workspace that matched nothing walks the
+ * org's whole event history for one empty page. A lower bound on
+ * `received_at` joins the `(org_id, received_at)` index condition, so it is
+ * the cheapest bound available. The unfiltered feed keeps no window.
  *
- * The unfiltered feed needs no window: `events_org_received` covers
- * `(org_id, received_at)`, so `LIMIT 50` reads fifty index entries and
- * stops. The owner filter rejects candidates that no index can pre-select,
- * so a workspace whose subscriptions have matched nothing walks the org's
- * whole event history to fill a page it can never fill. Measured on 40,000
- * events: 40,000 semi-join loops and 200,689 buffer hits for one empty
- * page, against 1,001 loops and 5,026 hits with this bound.
- *
- * A lower bound on `received_at` joins the same index condition, which is
- * why it is the cheapest bound available. The cost is real and stated: a
- * workspace whose newest matching event is older than this window sees an
- * empty feed. `components/events/feed.tsx` names the window in its empty
- * state and beside a scoped list, and "All" carries no window at all.
- * Change the two together: `feed-window.test.ts` in the web package reads
- * this declaration and fails when only one of them moves.
+ * `components/events/feed.tsx` prints this window to the reader and must
+ * hold the same number. `feed-window.test.ts` reads this declaration and
+ * fails when only one of them moves.
  */
 const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -264,31 +238,14 @@ eventsRouter.get("/events/catalog", (c) => {
 // ── Feed ────────────────────────────────────────────────────────────────────
 
 /**
- * The feed keeps its org-wide meaning and gains an optional owner filter
- * (small-fixes design, decision 2). The `events` table has no owner column
- * and gains none: an event is an org-level fact, and a row that matched
- * nothing you own is exactly the row you open to answer "why did my
- * subscription never fire". The web page therefore sends the owner for its
- * default "This workspace" state and drops it for "All".
+ * The org's feed, with an optional owner filter. The `events` table has no
+ * owner column: ownership is read one join away, through the deliveries the
+ * dispatcher wrote. An event with no deliveries matches no owner, because
+ * no subscription acted on it.
  *
- * The filter reads ownership one join away, through the deliveries the
- * dispatcher wrote for this event. `event_deliveries_event` indexes the
- * join column and the subscription lookup is by primary key, so the
- * `EXISTS` costs one index probe per candidate row. An event with no
- * deliveries at all matches no owner, which is correct: nobody's
- * subscription acted on it.
- *
- * The owner predicate is the SAME union the subscriptions list uses: the
- * named owner's rows, or the org's own. The two surfaces are read side by
- * side — one tab lists the subscriptions, the other lists what they
- * received — so a difference between them reads as a bug in the page. Drop
- * the org branch here and an org-owned subscription is listed in a
- * workspace whose feed hides every event it acted on.
- *
- * The probe is cheap; the NUMBER of probes is not, because the `LIMIT` no
- * longer stops the scan early when nothing matches. The filtered query
- * therefore also carries the `OWNER_FEED_WINDOW_MS` lower bound — see that
- * constant for the measurement and for what the window costs the reader.
+ * The owner predicate must stay the SAME union the subscriptions list uses
+ * — the named owner's rows, or the org's own. Drop the org branch here and
+ * a workspace lists an org-owned subscription whose events its feed hides.
  */
 eventsRouter.get("/events", async (c) => {
   const { db } = c.var.providers;
@@ -307,8 +264,6 @@ eventsRouter.get("/events", async (c) => {
   if (key) conditions.push(eq(events.eventKey, key));
   if (filter.owner) {
     const owner = filter.owner;
-    // Bounds the rows the semi-join examines. The unfiltered feed keeps
-    // the org's whole history.
     conditions.push(gte(events.receivedAt, Date.now() - OWNER_FEED_WINDOW_MS));
     conditions.push(
       exists(
@@ -319,17 +274,15 @@ eventsRouter.get("/events", async (c) => {
           .where(
             and(
               eq(eventDeliveries.eventId, events.id),
-              // The org predicate repeats the outer query's scope inside
-              // the subquery, so the join cannot reach a subscription row
-              // from another org even if a delivery ever crossed one.
+              // Repeats the outer scope, so the join cannot reach another
+              // org's subscription even if a delivery ever crossed one.
               eq(eventSubscriptions.orgId, user.orgId),
               or(
                 and(
                   eq(eventSubscriptions.ownerType, owner.type),
                   eq(eventSubscriptions.ownerId, owner.id),
                 ),
-                // Org-owned subscriptions belong to every workspace, so
-                // the events they received do too.
+                // Org-owned subscriptions belong to every workspace.
                 eq(eventSubscriptions.ownerType, "org"),
               ),
             ),
@@ -569,6 +522,12 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   return c.json(resp, 201);
 });
 
+/**
+ * Every subscription in the org, or one workspace's plus the org's own when
+ * the caller names an owner. Visibility is wider than the mutation gate on
+ * purpose: these rows were always org-visible, and the filter answers
+ * "whose automations am I looking at", not "what may I see".
+ */
 eventsRouter.get("/event-subscriptions", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
@@ -585,8 +544,8 @@ eventsRouter.get("/event-subscriptions", async (c) => {
           eq(eventSubscriptions.ownerType, owner.type),
           eq(eventSubscriptions.ownerId, owner.id),
         ),
-        // Org-owned rows join every workspace's list. The outer `orgId`
-        // predicate bounds them to the caller's own org.
+        // Org-owned rows join every workspace's list, bounded to the
+        // caller's org by the outer `orgId` predicate.
         eq(eventSubscriptions.ownerType, "org"),
       ),
     );

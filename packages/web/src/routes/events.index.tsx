@@ -21,19 +21,16 @@ import { textParam } from "~/lib/search-params";
  * event DOES have its own URL — `/events/$eventId` — because an event that
  * broke a run has to be paste-able into a ticket.
  *
- * The feed's scope is NOT local state. The two tabs unmount each other, and
- * the round trip a diagnosis needs — select "All" to find an unmatched
- * event, read its rule on the Subscriptions tab, come back — would discard
- * it. It lives in `?scope=`, the same way the workflows hub keeps `?tab=`,
- * so it also survives a reload and pastes into a ticket.
+ * The feed's scope is NOT local state: the two tabs unmount each other, and
+ * a diagnosis crosses them. It lives in `?scope=`, the same way the
+ * workflows hub keeps `?tab=`.
  */
 interface EventsSearch {
   scope?: FeedScope;
 }
 
 /** Only "all" is written to the URL. An absent or hand-edited value reads
- * as the default workspace scope, which is the honest answer for a value
- * that names no scope. */
+ * as the default workspace scope. */
 function readEventsSearch(raw: unknown): EventsSearch {
   return textParam(raw, "scope") === "all" ? { scope: "all" } : {};
 }
@@ -54,8 +51,7 @@ type TabId = (typeof TABS)[number]["id"];
 export function EventsPage() {
   const [tab, setTab] = useState<TabId>("activity");
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
-  // this module and never builds a real router context. Same call shape as
-  // `skills.index.tsx`.
+  // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
   const scope: FeedScope = search.scope ?? "workspace";
@@ -65,8 +61,6 @@ export function EventsPage() {
       <div className="mx-auto max-w-4xl px-6 py-10">
         <div className="flex items-baseline gap-3">
           <h1 className="font-display text-2xl text-ink">Events</h1>
-          {/* Both tabs follow the switcher now — the subscriptions list
-              scopes to it, and the feed's default filter reads from it. */}
           <WorkspaceClause />
         </div>
         <p className="mt-1 text-sm text-muted">

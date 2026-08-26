@@ -63,32 +63,20 @@ function describeTarget(
  * delete; create via `SubscriptionCreateDialog`. Rows show filters
  * read-only (filters are API-only for now).
  *
- * The list is the active workspace's, plus every org-owned subscription:
- * your own rows and the org's in the personal workspace, one team's and the
- * org's in a team workspace. An org-owned row belongs to no single
- * workspace, so the route returns it in all of them — otherwise the create
- * dialog's "Notify the org assistant" option writes a row this page can
- * never disable. Ownership therefore still varies row to row, which is what
- * the badges say.
- *
- * The list is held until the workspace owner resolves, for the same reason
- * the feed holds its own query: an owner-less request is the org-wide list.
- * The owner never resolves when identity itself fails, so the panel reads
- * the identity query directly and reports that instead of holding for ever.
+ * The list is the active workspace's, plus every org-owned subscription. An
+ * org-owned row belongs to no single workspace, so the route returns it in
+ * all of them — otherwise the create dialog's "Notify the org assistant"
+ * option writes a row this page can never disable.
  */
 export function SubscriptionsPanel() {
   const owner = useListOwner();
   const meQ = useMe();
-  // `useListOwner` answers undefined both while identity loads AND when it
-  // fails, so a held list would otherwise sit on "Loading subscriptions…"
-  // for ever. Read the identity query directly to tell the two apart.
+  // `useListOwner` also answers undefined when identity FAILS, and that
+  // hold never ends. Report it instead.
   const ownerFailed = owner === undefined && meQ.isError;
+  // An owner-less request lists every subscription in the org, so hold the
+  // query until the owner resolves. Same gate the feed uses.
   const subsQ = useEventSubscriptions(owner, {
-    // `useListOwner()` answers undefined while the caller's identity is in
-    // flight, and an owner-less request lists every subscription in the
-    // org. The page header names the active workspace, so a held query
-    // beats one frame of every colleague's automations under it. Same gate
-    // the feed uses.
     enabled: owner !== undefined,
   });
   const workflowsQ = useWorkflows();
@@ -127,13 +115,10 @@ export function SubscriptionsPanel() {
         </Button>
       </div>
 
-      {/* `isPending`, not `isLoading`: the query is held (not fetching)
-          while the owner resolves, and a held list is still loading. */}
+      {/* `isPending`, not `isLoading`: a held query still counts as
+          loading. */}
       {subsQ.isPending && !ownerFailed && <LoadingRow label="Loading subscriptions…" />}
       {subsQ.error != null && <ErrorRow>Failed to load subscriptions.</ErrorRow>}
-      {/* This tab has no unscoped state to fall back to — the feed's "All"
-          control has no counterpart here — so the only move left is to load
-          the page again. */}
       {ownerFailed && (
         <ErrorRow>
           Could not load your workspace, so subscriptions cannot be listed for it. Reload the page
@@ -194,12 +179,11 @@ function SubscriptionRow({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
-          {/* Ownership varies row to row here, so it is badged: "Org" for
-              an org-owned row, the team's name for a team's (`OwnerBadge`),
-              and "Personal" for a COLLEAGUE's. The scoped list returns no
-              colleague's row, so that last badge marks a row the server
-              should not have sent — it keeps such a row from reading as
-              yours. An unbadged row is yours. */}
+          {/* Ownership varies row to row, so it is badged: "Org", the
+              team's name (`OwnerBadge`), or "Personal" for a COLLEAGUE's.
+              An unbadged row is yours. The scoped list returns no
+              colleague's row, so "Personal" marks one the server should not
+              have sent. */}
           {sub.ownerType === "org" && (
             <Badge variant="accent" className="shrink-0">
               Org

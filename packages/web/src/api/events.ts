@@ -23,22 +23,16 @@ import type {
 } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
 
-/** Marks the key of a query that asks about ONE workspace and cannot name
- * its owner yet. Any string works; this one is not a valid `ownerType`, so
- * it can never collide with a real owner pair. */
+/** Key marker for a scoped query whose owner has not resolved. Not a valid
+ * `ownerType`, so it can never collide with a real owner pair. */
 const UNRESOLVED_OWNER = "owner-unresolved";
 
-/** The workspace, as trailing key elements. Same shape as `qkMemory`'s:
- * trailing, so the bare prefix stays the key that invalidates every
- * workspace at once. An absent owner adds nothing, which is the key an
- * unscoped list already had.
+/** The workspace, as TRAILING key elements, so the bare prefix still
+ * invalidates every workspace at once. Same shape as `qkMemory`'s.
  *
- * `held` is the third state, and it is why this factory differs from
- * `qkMemory`'s. A scoped list whose owner has not resolved sends no owner
- * either, but it does NOT mean the unscoped list and must not read its
- * cache entry: a warm org-wide answer would render under a "This
- * workspace" label. The marker is trailing like an owner, so the bare
- * prefix still invalidates it along with every workspace. */
+ * A held query sends no owner but must not read the unscoped cache entry:
+ * a warm org-wide answer would render under a "This workspace" label. Hence
+ * the third state. */
 function ownerKey(owner: OwnerFilter | undefined, held: boolean): readonly string[] {
   if (owner) return [owner.ownerType, owner.ownerId];
   return held ? [UNRESOLVED_OWNER] : [];
@@ -64,9 +58,9 @@ export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogRe
 }
 
 /** `owner` narrows the feed to events delivered to that owner's
- * subscriptions. Undefined keeps the whole org's feed, which is what the
- * page's "All" state sends — unless the caller also disabled the query,
- * which is how the page says "one workspace, owner still unknown". */
+ * subscriptions. Undefined keeps the whole org's feed, unless the caller
+ * also disabled the query, which means "one workspace, owner still
+ * unknown". */
 export function useEvents(
   params?: { service?: string; key?: string },
   owner?: OwnerFilter,
@@ -108,16 +102,13 @@ export function useRedeliverEvent(id: string) {
   });
 }
 
-/** `owner` scopes the list to one workspace — your own subscriptions, or one
- * team's — plus every org-owned subscription, which belongs to no single
- * workspace. Undefined lists every subscription in the org, which is what
- * `redeliver-button.tsx` asks for; an undefined owner on a DISABLED query
- * is the held workspace list instead. */
+/** `owner` scopes the list to one workspace plus every org-owned
+ * subscription. Undefined lists every subscription in the org; an undefined
+ * owner on a DISABLED query is the held workspace list instead. */
 export function useEventSubscriptions(
   owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventSubscriptionsResponse>>,
 ) {
-  // Held for a missing owner, not unscoped on purpose — see `ownerKey`.
   const held = owner === undefined && opts?.enabled === false;
   return useQuery<ListEventSubscriptionsResponse>({
     queryKey: qkEvents.subscriptions(owner, held),

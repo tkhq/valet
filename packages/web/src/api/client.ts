@@ -695,16 +695,13 @@ export const api = {
 
   // events (event-system design): org feed, per-event detail with delivery
   // attempts, the plugin trigger catalog, and subscription CRUD. Both lists
-  // take the workspace owner: the feed narrows to events delivered to that
-  // owner's subscriptions, and the subscriptions list to that owner's rows.
+  // take an optional workspace owner.
   getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
   listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
     const qs = new URLSearchParams();
     if (params?.service) qs.set("service", params.service);
     if (params?.key) qs.set("key", params.key);
     const q = qs.toString();
-    // The service/key filters are optional, so the owner pair is appended
-    // to whichever query string the path ends up with.
     const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
     return request<ListEventsResponse>("GET", path);
   },

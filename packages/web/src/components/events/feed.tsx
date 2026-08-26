@@ -19,16 +19,15 @@ const ALL = "";
  * at exactly this count may be hiding older events. */
 const FEED_PAGE_SIZE = 50;
 
-/** How far back the workspace-scoped feed reaches. The route bounds the
- * owner-filtered query so it cannot walk the org's whole event history —
- * see `OWNER_FEED_WINDOW_MS` in `packages/api/src/routes/events.ts`, which
- * this number must match. "All" has no window. Exported for the case that
- * holds the two together (`feed-window.test.ts`). */
+/** How far back the workspace-scoped feed reaches. Must match
+ * `OWNER_FEED_WINDOW_MS` in `packages/api/src/routes/events.ts`; "All" has
+ * no window. Exported for the case that holds the two together
+ * (`feed-window.test.ts`). */
 export const WORKSPACE_WINDOW_DAYS = 30;
 
 /** Which events the feed asks for: those delivered to the active
  * workspace's subscriptions, or every event the org ingested. The route
- * owns the value, in `?scope=` — see `routes/events.index.tsx`. */
+ * owns the value, in `?scope=`. */
 export type FeedScope = "workspace" | "all";
 
 const SCOPE_OPTIONS = [
@@ -43,18 +42,13 @@ const SCOPE_OPTIONS = [
  * delivery attempts made for it, so "my subscription never fired" is
  * answerable from this page alone.
  *
- * The scope control decides which events the question is asked about. It
- * starts at "This workspace", the events that reached the subscriptions
- * the tab beside this one lists for that workspace — its own rows and the
- * org's. "All" restores the org-wide feed, and it must stay available: an
- * event that matched nothing you own is precisely the row you open when
+ * The scope control starts at "This workspace". "All" must stay available:
+ * an event that matched nothing you own is precisely the row you open when
  * your subscription never fired.
  *
  * `scope` is a prop, not local state, because the Activity and
- * Subscriptions tabs unmount each other. The round trip that needs "All" —
- * find an unmatched event, open the Subscriptions tab to read the rule,
- * come back — is exactly the one that would discard it. The route holds it
- * in `?scope=`.
+ * Subscriptions tabs unmount each other and the round trip that needs "All"
+ * crosses them.
  */
 export function EventFeed({
   scope,
@@ -66,19 +60,13 @@ export function EventFeed({
   const [service, setService] = useState(ALL);
   const [key, setKey] = useState(ALL);
   const owner = useListOwner();
-  // `useListOwner` answers undefined both while identity loads AND when it
-  // fails, so a held query would otherwise sit on "Loading events…" forever.
-  // Read the identity query directly to tell the two apart.
   const me = useMe();
   const catalogQ = useEventCatalog();
-  // `useListOwner` answers undefined while the caller's identity loads, and
-  // an owner-less request IS the org-wide feed. A control that says "This
-  // workspace" must not show the org's events for that one frame, so hold
-  // the query until the owner resolves.
+  // An owner-less request IS the org-wide feed, so a control reading "This
+  // workspace" must not fetch until the owner resolves.
   const canFetch = scope === "all" || owner !== undefined;
-  // A hold that identity failure caused never ends, so it is reported
-  // instead of shown as loading. Same value, same name, in
-  // `subscriptions-panel.tsx`.
+  // `useListOwner` answers undefined both while identity loads AND when it
+  // fails. A hold that failure caused never ends, so report it instead.
   const ownerFailed = !canFetch && me.isError;
   const eventsQ = useEvents(
     { service: service || undefined, key: key || undefined },
@@ -98,8 +86,6 @@ export function EventFeed({
         <SelectMenu
           value={scope}
           onChange={onScopeChange}
-          // The trigger sits beside "All services" and "All events", so it
-          // names the dimension it filters.
           triggerLabel={`Scope: ${scope === "all" ? "All" : "This workspace"}`}
           options={SCOPE_OPTIONS}
         />
@@ -129,10 +115,8 @@ export function EventFeed({
         )}
 
         <div className="flex-1" />
-        {/* `refetch()` ignores `enabled`, so an unheld press during the
-            hold would fetch the org-wide feed and render it under a control
-            reading "This workspace". Disable the control for that window
-            instead of letting the press through. */}
+        {/* `refetch()` ignores `enabled`, so a press during the hold would
+            fetch the org-wide feed under a "This workspace" control. */}
         <Button
           type="button"
           variant="ghost"
@@ -145,8 +129,8 @@ export function EventFeed({
         </Button>
       </div>
 
-      {/* `isPending`, not `isLoading`: the query is held (not fetching)
-          while the owner resolves, and a held feed is still loading. */}
+      {/* `isPending`, not `isLoading`: a held query is not fetching, but
+          it still counts as loading. */}
       {eventsQ.isPending && !ownerFailed && <LoadingRow label="Loading events…" />}
       {eventsQ.error != null && (
         <ErrorRow>Failed to load events. Press refresh to try again.</ErrorRow>
@@ -179,8 +163,6 @@ export function EventFeed({
         </div>
       )}
 
-      {/* The window is a property of the scoped query, not of the page
-          size, so it is stated whenever a scoped list has rows. */}
       {eventsQ.data && scope === "workspace" && eventsQ.data.events.length > 0 && (
         <p className="pt-1 text-xs text-muted">
           This workspace's feed covers the last {WORKSPACE_WINDOW_DAYS} days. Select All for
