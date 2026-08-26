@@ -107,6 +107,11 @@ export interface BootTestApiOpts {
    * decision 3) point this at a temp dir with a fixture `index.html`. Unset
    * by every other caller, matching dev's unmounted-static behavior. */
   webDistDir?: string;
+  /** Passed through to `createApp`'s `CreateAppOpts.isReady` — readiness
+   * route tests drive `/api/ready` through a fake boot flag. Unset by every
+   * other caller: no callback means always ready, matching a harness with
+   * no background boot chain. */
+  isReady?: () => boolean;
   /** Public base URL forwarded to the constructed `ChannelHost` (Task 8) —
    * unset by default (long-poll/inert mode). Webhook-mode route tests set
    * this so the host registers webhook transports instead. */
@@ -511,7 +516,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   }
 
   // Node-only test boot: `createApp` defaults to the Node server adapter.
-  const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir });
+  const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir, isReady: opts.isReady });
   const server = await new Promise<ReturnType<typeof startServer>>((resolve) => {
     const handle = startServer({ port, onListen: () => resolve(handle) });
   });

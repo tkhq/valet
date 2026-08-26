@@ -39,7 +39,7 @@ import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
-import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
+import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
 import { webDistPath } from "./assets/base.js";
 import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
 import {
@@ -60,14 +60,27 @@ export interface ServerHandle {
   backend: string;
 }
 
+/** Per-session boot-restore wait budget. A session past it stops blocking
+ * the restore pass (and therefore readiness); its restore keeps running in
+ * the background and `sessionFor`'s single-flight map dedupes later access.
+ * Sized for a warm sandbox re-attach plus a `git fetch` on a large repo. */
+const BOOT_RESTORE_SESSION_TIMEOUT_MS = 60_000;
+/** How many sessions the boot-restore pass works on at once — bounds total
+ * pass time to ~`ceil(n / 4) * timeout` in the worst case, and stops one
+ * wedged sandbox from serializing every other session behind it. */
+const BOOT_RESTORE_CONCURRENCY = 4;
+
 /**
  * Eager restore of sessions with unsettled submissions. On boot the store may
  * hold in-flight submissions from a previous process; materializing their
  * engine sessions lets the claim loop pick the work back up. Per-session
  * failures are isolated so one bad row can't stall the rest of the boot.
+ *
+ * Runs in the background boot chain, AFTER the HTTP listener binds (see
+ * `startServer`): a restore pass that touches sandboxes can stall on a
+ * wedged exec, and that stall must cost readiness at most, never liveness.
  */
-async function restoreUnsettledSessions(providers: Providers): Promise<void> {
-  let restored = 0;
+async function restoreUnsettledSessions(providers: Providers, shouldStop: () => boolean): Promise<void> {
   let ids: string[] = [];
   try {
     ids = await providers.engineStore.listSessionIdsWithUnsettledSubmissions();
@@ -110,15 +123,17 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
     },
     sessionFor: (sessionId, meta) => providers.engineHost.sessionFor(sessionId, meta),
   };
-  for (const id of ids) {
-    try {
-      await restoreOneSession(id, deps);
-      restored++;
-    } catch (err) {
-      console.error(`boot restore: failed to restore session ${id}:`, err);
-    }
-  }
-  console.log(`boot restore: restored ${restored} sessions with unsettled submissions`);
+  const result = await runBoundedRestore(ids, (id) => restoreOneSession(id, deps), {
+    concurrency: BOOT_RESTORE_CONCURRENCY,
+    timeoutMs: BOOT_RESTORE_SESSION_TIMEOUT_MS,
+    shouldStop,
+  });
+  console.log(
+    `boot restore: restored ${result.restored} sessions with unsettled submissions` +
+      (result.failed ? `, ${result.failed} failed` : "") +
+      (result.timedOut ? `, ${result.timedOut} timed out (still restoring in the background)` : "") +
+      (result.stopped ? " — stopped early for shutdown" : ""),
+  );
 }
 
 /**
@@ -282,163 +297,6 @@ wireAttentionRouter({
   channels: [providers.channelHost.attentionDeliverer()],
 });
 
-// Eager boot restore: pick up any submissions left unsettled by a prior
-// process before we start accepting connections. A restore failure must
-// never prevent `serve` — any unexpected rejection is logged and boot
-// continues so a single bad row can't crash-loop the process.
-await restoreUnsettledSessions(providers).catch((err) => {
-  console.error("boot restore: unexpected failure (continuing to serve):", err);
-});
-
-// Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
-// restart-mid-child-run survival mechanism. Alongside restoreUnsettledSessions
-// above; a failure here must likewise never block boot.
-await providers.childWatcher.rearm().catch((err) => {
-  console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
-});
-
-// Parked-child retention (child_send arc): destroy suspended child
-// sandboxes whose retention window has passed. No-op when retention is
-// off; the interval is unref'd so it never holds the process open.
-providers.childWatcher.startRetentionSweep();
-
-// Destroys sandboxes hibernated past the retention window (default 72h,
-// VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
-providers.hibernationReaper.start();
-
-// Settled-run sandbox reclaim retry sweep: picks up runs settled while the
-// api was down and on-settle reclaims that failed. The on-settle path
-// itself runs from the `onRunSettled` hook, not this interval.
-providers.workflowSandboxReclaimer.start();
-
-// Provider-side reconciler: destroys orphaned sandboxes (owning session
-// gone). Sandboxes past VALET_SANDBOX_AGE_REPORT_HOURS are REPORTED, not
-// destroyed (CLAUDE.md: alert, don't auto-repair). No-op on providers
-// without a list() seam (docker/local).
-providers.sandboxReconcileSweep.start();
-
-// Hibernates idle ACTIVE sessions an api restart evicted from the host
-// cache — the in-memory idle sweep only walks the cache, and the reaper
-// only reaps hibernated rows, so these were stranded with running pods.
-providers.idleHibernationSweep.start();
-
-// Channel ingress (Task 8): resolves credentials into transports, then
-// starts webhook registration or the long-poll loop per transport. A
-// failure here must never block boot — channels are best-effort.
-await providers.channelHost.start().catch((err) => {
-  console.error("boot restore: channelHost.start failed (continuing to serve):", err);
-});
-console.log("channel host started");
-
-// GitHub App webhook URL: point every app this instance OWNS at this
-// instance's public URL. A developer behind an ephemeral tunnel gets a new
-// hostname on every restart, and the URL baked into the app at creation goes
-// stale, so inbound deliveries stop with no error anywhere. Apps supplied
-// through `GITHUB_APP_*` belong to another instance and are never touched —
-// see `syncAppWebhookUrl`'s doc comment for that guard.
-//
-// Deliberately NOT awaited: this makes up to two GitHub round trips, and a
-// slow or unreachable GitHub must not hold up the port. The function
-// swallows every failure, so the floating promise cannot reject.
-void syncAllAppWebhookUrls(
-  { db: providers.db, credentials: providers.engineCredentials },
-  publicUrlFromEnv(process.env),
-);
-
-// Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
-// loops so pending/parked runs left over from a prior process pick back up.
-providers.workflowRunHost.startHost();
-
-// Workflow schedule loop: fire cron schedules that came due (including at
-// most one catch-up per schedule for fires missed while down).
-providers.workflowScheduler.start();
-
-// Event dispatcher (event-system plan Task 6): begin the delivery drain loop
-// so pending/failed event_deliveries left over from a prior process (and
-// freshly-ingested ones between nudges) get delivered.
-providers.eventDispatcher.start();
-
-// Skill-repository sync (agent-skills design): begin the sweep that re-reads
-// every tracked repository on its own schedule, and imports any source added
-// while this process was down.
-providers.skillSync.start();
-
-// Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
-// queued/building rows orphaned by a prior process crash/restart, then begin
-// the 10s build-status poll + 10min nightly-scheduler intervals. A no-op
-// backend (`imageBuilder: null`) still starts harmlessly — every pass
-// short-circuits.
-await providers.prebuildService.start().catch((err) => {
-  console.error("prebuildService.start failed:", err);
-});
-
-// Hourly sandbox-token rotation (sandbox-reconciliation plan, Task 12):
-// re-mints tokens for long-running sandboxes whose initial token is > 12 h
-// old, pushing the fresh token via `SandboxProvider.updateCreds` into the
-// live /etc/valet/creds/ mount. A no-op when the provider does not report
-// `credsMount` (docker dev, local). The interval is `.unref()`'d inside
-// `startRotateSweep` so it never prevents process exit on its own.
-const rotateSweep: RotateSweepHandle = startRotateSweep({
-  host: providers.engineHost,
-  provider: providers.sandboxProvider,
-  db: providers.db,
-});
-
-// GitHub App installations: pick up a new installation without anybody
-// pressing "Refresh installations". The tick wakes every minute and checks at
-// most one org that is past its own due time, so most ticks do nothing. An
-// instance with no public URL receives no `installation` webhooks, which is
-// why this cannot be webhook-only. The interval is `.unref()`'d inside
-// `startInstallationSweep`, so it never prevents process exit on its own.
-const installationSweep: InstallationSweepHandle = startInstallationSweep({
-  db: providers.db,
-  credentials: providers.engineCredentials,
-  key: deriveSecretKey(encryptionKey),
-  publicUrl: publicUrlFromEnv(process.env),
-});
-
-// Instance config reconciliation: apply the declarative config to the live
-// database (org name, members, teams, skill sources, etc.). Runs after all
-// boot-restore passes so the db is settled before we write to it. Failure
-// here fails boot — a half-reconciled config is worse than no config.
-if (instanceConfig) {
-  // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
-  // no admin, or duplicate skill sources). Fail boot with the
-  // corrective-action message only — no stack spam. Rethrow anything else.
-  try {
-    await reconcileInstanceConfig(
-      { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
-      instanceConfig,
-    );
-  } catch (e) {
-    if (e instanceof InstanceConfigError) {
-      console.error(e.message);
-      process.exit(1);
-    }
-    throw e;
-  }
-}
-
-// Team mirroring is off unless an operator asks for it, so say once what it
-// will do. This runs AFTER the reconcile above, which is what applies
-// `org.features.ssoTeamSync` from the file. It reads and prints; it never
-// creates an org and never deletes a team.
-{
-  const org = await findOrg(providers.db);
-  if (org) {
-    const features = await getOrgFeatures(providers.db, org.id);
-    await reportTeamSyncState(providers.db, {
-      orgId: org.id,
-      enabled: features.ssoTeamSync,
-      ssoConfigured: authConfig?.oidc !== undefined,
-      // The column, not the file: the reconcile above already wrote the
-      // file's list over it, and Settings edits land here too.
-      mirroredGroups: (await getSsoTeamGroups(providers.db, org.id)) ?? [],
-      configPath: process.env.VALET_CONFIG,
-    });
-  }
-}
-
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
 const authWiring: AuthWiring = authConfig
@@ -473,9 +331,23 @@ const adapter = await selectServerAdapter();
 // expired refs every 60 seconds. The interval is `.unref()`'d inside.
 getAttachmentRefStore().startSweep();
 
+// Boot state shared by the readiness route, the background boot chain, and
+// `close()`. `closed` lives up here (not next to `close()`) because the
+// chain checks it between steps: a shutdown during boot must stop the chain
+// from starting more services.
+let closed = false;
+let bootReady = false;
+let rotateSweep: RotateSweepHandle | undefined;
+let installationSweep: InstallationSweepHandle | undefined;
+
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
-const { startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
+const { startServer: startListening, webServed } = createApp(
+  providers,
+  authWiring,
+  { webDistDir, isReady: () => bootReady },
+  adapter,
+);
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
 // silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.
@@ -501,14 +373,219 @@ const server = startListening({
   },
 });
 
+// ── Background boot chain ──────────────────────────────────────────────────
+//
+// Everything below used to run in front of `startListening`, so `/api/health`
+// was unreachable until the LAST awaited step finished. The sha-a6eadbe
+// rollout showed why that ordering is fatal: `restoreUnsettledSessions` ran a
+// `git fetch` inside a wedged sandbox, boot crossed the 300s startup budget,
+// and the kubelet killed the pod before the port ever bound. The invariant
+// now: the listener binds within seconds of process start, and boot-restore /
+// reconcile work costs READINESS only (`/api/ready` stays 503, the pod stays
+// NotReady) — never liveness. `syncAllAppWebhookUrls` below was already
+// deliberately off the port's critical path for exactly this reason; the
+// whole chain now follows it.
+//
+// Steps keep their pre-existing relative order. Each one already tolerates
+// failure (logged-and-continue), except `reconcileInstanceConfig`, which
+// keeps its fail-fast `process.exit(1)` — it runs before `bootReady` flips,
+// so a pod with a bad config dies while still NotReady and never takes
+// traffic.
+async function runBootChain(): Promise<void> {
+  // Eager boot restore: pick up any submissions left unsettled by a prior
+  // process. A restore failure must never prevent `serve` — any unexpected
+  // rejection is logged and boot continues so a single bad row can't
+  // crash-loop the process. Bounded (per-session timeout + concurrency cap in
+  // `runBoundedRestore`) so one wedged sandbox exec can't hold readiness
+  // forever.
+  await restoreUnsettledSessions(providers, () => closed).catch((err) => {
+    console.error("boot restore: unexpected failure (continuing to serve):", err);
+  });
+
+  // Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
+  // restart-mid-child-run survival mechanism. Alongside
+  // restoreUnsettledSessions above; a failure here must likewise never block
+  // boot.
+  await providers.childWatcher.rearm().catch((err) => {
+    console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
+  });
+
+  if (closed) return;
+
+  // Parked-child retention (child_send arc): destroy suspended child
+  // sandboxes whose retention window has passed. No-op when retention is
+  // off; the interval is unref'd so it never holds the process open.
+  providers.childWatcher.startRetentionSweep();
+
+  // Destroys sandboxes hibernated past the retention window (default 72h,
+  // VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES).
+  providers.hibernationReaper.start();
+
+  // Settled-run sandbox reclaim retry sweep: picks up runs settled while the
+  // api was down and on-settle reclaims that failed. The on-settle path
+  // itself runs from the `onRunSettled` hook, not this interval.
+  providers.workflowSandboxReclaimer.start();
+
+  // Provider-side reconciler: destroys orphaned sandboxes (owning session
+  // gone). Sandboxes past VALET_SANDBOX_AGE_REPORT_HOURS are REPORTED, not
+  // destroyed (CLAUDE.md: alert, don't auto-repair). No-op on providers
+  // without a list() seam (docker/local).
+  providers.sandboxReconcileSweep.start();
+
+  // Hibernates idle ACTIVE sessions an api restart evicted from the host
+  // cache — the in-memory idle sweep only walks the cache, and the reaper
+  // only reaps hibernated rows, so these were stranded with running pods.
+  providers.idleHibernationSweep.start();
+
+  // Channel ingress (Task 8): resolves credentials into transports, then
+  // starts webhook registration or the long-poll loop per transport. A
+  // failure here must never block boot — channels are best-effort.
+  await providers.channelHost.start().catch((err) => {
+    console.error("boot restore: channelHost.start failed (continuing to serve):", err);
+  });
+  console.log("channel host started");
+
+  // GitHub App webhook URL: point every app this instance OWNS at this
+  // instance's public URL. A developer behind an ephemeral tunnel gets a new
+  // hostname on every restart, and the URL baked into the app at creation goes
+  // stale, so inbound deliveries stop with no error anywhere. Apps supplied
+  // through `GITHUB_APP_*` belong to another instance and are never touched —
+  // see `syncAppWebhookUrl`'s doc comment for that guard.
+  //
+  // Deliberately NOT awaited: this makes up to two GitHub round trips, and a
+  // slow or unreachable GitHub must not hold up readiness. The function
+  // swallows every failure, so the floating promise cannot reject.
+  void syncAllAppWebhookUrls(
+    { db: providers.db, credentials: providers.engineCredentials },
+    publicUrlFromEnv(process.env),
+  );
+
+  if (closed) return;
+
+  // Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
+  // loops so pending/parked runs left over from a prior process pick back up.
+  providers.workflowRunHost.startHost();
+
+  // Workflow schedule loop: fire cron schedules that came due (including at
+  // most one catch-up per schedule for fires missed while down).
+  providers.workflowScheduler.start();
+
+  // Event dispatcher (event-system plan Task 6): begin the delivery drain loop
+  // so pending/failed event_deliveries left over from a prior process (and
+  // freshly-ingested ones between nudges) get delivered.
+  providers.eventDispatcher.start();
+
+  // Skill-repository sync (agent-skills design): begin the sweep that re-reads
+  // every tracked repository on its own schedule, and imports any source added
+  // while this process was down.
+  providers.skillSync.start();
+
+  // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
+  // queued/building rows orphaned by a prior process crash/restart, then begin
+  // the 10s build-status poll + 10min nightly-scheduler intervals. A no-op
+  // backend (`imageBuilder: null`) still starts harmlessly — every pass
+  // short-circuits.
+  await providers.prebuildService.start().catch((err) => {
+    console.error("prebuildService.start failed:", err);
+  });
+
+  if (closed) return;
+
+  // Hourly sandbox-token rotation (sandbox-reconciliation plan, Task 12):
+  // re-mints tokens for long-running sandboxes whose initial token is > 12 h
+  // old, pushing the fresh token via `SandboxProvider.updateCreds` into the
+  // live /etc/valet/creds/ mount. A no-op when the provider does not report
+  // `credsMount` (docker dev, local). The interval is `.unref()`'d inside
+  // `startRotateSweep` so it never prevents process exit on its own.
+  rotateSweep = startRotateSweep({
+    host: providers.engineHost,
+    provider: providers.sandboxProvider,
+    db: providers.db,
+  });
+
+  // GitHub App installations: pick up a new installation without anybody
+  // pressing "Refresh installations". The tick wakes every minute and checks at
+  // most one org that is past its own due time, so most ticks do nothing. An
+  // instance with no public URL receives no `installation` webhooks, which is
+  // why this cannot be webhook-only. The interval is `.unref()`'d inside
+  // `startInstallationSweep`, so it never prevents process exit on its own.
+  installationSweep = startInstallationSweep({
+    db: providers.db,
+    credentials: providers.engineCredentials,
+    key: deriveSecretKey(encryptionKey),
+    publicUrl: publicUrlFromEnv(process.env),
+  });
+
+  // Instance config reconciliation: apply the declarative config to the live
+  // database (org name, members, teams, skill sources, etc.). Runs after all
+  // boot-restore passes so the db is settled before we write to it. Failure
+  // here still exits the process — a half-reconciled config is worse than no
+  // config — and because it precedes the `bootReady` flip, the pod dies
+  // NotReady: the rollout crash-loops with the corrective message, and
+  // traffic never moves.
+  if (instanceConfig) {
+    // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
+    // no admin, or duplicate skill sources). Exit with the corrective-action
+    // message only — no stack spam. Anything else is unexpected: print it and
+    // exit too, preserving the pre-reorder "reconcile failure fails boot"
+    // contract.
+    try {
+      await reconcileInstanceConfig(
+        { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
+        instanceConfig,
+      );
+    } catch (e) {
+      if (e instanceof InstanceConfigError) {
+        console.error(e.message);
+        process.exit(1);
+      }
+      console.error("FATAL: instance config reconcile failed:", e);
+      process.exit(1);
+    }
+  }
+
+  // Team mirroring is off unless an operator asks for it, so say once what it
+  // will do. This runs AFTER the reconcile above, which is what applies
+  // `org.features.ssoTeamSync` from the file. It reads and prints; it never
+  // creates an org and never deletes a team.
+  {
+    const org = await findOrg(providers.db);
+    if (org) {
+      const features = await getOrgFeatures(providers.db, org.id);
+      await reportTeamSyncState(providers.db, {
+        orgId: org.id,
+        enabled: features.ssoTeamSync,
+        ssoConfigured: authConfig?.oidc !== undefined,
+        // The column, not the file: the reconcile above already wrote the
+        // file's list over it, and Settings edits land here too.
+        mirroredGroups: (await getSsoTeamGroups(providers.db, org.id)) ?? [],
+        configPath: process.env.VALET_CONFIG,
+      });
+    }
+  }
+
+  bootReady = true;
+  console.log("boot chain complete — /api/ready now reports ready");
+}
+
+// Kick the chain off the listener's critical path. An unexpected rejection
+// is logged and the pod stays NotReady — that IS the alert (CLAUDE.md:
+// alert, don't auto-repair); flipping ready over a half-booted process would
+// hide it.
+void runBootChain().catch((err) => {
+  console.error("boot chain: unexpected failure — /api/ready will stay 503:", err);
+});
+
 // ── Graceful shutdown — evict live sandboxes so containers don't leak. This
 // does NOT call process.exit: the caller (direct-entry guard below, or the
 // serve command) owns process lifecycle. Idempotent so repeated close() /
 // double signals are harmless.
 
-let closed = false;
 async function close(): Promise<void> {
   if (closed) return;
+  // Also read by the boot chain between steps: services not yet started
+  // after this point stay unstarted, so the stops below can meet a service
+  // that never ran — each one tolerates that.
   closed = true;
   try {
     providers.workflowScheduler.stop();
@@ -536,7 +613,7 @@ async function close(): Promise<void> {
     console.error("prebuildService.stop failed:", err);
   }
   try {
-    rotateSweep.stop();
+    rotateSweep?.stop();
   } catch (err) {
     console.error("rotateSweep.stop failed:", err);
   }
@@ -544,7 +621,7 @@ async function close(): Promise<void> {
     // Awaited, unlike the sweeps above it: a pass in flight holds a database
     // query open, and closing the store under it logs errors that look like
     // real failures during every shutdown.
-    await installationSweep.stop();
+    await installationSweep?.stop();
   } catch (err) {
     console.error("installationSweep.stop failed:", err);
   }

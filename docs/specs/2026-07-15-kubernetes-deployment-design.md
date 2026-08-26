@@ -72,6 +72,33 @@ see `.superpowers/sdd/task-9-report.md` for the full transcript):
   blocker for this pass since workspace-derived identity is deterministic
   and consistent with the existing docker provider.
 
+## Update (2026-08-26): boot ordering and the probe split
+
+The sha-a6eadbe rollout to agents-dev crash-looped: `startServer()` bound the
+HTTP listener after every awaited boot-restore step, so `/api/health` was
+unreachable while `restoreUnsettledSessions` waited on a `git fetch` inside a
+wedged sandbox. Boot crossed the 300s startup budget and the kubelet killed
+the pod before the port ever bound.
+
+The fix changes both the api and the chart (0.10.2):
+
+- `main.ts` binds the listener right after provider construction. Restore,
+  child-watch re-arm, channel host, prebuild sweep, instance-config
+  reconcile, and the team-sync report run in a background chain after the
+  port binds. The restore pass is bounded: 60s per session, 4 sessions at a
+  time (`runBoundedRestore` in `boot-restore.ts`).
+- `GET /api/ready` (new) reports 503 until the background chain completes.
+  `reconcileInstanceConfig` keeps its fail-fast `process.exit(1)`; it runs
+  before the ready flip, so a pod with a bad config dies NotReady and never
+  takes traffic.
+- Probes: startup + liveness stay on `/api/health` ("port bound"); the
+  startup window shrinks from 300s to 90s because pre-bind work is now only
+  DB connect + migrations + provider construction. Readiness moves to
+  `/api/ready`, so a pod still restoring holds traffic without being killed.
+
+Follow-ups recorded, not done here: lazy workspace refresh (take `git fetch`
+out of restore-time prep entirely) and sandbox disk-exhaustion hygiene.
+
 ## Non-goals
 
 - CI image publishing / remote clusters (follow-up when a prod cluster exists).
