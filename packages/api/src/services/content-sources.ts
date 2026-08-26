@@ -200,7 +200,12 @@ export async function createContentSource(
     repoFullName: parsed.repoFullName,
     ref: parsed.ref,
     subpath: parsed.subpath,
-    // Skills only until the source routes can open a kind per source.
+    // Skills only. The source routes open a kind per source, and workflows
+    // or templates need ADMIN authority over the owner first: push access to
+    // a tracked repository becomes authority to run tool nodes as that team
+    // or org (2026-08-24 workflows MVP design, decision 10). Threading a
+    // `kinds` input through this function without that gate is a privilege
+    // escalation.
     kinds: ["skills"],
     enabled: true,
     status: "pending",
