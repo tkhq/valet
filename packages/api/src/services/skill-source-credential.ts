@@ -64,11 +64,13 @@
  * and its 404 names what to do. It does not climb to the App to keep
  * working, and a public repository does not stop syncing.
  *
- * The two tokenless results differ so the 404 can:
+ * The tokenless results differ so the 404 can:
  *
  *   - `none`        — there is no credential to use.
  *   - `unavailable` — a credential exists but the server cannot read it, for
  *                     example after the encryption key changed.
+ *   - `missing_app` — an org source has no App installation that covers the
+ *                     repository. The 404 names installing the App.
  */
 import type { SkillSourceRow } from "../schema/index.js";
 import {
@@ -87,6 +89,9 @@ import {
 
 /** No credential to use. The read is anonymous. */
 const ANONYMOUS: SkillRepoCredential = { kind: "none" };
+
+/** Org source whose App install is missing or does not cover the repo. */
+const MISSING_APP: SkillRepoCredential = { kind: "missing_app" };
 
 /**
  * The credential this source may sync with. Never throws: a sync must not
@@ -121,7 +126,7 @@ export async function resolveSkillSourceCredential(
         repo: { owner, name: repoOf(source.repoFullName) },
       });
       return resolved.token === null
-        ? ANONYMOUS
+        ? MISSING_APP
         : { kind: "installation", token: resolved.token };
     }
 
@@ -159,7 +164,9 @@ export async function resolveSkillSourceCredential(
       ? { kind: "user", token: resolved.token, ownerScope }
       : { kind: "user", token: resolved.token, ownerScope, login: resolved.login };
   } catch (err) {
-    if (err instanceof GitHubAuthError) return ANONYMOUS;
+    if (err instanceof GitHubAuthError) {
+      return source.ownerType === "org" ? MISSING_APP : ANONYMOUS;
+    }
     // Only the message, and only to the server log. The source row is shown
     // to users, and an arbitrary error is not written for them to read.
     console.error(

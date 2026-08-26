@@ -685,7 +685,19 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
       .limit(1);
 
     if (existingById[0]) {
-      // Already managed — done.
+      // A prior boot can leave a never-synced config row past its claim
+      // lease. Mark it due so the sweep picks it up after reconcile.
+      const [existing] = await db
+        .select({ lastSyncedAt: skillSources.lastSyncedAt })
+        .from(skillSources)
+        .where(eq(skillSources.id, desiredId))
+        .limit(1);
+      if (existing && existing.lastSyncedAt === null) {
+        await db
+          .update(skillSources)
+          .set({ nextAttemptAt: now, updatedAt: now })
+          .where(eq(skillSources.id, desiredId));
+      }
       continue;
     }
 

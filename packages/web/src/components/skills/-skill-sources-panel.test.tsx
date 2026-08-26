@@ -43,6 +43,8 @@ const remove = vi.fn();
  * whole reason a page shows what it shows. */
 const listQuery = vi.fn();
 let addState = { isPending: false, error: null as Error | null };
+let syncState = { isPending: false, error: null as Error | null, data: undefined as { excluded: number; discovered: number } | undefined };
+let removeState = { isPending: false, error: null as Error | null };
 let teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" as const }] };
 
 vi.mock("~/api/skill-sources", () => ({
@@ -51,8 +53,8 @@ vi.mock("~/api/skill-sources", () => ({
     return { data: currentData, ...currentState };
   },
   useAddSkillSource: () => ({ mutate: add, ...addState }),
-  useSyncSkillSource: () => ({ mutate: sync, isPending: false }),
-  useRemoveSkillSource: () => ({ mutate: remove, isPending: false }),
+  useSyncSkillSource: () => ({ mutate: sync, ...syncState }),
+  useRemoveSkillSource: () => ({ mutate: remove, ...removeState }),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -127,6 +129,8 @@ describe("SkillSourcesPanel", () => {
     currentData = { sources: [], nextCursor: null };
     currentState = { isLoading: false, error: null };
     addState = { isPending: false, error: null };
+    syncState = { isPending: false, error: null, data: undefined };
+    removeState = { isPending: false, error: null };
     add.mockReset();
     sync.mockReset();
     remove.mockReset();
@@ -232,6 +236,34 @@ describe("SkillSourcesPanel", () => {
 
     expect(screen.getByText(/main/)).toBeTruthy();
     expect(screen.getByText(/agent\/skills/)).toBeTruthy();
+  });
+
+  it("shows the server error when an org Sync fails", () => {
+    syncState = {
+      isPending: false,
+      error: new Error(
+        "Install the GitHub App for this organization, or add the repository to the App installation, then sync again.",
+      ),
+      data: undefined,
+    };
+    currentData = {
+      sources: [source({ ownerType: "org", ownerId: "org1" })],
+      nextCursor: null,
+    };
+    renderPanel(PERSONAL, { owner: { type: "org", id: "org1" } });
+
+    expect(screen.getByText(/Install the GitHub App for this organization/)).toBeTruthy();
+  });
+
+  it("shows the server error when Remove fails", () => {
+    removeState = {
+      isPending: false,
+      error: new Error("Ask an org admin to remove this repository, then retry."),
+    };
+    currentData = { sources: [source()], nextCursor: null };
+    renderPanel();
+
+    expect(screen.getByText(/Ask an org admin to remove this repository/)).toBeTruthy();
   });
 
   it("shows the message from a failed sync", () => {

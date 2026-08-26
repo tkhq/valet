@@ -770,6 +770,25 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     expect(row.ownerType).toBe("org");
     expect(row.status).toBe("pending");
     expect(row.enabled).toBe(true);
+    expect(row.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("marks an existing never-synced config row due", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("owner/repo", "", "");
+    await db
+      .update(skillSources)
+      .set({ nextAttemptAt: Date.now() + 60_000 })
+      .where(eq(skillSources.id, id));
+
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    expect(row?.nextAttemptAt).toBeLessThanOrEqual(Date.now());
   });
 
   it("second run on same source is a no-op", async () => {
