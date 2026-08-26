@@ -13,7 +13,7 @@
  */
 import { Hono, type Context } from "hono";
 import { eq, inArray } from "drizzle-orm";
-import { dispatchCommand } from "@valet/engine";
+import { dispatchCommand, NotFoundError, ValidationError } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -451,6 +451,7 @@ export async function submitSessionPrompt(
   threadId?: string,
   attachments?: SendPromptRequest["attachments"],
   fileRefs?: SendPromptRequest["fileRefs"],
+  admission?: { queueMode?: "followup" | "steer"; promoteItemId?: string },
 ): Promise<SendPromptResponse | null> {
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -462,6 +463,18 @@ export async function submitSessionPrompt(
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+
+  if (admission?.promoteItemId) {
+    const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
+    await db
+      .update(agentSessions)
+      .set({ updatedAt: Date.now() })
+      .where(eq(agentSessions.id, row.id));
+    return {
+      messageId: receipt.queueItemId || null,
+      threadId: receipt.threadId,
+    };
+  }
 
   // Resolve file attachment refs. Consumption is atomic for the whole
   // batch: the loop is synchronous, so two concurrent submits can never
@@ -550,11 +563,14 @@ export async function submitSessionPrompt(
   try {
     receipt =
       outcome && outcome.kind === "execute"
-        ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
-        : await thread.submitPrompt(
-            withAttachments(promptText),
-            skillMetadata ? { metadata: skillMetadata } : {},
-          );
+        ? await engineSession.prompt(withAttachments(promptText), {
+            threadId: thread.id,
+            ...(admission?.queueMode ? { queueMode: admission.queueMode } : {}),
+          })
+        : await thread.submitPrompt(withAttachments(promptText), {
+            ...(admission?.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(skillMetadata ? { metadata: skillMetadata } : {}),
+          });
   } catch (err) {
     attachmentRefStore.restore(resolvedFileAttachments);
     throw err;
@@ -582,8 +598,18 @@ messagesRouter.post("/:id/messages", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!body.text || typeof body.text !== "string") {
+  const promoteItemId =
+    typeof body.promoteItemId === "string" && body.promoteItemId.length > 0
+      ? body.promoteItemId
+      : undefined;
+  if (!promoteItemId && (!body.text || typeof body.text !== "string")) {
     return c.json({ error: "text is required" }, 400);
+  }
+  if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "steer") {
+    return c.json(
+      { error: "queueMode must be 'followup' or 'steer'. Omit it to use the thread default." },
+      400,
+    );
   }
   if (body.attachments !== undefined) {
     const valid =
@@ -614,10 +640,14 @@ messagesRouter.post("/:id/messages", async (c) => {
     const resp = await submitSessionPrompt(
       c.var.providers,
       row,
-      body.text,
+      body.text ?? "",
       body.threadId,
       body.attachments,
       body.fileRefs,
+      {
+        ...(body.queueMode ? { queueMode: body.queueMode } : {}),
+        ...(promoteItemId ? { promoteItemId } : {}),
+      },
     );
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);
@@ -630,6 +660,17 @@ messagesRouter.post("/:id/messages", async (c) => {
         },
         400,
       );
+    }
+    if (err instanceof NotFoundError) {
+      return c.json(
+        {
+          error: "That queued message was not found. Send the message again.",
+        },
+        404,
+      );
+    }
+    if (err instanceof ValidationError) {
+      return c.json({ error: err.message }, 400);
     }
     throw err;
   }

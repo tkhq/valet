@@ -294,6 +294,12 @@ export interface PromptOptions {
   /** Idempotent admission key. Re-submitting the same dispatchId returns the existing submission. */
   dispatchId?: string;
   /**
+   * Promote this already-queued item into a steer instead of admitting a
+   * new prompt. Hosts pass it through `Thread.promoteQueuedItem`; it is
+   * not read by `submitPrompt`.
+   */
+  promoteItemId?: string;
+  /**
    * Set only by trusted host code (never by route handlers relaying raw
    * client input) when admitting a signal on behalf of another session —
    * child settlement, cross-orchestrator messaging, workflow dispatch. The

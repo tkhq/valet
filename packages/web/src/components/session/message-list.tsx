@@ -28,6 +28,7 @@ export function MessageList({
   threadId,
   onOpenChild,
   agentBusy = false,
+  pendingIds,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -43,6 +44,8 @@ export function MessageList({
    * token, and must not flash as a failure.
    */
   agentBusy?: boolean;
+  /** Engine queue item ids still waiting. Marks those user bubbles Queued. */
+  pendingIds?: string[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -121,6 +124,7 @@ export function MessageList({
               key={m.id}
               message={m}
               suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+              queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
             />
           ),
         )}

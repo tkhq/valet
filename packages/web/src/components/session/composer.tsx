@@ -54,12 +54,10 @@ import { useFileUpload } from "~/hooks/use-file-upload";
 /**
  * What the submit button does with the text in the composer.
  *
- * `steer` and `queue` are not interchangeable, and the difference is not the
- * client's to guess: the engine gives a user's own orchestrator the `steer`
- * queue mode and every other principal — a team orchestrator included — the
- * `followup` mode (`packages/api/src/engine/host.ts`). A "Steer" label on a
- * followup queue promises an interrupt that does not happen, so the label
- * comes from the live `queue.state` frame or falls back to `queue`.
+ * Mid-turn Enter queues (`followup`) even on a user orchestrator whose
+ * thread default is `steer`. A second Enter on an empty composer promotes
+ * that queued item into a steer. The engine thread default is left alone
+ * so Slack and other channels can still steer on first submit.
  */
 type SubmitAction = "send" | "steer" | "queue";
 
@@ -73,20 +71,19 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
  * One line of copy that tells the user what happens to the message. Shown
  * only while the agent works — while it is idle, "Send" needs no gloss.
  *
- * The steer wording is literal. A steer admission supersedes the running
- * submission and aborts the live agent run, then the claim loop starts the
- * new message (`Thread.handleSteerSupersession`). It does not append to the
- * turn that is already in flight.
+ * Mid-turn the first Enter queues. A second empty Enter promotes that
+ * queued item into a steer (`Thread.promoteQueuedItem`) so the same
+ * bubble becomes the new prompt. It does not POST the text again.
  */
 const ACTION_HINT: Record<SubmitAction, string> = {
   send: "",
-  steer: "Steer stops the current turn. The agent starts your message immediately.",
+  steer: "Queued. Press Enter again to interrupt the current turn.",
   queue: "The agent completes the current turn. Then it reads your message.",
 };
 
 const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
   send: "Send a message — Enter to send, Shift+Enter for a new line",
-  steer: "Steer the current turn — Enter to steer, Shift+Enter for a new line",
+  steer: "Press Enter to interrupt the current turn, or type a new queued message",
   queue: "Queue a message for after this turn — Enter to queue, Shift+Enter for a new line",
 };
 
@@ -247,6 +244,12 @@ export function Composer({
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
+  // The last followup this composer admitted while the agent was working.
+  // An empty Enter promotes that item; a new typed message queues another.
+  const [queuedFollowup, setQueuedFollowup] = useState<{
+    localId: string;
+    itemId: string;
+  } | null>(null);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -261,17 +264,25 @@ export function Composer({
   // there is something to abort.
   const working =
     (agentStatus !== "idle" && agentStatus !== "error") || queueBusy(queueState);
-  // `collect` also lands on `queue`: a collect-mode message waits for its
-  // window to close, so "after the current turn" stays true for it.
+  useEffect(() => {
+    if (!working) setQueuedFollowup(null);
+  }, [working]);
+  // Mid-turn: first Enter queues. After a self-queued item, an empty
+  // composer steers that item in place. New text queues another followup.
   const action: SubmitAction = !working
     ? "send"
-    : queueState?.mode === "steer"
+    : queuedFollowup && text.trim().length === 0
       ? "steer"
       : "queue";
   // A send with a still-uploading file would drop it (the ref does not
-  // exist yet), so the button waits for the uploads.
+  // exist yet), so the button waits for the uploads. Steer is the empty
+  // Enter that promotes the already-queued item, so it does not need text.
   const uploadsPending = files.some(isFileUploading);
-  const canSend = !send.isPending && !!threadId && text.trim().length > 0 && !uploadsPending;
+  const canSend =
+    !send.isPending &&
+    !!threadId &&
+    !uploadsPending &&
+    (action === "steer" || text.trim().length > 0);
   // An attachment alone cannot go out: the route requires text on the
   // prompt. Say so on the disabled button instead of leaving the user
   // guessing.
@@ -431,8 +442,30 @@ export function Composer({
   }
 
   async function submit() {
+    if (send.isPending || !threadId || uploadsPending) return;
+
+    // Empty Enter after a self-queued followup promotes that item. Do not
+    // POST the same text again — that would write a second user entry.
+    if (action === "steer" && queuedFollowup) {
+      try {
+        const res = await send.mutateAsync({
+          text: "",
+          threadId,
+          promoteItemId: queuedFollowup.itemId,
+        });
+        if (res.messageId && res.messageId !== queuedFollowup.itemId) {
+          setMessageQueueItemId(sessionId, queuedFollowup.localId, res.messageId);
+        }
+        setQueuedFollowup(null);
+      } catch {
+        // The optimistic bubble stays. The user can retry the promote or
+        // type a new message.
+      }
+      return;
+    }
+
     const t = text.trim();
-    if (!t || send.isPending || !threadId || uploadsPending) return;
+    if (!t) return;
     // Capture the draft slot at send time: the failure path below must
     // restore into the thread the message was written for, even if the
     // user switches threads while the POST is in flight.
@@ -458,13 +491,17 @@ export function Composer({
         threadId,
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
+        ...(working ? { queueMode: "followup" as const } : {}),
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of
       // falling back to a recency heuristic. Null for slash commands —
       // they never queue, so there is nothing to link.
-      if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
+      if (res.messageId) {
+        setMessageQueueItemId(sessionId, localId, res.messageId);
+        if (working) setQueuedFollowup({ localId, itemId: res.messageId });
+      }
       // Recency ranking for the command popup. Recorded only for a name the
       // registry knows, and only after the send succeeded — a typo or a
       // failed send is not a "use". Matched case-insensitively (dispatch
