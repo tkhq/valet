@@ -56,6 +56,16 @@ export function MessageList({
     return messages.filter((m) => m.threadId === threadId);
   }, [messages, threadId]);
 
+  // A thread switch starts at the bottom: the previous thread's scroll
+  // position must not decide whether the new thread auto-scrolls or shows
+  // the "Latest" button.
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    setScrolledAway(false);
+    const el = containerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [threadId]);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;

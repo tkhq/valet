@@ -115,8 +115,18 @@ export interface SessionStreamState {
    * so the header picker never shows a stale model.
    */
   modelSwitchNonce: number;
-  /** Last error message from the wire (if any). Cleared on successful turn_end. */
-  error?: { code: string; message: string };
+  /**
+   * Last wire error per thread. Wire `error` frames carry the originating
+   * threadId; keying by it keeps thread B's failure banner off thread A's
+   * view. Cleared per thread when that thread streams a new message or the
+   * user sends a new prompt on it — never by another thread's activity.
+   */
+  errorByThread: Record<string, { code: string; message: string }>;
+  /**
+   * A wire error with no threadId (e.g. `ws_open_failed`) — a session-level
+   * failure, shown whatever thread is active.
+   */
+  sessionError?: { code: string; message: string };
   /**
    * Ambient sandbox attachment status, mirroring the wire `sandbox.status`
    * frame. Session-scoped (no threadId). Undefined until the first event
@@ -203,6 +213,7 @@ const EMPTY: SessionStreamState = {
   conn: "idle",
   lastOffset: "",
   statusByThread: {},
+  errorByThread: {},
   messages: [],
   pendingGates: {},
   queueByThread: {},
@@ -246,15 +257,21 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // make an awaiting-approval card flicker out of view. The bootstrap
       // GET /decisions seeds them on first load; subsequent gates arrive
       // on the wire.
-      next.error = undefined;
+      next.errorByThread = {};
+      next.sessionError = undefined;
       next.statusByThread = {};
       return next;
     }
 
     case "message_start": {
-      // A new message is actually streaming — any error banner from a prior
-      // failed turn is stale now.
-      next.error = undefined;
+      // A new message is actually streaming on THIS thread — its own error
+      // banner from a prior failed turn is stale now. Only this thread's:
+      // another thread starting a turn says nothing about this one's
+      // failure, and orchestrator sessions stream on siblings constantly.
+      if (slice.errorByThread[ev.threadId]) {
+        const { [ev.threadId]: _, ...rest } = slice.errorByThread;
+        next.errorByThread = rest;
+      }
       // Any part still `streaming` on this thread belongs to a dead attempt
       // (zombie deltas from a superseded run are unfenced and can arrive
       // after its cleanup) — sweep before the new message begins.
@@ -435,26 +452,33 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // `streaming` (superseded attempt, dropped upgrade) is dead. Sweep it
       // and its scratch so zombie state cannot outlive the turn.
       sweepStreamingParts(next, ev.threadId);
-      // Deliberately KEEP `slice.error`: on a failed turn the engine emits
-      // `error` then `turn_end` within the same tick, so clearing here made
-      // the error banner flash for milliseconds and vanish — a failing turn
-      // (exhausted credits, bad key) looked like a silent empty reply. The
-      // error clears when a new message actually streams (`message_start`)
-      // or when the user sends a new prompt (`addUserMessage`).
+      // Deliberately KEEP the thread's error: on a failed turn the engine
+      // emits `error` then `turn_end` within the same tick, so clearing here
+      // made the error banner flash for milliseconds and vanish — a failing
+      // turn (exhausted credits, bad key) looked like a silent empty reply.
+      // The error clears when this thread streams a new message
+      // (`message_start`) or the user sends it a new prompt
+      // (`addUserMessage`).
       return next;
     }
 
     case "error": {
-      next.error = { code: ev.code, message: ev.message };
-      // Engine-originated errors name their thread; flip only that thread's
-      // badge. A session-level error (no threadId, e.g. `ws_open_failed`)
-      // keeps the banner but has no thread badge to flip.
+      // Engine-originated errors name their thread; store the banner and
+      // flip the badge for that thread only. A session-level error (no
+      // threadId, e.g. `ws_open_failed`) lands in `sessionError` and shows
+      // whatever thread is active.
       if (ev.threadId !== undefined) {
+        next.errorByThread = {
+          ...slice.errorByThread,
+          [ev.threadId]: { code: ev.code, message: ev.message },
+        };
         const prev = slice.statusByThread[ev.threadId];
         next.statusByThread = {
           ...slice.statusByThread,
           [ev.threadId]: { status: "error", turnStartedAt: prev?.turnStartedAt },
         };
+      } else {
+        next.sessionError = { code: ev.code, message: ev.message };
       }
       return next;
     }
@@ -667,12 +691,14 @@ export const useStreamStore = create<StreamStore>((set) => ({
         // overwrite this row with the server's canonical attachments field.
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
+      // A fresh prompt supersedes this thread's lingering error banner from
+      // the previous failed turn (see the `turn_end` reducer note). Other
+      // threads' errors stay.
+      const { [threadId]: _, ...errorByThread } = slice.errorByThread;
       return {
         bySession: {
           ...state.bySession,
-          // A fresh prompt supersedes any lingering error banner from the
-          // previous failed turn (see the `turn_end` reducer note).
-          [sessionId]: { ...slice, messages: [...slice.messages, message], error: undefined },
+          [sessionId]: { ...slice, messages: [...slice.messages, message], errorByThread },
         },
       };
     });
@@ -785,6 +811,22 @@ export function useThreadLiveStatus(
   return useStreamStore((s) => {
     if (!threadId) return IDLE_THREAD_STATUS;
     return s.bySession[sessionId]?.statusByThread[threadId] ?? IDLE_THREAD_STATUS;
+  });
+}
+
+/**
+ * The error banner for one thread: the thread's own error, or the
+ * session-level error (no threadId on the wire frame) which shows whatever
+ * thread is active. Undefined when neither exists.
+ */
+export function useErrorForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): { code: string; message: string } | undefined {
+  return useStreamStore((s) => {
+    const slice = s.bySession[sessionId];
+    if (!slice) return undefined;
+    return (threadId ? slice.errorByThread[threadId] : undefined) ?? slice.sessionError;
   });
 }
 

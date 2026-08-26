@@ -18,6 +18,7 @@ import {
   usePendingGateForThread,
   useQueueStateForThread,
   useThreadLiveStatus,
+  useErrorForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import {
@@ -134,6 +135,7 @@ export function SessionView({
   }, [sessionId, decisionsQ.data, setPendingGates]);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+  const threadError = useErrorForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
   // the same two signals the composer's Stop/Escape affordance uses: the
@@ -280,13 +282,25 @@ export function SessionView({
             onOpenChild={onOpenChild}
             agentBusy={agentBusy}
           />
-          {stream.error && (
+          {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
-              <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
+              <span className="font-medium">{threadError.code}:</span> {threadError.message}
             </div>
           )}
-          {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
-          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={threadStatus.status} />
+          {/* Keyed by gate id: the question input's draft must not carry
+              over when the pending gate changes (e.g. a thread switch to a
+              different pending gate). */}
+          {pendingGate && (
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+          )}
+          {/* Keyed by thread: a draft (text, images, files) typed for one
+              thread must not survive a switch and get sent to another. */}
+          <Composer
+            key={effectiveThreadId ?? "no-thread"}
+            sessionId={sessionId}
+            threadId={effectiveThreadId}
+            agentStatus={threadStatus.status}
+          />
         </PageDropTarget>
       ) : null}
     </div>

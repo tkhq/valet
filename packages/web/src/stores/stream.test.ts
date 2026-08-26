@@ -774,7 +774,10 @@ describe("turn error visibility", () => {
     });
 
     const slice = useStreamStore.getState().bySession[SESSION];
-    expect(slice.error).toEqual({ code: "run_failed", message: "400 credit balance too low" });
+    expect(slice.errorByThread[THREAD]).toEqual({
+      code: "run_failed",
+      message: "400 credit balance too low",
+    });
     expect(slice.statusByThread[THREAD]?.status).toBe("idle");
   });
 
@@ -782,14 +785,55 @@ describe("turn error visibility", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, errorEvent(1));
     ingest(SESSION, messageStart("m1", 2));
-    expect(useStreamStore.getState().bySession[SESSION].error).toBeUndefined();
+    expect(useStreamStore.getState().bySession[SESSION].errorByThread[THREAD]).toBeUndefined();
   });
 
   it("clears the error when the user sends a new prompt", () => {
     const { ingest, addUserMessage } = useStreamStore.getState();
     ingest(SESSION, errorEvent(1));
     addUserMessage(SESSION, "retry", THREAD);
-    expect(useStreamStore.getState().bySession[SESSION].error).toBeUndefined();
+    expect(useStreamStore.getState().bySession[SESSION].errorByThread[THREAD]).toBeUndefined();
+  });
+
+  it("keeps a thread's error when ANOTHER thread streams or the user prompts it", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    const OTHER = "thread-other";
+    ingest(SESSION, errorEvent(1));
+    // Another thread starts streaming — thread-1's error must survive.
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_start",
+      threadId: OTHER,
+      messageId: "m-other",
+      role: "assistant",
+    });
+    // The user prompts another thread — still must survive.
+    addUserMessage(SESSION, "hi", OTHER);
+    expect(useStreamStore.getState().bySession[SESSION].errorByThread[THREAD]).toEqual({
+      code: "run_failed",
+      message: "400 credit balance too low",
+    });
+  });
+
+  it("stores an error with no threadId as a session-level error", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "error",
+      code: "ws_open_failed",
+      message: "failed to open session stream",
+      recoverable: false,
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.sessionError).toEqual({
+      code: "ws_open_failed",
+      message: "failed to open session stream",
+    });
+    expect(slice.errorByThread).toEqual({});
   });
 });
 
