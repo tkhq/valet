@@ -775,7 +775,7 @@ describe("turn error visibility", () => {
 
     const slice = useStreamStore.getState().bySession[SESSION];
     expect(slice.error).toEqual({ code: "run_failed", message: "400 credit balance too low" });
-    expect(slice.agentStatus).toBe("idle");
+    expect(slice.statusByThread[THREAD]?.status).toBe("idle");
   });
 
   it("clears the error when a new message starts streaming", () => {
@@ -800,24 +800,28 @@ describe("turnStartedAt", () => {
     return { seq: ts, ts, type: "status", threadId: THREAD, status } as WireEvent;
   }
 
+  function threadStatus(threadId = THREAD) {
+    return useStreamStore.getState().bySession[SESSION].statusByThread[threadId];
+  }
+
   it("stamps turnStartedAt on the first non-idle status after idle", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, statusEvent("queued", 1000));
-    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(1000);
+    expect(threadStatus().turnStartedAt).toBe(1000);
   });
 
   it("does not re-stamp on a later non-idle status within the same turn", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, statusEvent("queued", 1000));
     ingest(SESSION, statusEvent("thinking", 2000));
-    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(1000);
+    expect(threadStatus().turnStartedAt).toBe(1000);
   });
 
   it("clears turnStartedAt on turn_end", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, statusEvent("queued", 1000));
     ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
-    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBeUndefined();
+    expect(threadStatus().turnStartedAt).toBeUndefined();
   });
 
   it("stamps again on the next turn after idle", () => {
@@ -825,7 +829,78 @@ describe("turnStartedAt", () => {
     ingest(SESSION, statusEvent("queued", 1000));
     ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
     ingest(SESSION, statusEvent("queued", 3000));
-    expect(useStreamStore.getState().bySession[SESSION].turnStartedAt).toBe(3000);
+    expect(threadStatus().turnStartedAt).toBe(3000);
+  });
+});
+
+describe("per-thread status scoping", () => {
+  beforeEach(reset);
+
+  const THREAD_B = "thread-b";
+
+  function statusEvent(threadId: string, status: "thinking" | "blocked_on_decision_gate" | "idle", ts: number): WireEvent {
+    return { seq: ts, ts, type: "status", threadId, status } as WireEvent;
+  }
+
+  it("a gate-blocked thread does not change another thread's status", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "blocked_on_decision_gate", 1000));
+    const byThread = useStreamStore.getState().bySession[SESSION].statusByThread;
+    expect(byThread[THREAD].status).toBe("blocked_on_decision_gate");
+    expect(byThread[THREAD_B]).toBeUndefined();
+  });
+
+  it("turn_end on one thread leaves the other thread's status alone", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "blocked_on_decision_gate", 1000));
+    ingest(SESSION, statusEvent(THREAD_B, "thinking", 2000));
+    ingest(SESSION, { seq: 3, ts: 3000, type: "turn_end", threadId: THREAD_B, reason: "end_turn" } as WireEvent);
+    const byThread = useStreamStore.getState().bySession[SESSION].statusByThread;
+    expect(byThread[THREAD].status).toBe("blocked_on_decision_gate");
+    expect(byThread[THREAD_B].status).toBe("idle");
+  });
+
+  it("an error frame flips only its own thread", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "thinking", 1000));
+    ingest(SESSION, {
+      seq: 2,
+      ts: 2000,
+      offset: offset(2),
+      type: "error",
+      threadId: THREAD_B,
+      code: "run_failed",
+      message: "boom",
+      recoverable: true,
+    });
+    const byThread = useStreamStore.getState().bySession[SESSION].statusByThread;
+    expect(byThread[THREAD].status).toBe("thinking");
+    expect(byThread[THREAD_B].status).toBe("error");
+  });
+
+  it("init clears every thread's transient status", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "blocked_on_decision_gate", 1000));
+    ingest(SESSION, statusEvent(THREAD_B, "thinking", 2000));
+    ingest(SESSION, {
+      seq: 3,
+      ts: 3000,
+      type: "init",
+      session: {
+        id: SESSION,
+        workspace: "/workspace",
+        status: "active",
+        runState: "idle",
+        createdAt: 0,
+        updatedAt: 0,
+        lastActivityAt: 0,
+        owner: { type: "user", id: "user-1" },
+        messageCount: 0,
+        profile: "headless",
+        docker: false,
+      },
+    });
+    expect(useStreamStore.getState().bySession[SESSION].statusByThread).toEqual({});
   });
 });
 

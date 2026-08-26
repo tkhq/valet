@@ -17,6 +17,7 @@ import {
   useStreamStore,
   usePendingGateForThread,
   useQueueStateForThread,
+  useThreadLiveStatus,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import {
@@ -139,8 +140,9 @@ export function SessionView({
   // live `status` events plus the durable queue state (which the WS
   // handshake seeds, so it survives a mid-turn page load or reconnect).
   const threadQueueState = useQueueStateForThread(sessionId, effectiveThreadId);
+  const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
   const agentBusy =
-    (stream.agentStatus !== "idle" && stream.agentStatus !== "error") ||
+    (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
 
   // Auto-title: fire whenever we see an assistant reply on either an
@@ -255,8 +257,8 @@ export function SessionView({
       ) : (
         <SessionHeader
           session={session.data}
-          agentStatus={stream.agentStatus}
-          turnStartedAt={stream.turnStartedAt}
+          agentStatus={threadStatus.status}
+          turnStartedAt={threadStatus.turnStartedAt}
           conn={stream.conn}
           sandbox={stream.sandbox}
           threadId={effectiveThreadId}
@@ -284,7 +286,7 @@ export function SessionView({
             </div>
           )}
           {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
-          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
+          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={threadStatus.status} />
         </PageDropTarget>
       ) : null}
     </div>

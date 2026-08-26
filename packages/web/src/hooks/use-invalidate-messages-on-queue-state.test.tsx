@@ -53,7 +53,7 @@ describe("useInvalidateMessagesOnQueueState", () => {
             ...(s.bySession[SESSION] ?? {
               conn: "open",
               lastOffset: "",
-              agentStatus: "idle",
+              statusByThread: {},
               messages: [],
               pendingGates: {},
             }),

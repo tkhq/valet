@@ -58,6 +58,24 @@ export interface StreamMessage extends Message {
   queueItemId?: string;
 }
 
+/**
+ * Live agent status for one thread. Wire `status`/`turn_end` frames carry a
+ * `threadId`; this is the per-thread slice they update.
+ */
+export interface ThreadLiveStatus {
+  /** Engine-reported agent status; mirrors the wire `status` event. */
+  status: AgentStatus;
+  /**
+   * Wire timestamp (`WireEvent.ts`) of the first non-idle `status` event in
+   * the current turn — server-stamped, not `Date.now()`, so it isn't thrown
+   * off by client clock skew. `undefined` while idle. Drives the elapsed-
+   * time counter on `AgentStatusBadge`; does not reset on an idle→non-idle
+   * status change WITHIN a turn (thinking → tool_calling → streaming), only
+   * on idle → non-idle.
+   */
+  turnStartedAt?: number;
+}
+
 export interface SessionStreamState {
   /** Whether the WS is currently open. */
   conn: ConnectionStatus;
@@ -70,17 +88,13 @@ export interface SessionStreamState {
    * reconnect, but durable offsets do.
    */
   lastOffset: string;
-  /** Engine-reported agent status; mirrors the wire `status` event. */
-  agentStatus: AgentStatus;
   /**
-   * Wire timestamp (`WireEvent.ts`) of the first non-idle `status` event in
-   * the current turn — server-stamped, not `Date.now()`, so it isn't thrown
-   * off by client clock skew. `undefined` while idle. Drives the elapsed-
-   * time counter on `AgentStatusBadge`; does not reset on an idle→non-idle
-   * status change WITHIN a turn (thinking → tool_calling → streaming), only
-   * on idle → non-idle.
+   * Per-thread agent status, keyed by threadId. Wire `status` frames carry
+   * the originating thread; keying by it keeps one thread's state (e.g.
+   * `blocked_on_decision_gate`) from painting the status badge on every
+   * other thread in the session. A thread with no entry is idle.
    */
-  turnStartedAt?: number;
+  statusByThread: Record<string, ThreadLiveStatus>;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
   messages: StreamMessage[];
   /**
@@ -188,7 +202,7 @@ export interface StreamStore {
 const EMPTY: SessionStreamState = {
   conn: "idle",
   lastOffset: "",
-  agentStatus: "idle",
+  statusByThread: {},
   messages: [],
   pendingGates: {},
   queueByThread: {},
@@ -233,8 +247,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // GET /decisions seeds them on first load; subsequent gates arrive
       // on the wire.
       next.error = undefined;
-      next.agentStatus = "idle";
-      next.turnStartedAt = undefined;
+      next.statusByThread = {};
       return next;
     }
 
@@ -405,14 +418,19 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "status": {
-      if (slice.agentStatus === "idle" && ev.status !== "idle") next.turnStartedAt = ev.ts;
-      next.agentStatus = ev.status;
+      const prev = slice.statusByThread[ev.threadId];
+      const wasIdle = prev === undefined || prev.status === "idle";
+      const turnStartedAt =
+        ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+      next.statusByThread = {
+        ...slice.statusByThread,
+        [ev.threadId]: { status: ev.status, turnStartedAt },
+      };
       return next;
     }
 
     case "turn_end": {
-      next.agentStatus = "idle";
-      next.turnStartedAt = undefined;
+      next.statusByThread = { ...slice.statusByThread, [ev.threadId]: { status: "idle" } };
       // No further tool activity can arrive for this turn — any part still
       // `streaming` (superseded attempt, dropped upgrade) is dead. Sweep it
       // and its scratch so zombie state cannot outlive the turn.
@@ -428,7 +446,16 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
 
     case "error": {
       next.error = { code: ev.code, message: ev.message };
-      next.agentStatus = "error";
+      // Engine-originated errors name their thread; flip only that thread's
+      // badge. A session-level error (no threadId, e.g. `ws_open_failed`)
+      // keeps the banner but has no thread badge to flip.
+      if (ev.threadId !== undefined) {
+        const prev = slice.statusByThread[ev.threadId];
+        next.statusByThread = {
+          ...slice.statusByThread,
+          [ev.threadId]: { status: "error", turnStartedAt: prev?.turnStartedAt },
+        };
+      }
       return next;
     }
 
@@ -738,6 +765,27 @@ export const useStreamStore = create<StreamStore>((set) => ({
 
 export function useSessionStream(sessionId: string): SessionStreamState {
   return useStreamStore((s) => s.bySession[sessionId] ?? EMPTY);
+}
+
+/**
+ * Stable idle value so the selector returns a referentially equal object for
+ * threads with no live status — zustand re-renders on identity change.
+ */
+const IDLE_THREAD_STATUS: ThreadLiveStatus = { status: "idle" };
+
+/**
+ * Live status for one thread, defaulting to idle. Undefined `threadId`
+ * (thread list still loading) also reads idle — the queue-state fallback in
+ * the consumers covers the connect-mid-turn window.
+ */
+export function useThreadLiveStatus(
+  sessionId: string,
+  threadId: string | undefined,
+): ThreadLiveStatus {
+  return useStreamStore((s) => {
+    if (!threadId) return IDLE_THREAD_STATUS;
+    return s.bySession[sessionId]?.statusByThread[threadId] ?? IDLE_THREAD_STATUS;
+  });
 }
 
 /**
