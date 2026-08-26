@@ -154,12 +154,10 @@ interface SchemaRepair {
  * `0000_app.sql`. Delete this list at 1.0, when numbered migrations take
  * over.
  *
- * Every entry must also be safe to ROLL BACK, because these repairs run on
- * a database the PREVIOUS release may boot again. Adding a column or a
- * table is safe: the older release ignores what it does not know. Renaming
- * or dropping is not — the older release repairs the OLD name, and its own
- * statement against a table that no longer exists stops its boot. Do not
- * rename or drop here.
+ * Every entry must also be safe to ROLL BACK: the previous release may boot
+ * this database again. Adding a column or a table is safe; renaming or
+ * dropping is not, because the older release repairs the OLD name and its
+ * statement then stops its boot. Do not rename or drop here.
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
@@ -187,9 +185,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text',
   },
   {
-    // Which content kinds a source collects. The DEFAULT backfills every
-    // pre-existing row to skills only, so a repository tracked before
-    // workflow sync existed keeps mirroring exactly what it mirrored.
+    // The DEFAULT backfills every pre-existing row to skills only, so a
+    // repository tracked before workflow sync existed keeps mirroring what it
+    // mirrored.
     describe: "skill_sources.kinds column",
     probe: { kind: "column", table: "skill_sources", column: "kinds" },
     sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,

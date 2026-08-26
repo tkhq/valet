@@ -717,13 +717,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
   });
 
-  // Repository content sync (agent-skills design). `readerFor` gives each
-  // source the GitHub credential its OWNER holds, so a private repository
-  // syncs without letting a source borrow reach it does not have — the rule
-  // is in `services/content-source-credential.ts`. A source with no resolvable
-  // credential falls back to the anonymous `reader`, which is what every
-  // public repository uses. `start()`/`stop()` are called from `main.ts`
-  // alongside the other loops.
+  // Repository content sync. `readerFor` gives each source the GitHub
+  // credential its OWNER holds, so a source cannot borrow reach it does not
+  // have; the rule is in `services/content-source-credential.ts`. With no
+  // resolvable credential it falls back to the anonymous `reader`.
   const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader(),

@@ -904,12 +904,9 @@ export const skills = pgTable(
   ],
 );
 
-/**
- * What one tracked repository mirrors. `skills` is the kind that ships;
- * `workflows` and `templates` are the kinds the 2026-08-24 workflows MVP
- * design adds on the same rail
- * (`docs/specs/2026-08-24-workflows-mvp-design.md`, decision 1).
- */
+/** What one tracked repository mirrors. `skills` is the kind that ships; the
+ * other two join the same rail
+ * (`docs/specs/2026-08-24-workflows-mvp-design.md`). */
 export type ContentKind = "skills" | "workflows" | "templates";
 
 // One tracked repository. A `repo`-origin row in `skills` above is a MIRROR
@@ -921,10 +918,9 @@ export type ContentKind = "skills" | "workflows" | "templates";
 // assembled skill on its way into a session. In prose here, "content source"
 // always means the tracked repository.
 //
-// `kinds` says which content the sync collects from the repository. One
-// collector per kind reads the same tree, so a repository tracked for two
-// kinds still costs one head-commit read per poll — see
-// `services/content-sync/collector.ts`.
+// `kinds` says which content the sync collects. One collector per kind reads
+// the same tree, so a repository tracked for two kinds still costs one
+// head-commit read per poll — see `services/content-sync/collector.ts`.
 //
 // `ref` empty means the repository's default branch. `subpath` empty means
 // the repository root. Both are part of the UNIQUE key, so one repository can
@@ -943,13 +939,9 @@ export type ContentKind = "skills" | "workflows" | "templates";
 // reader: the failure for `status='error'`, and the per-file warnings for
 // `status='warning'` (a sync that succeeded but skipped a malformed file).
 //
-// The SQL name is `skill_sources`, and its three indexes keep the same
-// prefix. The name predates the content-sync generalization and stays,
-// because renaming a table costs the rollback path: the release before this
-// one repairs `skill_sources` by name at boot, so a database carrying the
-// new name crash-loops the api it is rolled back onto. A physical name
-// nobody sees is not worth that, and the TypeScript name says what the
-// table now holds.
+// The SQL name stays `skill_sources`, and so do its three indexes. The
+// release before this one repairs `skill_sources` by name at boot, so a
+// rename would crash-loop the api a rollback lands on.
 export const contentSources = pgTable(
   "skill_sources",
   {
@@ -970,8 +962,8 @@ export const contentSources = pgTable(
     /** Narrows the scan to one directory. Empty scans the whole repository,
      * which is the normal case. */
     subpath: text("subpath").notNull().default(""),
-    /** The content kinds this source collects. Defaults to skills only, so
-     * every row written before workflow sync existed keeps its behavior. */
+    /** Defaults to skills only, so every row written before workflow sync
+     * existed keeps its behavior. */
     kinds: jsonb("kinds").notNull().default(["skills"]).$type<ContentKind[]>(),
     enabled: boolean("enabled").notNull().default(true),
     status: text("status", { enum: ["pending", "ok", "warning", "error"] })

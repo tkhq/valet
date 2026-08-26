@@ -35,8 +35,8 @@
  * Read the other way, one mapper edit deprovisions every user of the
  * deployment on their next login. This repo shipped that failure once
  * already, in the skill sync, where a truncated directory listing read as
- * "everything was deleted upstream" (`content-sync/service.ts`, "A transport failure
- * is different").
+ * "everything was deleted upstream" (`content-sync/service.ts`, "What a fault
+ * may do").
  *
  * Keycloak drops the group claim for a user who is in no groups (measured
  * on 26.2), so "in no groups" and "no mapper" arrive identical. A second

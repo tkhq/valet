@@ -1,24 +1,18 @@
 /**
  * The skills collector — every rule that is true of skills and of nothing
- * else. `services/content-sync/service.ts` runs the sweep around it and holds
- * no skill rule at all. That file also states, once, the rules every
- * collector holds to: what a transport failure, a file the sync could not
- * read, a narrowed scan, and a delete may each do. Read it first.
+ * else. `content-sync/service.ts` runs the sweep around it and states the
+ * rules every collector holds to; read it first.
+ * `services/skill-discovery.ts` holds the rules about which tree path is a
+ * skill.
  *
- * One recursive tree read finds every `SKILL.md` in the repository, at any
- * depth. `services/skill-discovery.ts` holds the rules about which of those
- * paths is a skill, and its file comment is where they are explained.
+ * `walkDirectory` is the narrow fallback for a repository whose tree GitHub
+ * cuts: list the configured subdirectory, read
+ * `<subdirectory>/<entry>/SKILL.md` under each directory in it, then list
+ * `<subdirectory>/prompts`. One level, one directory, one request per
+ * candidate.
  *
- * `walkDirectory` is the pre-tree discovery path: list the configured
- * subdirectory, read `<subdirectory>/<entry>/SKILL.md` under each directory
- * in it, then list `<subdirectory>/prompts`. It finds strictly less than the
- * tree read — one level, one directory — and costs one request per candidate
- * directory. It stays for one case: a repository with more than 100,000
- * files, where GitHub cuts the tree read.
- *
- * One skill rule has no counterpart on the rail. A name the owner already
- * holds is a per-skill warning, not a failure, and the skill already there is
- * left alone — the same answer a malformed `SKILL.md` gets.
+ * One skill rule has no counterpart on the rail: a name the owner already
+ * holds is a per-skill warning, and the skill already there is left alone.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -64,10 +58,8 @@ export class SkillCollector implements ContentCollector {
 
   async walkDirectory({ source, headSha, reader }: CollectorWalkContext): Promise<CollectorPass> {
     const listing = await reader.listDirectory(source.repoFullName, source.subpath, headSha);
-    // A partial listing must fail here, before reconcile reads it as a
-    // delete list. `complete: false` says the listing holds fewer entries
-    // than the directory does, and every entry past the cut would look
-    // deleted.
+    // A partial listing must fail before reconcile reads it as a delete list:
+    // every entry past the cut would look deleted.
     if (!listing.complete) {
       throw new SkillRepoListingTruncatedError(source.repoFullName, source.subpath);
     }
@@ -77,26 +69,21 @@ export class SkillCollector implements ContentCollector {
     for (const dir of listing.entries) {
       if (dir.type !== "dir") continue;
       const path = joinPath(source.subpath, dir.name, SKILL_FILE);
-      // A read fault here propagates and fails the whole sync. Only "the
-      // file is not there" (null) is a normal answer, and it means the
-      // directory is not a skill.
+      // A read fault fails the whole sync. Only null ("not there") is normal,
+      // and it means the directory is not a skill.
       const file = await reader.readFile(source.repoFullName, path, headSha);
       if (file === null) continue;
       candidates.push({ name: dir.name, path, blobSha: file.blobSha, kind: "skill" });
       text.set(path, file.text);
     }
 
-    // Scan the `prompts/` directory. A 404 (no such directory) is normal and
-    // produces zero prompt entries. Any other read fault propagates and fails
-    // the whole sync, the same way a SKILL.md read fault does.
     const promptsDir = joinPath(source.subpath, PROMPTS_DIR);
     let promptListing;
     try {
       promptListing = await reader.listDirectory(source.repoFullName, promptsDir, headSha);
     } catch (err) {
-      // SkillRepoNotFoundError means the prompts/ directory does not exist —
-      // zero prompt entries, not a failure. SkillRepoReadError wraps other
-      // non-404 responses, which ARE transport failures and must propagate.
+      // A missing `prompts/` directory is normal and yields zero entries. Any
+      // other read fault is a transport failure and must propagate.
       if (!(err instanceof SkillRepoNotFoundError)) throw err;
       promptListing = null;
     }
@@ -116,8 +103,8 @@ export class SkillCollector implements ContentCollector {
       }
     }
 
-    // The same collision rule as the tree path, so the two paths never
-    // disagree about which of two same-named files is a skill.
+    // The same collision rule as the tree path, so the two never disagree
+    // about which of two same-named files is a skill.
     const resolved = resolveNameCollisions(candidates);
     return new SkillPass(
       { ...resolved, discovered: candidates.length, excludedCandidates: [] },
@@ -134,9 +121,8 @@ interface SkillDiscovery {
   reservedNames: Set<string>;
   warnings: string[];
   discovered: number;
-  /** Files that are `SKILL.md` or `prompts/*.md` and sit under a directory
-   * the scan skips. Carried as candidates, not a count, so reconcile can test
-   * their names against the rows this source mirrors. */
+  /** Candidates under a directory the scan skips. Carried whole, not counted,
+   * so reconcile can test their names against the rows this source mirrors. */
   excludedCandidates: SkillCandidate[];
 }
 
@@ -170,13 +156,12 @@ class SkillPass implements CollectorPass {
         skillEntries.push(entry);
       }
     }
-    // Skills first, then prompts. Reconcile reads them in that order, so a
+    // Skills first, then prompts: reconcile reads them in that order, so a
     // skill directory wins the owner's name and a same-named prompt file
-    // reports the collision rather than overwriting the row.
+    // reports the collision instead of overwriting the row.
     this.readEntries = [...skillEntries, ...promptEntries];
-    // The hash input sorts each group by name, so the same commit produces
-    // the same hash however GitHub ordered the tree, and a tree read and a
-    // directory walk agree on a file they both found.
+    // Sorted per group, so the same commit hashes the same however GitHub
+    // ordered the tree, and a tree read and a walk agree on a shared file.
     this.manifestEntries = [...byName(skillEntries), ...byName(promptEntries)];
     this.promptNames = promptNames;
     this.reservedNames = found.reservedNames;
@@ -194,28 +179,14 @@ class SkillPass implements CollectorPass {
    * Brings this source's mirrored skills in line with what the commit holds.
    *
    * The delete is a set reconcile over the names the repository still holds,
-   * scoped to `source_id` AND `origin='repo'`. A directory that failed
-   * validation stays in that set: it is still upstream, so its previous row
-   * is kept rather than deleted on the strength of a typo in its frontmatter.
-   * `reservedNames` is in the set for the same reason: a name two files now
-   * claim is still a name the repository holds.
+   * scoped to `source_id` AND `origin='repo'`. A file that failed validation
+   * and a name two files now claim both stay in that set: they are still
+   * upstream, so their rows survive a typo in frontmatter.
    *
-   * ## A delete needs a listing as wide as the one that imported
-   *
-   * "Absent from this scan" only means "deleted upstream" when this scan
-   * looked everywhere the last one did. Two things narrow a scan, and both
-   * are handled here rather than left to read as deletions:
-   *
-   *   - The directory walk. It runs only when GitHub cut the tree, and it
-   *     sees ONE level under ONE directory, where the tree saw the whole
-   *     repository at any depth. A skill the tree imported from
-   *     `<dir>/team/escalate/SKILL.md` is invisible to the walk, so the walk
-   *     never deletes: it imports and updates, and reports what it kept.
-   *   - The exclusion rule. A file that moved under an excluded directory
-   *     stops being a candidate, which is indistinguishable from the file
-   *     being deleted. An excluded name that this source already mirrors
-   *     keeps its row and warns, because the rule can be wrong and a wrong
-   *     rule must not destroy a skill.
+   * Two things narrow a scan, and neither may read as a delete: the directory
+   * walk, which sees one level under one directory where the tree saw every
+   * depth; and the exclusion rule, which can be wrong and must not destroy a
+   * skill. Both keep the row and report it.
    */
   async reconcile(ctx: CollectorReconcileContext): Promise<CollectorReconcileResult> {
     const { db, source, text } = ctx;
@@ -233,17 +204,10 @@ class SkillPass implements CollectorPass {
     let imported = 0;
     let updated = 0;
 
-    // An excluded candidate is still a file the repository holds. When its
-    // name is one this source mirrors AND the live scan did not find that
-    // name anywhere else, the exclusion rule is what took the skill away, so
-    // the name stays upstream and the row survives. The warning names the
-    // path, because the person reading it is the only one who can say
-    // whether that path is a real skill or a downloaded copy.
-    //
-    // A name the scan DID find needs neither: the skill is imported from its
-    // real path, and the excluded file is the copy. Warning about it would
-    // put a standing false alarm on every source whose repository vendors a
-    // skill of the same name.
+    // An excluded candidate is still a file the repository holds. A name this
+    // source mirrors that the live scan found nowhere else was taken away by
+    // the exclusion rule, so the name stays upstream and the row survives. A
+    // name the scan DID find needs no warning: the excluded file is the copy.
     for (const candidate of this.excludedCandidates) {
       if (!byRowName.has(candidate.name) || upstream.has(candidate.name)) continue;
       upstream.add(candidate.name);
@@ -253,18 +217,16 @@ class SkillPass implements CollectorPass {
     }
 
     for (const entry of this.readEntries) {
-      // Content is keyed by PATH to prevent a same-named skill directory and
-      // prompt file from silently overwriting each other in the map.
+      // Keyed by PATH, so a same-named skill directory and prompt file cannot
+      // overwrite each other.
       const raw = text.get(entry.path);
       if (raw === undefined) continue;
       const isPrompt = this.promptNames.has(entry.name);
       const parsed = isPrompt ? parsePromptFile(raw, entry.name) : parseSkillFile(raw, entry.name);
       if (parsed.violations.length > 0) {
         warnings.push(`${entry.name}: ${parsed.violations.map((v) => v.message).join(" ")}`);
-        // An advisory violation is reported but does not stop the mirror.
-        // Nobody here can edit the upstream repository, so refusing the
-        // skill would only make the corpus incomplete. An error means the
-        // skill is broken or unfindable, and that one is skipped.
+        // An advisory violation is reported and still mirrors: nobody here can
+        // edit the upstream repository. An error skips the file.
         if (!isLoadable(parsed.violations)) continue;
       }
       const row = byRowName.get(entry.name);
@@ -286,10 +248,8 @@ class SkillPass implements CollectorPass {
     }
 
     const stale = existing.filter((row) => !upstream.has(row.name));
-    // The directory walk is narrower than the tree read that mirrored these
-    // rows, so its absences prove nothing. A stale mirror is recoverable —
-    // the next sync on a tree that fits deletes what is really gone — and a
-    // deleted skill is not.
+    // The walk is narrower than the tree read that mirrored these rows, so its
+    // absences prove nothing. A stale mirror is recoverable; a delete is not.
     if (ctx.discovery === "directory-walk") {
       return {
         imported,
@@ -300,9 +260,8 @@ class SkillPass implements CollectorPass {
       };
     }
     if (stale.length > 0) {
-      // Scoped by source AND origin a second time: this delete must stay off
-      // a local skill and off another source's rows even if the id list were
-      // ever computed wrong.
+      // Scoped by source AND origin a second time, so this delete stays off a
+      // local skill and off another source's rows even if the ids were wrong.
       await db
         .delete(skills)
         .where(
@@ -320,38 +279,14 @@ class SkillPass implements CollectorPass {
   }
 
   /**
-   * What this pass needs to say about the REPOSITORY, as distinct from
-   * `warnings`, which is one line per skill. Null when there is nothing to
-   * say. Several lines when several apply.
+   * What this pass says about the REPOSITORY, as distinct from `warnings`,
+   * which is one line per skill. Null when there is nothing to say.
    *
-   * Two things go here.
-   *
-   * ## A sync that imported nothing
-   *
-   * Three outcomes used to look the same on the row, and only one of them is
-   * the person's own doing. So each names a different action:
-   *
-   *   - candidates exist, and every one sits under a directory Valet does not
-   *     scan — the fix is to name that directory;
-   *   - no candidate at all under a configured subdirectory — the subdirectory
-   *     is probably wrong, and removing it scans everything;
-   *   - no candidate anywhere in the repository — the repository holds no
-   *     skill, or the branch is wrong.
-   *
-   * Each of those also names how many mirrored skills the sync just deleted,
-   * when it deleted any. The count is the part the reader acts on: advice to
-   * re-import is no use if it arrives without saying that the skills are gone.
-   *
-   * A repository that DID yield candidates gets no line here even when every
-   * one of them failed validation, because those skills each carry their own
-   * warning and a second message about the repository would hide them.
-   *
-   * ## A scan that could not cover the repository
-   *
-   * The directory walk runs on a repository too large for one tree read, and
-   * it applies no deletions (see `reconcile`). That is a standing limitation
-   * of that source, not a one-off, so it is reported on every sync that uses
-   * the walk — a source whose deletions never apply must not look healthy.
+   * Two things go here. A sync that found no candidate at all names the fix
+   * for each of the three reasons, and names how many mirrored skills it just
+   * deleted. And a scan that used the directory walk says so on EVERY sync
+   * that uses it: the walk applies no deletions, and a source whose deletions
+   * never apply must not look healthy.
    */
   notice(ctx: CollectorNoticeContext): string | null {
     const { source } = ctx;
@@ -421,9 +356,9 @@ async function insertMirror(
     await db.insert(skills).values(row);
     return true;
   } catch (err) {
-    // `skills_owner_name` is the only unique index, so a violation is a
-    // name this owner already holds — a local skill, or another source's
-    // mirror. Neither may be overwritten from here.
+    // `skills_owner_name` is the only unique index, so a violation is a name
+    // this owner already holds — a local skill, or another source's mirror.
+    // Neither may be overwritten from here.
     if (isPgUniqueViolation(err)) return false;
     throw err;
   }
@@ -467,9 +402,8 @@ interface ParsedSkillFile {
 
 /**
  * Parses one `SKILL.md` and checks it against the spec WITHOUT throwing.
- * `loadSkillFromMarkdown` throws, which is right for the skills we ship and
- * wrong for a third party's repository, so this calls the validator directly
- * — the split the validator was written for.
+ * `loadSkillFromMarkdown` throws, which is wrong for a third party's
+ * repository, so this calls the validator directly.
  */
 function parseSkillFile(raw: string, directoryName: string): ParsedSkillFile {
   const parsed = parseMarkdownArtifact(raw);
@@ -496,30 +430,20 @@ function parseSkillFile(raw: string, directoryName: string): ParsedSkillFile {
 }
 
 /**
- * Parses one `prompts/<name>.md` file. Prompt files differ from `SKILL.md`
- * in three ways:
- *
- * 1. `name` is the filename stem, never a frontmatter field.
- * 2. `invocation` defaults to `"prompt"` when absent. `"context"` is the only
- *    other valid value; any other value is an error violation and the file is
- *    skipped.
- * 3. `description` is optional (the spec requires it for SKILL.md; prompts
- *    may omit it).
- *
- * Name validation reuses `validateSkillFrontmatter` but only the `name` field
- * matters — the description-missing violation is suppressed for prompts.
+ * Parses one `prompts/<name>.md`. It differs from `SKILL.md`: `name` is the
+ * filename stem and never a frontmatter field; `invocation` defaults to
+ * `"prompt"` and takes only `"context"` beside it, any other value being an
+ * error that skips the file; and `description` is optional.
  */
 function parsePromptFile(raw: string, fileName: string): ParsedSkillFile {
   const parsed = parseMarkdownArtifact(raw);
 
-  // Validate the name (from the filename) via the skill spec, but skip the
-  // description check — prompts may omit it.
+  // Prompts may omit `description`, so that violation is dropped.
   const nameViolations = validateSkillFrontmatter(
     { name: fileName, description: "placeholder" },
     { directoryName: fileName },
   ).filter((v) => v.field !== "description");
 
-  // Also reject reserved builtin names.
   if ((BUILTIN_COMMAND_NAMES as readonly string[]).includes(fileName)) {
     nameViolations.push({
       field: "name",
@@ -528,7 +452,6 @@ function parsePromptFile(raw: string, fileName: string): ParsedSkillFile {
     });
   }
 
-  // Validate the invocation field.
   const rawInvocation = parsed.frontmatter.invocation;
   const invocationViolations: SkillSpecViolation[] = [];
   let invocation: "prompt" | "context" = "prompt";
@@ -544,10 +467,8 @@ function parsePromptFile(raw: string, fileName: string): ParsedSkillFile {
     });
   }
 
-  // Only set the resolved `invocation` when it is valid. When the raw value
-  // was invalid, `invocationViolations` carries an error and the file will be
-  // skipped — the frontmatter is never persisted, but returning a misleading
-  // value is still confusing to callers and tests.
+  // Set the resolved `invocation` only when it is valid: an invalid one is
+  // skipped anyway, and returning a value it never had misleads the caller.
   const frontmatter: Record<string, unknown> = {
     ...parsed.frontmatter,
     name: fileName,

@@ -2,12 +2,10 @@
  * Tracked repositories — CRUD over the `skill_sources` table, plus the
  * parsing that turns a pasted repository address into one row.
  *
- * A source is a subscription to a GitHub repository. `kinds` says what the
- * sync collects from it; a skills source expects the Agent Skills layout
- * (`<root>/<skill-name>/SKILL.md`). The repository is authoritative:
- * `services/content-sync/service.ts` is the only writer of the
- * `origin='repo'` rows a source carries, and deleting a source deletes them,
- * because a mirror has no existence apart from what it mirrors.
+ * A source is a subscription to a GitHub repository, and `kinds` says what the
+ * sync collects from it. The repository is authoritative:
+ * `services/content-sync/service.ts` is the only writer of the `origin='repo'`
+ * rows a source carries, and deleting a source deletes them.
  *
  * Access follows `services/skills.ts`: your own rows plus the rows of every
  * team you belong to, plus org-library rows every member can read. A row
@@ -31,10 +29,8 @@ const SEGMENT = /^[A-Za-z0-9._-]+$/;
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
 
 /** Thrown when the pasted repository address is not one this can track.
- *
- * `code` still reads `skill_source_*` on both errors below. It is the wire
- * contract `routes/skills.ts` answers with and the web client reads, so it
- * does not move with the table. */
+ * `code` keeps its `skill_source_*` value here and below: it is the wire
+ * contract the web client reads, so it does not move with the table. */
 export class ContentSourceInputError extends Error {
   readonly code = "skill_source_invalid";
   readonly statusCode = 400;
@@ -54,10 +50,8 @@ export class ContentSourceConflictError extends Error {
   }
 }
 
-/** The `skillsrc_` prefix predates the content-sync generalization and
- * stays. Ids are persisted, `services/config-reconcile.ts` matches on the
- * prefix, and a new prefix would split one table's ids into two shapes for
- * no gain. */
+/** The `skillsrc_` prefix stays: ids are persisted, and
+ * `services/config-reconcile.ts` matches on it. */
 export function newContentSourceId(): string {
   return `skillsrc_${randomUUID()}`;
 }
@@ -206,9 +200,7 @@ export async function createContentSource(
     repoFullName: parsed.repoFullName,
     ref: parsed.ref,
     subpath: parsed.subpath,
-    // Skills only. Workflow and template collection is opened per source by
-    // the source routes, and it needs authority over the owner first
-    // (2026-08-24 workflows MVP design, decision 10).
+    // Skills only until the source routes can open a kind per source.
     kinds: ["skills"],
     enabled: true,
     status: "pending",

@@ -94,9 +94,8 @@ export interface Providers {
   /** Cron-driven workflow run starts. `start()`/`stop()` from main.ts. */
   workflowScheduler: WorkflowScheduler;
   /** Repository content sync (`services/content-sync/service.ts`) —
-   * `start()`/`stop()` from main.ts. `routes/skills.ts` calls its `syncOnce`
-   * for the create and "sync now" routes, so there is one sync
-   * implementation. */
+   * `start()`/`stop()` from main.ts. `routes/skills.ts` calls the same
+   * `syncOnce` for its create and "sync now" routes. */
   contentSync: ContentSyncService;
   /** Per-workflow in-memory limiter for the public webhook-trigger route
    * (`routes/workflow-hooks.ts`, overhaul design decision 5) — single-

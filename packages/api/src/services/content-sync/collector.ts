@@ -1,30 +1,14 @@
 /**
- * The seam between the generic repository sync rail and the rules of one
- * content kind.
+ * The seam between the generic sync rail (`content-sync/service.ts`) and the
+ * rules of one content kind. The rail owns credentials, the two compares, the
+ * tree read, the file reads, the claim loop, and the retry ladder, and no rule
+ * about `SKILL.md` or about any table a mirror lands in. Read it before you
+ * write a collector: it states the rules every collector holds to.
  *
- * `services/content-sync/service.ts` owns everything that is true of every
- * kind: which credential the source reads with, the two cheap compares, the
- * one tree read, the file-body reads, the claim loop, and the retry ladder.
- * It knows nothing about `SKILL.md`, about a workflow envelope, or about any
- * table a mirror lands in. A `ContentCollector` holds all of that.
- *
- * That file also states, once, the rules every collector holds to: what a
- * transport failure, a file the sync could not read, a narrowed scan, and a
- * delete may each do. Read it before you write a collector.
- *
- * ## Why discovery returns an object and not plain data
- *
- * `discover` returns a `CollectorPass`: what this collector found at this
- * commit, WITH the writes bound to it. A pass carries the per-kind detail the
- * sweep must not see — which of two same-named files won, which names are
- * reserved, which candidates an exclusion rule dropped — and exposes only the
- * counts and entries the sweep itself needs.
- *
- * The alternative was a plain manifest plus `collector.reconcile(manifest)`.
- * It types worse and it is easy to get wrong: with several collectors in one
- * sweep, nothing stops one collector's manifest reaching another collector's
- * reconcile. Binding the two at discovery makes that unrepresentable, with no
- * generic parameter and no cast.
+ * `discover` returns a `CollectorPass` — what the collector found at this
+ * commit, WITH the writes bound to it. A plain manifest plus
+ * `collector.reconcile(manifest)` would let one collector's manifest reach
+ * another collector's reconcile; binding the two makes that unrepresentable.
  */
 import { createHash } from "node:crypto";
 import type { AppDb } from "../../lib/drizzle.js";
@@ -32,18 +16,18 @@ import type { ContentKind, ContentSourceRow } from "../../schema/index.js";
 import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
 
 /** One tracked file as the repository holds it. `name` comes from the PATH,
- * because it is the only identity available before the file body is read. */
+ * the only identity available before the body is read. */
 export interface ContentManifestEntry {
   name: string;
   path: string;
-  /** Git blob sha. Named for what it is, because a mirrored row's own
-   * `content_sha` is a different hash over a different thing. The tree read
-   * carries this one, so the manifest compare runs before any body is read. */
+  /** Git blob sha, carried by the tree read, so the manifest compare runs
+   * before any body is read. Not a mirrored row's `content_sha`, which hashes
+   * something else. */
   blobSha: string;
 }
 
-/** How discovery found the files. `directory-walk` says GitHub cut the tree
- * and the sync fell back to listing the configured subdirectory, which finds
+/** How discovery found the files. `directory-walk` means GitHub cut the tree
+ * and the sync listed the configured subdirectory instead, which finds
  * strictly less: one level, one directory. */
 export type ContentDiscoveryMode = "tree" | "directory-walk";
 
@@ -54,8 +38,7 @@ export interface CollectorDiscoverContext {
 }
 
 /** The narrower fallback, for a commit whose tree GitHub cut. The reader is
- * passed in rather than read from the service, so every read in one sync
- * carries the credential that sync resolved. */
+ * passed in so every read of one sync carries that sync's credential. */
 export interface CollectorWalkContext {
   source: ContentSourceRow;
   headSha: string;
@@ -65,12 +48,12 @@ export interface CollectorWalkContext {
 export interface CollectorReconcileContext {
   db: AppDb;
   source: ContentSourceRow;
-  /** The body of every file this pass asked for, keyed by PATH. Keyed by
-   * path and never by name, so two same-named files of different kinds
-   * cannot overwrite each other. */
+  /** The body of every file this pass asked for, keyed by PATH and never by
+   * name, so two same-named files of different kinds cannot overwrite each
+   * other. */
   text: Map<string, string>;
   discovery: ContentDiscoveryMode;
-  /** Injected clock, so a test can drive a deterministic schedule. */
+  /** Injected clock, for a deterministic test schedule. */
   now: () => number;
 }
 
@@ -85,11 +68,9 @@ export interface CollectorReconcileResult {
   warnings: string[];
 }
 
-/** What one pass needs to write its message about the REPOSITORY. The two
- * counts are THIS pass's own, from the `CollectorReconcileResult` it
- * returned, and never the sweep's total — otherwise a sync that deleted one
- * workflow would tell the reader it deleted one skill. Both read zero and
- * empty for a poll that stopped at a compare and reconciled nothing. */
+/** What one pass needs to write its message about the REPOSITORY. The counts
+ * are THIS pass's own and never the sweep's total, or a sync that deleted one
+ * workflow would report it as a deleted skill. */
 export interface CollectorNoticeContext {
   source: ContentSourceRow;
   discovery: ContentDiscoveryMode;
@@ -97,33 +78,29 @@ export interface CollectorNoticeContext {
   keptStale: string[];
 }
 
-/**
- * One collector's work for ONE commit: what discovery found, and the writes
- * bound to it.
- */
+/** One collector's work for ONE commit: discovery, and the writes bound to it. */
 export interface CollectorPass {
   readonly kind: ContentKind;
   /** Files whose bodies reconcile needs, in the order reconcile wants them. */
   readonly readEntries: ContentManifestEntry[];
   /** The same files in canonical order — the manifest-hash input. Canonical
-   * means the order does not depend on how GitHub listed the tree. */
+   * means independent of how GitHub listed the tree. */
   readonly manifestEntries: ContentManifestEntry[];
-  /** Bodies this discovery already read, keyed by PATH. Empty after a tree
-   * read; the directory walk fills it, because it reads a file to learn its
-   * blob sha, and that body must not be fetched twice. */
+  /** Bodies discovery already read, keyed by PATH. Empty after a tree read;
+   * the directory walk fills it, because it reads a file to learn its blob
+   * sha, and that body must not be fetched twice. */
   readonly text: Map<string, string>;
   /** One line per candidate found and not collected. */
   readonly warnings: string[];
   /** Candidates that passed the shape test and the subdirectory filter,
-   * before names collided and before any body was read. Zero says the
-   * repository holds nothing of this kind. */
+   * before names collided and before any body was read. */
   readonly discovered: number;
   /** Candidates dropped because an ancestor directory is not scanned. */
   readonly excluded: number;
   /** Brings this source's mirrored rows of this kind in line with the pass. */
   reconcile(ctx: CollectorReconcileContext): Promise<CollectorReconcileResult>;
-  /** What this pass must say about the REPOSITORY, as distinct from the
-   * per-file warnings. Null when there is nothing to say. */
+  /** What this pass says about the REPOSITORY, as distinct from the per-file
+   * warnings. Null when there is nothing to say. */
   notice(ctx: CollectorNoticeContext): string | null;
   /** One line for a file discovery found and the sync could not read. */
   unreadWarning(path: string): string;
@@ -133,24 +110,17 @@ export interface ContentCollector {
   readonly kind: ContentKind;
   /** Pure discovery over one tree listing. */
   discover(ctx: CollectorDiscoverContext): CollectorPass;
-  /**
-   * Discovery for a commit whose tree GitHub cut. A kind with no fallback
-   * leaves this out, mirrors nothing on such a commit, and deletes nothing —
-   * the sweep reports `directory-walk`, and that mode already forbids every
-   * delete.
-   */
+  /** Discovery for a commit whose tree GitHub cut. A kind with no fallback
+   * leaves this out and mirrors nothing on such a commit; the sweep reports
+   * `directory-walk`, which already forbids every delete. */
   walkDirectory?(ctx: CollectorWalkContext): Promise<CollectorPass>;
 }
 
 /**
  * Hash over the canonical manifest of a whole sync — every collector's
- * entries, concatenated in collector order.
- *
- * Each entry is rendered as compact JSON with only the three manifest fields,
- * so the hash depends on the content of the commit and not on how a listing
- * was ordered or on what a collector carries beside these fields. The
- * per-file key is the git blob sha, which the tree read already supplies, so
- * this hash is computable with no file read.
+ * entries, in collector order. Only the three manifest fields go in, so the
+ * hash follows the commit and not the listing order. The per-file key is the
+ * git blob sha the tree read supplies, so the hash needs no file read.
  */
 export function contentManifestHash(entries: ContentManifestEntry[]): string {
   const canonical = entries.map((e) => ({ name: e.name, path: e.path, blobSha: e.blobSha }));
