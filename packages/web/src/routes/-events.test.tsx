@@ -121,6 +121,15 @@ const workflowsData = {
       ownerType: "user" as const,
       ownerId: "u1",
     },
+    {
+      id: "wf_team",
+      name: "Team pipeline",
+      definition: {},
+      createdAt: 1,
+      updatedAt: 1,
+      ownerType: "team" as const,
+      ownerId: "t_eng",
+    },
   ],
 };
 
@@ -459,9 +468,9 @@ describe("EventsPage — Subscriptions", () => {
     );
   });
 
-  // Ownership follows the TARGET, so a workflow or a personal-assistant
-  // target created in a team workspace is filed personally and vanishes
-  // from the list it was created in. The dialog says so.
+  // Ownership follows the TARGET, not the workspace on screen, so a row can
+  // land in a list other than the one that created it. The dialog names the
+  // list it lands in, in BOTH directions.
   it("in a team workspace, says a personally-filed subscription lands elsewhere", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     scopeTeamId = "t_eng";
@@ -474,7 +483,8 @@ describe("EventsPage — Subscriptions", () => {
     fireEvent.click(screen.getByRole("radio", { name: /Notify your assistant/ }));
     expect(screen.getByText(/not in Engineering/)).toBeTruthy();
 
-    // A workflow target is filed to the caller too, whoever owns the workflow.
+    // A workflow target follows the WORKFLOW's owner. The first option is
+    // personally owned, so this one does leave the team's list.
     fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
     expect(screen.getByText(/not in Engineering/)).toBeTruthy();
 
@@ -484,10 +494,29 @@ describe("EventsPage — Subscriptions", () => {
     expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
   });
 
-  it("personal workspace: the filing note never appears", () => {
+  it("personal workspace: a personally-filed target gets no note", () => {
     openSubscriptionsTab();
     fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
-    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+    expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
+  });
+
+  // The direction a workspace-gated notice cannot reach. A team workflow
+  // armed from the personal workspace is filed to that team, so it leaves
+  // the tab that created it just as completely as the reverse case — and
+  // there is no team on screen to gate the warning on.
+  it("personal workspace: names the team a team workflow's subscription lands in", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
+    expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
+
+    // The workflow picker is a `SelectMenu`, driven the way its own suite
+    // drives it: open the trigger, then click the option.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Deploy pipeline" }), { key: "Enter" });
+    fireEvent.click(screen.getByText("Team pipeline"));
+    expect(screen.getByText(/listed in Engineering/)).toBeTruthy();
+    expect(screen.getByText(/not in your personal workspace/)).toBeTruthy();
   });
 
   it("personal workspace: no team target is offered", () => {

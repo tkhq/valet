@@ -3,7 +3,8 @@ import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRo
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
-import { useActiveWorkspace } from "~/components/workspace-clause";
+import { useTeams } from "~/api/settings";
+import { type ActiveWorkspace, useActiveWorkspace, workspaceName } from "~/components/workspace-clause";
 
 type TargetChoice =
   | { kind: "orchestrator"; orchestrator: "user" | "org" }
@@ -22,11 +23,48 @@ function targetFor(scopedTeamId: string | undefined): TargetChoice {
 /**
  * Which owner `POST /api/event-subscriptions` will stamp on the row, read
  * off the target the same way the route reads it. Ownership follows the
- * TARGET, not the active workspace, so a workflow target is filed to the
- * caller even when the workflow and the workspace are a team's.
+ * TARGET, not the active workspace: an orchestrator target carries its own
+ * owner, and a workflow target follows the workflow's. A workflow the list
+ * has not loaded reads as the caller's own, matching the route's fallback.
  */
-function filedOwnerType(target: TargetChoice): "user" | "team" | "org" {
-  return target.kind === "workflow" ? "user" : target.orchestrator;
+function filedOwner(
+  target: TargetChoice,
+  workflows: { id: string; ownerType: "user" | "team"; ownerId: string }[],
+): { type: "user" | "team" | "org"; teamId?: string } {
+  if (target.kind !== "workflow") {
+    return target.orchestrator === "team"
+      ? { type: "team", teamId: target.teamId }
+      : { type: target.orchestrator };
+  }
+  const wf = workflows.find((w) => w.id === target.workflowId);
+  return wf?.ownerType === "team" ? { type: "team", teamId: wf.ownerId } : { type: "user" };
+}
+
+/**
+ * Where the row will be listed, when that is NOT the workspace on screen —
+ * and null when the two agree, so the notice suppresses itself.
+ *
+ * BOTH directions matter, and only one of them was obvious. A personal
+ * target armed in a team workspace leaves that team's tab; a TEAM workflow
+ * armed from the personal workspace leaves the personal tab just as
+ * completely. A notice gated on a team being active would say nothing in
+ * the second case, which is the one where the row is most surprising.
+ *
+ * An org-owned row is listed in every workspace, so it never lands
+ * elsewhere.
+ */
+function filedElsewhere(
+  filed: { type: "user" | "team" | "org"; teamId?: string },
+  ws: ActiveWorkspace | undefined,
+  teams: { id: string; name: string }[],
+): string | null {
+  if (filed.type === "org" || ws === undefined) return null;
+  const activeTeamId = ws.kind === "team" ? ws.team.id : undefined;
+  if (filed.type === "team") {
+    if (filed.teamId === activeTeamId) return null;
+    return teams.find((t) => t.id === filed.teamId)?.name ?? "the team that owns it";
+  }
+  return activeTeamId === undefined ? null : "your personal workspace";
 }
 
 /**
@@ -45,6 +83,7 @@ export function SubscriptionCreateDialog({
   const workflowsQ = useWorkflows();
   const create = useCreateEventSubscription();
   const ws = useActiveWorkspace();
+  const teamsQ = useTeams();
   const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
   const scopedTeamId = scopedTeam?.id;
 
@@ -63,6 +102,7 @@ export function SubscriptionCreateDialog({
   const workflows = workflowsQ.data?.workflows ?? [];
   const services = catalogQ.data?.services ?? [];
   const targetReady = target.kind === "orchestrator" || target.workflowId.length > 0;
+  const elsewhere = filedElsewhere(filedOwner(target, workflows), ws, teamsQ.data?.teams ?? []);
   const canSubmit = name.trim().length > 0 && keys.size > 0 && targetReady && !create.isPending;
 
 
@@ -207,12 +247,12 @@ export function SubscriptionCreateDialog({
             </div>
           </div>
 
-          {/* Only a personally-filed row can go missing from the workspace
-              it was created in, so say where it will be instead. */}
-          {scopedTeam && filedOwnerType(target) === "user" && (
+          {/* Say where the row lands whenever that is not the workspace on
+              screen. An org-owned row lists everywhere, so it never is. */}
+          {elsewhere !== null && ws !== undefined && (
             <p className="text-xs text-muted">
-              Ownership follows the target. This subscription will be listed in your personal
-              workspace, not in {scopedTeam.name}.
+              Ownership follows the target. This subscription will be listed in {elsewhere}, not in{" "}
+              {workspaceName(ws)}.
             </p>
           )}
 

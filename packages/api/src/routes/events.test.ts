@@ -375,6 +375,39 @@ describe("POST /api/event-subscriptions", () => {
     expect(body.error).toContain("workflow");
   });
 
+  it("files a team workflow's subscription with the team, not the creator", async () => {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "t_eng", orgId: "local-org", name: "Eng", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "t_eng", userId: "local-user", role: "member" });
+    await a.providers.db.insert(workflowDefinitions).values({
+      id: "wf_team",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: "t_eng",
+      name: "team workflow",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      target: { kind: "workflow", workflowId: "wf_team" },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    // The owner names the WORKSPACE the automation belongs to. Stamping the
+    // creator filed a team workflow's trigger in a personal workspace, where
+    // the team that owns the workflow could not see it.
+    expect(body.ownerType).toBe("team");
+    expect(body.ownerId).toBe("t_eng");
+
+    // Who armed it is still recorded, on its own column.
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
+    expect(rows[0].createdBy).toBe("local-user");
+  });
+
   it("400s a missing name", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, { ...VALID_BODY, name: "" });

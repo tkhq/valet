@@ -1021,12 +1021,14 @@ export async function installWorkflowTemplate(
       await tx.insert(workflowSchedules).values({
         id: scheduleId,
         orgId: owner.orgId,
-        // `workflow_schedules.owner_type` holds only "user" or "org", and
-        // the scheduler bills the WORKFLOW's owner anyway (`scheduler.ts`
-        // #fire), so the installer is recorded here even for a team
-        // workflow. This row says who armed it, not who the run acts as.
-        ownerType: "user",
-        ownerId: owner.userId,
+        // Follow the workflow's own owner, the rule `schedule-service.ts`
+        // already applies when a schedule is created by hand. The column
+        // holds a team now, so a team workflow's schedule is filed with the
+        // team rather than the installer. `created_by` below still records
+        // who armed it, and the scheduler bills the workflow's owner
+        // (`scheduler.ts` #fire) either way.
+        ownerType,
+        ownerId,
         targetKind: "workflow",
         workflowId,
         // The workflow id is minted in this transaction and unique by
@@ -1052,10 +1054,12 @@ export async function installWorkflowTemplate(
       await tx.insert(eventSubscriptions).values({
         id,
         orgId: owner.orgId,
-        // The dispatcher starts the run as the DEFINITION's owner, so this
-        // records who armed it, the same way the schedule row does.
-        ownerType: "user",
-        ownerId: owner.userId,
+        // Same rule as the schedule above: the subscription is filed with
+        // the workflow it starts, so a team install appears in the team's
+        // workspace. The dispatcher starts the run as the definition's
+        // owner regardless (`events/dispatcher.ts`).
+        ownerType,
+        ownerId,
         name: subscription.name,
         eventKeys: subscription.eventKeys,
         filters: subscription.filters,
