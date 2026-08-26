@@ -83,7 +83,9 @@ Two repo-specific rules:
 - **Every user-facing error message names the corrective action when one exists.** "Missing GitHub access token. Connect the GitHub integration in Settings." is the model. A bare fact ("expected an array response") is incomplete when the user can act.
 - **Terminology:** "workspace" is overloaded — `SessionData.workspace` is a display label, `/workspace` is the in-sandbox path, workspace prep is the clone subsystem, and in web UI copy a workspace is the nav switcher's scope: personal or a team (`docs/specs/2026-08-17-team-workspace-ui-design.md`). Say which one you mean. UI copy reserves "workspace" for the switcher scope and calls the in-sandbox path the "working directory". Spell the session start reference "start-ref" in prose and `startRef` in code.
 
-`make e2e E2E_ARGS="--only docs-lint"` runs an advisory STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
+`make e2e E2E_ARGS="--only docs-lint"` runs the STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds; CI runs the same script as a blocking check on every PR. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
+
+CI also lints every PR description (`scripts/docs/pr_description_lint.py`, the "PR lint" workflow). Hard rules: not empty, no em/en dashes, no marketing words, no filler hedges, 300 words max (code blocks excluded). Fix the description and the check re-runs on edit.
 
 This section governs new and edited prose. Do not rewrite existing documents wholesale for style alone. Apply the rules to the text you touch.
 

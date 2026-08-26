@@ -1,0 +1,24 @@
+name: PR lint
+
+# A separate workflow, not a ci.yml job, because this one needs the `edited`
+# type: when someone fixes the description, the check must re-run without
+# re-running typecheck and the test shards. Like ci.yml, the pull_request
+# trigger is deliberately unfiltered by base branch — a branches filter
+# matches the PR's base and would skip stacked PRs until retarget.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The body goes through an env var, never inline interpolation into the
+      # script — a PR description is attacker-controlled input and inline
+      # `${{ }}` in `run` is a shell-injection vector.
+      - name: Lint the PR description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" | python3 scripts/docs/pr_description_lint.py
