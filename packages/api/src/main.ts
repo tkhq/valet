@@ -139,11 +139,17 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
 /**
  * Boot the API server. Reads every effective value from `process.env` (a
  * caller such as `valet serve` sets those BEFORE calling), starts listening,
- * runs boot-time reconciliation, and returns a `ServerHandle`.
+ * and returns a `ServerHandle`. Boot-time reconciliation (session restore,
+ * instance-config reconcile, service hosts) continues in a background chain
+ * AFTER the listener binds; `GET /api/ready` reports 503 until it completes.
  *
- * This function does NOT register signal handlers or call `process.exit` — the
- * caller owns process lifecycle (see the direct-entry guard at the bottom of
- * this file, and `cli/commands/serve.ts`).
+ * This function does NOT register signal handlers — the caller owns process
+ * lifecycle (see the direct-entry guard at the bottom of this file, and
+ * `cli/commands/serve.ts`). It DOES `process.exit(1)` on fatal
+ * misconfiguration: synchronously for pre-bind checks (missing API key,
+ * auth-mode conflict, invalid config file), and from the background chain
+ * when the instance-config reconcile fails — that exit fires before the
+ * ready flip, so in Kubernetes the pod dies NotReady.
  */
 export async function startServer(): Promise<ServerHandle> {
 const port = Number.parseInt(process.env.PORT ?? "8787", 10);
