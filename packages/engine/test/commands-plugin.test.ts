@@ -267,6 +267,54 @@ describe("Session.prompt plugin command execution", () => {
     });
   });
 
+  it("withdrawing a live command gate rejects the waiter and the row stays withdrawn (TKAI-238)", async () => {
+    const faux = registerFauxProvider({ provider: "s-plugin-gate-wd" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const fx = echoFixture({ defaultApprovalMode: "require_approval" });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      pluginCommands: fx.commands,
+      pluginCatalog: fx.catalog,
+      // No commandRequestDecision: the engine opens a session-level gate.
+    });
+    const threadId = session.thread().id;
+
+    const receiptP = session.prompt("/testplug:echo halt");
+    let gateId = "";
+    await vi.waitFor(async () => {
+      const entries = await store.getEntries(session.id, threadId);
+      const gateEntry = entries.find((e) => e.type === "decision_gate");
+      expect(gateEntry).toBeDefined();
+      if (gateEntry?.type === "decision_gate") gateId = gateEntry.gate.id;
+    });
+
+    // Withdraw must reach the session-level command-gate registry, not the
+    // store-side orphan repair: the waiter rejects (the command settles
+    // instead of hanging to expiry) and the row terminalizes withdrawn.
+    await session.withdrawDecision(gateId, "cancel");
+    await receiptP;
+
+    await vi.waitFor(async () => {
+      const entries = await store.getEntries(session.id, threadId);
+      const result = entries.find((e) => e.type === "command_result");
+      expect(result?.type === "command_result" && result.ok).toBe(false);
+    });
+    expect((await store.getDecisionGate(session.id, gateId))?.status).toBe("withdrawn");
+
+    // A late resolve against the withdrawn gate must not flip it back.
+    await session.resolveDecision(gateId, {
+      actionId: "approve",
+      resolvedBy: "test-user",
+      resolvedAt: Date.now(),
+    });
+    expect((await store.getDecisionGate(session.id, gateId))?.status).toBe("withdrawn");
+  });
+
   it("missing credentials produce a corrective error", async () => {
     const faux = registerFauxProvider({ provider: "s-plugin-cred" });
     cleanups.push(() => faux.unregister());

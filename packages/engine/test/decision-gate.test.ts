@@ -8,7 +8,9 @@ import {
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
+  type SessionEntry,
   type ToolDef,
+  type WriteFence,
 } from "../src/index.js";
 import { fromRequest } from "../src/decision-gate.js";
 
@@ -61,6 +63,15 @@ async function waitForAsync(
     if (Date.now() - start > timeoutMs) throw new Error("timeout");
     await new Promise((r) => setTimeout(r, 5));
   }
+}
+
+/** Gates carried by decision_gate events, in emission order (union-narrowed). */
+function gatesFrom(events: BusEvent[]): DecisionGate[] {
+  const gates: DecisionGate[] = [];
+  for (const e of events) {
+    if (e.event.type === "decision_gate") gates.push(e.event.gate);
+  }
+  return gates;
 }
 
 describe("decision gates: pending -> resolved", () => {
@@ -384,6 +395,308 @@ describe("decision gates: retry after denial mints a fresh ordinal", () => {
     await waitFor(() =>
       events.some((e) => e.event.type === "status" && e.event.status === "idle"),
     );
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: two gated tool calls in one block (TKAI-238)", () => {
+  it("serializes gate opens: both gates resolve in turn and no pending gate is left behind", async () => {
+    const faux = registerFauxProvider({ provider: "gate-parallel" });
+    // One assistant message with TWO gated tool calls. pi-agent-core executes
+    // a block's tool calls in parallel, so both requestDecision calls race on
+    // the same queue item.
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall("do_thing", { arg: "a" }, { id: "tcA" }),
+          fauxToolCall("do_thing", { arg: "b" }, { id: "tcB" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("both done"),
+    ]);
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [approvalTool()],
+    });
+
+    void session.prompt("do both things");
+
+    // First gate opens; approve it.
+    await waitFor(() => gatesFrom(events).length >= 1);
+    const gate1 = gatesFrom(events)[0]!;
+    await session.resolveDecision(gate1.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    // The second gate must open AFTER the first resolves — not fail silently.
+    await waitFor(() => gatesFrom(events).length >= 2, 3000);
+    const gate2 = gatesFrom(events)[1]!;
+    expect(gate2.id).not.toBe(gate1.id);
+    await session.resolveDecision(gate2.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    await waitFor(
+      () => events.some((e) => e.event.type === "status" && e.event.status === "idle"),
+      3000,
+    );
+
+    // Both tools ran for real — their results reached the transcript.
+    const entries = await session.readEntries("web:default");
+    const partTexts: string[] = [];
+    for (const e of entries) {
+      if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
+      for (const p of e.parts) {
+        if (p.type === "tool_call") partTexts.push(JSON.stringify(p.result ?? ""));
+      }
+    }
+    expect(partTexts.some((t) => t.includes("did the thing with arg=a"))).toBe(true);
+    expect(partTexts.some((t) => t.includes("did the thing with arg=b"))).toBe(true);
+
+    // No orphan: every persisted gate is terminal, two of them resolved.
+    const gates = await store.listDecisionGates(session.id);
+    expect(gates.filter((g) => g.status === "pending")).toHaveLength(0);
+    expect(gates.filter((g) => g.status === "resolved")).toHaveLength(2);
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: steer with a second gated call queued (TKAI-238)", () => {
+  it("the queued gate cycle unwinds without persisting a gate on the superseded turn", async () => {
+    const faux = registerFauxProvider({ provider: "gate-steer-queued" });
+    // Turn A: two gated calls in one block. After the steer withdraws them,
+    // both tools return errors, so the loop gives the model one follow-up
+    // call (response 2, discarded — the turn settles superseded). Response 3
+    // completes the steer turn.
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall("do_thing", { arg: "a" }, { id: "tcA" }),
+          fauxToolCall("do_thing", { arg: "b" }, { id: "tcB" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("a's discarded follow-up"),
+      fauxAssistantMessage("after steer"),
+    ]);
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [approvalTool()],
+    });
+
+    const r1 = await session.prompt("do both things");
+    // Gate 1 is pending; the second gated call is queued on the gate-cycle
+    // slot with nothing persisted yet.
+    await waitFor(() => gatesFrom(events).length >= 1);
+
+    const r2 = await session.thread().submitPrompt("steer away", { queueMode: "steer" });
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r2.queueItemId))?.status === "settled",
+      5000,
+    );
+
+    // The queued cycle must unwind without persisting: exactly one gate
+    // exists (gate 1, withdrawn by the steer), nothing pending, no leftover
+    // checkpoint, and the superseded item settled.
+    const gates = await store.listDecisionGates(session.id);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.status).toBe("withdrawn");
+    expect(await store.getSuspendedTurn(session.id, session.thread().id)).toBeFalsy();
+    expect((await store.getQueueItem(session.id, r1.queueItemId))?.status).toBe("settled");
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: orphaned pending gate with no waiter (TKAI-238)", () => {
+  /** Build a session + an orphaned pending gate row/entry with no waiter. */
+  async function makeOrphan() {
+    const faux = registerFauxProvider({ provider: "gate-orphan" });
+    faux.setResponses([fauxAssistantMessage("hi")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [],
+    });
+    await session.prompt("hello");
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+    const threadId = (await session.readEntries("web:default"))[0]!.threadId;
+
+    // Simulate an orphan: a pending row + DAG entry whose waiter was never
+    // registered (the open sequence failed partway on an older build).
+    const gate = fromRequest(
+      { type: "approval", title: "orphan?", resumeKey: "orphan-key" },
+      {
+        sessionId: session.id,
+        threadId,
+        queueItemId: "q-gone",
+        resumeKey: "orphan-key",
+        ordinal: 0,
+      },
+    );
+    await store.saveDecisionGate(session.id, threadId, gate);
+    const entry: SessionEntry = {
+      id: "e-orphan",
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      type: "decision_gate",
+      gate,
+      createdAt: Date.now(),
+    };
+    await store.appendEntries(session.id, threadId, [entry]);
+    return { faux, store, events, session, threadId, gate };
+  }
+
+  it("resolveDecision terminally resolves the orphan instead of silently no-oping", async () => {
+    const { faux, store, events, session, gate } = await makeOrphan();
+
+    await session.resolveDecision(gate.id, {
+      actionId: "deny",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("resolved");
+    // The resolved event reaches live clients so the card clears.
+    expect(
+      events.some(
+        (e) => e.event.type === "decision_gate_resolved" && e.event.gateId === gate.id,
+      ),
+    ).toBe(true);
+    // The DAG entry is terminal too, so a refresh does not resurrect the card.
+    const entries = await session.readEntries("web:default");
+    const ge = entries.find((e) => e.type === "decision_gate" && e.gate.id === gate.id);
+    expect(ge && ge.type === "decision_gate" ? ge.gate.status : undefined).toBe("resolved");
+
+    faux.unregister();
+  });
+
+  it("withdrawDecision terminally withdraws the orphan", async () => {
+    const { faux, store, events, session, gate } = await makeOrphan();
+
+    await session.withdrawDecision(gate.id, "cancel");
+
+    expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("withdrawn");
+    expect(
+      events.some(
+        (e) => e.event.type === "decision_gate_withdrawn" && e.event.gateId === gate.id,
+      ),
+    ).toBe(true);
+
+    faux.unregister();
+  });
+
+  it("leaves a suspended-turn gate alone — reconciliation owns its replay", async () => {
+    const { faux, store, session, threadId, gate } = await makeOrphan();
+
+    // A checkpoint referencing the gate means it is NOT an orphan: after a
+    // restart, reconcileGate re-arms it and a store-side resolve would
+    // bypass replay.
+    await store.saveSuspendedTurn(session.id, threadId, {
+      sessionId: session.id,
+      threadId,
+      queueItemId: "q-gone",
+      gateId: gate.id,
+      model: "m",
+      toolCallId: "tc",
+      toolName: "do_thing",
+      toolArgs: {},
+      resumeKey: "orphan-key",
+      ordinal: 0,
+      attempt: 1,
+      createdAt: Date.now(),
+    });
+
+    await session.resolveDecision(gate.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("pending");
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: gate open fails partway (TKAI-238)", () => {
+  class FlakyBlockStore extends InMemorySessionStore {
+    failNextBlock = false;
+    override async setSubmissionBlocked(
+      sessionId: string,
+      threadId: string,
+      itemId: string,
+      blocked: boolean,
+      fence: WriteFence,
+    ): Promise<void> {
+      if (blocked && this.failNextBlock) {
+        this.failNextBlock = false;
+        throw new Error("injected block failure");
+      }
+      return super.setSubmissionBlocked(sessionId, threadId, itemId, blocked, fence);
+    }
+  }
+
+  it("withdraws the just-persisted gate so no pending row survives the failure", async () => {
+    const faux = registerFauxProvider({ provider: "gate-open-fail" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tcF" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("recovered"),
+    ]);
+
+    const store = new FlakyBlockStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [approvalTool()],
+    });
+
+    store.failNextBlock = true;
+    await session.prompt("go");
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+
+    // The gate the failed open persisted must be terminal, not pending.
+    const gates = await store.listDecisionGates(session.id);
+    expect(gates.filter((g) => g.status === "pending")).toHaveLength(0);
+    expect(gates.filter((g) => g.status === "withdrawn")).toHaveLength(1);
+    // The checkpoint did not leak either.
+    const threadId = gates[0]!.threadId;
+    expect(await store.getSuspendedTurn(session.id, threadId)).toBeFalsy();
 
     faux.unregister();
   });
