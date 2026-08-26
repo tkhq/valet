@@ -12,6 +12,7 @@ import {
   GateManager,
   isDecisionGateExpired,
   isDecisionGateWithdrawn,
+  persistTerminalGate,
   shouldShortCircuit,
   type GateContext,
 } from "./decision-gate.js";
@@ -327,16 +328,9 @@ export class Thread {
     const store = this.session.providers.store;
     const existing = await store.getDecisionGate(this.session.id, gateId);
     if (!existing) return;
-    const resolved: DecisionGate = {
-      ...existing,
+    await persistTerminalGate(store, this.session.id, this.id, existing, {
       status: "resolved",
-      updatedAt: Date.now(),
-    };
-    await store.saveDecisionGate(this.session.id, this.id, resolved);
-    await store.updateDecisionGateEntry(this.session.id, this.id, gateId, {
-      gate: resolved,
       resolution,
-      resolvedAt: new Date(resolution.resolvedAt).toISOString(),
     });
   }
 
@@ -995,15 +989,13 @@ export class Thread {
   private async terminalizeReconciledGate(gate: DecisionGate, err: unknown): Promise<void> {
     const store = this.session.providers.store;
     const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
-    const status: DecisionGate["status"] = reason ? "withdrawn" : "expired";
-    const terminal: DecisionGate = { ...gate, status, updatedAt: Date.now() };
-    await store.saveDecisionGate(this.session.id, this.id, terminal);
-    await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
-      gate: terminal,
-      ...(reason
-        ? { withdrawnReason: reason }
-        : { resolvedAt: new Date().toISOString() }),
-    });
+    await persistTerminalGate(
+      store,
+      this.session.id,
+      this.id,
+      gate,
+      reason ? { status: "withdrawn", reason } : { status: "expired" },
+    );
     if (!reason) {
       await this.session.emit(
         {
@@ -1034,11 +1026,12 @@ export class Thread {
   private async runGateCycle(args: {
     req: DecisionGateRequest;
     gateCtx: GateContext;
+    signal: AbortSignal;
     toolCallId: string;
     toolName: string;
     toolArgs: Record<string, unknown>;
   }): Promise<DecisionResolution> {
-    const { req, gateCtx, toolCallId, toolName, toolArgs } = args;
+    const { req, gateCtx, signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     // Ordinal resolution: reuse a still-pending gate for this
     // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
@@ -1075,31 +1068,22 @@ export class Thread {
     // When joining a still-pending gate the durable row + DAG entry already
     // exist, so reuse them; only re-arm the wait and re-checkpoint below.
     const gate = joiningPending && latestGate ? latestGate : fromRequest(req, { ...gateCtx, ordinal });
-    // The thread aborted while this call waited for the gate-cycle slot —
-    // do not persist a gate that no waiter will ever own.
-    if (this.aborted) {
-      throw new DecisionGateWithdrawnError(gate.id, "abort");
+    // The turn unwound while this call waited for the gate-cycle slot:
+    // Thread.abort sets `aborted`; steer supersession aborts the agent's
+    // run signal without setting it. Either way, do not persist a gate
+    // that no waiter will ever own.
+    if (this.aborted || signal.aborted) {
+      throw new DecisionGateWithdrawnError(gate.id, this.aborted ? "abort" : "steer");
     }
     try {
-      if (!joiningPending) {
-        await session.providers.store.saveDecisionGate(session.id, this.id, gate);
-        const gateEntry: SessionEntry = {
-          id: uid("e"),
-          sessionId: session.id,
-          threadId: this.id,
-          parentId: null,
-          type: "decision_gate",
-          gate,
-          queueItemId: runningItemId,
-          createdAt: Date.now(),
-        };
-        await fencedGateWrite(() =>
-          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
-        );
-      }
-
-      // checkpoint the suspended turn — use real toolName + toolArgs so
-      // restoreSession can replay this exact tool call.
+      // Checkpoint FIRST — the suspended-turn row is the ownership anchor
+      // for `terminalizeOrphanedGate`'s guard: once it references this gate,
+      // a resolve/withdraw that lands before the waiter arms is left alone
+      // (retryable) instead of consumed by the store-side orphan repair. A
+      // crash in this window leaves a checkpoint without a row (inert; the
+      // next cycle overwrites it) rather than a row without a checkpoint
+      // (an orphan card). Use real toolName + toolArgs so restoreSession
+      // can replay this exact tool call.
       await fencedGateWrite(() =>
         session.providers.store.saveSuspendedTurn(
           session.id,
@@ -1121,6 +1105,23 @@ export class Thread {
           fence,
         ),
       );
+
+      if (!joiningPending) {
+        await session.providers.store.saveDecisionGate(session.id, this.id, gate);
+        const gateEntry: SessionEntry = {
+          id: uid("e"),
+          sessionId: session.id,
+          threadId: this.id,
+          parentId: null,
+          type: "decision_gate",
+          gate,
+          queueItemId: runningItemId,
+          createdAt: Date.now(),
+        };
+        await fencedGateWrite(() =>
+          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
+        );
+      }
 
       // Durable block flag under the fence (running → blocked). Gate-blocked
       // turns retain their claim and do not settle until the gate resolves.
@@ -1153,7 +1154,7 @@ export class Thread {
       // A partially-opened gate must not survive as a pending row with no
       // registered waiter — that renders as an approval card that neither
       // resolve nor refresh can clear (TKAI-238).
-      await this.cleanupFailedGateOpen(gate, !joiningPending, fence, runningItemId);
+      await this.cleanupFailedGateOpen(gate, fence, runningItemId);
       throw err;
     }
 
@@ -1177,12 +1178,9 @@ export class Thread {
       // legitimate repeat (new ordinal) for the same resumeKey.
       const resolution: DecisionResolution = { ...rawResolution, gateOrdinal: gate.ordinal };
       // Mark gate resolved in store and update DAG entry
-      const resolved: DecisionGate = { ...gate, status: "resolved", updatedAt: Date.now() };
-      await session.providers.store.saveDecisionGate(session.id, this.id, resolved);
-      await session.providers.store.updateDecisionGateEntry(session.id, this.id, gate.id, {
-        gate: resolved,
+      await persistTerminalGate(session.providers.store, session.id, this.id, gate, {
+        status: "resolved",
         resolution,
-        resolvedAt: new Date(resolution.resolvedAt).toISOString(),
       });
       this.blockedGateId = undefined;
       if (fence && runningItemId) {
@@ -1202,17 +1200,14 @@ export class Thread {
       return resolution;
     } catch (err) {
       // Withdrawn or expired: persist the terminal status, then propagate.
-      const reason =
-        err instanceof Error && err.name === "DecisionGateWithdrawnError"
-          ? (err as { reason?: DecisionWithdrawReason }).reason ?? "cancel"
-          : undefined;
-      const status = reason ? "withdrawn" : "expired";
-      const terminal: DecisionGate = { ...gate, status, updatedAt: Date.now() };
-      await session.providers.store.saveDecisionGate(session.id, this.id, terminal);
-      await session.providers.store.updateDecisionGateEntry(session.id, this.id, gate.id, {
-        gate: terminal,
-        withdrawnReason: reason,
-      });
+      const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
+      await persistTerminalGate(
+        session.providers.store,
+        session.id,
+        this.id,
+        gate,
+        reason ? { status: "withdrawn", reason } : { status: "expired" },
+      );
       this.blockedGateId = undefined;
       // Flip the durable block back to running so the turn can end and
       // settle normally (the model sees the gate's terminal state).
@@ -1235,39 +1230,43 @@ export class Thread {
   }
 
   /**
-   * Best-effort unwind after a gate open failed partway. Rows this cycle
-   * persisted are terminalized (withdrawn) so the UI never renders an
-   * unresolvable approval card; a joined pre-existing pending row stays —
-   * the suspended-turn checkpoint that references it re-arms it through
-   * reconciliation. The original open error propagates from the caller
-   * regardless of what this method manages to clean.
+   * Best-effort unwind after a gate open failed partway. The original open
+   * error propagates from the caller regardless of what this method cleans.
+   *
+   * Stale fence: a successor incarnation owns the turn's durable state.
+   * Touch nothing — the row (if one persisted) stays pending so the
+   * successor's re-run can adopt it through the join path, and the fenced
+   * checkpoint/blocked cleanup below would fail stale anyway. An unfenced
+   * withdraw here would yank a gate the successor may have re-armed.
+   *
+   * Live fence: the turn continues and no waiter will ever own this gate —
+   * terminalize the row (created or joined) so it cannot render as an
+   * unresolvable approval card, then release the checkpoint and the blocked
+   * toggle. Cleanup failures are emitted, not swallowed: a blocked toggle
+   * that stays flipped wedges the whole thread (alert, don't auto-repair).
    */
   private async cleanupFailedGateOpen(
     gate: DecisionGate,
-    ownedRow: boolean,
     fence: WriteFence | undefined,
     runningItemId: string | undefined,
   ): Promise<void> {
-    const store = this.session.providers.store;
     if (this.blockedGateId === gate.id) this.blockedGateId = undefined;
-    if (ownedRow) {
-      try {
-        const terminal: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
-        await store.saveDecisionGate(this.session.id, this.id, terminal);
-        await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
-          gate: terminal,
-          withdrawnReason: "abort",
-        });
-        await this.session.emit(
-          { type: "decision_gate_withdrawn", threadId: this.id, gateId: gate.id, reason: "abort" },
-          { eventKey: `gate:${gate.id}:withdrawn` },
-        );
-      } catch (e) {
-        this.emitError(
-          "gate_open_cleanup_failed",
-          e instanceof Error ? e.message : String(e),
-        );
-      }
+    if (this.staleFenceDetected) return;
+    const store = this.session.providers.store;
+    try {
+      await persistTerminalGate(store, this.session.id, this.id, gate, {
+        status: "withdrawn",
+        reason: "abort",
+      });
+      await this.session.emit(
+        { type: "decision_gate_withdrawn", threadId: this.id, gateId: gate.id, reason: "abort" },
+        { eventKey: `gate:${gate.id}:withdrawn` },
+      );
+    } catch (e) {
+      this.emitError(
+        "gate_open_cleanup_failed",
+        e instanceof Error ? e.message : String(e),
+      );
     }
     try {
       const suspended = await store.getSuspendedTurn(this.session.id, this.id);
@@ -1280,8 +1279,11 @@ export class Thread {
           await store.setSubmissionBlocked(this.session.id, this.id, runningItemId, false, fence);
         }
       }
-    } catch {
-      // Stale fence or a store hiccup: the successor turn owns this state.
+    } catch (e) {
+      this.emitError(
+        "gate_open_cleanup_failed",
+        e instanceof Error ? e.message : String(e),
+      );
     }
   }
 
@@ -2070,11 +2072,9 @@ export class Thread {
     if (outcome.outcome === "superseded" && suspended) {
       const gate = await store.getDecisionGate(this.session.id, suspended.gateId);
       if (gate && gate.status === "pending") {
-        const withdrawn: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
-        await store.saveDecisionGate(this.session.id, this.id, withdrawn);
-        await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
-          gate: withdrawn,
-          withdrawnReason: "steer",
+        await persistTerminalGate(store, this.session.id, this.id, gate, {
+          status: "withdrawn",
+          reason: "steer",
         });
         await this.session.emit(
           {
@@ -3101,7 +3101,7 @@ export class Thread {
         });
         await prevCycle;
         try {
-          return await this.runGateCycle({ req, gateCtx, toolCallId, toolName, toolArgs });
+          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName, toolArgs });
         } finally {
           releaseCycle();
         }

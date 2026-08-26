@@ -65,6 +65,15 @@ async function waitForAsync(
   }
 }
 
+/** Gates carried by decision_gate events, in emission order (union-narrowed). */
+function gatesFrom(events: BusEvent[]): DecisionGate[] {
+  const gates: DecisionGate[] = [];
+  for (const e of events) {
+    if (e.event.type === "decision_gate") gates.push(e.event.gate);
+  }
+  return gates;
+}
+
 describe("decision gates: pending -> resolved", () => {
   it("opens a gate, the turn pauses, resolution resumes the turn", async () => {
     const faux = registerFauxProvider({ provider: "gate-resolved" });
@@ -421,10 +430,8 @@ describe("decision gates: two gated tool calls in one block (TKAI-238)", () => {
     void session.prompt("do both things");
 
     // First gate opens; approve it.
-    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
-    const gate1: DecisionGate = (
-      events.find((e) => e.event.type === "decision_gate")!.event as { gate: DecisionGate }
-    ).gate;
+    await waitFor(() => gatesFrom(events).length >= 1);
+    const gate1 = gatesFrom(events)[0]!;
     await session.resolveDecision(gate1.id, {
       actionId: "approve",
       resolvedBy: "u1",
@@ -432,13 +439,8 @@ describe("decision gates: two gated tool calls in one block (TKAI-238)", () => {
     });
 
     // The second gate must open AFTER the first resolves — not fail silently.
-    await waitFor(
-      () => events.filter((e) => e.event.type === "decision_gate").length >= 2,
-      3000,
-    );
-    const gate2: DecisionGate = (
-      events.filter((e) => e.event.type === "decision_gate")[1].event as { gate: DecisionGate }
-    ).gate;
+    await waitFor(() => gatesFrom(events).length >= 2, 3000);
+    const gate2 = gatesFrom(events)[1]!;
     expect(gate2.id).not.toBe(gate1.id);
     await session.resolveDecision(gate2.id, {
       actionId: "approve",
@@ -453,11 +455,13 @@ describe("decision gates: two gated tool calls in one block (TKAI-238)", () => {
 
     // Both tools ran for real — their results reached the transcript.
     const entries = await session.readEntries("web:default");
-    const partTexts = entries
-      .filter((e) => e.type === "message" && e.role === "assistant" && e.parts)
-      .flatMap((e) => e.parts!)
-      .filter((p) => p.type === "tool_call")
-      .map((p) => JSON.stringify((p as { result?: unknown }).result ?? ""));
+    const partTexts: string[] = [];
+    for (const e of entries) {
+      if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
+      for (const p of e.parts) {
+        if (p.type === "tool_call") partTexts.push(JSON.stringify(p.result ?? ""));
+      }
+    }
     expect(partTexts.some((t) => t.includes("did the thing with arg=a"))).toBe(true);
     expect(partTexts.some((t) => t.includes("did the thing with arg=b"))).toBe(true);
 
@@ -465,6 +469,59 @@ describe("decision gates: two gated tool calls in one block (TKAI-238)", () => {
     const gates = await store.listDecisionGates(session.id);
     expect(gates.filter((g) => g.status === "pending")).toHaveLength(0);
     expect(gates.filter((g) => g.status === "resolved")).toHaveLength(2);
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: steer with a second gated call queued (TKAI-238)", () => {
+  it("the queued gate cycle unwinds without persisting a gate on the superseded turn", async () => {
+    const faux = registerFauxProvider({ provider: "gate-steer-queued" });
+    // Turn A: two gated calls in one block. After the steer withdraws them,
+    // both tools return errors, so the loop gives the model one follow-up
+    // call (response 2, discarded — the turn settles superseded). Response 3
+    // completes the steer turn.
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall("do_thing", { arg: "a" }, { id: "tcA" }),
+          fauxToolCall("do_thing", { arg: "b" }, { id: "tcB" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("a's discarded follow-up"),
+      fauxAssistantMessage("after steer"),
+    ]);
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [approvalTool()],
+    });
+
+    const r1 = await session.prompt("do both things");
+    // Gate 1 is pending; the second gated call is queued on the gate-cycle
+    // slot with nothing persisted yet.
+    await waitFor(() => gatesFrom(events).length >= 1);
+
+    const r2 = await session.thread().submitPrompt("steer away", { queueMode: "steer" });
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r2.queueItemId))?.status === "settled",
+      5000,
+    );
+
+    // The queued cycle must unwind without persisting: exactly one gate
+    // exists (gate 1, withdrawn by the steer), nothing pending, no leftover
+    // checkpoint, and the superseded item settled.
+    const gates = await store.listDecisionGates(session.id);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.status).toBe("withdrawn");
+    expect(await store.getSuspendedTurn(session.id, session.thread().id)).toBeFalsy();
+    expect((await store.getQueueItem(session.id, r1.queueItemId))?.status).toBe("settled");
 
     faux.unregister();
   });

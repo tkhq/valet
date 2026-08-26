@@ -6,7 +6,13 @@ import { dispatchCommand } from "./commands/dispatch.js";
 import { parseCommandArgs } from "./commands/args.js";
 import { executeBuiltin } from "./commands/builtins.js";
 import { invokeAction, type InvokeActionResult } from "./plugin-catalog.js";
-import { GateManager, fromRequest, isDecisionGateExpired } from "./decision-gate.js";
+import {
+  GateManager,
+  fromRequest,
+  isDecisionGateExpired,
+  isDecisionGateWithdrawn,
+  persistTerminalGate,
+} from "./decision-gate.js";
 import type {
   CommandDef,
   CommandSource,
@@ -893,6 +899,12 @@ export class Session {
           output: "Approval expired before anyone resolved it. Send the command again to retry.",
         };
       }
+      if (isDecisionGateWithdrawn(err)) {
+        return {
+          ok: false,
+          output: "Approval was withdrawn before the command ran. Send the command again to retry.",
+        };
+      }
       throw err;
     }
   }
@@ -1078,12 +1090,9 @@ export class Session {
       const existing = await this.providers.store.getDecisionGate(this.id, gateId);
       this.commandGates.resolve(gateId, resolution);
       if (existing) {
-        const resolved: DecisionGate = { ...existing, status: "resolved", updatedAt: Date.now() };
-        await this.providers.store.saveDecisionGate(this.id, existing.threadId, resolved);
-        await this.providers.store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
-          gate: resolved,
+        await persistTerminalGate(this.providers.store, this.id, existing.threadId, existing, {
+          status: "resolved",
           resolution,
-          resolvedAt: new Date(resolution.resolvedAt).toISOString(),
         });
         await this.emit(
           { type: "decision_gate_resolved", threadId: existing.threadId, gateId, resolution },
@@ -1153,6 +1162,25 @@ export class Session {
   }
 
   async withdrawDecision(gateId: string, reason: DecisionWithdrawReason): Promise<void> {
+    // Command gates first — session-level, not owned by any thread (mirrors
+    // resolveDecision). Command gates never write a suspended-turn
+    // checkpoint, so without this branch the orphan repair below would
+    // terminalize a LIVE command gate's row while its waiter stays armed.
+    if (this.commandGates.isPending(gateId)) {
+      const existing = await this.providers.store.getDecisionGate(this.id, gateId);
+      this.commandGates.withdraw(gateId, reason);
+      if (existing) {
+        await persistTerminalGate(this.providers.store, this.id, existing.threadId, existing, {
+          status: "withdrawn",
+          reason,
+        });
+        await this.emit(
+          { type: "decision_gate_withdrawn", threadId: existing.threadId, gateId, reason },
+          { eventKey: `gate:${gateId}:withdrawn` },
+        );
+      }
+      return;
+    }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
         t.withdrawDecision(gateId, reason);
@@ -1183,29 +1211,31 @@ export class Session {
       `[engine] terminalizing orphaned decision gate ${gateId} (pending row, no registered waiter)`,
     );
     if ("resolution" in outcome) {
-      const resolved: DecisionGate = { ...existing, status: "resolved", updatedAt: Date.now() };
-      await store.saveDecisionGate(this.id, existing.threadId, resolved);
-      await store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
-        gate: resolved,
-        resolution: outcome.resolution,
-        resolvedAt: new Date(outcome.resolution.resolvedAt).toISOString(),
+      // Stamp the gate's ordinal like every other resolve path, so the
+      // persisted record and event stay self-describing for consumers that
+      // distinguish replay double-fires from fresh repeats by ordinal.
+      const resolution: DecisionResolution = {
+        ...outcome.resolution,
+        gateOrdinal: existing.ordinal,
+      };
+      await persistTerminalGate(store, this.id, existing.threadId, existing, {
+        status: "resolved",
+        resolution,
       });
       await this.emit(
         {
           type: "decision_gate_resolved",
           threadId: existing.threadId,
           gateId,
-          resolution: outcome.resolution,
+          resolution,
         },
         { eventKey: `gate:${gateId}:resolved` },
       );
       return;
     }
-    const terminal: DecisionGate = { ...existing, status: "withdrawn", updatedAt: Date.now() };
-    await store.saveDecisionGate(this.id, existing.threadId, terminal);
-    await store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
-      gate: terminal,
-      withdrawnReason: outcome.withdrawReason,
+    await persistTerminalGate(store, this.id, existing.threadId, existing, {
+      status: "withdrawn",
+      reason: outcome.withdrawReason,
     });
     await this.emit(
       {

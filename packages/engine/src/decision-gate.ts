@@ -3,6 +3,7 @@ import type {
   DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
+  SessionStore,
 } from "./types.js";
 
 /**
@@ -173,6 +174,42 @@ export function shouldShortCircuit(args: {
   if (suspendedDecision.gateId !== expectedGateId) return { match: false };
   if (!suspendedDecision.resolution) return { match: false };
   return { match: true, resolution: suspendedDecision.resolution };
+}
+
+/** Terminal outcome for a gate row + its DAG entry. */
+export type GateTerminalOutcome =
+  | { status: "resolved"; resolution: DecisionResolution }
+  | { status: "withdrawn"; reason: DecisionWithdrawReason }
+  | { status: "expired" };
+
+/**
+ * Persist a gate's terminal status: the row and its DAG entry, in one shape
+ * for every terminalization site (live resolve, expiry, withdrawal, failed
+ * open, restart reconcile, orphan repair). Events stay with the callers —
+ * their eventKey/queueItemId options differ per site. Returns the terminal
+ * gate for callers that emit it.
+ */
+export async function persistTerminalGate(
+  store: SessionStore,
+  sessionId: string,
+  threadId: string,
+  gate: DecisionGate,
+  outcome: GateTerminalOutcome,
+): Promise<DecisionGate> {
+  const terminal: DecisionGate = { ...gate, status: outcome.status, updatedAt: Date.now() };
+  await store.saveDecisionGate(sessionId, threadId, terminal);
+  await store.updateDecisionGateEntry(sessionId, threadId, gate.id, {
+    gate: terminal,
+    ...(outcome.status === "resolved"
+      ? {
+          resolution: outcome.resolution,
+          resolvedAt: new Date(outcome.resolution.resolvedAt).toISOString(),
+        }
+      : outcome.status === "withdrawn"
+        ? { withdrawnReason: outcome.reason }
+        : { resolvedAt: new Date().toISOString() }),
+  });
+  return terminal;
 }
 
 export function fromRequest(
