@@ -126,32 +126,19 @@ export const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   "external_plugins",
 ]);
 
-/**
- * Valet's own skills folder. A file under it outranks a same-kind file of the
- * same name anywhere else in the repository — see `resolveNameCollisions`.
- */
+/** Outranks a same-kind file of the same name elsewhere — see
+ * `resolveNameCollisions`. */
 const VALET_SKILLS_PATH = ".valet/skills";
 
 /**
- * The dot-prefixed PATHS this scan opens. Everything under one of them is
- * scanned; every other dot-prefixed ancestor is skipped.
+ * The dot-prefixed PATHS this scan opens; every other dot-prefixed ancestor
+ * is skipped. The whole `.claude` tree is open because that is where an agent
+ * runtime keeps a repository's skills.
  *
- * `.claude/skills/<name>/SKILL.md` is where an agent runtime keeps a
- * repository's own skills, so the whole `.claude` tree is open.
- *
- * `.valet` is open for `skills` and for nothing else. It is Valet's own
- * per-repository folder, and it already carries three conventions that are
- * not skills: `prebuild.yaml` configures the sandbox image, `persona` is
- * written by the runner, and `prompts/*.md` are the repository's own slash
- * commands, read from the prepared sandbox by
- * `engine/command-providers.ts`. Mirroring those prompt files as skills
- * would change what an already-tracked repository holds the moment it
- * upgraded, and a name held by both `.claude/prompts` and `.valet/prompts`
- * would collide on the owner-name unique index. Whether `.valet/prompts`
- * should become skills is a product question, and it is open.
- *
- * A source may still reach any of it deliberately, by naming the directory
- * as its `subpath` — the rules run below the subdirectory.
+ * `.valet` is open for `skills` only. Its other contents (`prebuild.yaml`,
+ * `persona`, `prompts/*.md`) are existing conventions, and mirroring them as
+ * skills would change what a tracked repository imports on upgrade. A source
+ * can still reach them deliberately by naming the directory as its `subpath`.
  */
 const SCANNED_DOT_PATHS: readonly string[] = [".claude", VALET_SKILLS_PATH];
 
@@ -289,11 +276,8 @@ export function treeHoldsSubpath(entries: SkillTreeEntry[], subpath: string): bo
  *     back when a skill directory and a prompt file were the only two paths
  *     that could produce one name.
  *   - Of two files of the SAME kind sharing a name, the one under
- *     `.valet/skills` wins. That folder is Valet's own, so a repository that
- *     writes it wrote it for this product, and the rule is stated in terms of
- *     one fixed path rather than of where the loser sits. The case is real
- *     because `.claude` and `.valet/skills` are both scanned, and a
- *     repository that serves two agent runtimes keeps the same skill in both.
+ *     `.valet/skills` wins: that folder is Valet's own. The case is real
+ *     because a repository serving two agent runtimes keeps one skill in both.
  *   - Two files of the same kind sharing a name with no `.valet/skills` file
  *     between them import NEITHER. Nothing here can rank those: taking the
  *     first by sorted path would make the skill somebody gets depend on the

@@ -16,26 +16,18 @@ import type { ContentKind, ContentSourceRow } from "../../schema/index.js";
 import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
 
 /**
- * The version of the discovery RULES — which paths in a repository the
- * collectors claim.
+ * The version of the discovery RULES — which paths the collectors claim.
  *
- * Compare 1 in `service.ts` stops a poll whose head commit has not moved, and
- * that is what makes polling affordable. It is only sound while the rules
- * that read a commit are the rules that read it last time. A release that
- * opens a new folder to discovery would otherwise never re-scan a repository
- * nobody pushes to, and its newly discoverable content would appear only
- * after some unrelated commit landed.
+ * Compare 1 in `service.ts` stops a poll whose head commit has not moved,
+ * which is only sound while the rules are the rules that read it last time.
+ * Without this, a release opening a new folder would never re-scan a
+ * repository nobody pushes to. A source whose record does not match reads the
+ * tree once more, then goes back to one call per poll.
  *
- * So a source records what it last synced, and compare 1 short-circuits only
- * when that record describes the current head — see `discoveryScanMark`. A
- * source whose record does not match reads the tree once more, then goes back
- * to costing one call per poll.
- *
- * Raise this by one when a change makes the SAME commit yield a different
- * candidate set for any collector: a newly scanned directory, a new file
- * extension, a changed exclusion rule, a new kind. Do not raise it for a
- * change to what a collector writes from a file it already found — the
- * manifest hash covers that.
+ * Raise it when a change makes the SAME commit yield a different candidate
+ * set: a new directory, extension, exclusion rule or kind. Not for a change
+ * to what a collector writes from a file it already found — the manifest
+ * hash covers that.
  */
 export const DISCOVERY_RULES_VERSION = 1;
 
@@ -43,18 +35,12 @@ export const DISCOVERY_RULES_VERSION = 1;
  * What a complete sync records in `skill_sources.discovery_scan`: the rules
  * version, then the commit those rules read.
  *
- * The commit is in the value for rollback. A release that does not know this
- * column still advances `last_sha`, so a bare version would survive a
- * rollback, a sync under the OLD rules, and a roll-forward, and would then
- * tell compare 1 that the new head was read under rules that never saw it.
- * The source would skip the re-scan it needs. Pairing the version with the
- * commit makes the record self-describing: it matches the head only when a
- * release carrying these rules wrote it FOR that commit, and every other
- * value re-scans once.
- *
- * The cost is that the commit is stored twice, here and in `last_sha`, and
- * that a rollback window which synced anything buys one extra tree read plus
- * its file reads, once per source.
+ * The commit is there for rollback. A release that does not know this column
+ * still advances `last_sha`, so a bare version would survive a rollback, a
+ * sync under the old rules and a roll-forward, then tell compare 1 the new
+ * head was read under rules that never saw it. Pairing the two makes the
+ * record self-describing, at the cost of storing the commit twice and one
+ * extra tree read per source after a rollback window.
  */
 export function discoveryScanMark(commitSha: string): string {
   return `${DISCOVERY_RULES_VERSION}:${commitSha}`;
