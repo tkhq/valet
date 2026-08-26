@@ -11,6 +11,9 @@ on:
 
 jobs:
   description:
+    # Bot PRs (dependabot and friends) do not follow the template; the check
+    # targets prose written by people and coding agents.
+    if: github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

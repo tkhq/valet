@@ -8,6 +8,12 @@ Hard rules:
   3. At most MAX_WORDS words (fenced code blocks excluded).
   4. No marketing adjectives (list vendored in ste_lint.py).
   5. No modal hedges ("it is worth noting", "please note that", ...).
+  6. A non-empty Validation section (see .github/PULL_REQUEST_TEMPLATE.md).
+     Accepted heading names: Validation, Test plan, Tests, Testing,
+     Verification.
+
+HTML comments are stripped before every check: they do not render on the PR,
+so the template's instruction comments never count against the rules.
 
 Everything else the STE linter reports (passive voice, banned words, long
 sentences) prints as advisory context and does not fail the check. Those
@@ -20,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -35,11 +42,28 @@ from ste_lint import (  # noqa: E402
 )
 
 MAX_WORDS = 300
+COMMENT = re.compile(r"<!--.*?-->", re.S)
+VALIDATION_HEADING = re.compile(
+    r"^#{2,4}\s*(?:validation|test plan|tests|testing|verification)\b.*$",
+    re.I | re.M,
+)
+ANY_HEADING = re.compile(r"^#{1,4}\s", re.M)
+
+
+def validation_section(body: str) -> str | None:
+    """Return the text under the Validation heading, or None if absent."""
+    match = VALIDATION_HEADING.search(body)
+    if not match:
+        return None
+    rest = body[match.end():]
+    next_heading = ANY_HEADING.search(rest)
+    return rest[: next_heading.start()] if next_heading else rest
 
 
 def check(body: str, max_words: int) -> list[str]:
     failures: list[str] = []
 
+    body = COMMENT.sub(" ", body)
     if not body.strip():
         failures.append(
             "The PR description is empty. Describe what changed and how you "
@@ -80,6 +104,18 @@ def check(body: str, max_words: int) -> list[str]:
             "fact."
         )
 
+    section = validation_section(body)
+    if section is None:
+        failures.append(
+            "No Validation section. Add '## Validation' with the commands "
+            "you ran and their results."
+        )
+    elif not re.search(r"\w", section):
+        failures.append(
+            "The Validation section is empty. State the commands you ran "
+            "and their results."
+        )
+
     return failures
 
 
@@ -97,7 +133,8 @@ def main() -> int:
             print(f"  {index}. {failure}")
         print(
             "\nRules: no em dashes, no marketing words, no filler hedges, "
-            f"{arguments.max_words} words max. See CLAUDE.md 'Writing'."
+            f"{arguments.max_words} words max, a filled-in Validation "
+            "section. See CLAUDE.md 'Writing'."
         )
         return 1
 

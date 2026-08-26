@@ -85,7 +85,7 @@ Two repo-specific rules:
 
 `make e2e E2E_ARGS="--only docs-lint"` runs the STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds; CI runs the same script as a blocking check on every PR. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
 
-CI also lints every PR description (`scripts/docs/pr_description_lint.py`, the "PR lint" workflow). Hard rules: not empty, no em/en dashes, no marketing words, no filler hedges, 300 words max (code blocks excluded). Fix the description and the check re-runs on edit.
+CI also lints every PR description (`scripts/docs/pr_description_lint.py`, the "PR lint" workflow). Hard rules: not empty, no em/en dashes, no marketing words, no filler hedges, 300 words max, a filled-in Validation section (`.github/PULL_REQUEST_TEMPLATE.md`). HTML comments and code blocks do not count. Fix the description and the check re-runs on edit.
 
 This section governs new and edited prose. Do not rewrite existing documents wholesale for style alone. Apply the rules to the text you touch.
 
