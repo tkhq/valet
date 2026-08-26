@@ -50,21 +50,33 @@ describe("org service", () => {
   });
 
   describe("getOrgFeatures / setOrgFeatures", () => {
-    it("defaults every feature to false", async () => {
-      // An absent key reads as false, which is what makes a gate off for an
-      // operator who declares nothing.
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: false, ssoTeamSync: false });
+    it("defaults every opt-in feature to false and personal 1Password to true", async () => {
+      // An absent key reads as false, except `allowPersonalOnePassword`
+      // (opt-out), which reads as true.
+      expect(await getOrgFeatures(db, orgId)).toEqual({
+        organizations: false,
+        ssoTeamSync: false,
+        allowPersonalOnePassword: true,
+      });
     });
 
     it("reflects setOrgFeatures", async () => {
       await setOrgFeatures(db, orgId, { organizations: true });
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true, ssoTeamSync: false });
+      expect(await getOrgFeatures(db, orgId)).toEqual({
+        organizations: true,
+        ssoTeamSync: false,
+        allowPersonalOnePassword: true,
+      });
     });
 
     it("changes only the keys it is given", async () => {
       await setOrgFeatures(db, orgId, { ssoTeamSync: true });
       await setOrgFeatures(db, orgId, { organizations: true });
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true, ssoTeamSync: true });
+      expect(await getOrgFeatures(db, orgId)).toEqual({
+        organizations: true,
+        ssoTeamSync: true,
+        allowPersonalOnePassword: true,
+      });
     });
 
     it("keeps a feature key this build does not name", async () => {
@@ -77,6 +89,15 @@ describe("org service", () => {
 
       const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId));
       expect(rows[0]?.features).toEqual({ fromTheFile: true, organizations: true });
+    });
+
+    it("can disable personal 1Password tokens", async () => {
+      await setOrgFeatures(db, orgId, { allowPersonalOnePassword: false });
+      expect(await getOrgFeatures(db, orgId)).toEqual({
+        organizations: false,
+        ssoTeamSync: false,
+        allowPersonalOnePassword: false,
+      });
     });
   });
 

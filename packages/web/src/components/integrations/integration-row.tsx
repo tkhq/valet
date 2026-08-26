@@ -286,7 +286,7 @@ function ServiceBlock({
       aria-label={`Disconnect ${title}`}
       onClick={() => {
         if (!confirm(`Disconnect ${title}?`)) return;
-        void disconnect.mutateAsync(service.service);
+        void disconnect.mutateAsync({ service: service.service });
       }}
       disabled={disconnect.isPending}
     >

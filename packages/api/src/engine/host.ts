@@ -55,6 +55,8 @@ import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { resolveUserCredentialRead } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -199,6 +201,18 @@ export interface EngineHostOpts {
     fetchImpl?: typeof fetch;
     now?: () => number;
   };
+  /**
+   * 1Password reference-credential resolver (1Password credential provider
+   * plan, Task 2). When present, `buildCredentialResolver` additionally
+   * checks every resolved row (github's own `github`-service branch AND the
+   * default fall-through raw-store read) for `onePasswordMeta` and — when
+   * present — routes it through `onePassword.resolveCredential` instead of
+   * returning the reference-only row. Absent === no 1Password branch: rows
+   * pass through unchanged, byte-identical to before this task. Unlike
+   * `githubTokenDeps`, this alone is enough to make `buildCredentialResolver`
+   * return a resolver even with no `db`/`githubTokenDeps` wired.
+   */
+  onePassword?: OnePasswordService;
   /**
    * Idle window (minutes) before a `ready` sandbox is hibernated (sandbox
    * hibernation plan, Task 3). `resolveIdleMinutes` (sandbox-backend.ts)
@@ -939,29 +953,51 @@ export class EngineHost {
 
   /**
    * Builds the `credentialResolver` (engine `CreateSessionOptions` seam,
-   * GH-T10 fix) for a session, or `undefined` when `githubTokenDeps`/`db`
-   * aren't wired — callers must conditionally spread the result so an
-   * unresolved session's options stay byte-identical to before this fix (no
-   * `credentialResolver` key at all → the engine reads the raw store).
+   * GH-T10 fix) for a session, or `undefined` when neither `githubTokenDeps`+`db`
+   * nor `onePassword` are wired — callers must conditionally spread the result
+   * so an unresolved session's options stay byte-identical to before this fix
+   * (no `credentialResolver` key at all → the engine reads the raw store).
    *
    * The resolver is the SINGLE decision point for this session's credentials:
-   *  - `github` → `resolveSessionGitHubToken` (`purpose: "api"`), which honors
-   *    the session's primary `session_repos` binding auth when it has one and
-   *    resolves repo-less `auto` otherwise. A `GitHubAuthError` propagates
-   *    unchanged — the engine surfaces it as the tool's error result, hint
-   *    text intact. Synthesizes a `StoredCredential` the engine's
-   *    `credentialProvider` maps to `{ accessToken }`.
+   *  - `github` (when `githubTokenDeps`+`db` are wired) → `resolveSessionGitHubToken`
+   *    (`purpose: "api"`), which honors the session's primary `session_repos`
+   *    binding auth when it has one and resolves repo-less `auto` otherwise.
+   *    A `GitHubAuthError` propagates unchanged — the engine surfaces it as
+   *    the tool's error result, hint text intact. Synthesizes a
+   *    `StoredCredential` the engine's `credentialProvider` maps to
+   *    `{ accessToken }`.
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
-   *    installation). `null` when no installation resolves.
-   *  - `slack` → user credential first (personal `plugin-slack-user` token),
-   *    then org credential (`plugin-slack` bot token) as fallback. When a
-   *    credential is found and the session user has a `slack` identity link,
-   *    `metadata.owner_slack_user_id` is injected, activating plugin-slack's
-   *    private-channel check. No enrichment when no link is found or no
-   *    credential is stored (returns `null` or the bare stored credential).
-   *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
-   *    read, byte-identical to the engine's default (store-backed) path.
+   *    installation). `null` when no installation resolves, or when `db`/
+   *    `githubTokenDeps` are not wired.
+   *  - `openai` → `resolveOpenAiCredential` (org OpenAI LLM-provider key →
+   *    stored "openai" credential → OPENAI_API_KEY env).
+   *  - `slack` → `resolveUserCredentialRead` (user row, then org row), then
+   *    `withSlackOwnerMetadata` when a credential is found and `db` is wired.
+   *    The identity link injects `metadata.owner_slack_user_id` for
+   *    plugin-slack's private-channel check.
+   *  - every OTHER service (and `github` itself when `githubTokenDeps`/`db`
+   *    aren't wired) → `resolveUserCredentialRead` (shared owner-precedence
+   *    contract, `services/credential-resolution.ts`): a `{ type: "user", id:
+   *    userId }` row wins outright when present (any kind); on a user-row
+   *    MISS it falls back to the `{ type: "org", id: orgId }` row for the
+   *    same service. The engine always hands this resolver `owner = { type:
+   *    "user", id: userId }`, so `owner` itself is ignored below —
+   *    `userId`/`orgId` (captured by this closure) drive both halves.
+   *    Whichever row wins, when `onePassword` is wired and that row carries
+   *    `metadata.onepassword` (`onePasswordMeta`), `onePassword.resolveCredential`
+   *    fills in the secret from the referenced 1Password item; an
+   *    `OnePasswordAuthError` (missing/disabled token, SDK failure)
+   *    propagates unchanged, mirroring `GitHubAuthError`'s tool-error-result
+   *    behavior above. Rows without 1Password reference metadata (or with no
+   *    `onePassword` wired) pass through unchanged (same object, no clone).
+   *
+   *    Member sessions now gain read access to PLAIN org-owned credential
+   *    rows on a user-row miss, not just 1Password reference rows — e.g. an
+   *    admin-pasted org-wide Linear API key is now session-visible. See
+   *    `credential-resolution.ts`'s module doc for the full rationale (same
+   *    trust model as the org 1Password token; mirrors `github`'s user→org
+   *    tiering precedent).
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -1006,7 +1042,8 @@ export class EngineHost {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
-    if (!tokenDeps || !db) return undefined;
+    const onePassword = this.opts.onePassword;
+    if ((!tokenDeps || !db) && !onePassword) return undefined;
     return async (owner, service) => {
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
@@ -1015,6 +1052,7 @@ export class EngineHost {
         // picked — a user token 403s on `GET /installation/repositories`.
         // `null` (no installation) stays `null`; the action names the
         // corrective step in its own error.
+        if (!db || !tokenDeps) return null;
         const binding = await primaryRepoBinding(db, sessionId);
         const token = await resolveInstallationApiToken(
           {
@@ -1035,50 +1073,44 @@ export class EngineHost {
         // plugin-openai's key probe: org OpenAI LLM-provider key → stored
         // "openai" credential → OPENAI_API_KEY env. `null` keeps the openai
         // tools hidden in list_tools (requiresCredential gating).
+        if (!db) {
+          return resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, service);
+        }
         return resolveOpenAiCredential(db, credentials, owner, orgId);
       }
-      if (service !== "github") {
-        if (service === "slack") {
-          // The Slack bot token is org-shared: `PUT
-          // /api/credentials/slack?scope=org` stores it under
-          // `{ type: "org", id: orgId }`. The engine's session always calls
-          // the resolver with a user owner, so a plain exact-owner read would
-          // return null for every production session. Read the user credential
-          // first (a personal `plugin-slack-user` token takes precedence);
-          // when absent, escalate to the org owner.
-          const stored =
-            (await credentials.get(owner, service)) ??
-            (await credentials.get({ type: "org", id: orgId }, service));
-          // Activates plugin-slack's private-channel check: the identity
-          // link is the single source of truth for the owner's Slack user
-          // id, regardless of how the link was created. Shared with the
-          // workflow action invoker (`plugins/action-invoker.ts`).
-          if (stored) return withSlackOwnerMetadata(db, userId, stored);
-          return null;
-        }
-        return await credentials.get(owner, service);
-      }
-      const resolved = await resolveSessionGitHubToken(
-        {
-          db,
-          credentials,
-          key: tokenDeps.key,
-          apiUrl: tokenDeps.apiUrl,
-          githubUrl: tokenDeps.githubUrl,
-          fetchImpl: tokenDeps.fetchImpl,
-          now: tokenDeps.now,
-        },
-        { orgId, userId, sessionId, purpose: "api" },
-      );
-      // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
-      // rather than returning a null token; a null here would be a contract
-      // violation upstream, so surface it as the same unconnected gap.
-      if (resolved.token === null) {
-        throw new GitHubAuthError(
-          "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+      if (service === "github" && tokenDeps && db) {
+        const resolved = await resolveSessionGitHubToken(
+          {
+            db,
+            credentials,
+            key: tokenDeps.key,
+            apiUrl: tokenDeps.apiUrl,
+            githubUrl: tokenDeps.githubUrl,
+            fetchImpl: tokenDeps.fetchImpl,
+            now: tokenDeps.now,
+          },
+          { orgId, userId, sessionId, purpose: "api" },
         );
+        // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
+        // rather than returning a null token; a null here would be a contract
+        // violation upstream, so surface it as the same unconnected gap.
+        if (resolved.token === null) {
+          throw new GitHubAuthError(
+            "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+          );
+        }
+        return { type: "oauth2", accessToken: resolved.token };
       }
-      return { type: "oauth2", accessToken: resolved.token };
+      if (service === "slack") {
+        const stored = await resolveUserCredentialRead(
+          { credentials, onePassword },
+          { orgId, userId },
+          service,
+        );
+        if (stored && db) return withSlackOwnerMetadata(db, userId, stored);
+        return stored;
+      }
+      return resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, service);
     };
   }
 

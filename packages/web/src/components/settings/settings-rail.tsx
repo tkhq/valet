@@ -46,6 +46,7 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
   { to: "/settings/organization/policies", label: "Policies" },
   { to: "/settings/organization/action-log", label: "Action log" },
+  { to: "/settings/organization/onepassword", label: "1Password" },
 ] as const;
 
 export function SettingsRail() {

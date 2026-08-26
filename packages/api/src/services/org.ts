@@ -27,6 +27,11 @@ export interface OrgFeatures {
    * user-create hooks in `auth/provisioning.ts`, which never read this flag.
    */
   ssoTeamSync: boolean;
+  /** Whether personal (per-user) 1Password service-account tokens are
+   * allowed for this org. Absent-reads-as-`true` (opt-out, not opt-in) —
+   * see `getAllowPersonalOnePassword`, which reads the same underlying
+   * `orgs.features` key with the same default. */
+  allowPersonalOnePassword: boolean;
 }
 
 export interface OrgMemberSummary {
@@ -112,8 +117,10 @@ export async function isOrgMember(db: AppQueryable, orgId: string, userId: strin
   return rows.length > 0;
 }
 
-/** Every feature key reads as false when absent, so a new gate defaults to off. */
-const FEATURES_OFF: OrgFeatures = { organizations: false, ssoTeamSync: false };
+/** Most feature keys read as false when absent, so a new gate defaults to
+ * off. `allowPersonalOnePassword` is the exception: absent reads as true
+ * (opt-out). */
+const FEATURES_OFF: OrgFeatures = { organizations: false, ssoTeamSync: false, allowPersonalOnePassword: true };
 
 /** Reads the raw `orgs.features` jsonb, or an empty record when the org has none. */
 async function readRawFeatures(db: AppQueryable, orgId: string): Promise<Record<string, unknown>> {
@@ -124,21 +131,34 @@ async function readRawFeatures(db: AppQueryable, orgId: string): Promise<Record<
 }
 
 /**
- * Reads `orgs.features` (jsonb). An absent key reads as false, which is what
- * makes every gate here off for an operator who sets nothing.
+ * Reads `orgs.features` (jsonb). An absent key reads as false, except
+ * `allowPersonalOnePassword`, which reads as true (opt-out).
  */
 export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<OrgFeatures> {
   const raw = await readRawFeatures(db, orgId);
   return {
     organizations: Boolean(raw.organizations),
     ssoTeamSync: Boolean(raw.ssoTeamSync),
+    allowPersonalOnePassword: raw.allowPersonalOnePassword !== false,
   };
+}
+
+/**
+ * Whether personal (per-user) 1Password service-account tokens are allowed
+ * for `orgId`. Reads the same `orgs.features` jsonb column `getOrgFeatures`
+ * does. An absent `allowPersonalOnePassword` key reads as `true` (opt-out)
+ * — org admins disable it explicitly.
+ */
+export async function getAllowPersonalOnePassword(db: AppQueryable, orgId: string): Promise<boolean> {
+  const raw = await readRawFeatures(db, orgId);
+  return raw.allowPersonalOnePassword !== false;
 }
 
 /**
  * Reads the feature gates of the deployment's org, without creating one.
  *
- * No org means no gate row, so every feature reads as off. A caller on the
+ * No org means no gate row, so every opt-in feature reads as off
+ * (`allowPersonalOnePassword` still defaults to on). A caller on the
  * login path must use this instead of `ensureOrg` + `getOrgFeatures`: a gate
  * check must not be the thing that creates an org.
  */

@@ -383,7 +383,7 @@ describe("IntegrationsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
 
     expect(window.confirm).toHaveBeenCalled();
-    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith("slack"));
+    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith({ service: "slack" }));
   });
 
   it("opens the pre-connect screen for an oauth service instead of redirecting on click", () => {
