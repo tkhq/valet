@@ -1,6 +1,7 @@
 /**
- * The workflow file envelope, and the one parser every source reads it
- * through: the import dialog, the repository sync, and the export route.
+ * The workflow file envelope and its parser. The import dialog reads it
+ * today; the repository sync and the export route are the two further doors
+ * the 2026-08-24 workflows MVP design adds (its tasks 5 and 9).
  *
  * `parseWorkflowFileValue` takes an ALREADY-PARSED value and holds no text
  * decoder, so the caller picks one — `yaml.parse` on the api, `JSON.parse`

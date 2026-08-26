@@ -43,8 +43,9 @@ export type ParsedWorkflowImport =
  * `valet: workflow-template/v1` file imports as the workflow its graph
  * describes, under the template's name.
  *
- * A failure returns the validator's own messages, unaltered: they name the
- * node and the field to correct.
+ * When the shape is right but the graph is wrong, the validator's own
+ * messages come back unaltered: they name the node and the field to correct.
+ * A file this function cannot decode at all gets a message from here.
  *
  * The browser has no plugin catalog, so a definition that passes here can
  * still be refused by `POST /api/workflows`, which runs the same validator
