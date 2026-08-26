@@ -155,6 +155,24 @@ echo "$API_DEPLOY_BLOCK" | grep -m1 'replicas:' | grep -q 'replicas: 1' \
   || fail "api Deployment replicas is not pinned to 1"
 pass "api Deployment replicas pinned to 1"
 
+# --- probe split: liveness on /api/health, readiness on /api/ready --------
+# Boot-ordering fix (chart 0.10.2): the api binds the listener before
+# boot-restore work, so /api/health means "port bound" and /api/ready means
+# "boot chain done". Readiness must NOT point at /api/health — that would
+# move traffic to a pod that is still restoring — and liveness/startup must
+# NOT point at /api/ready, or a slow restore would get the pod killed
+# (the exact sha-a6eadbe failure this split exists to prevent).
+READY_BLOCK=$(echo "$API_DEPLOY_BLOCK" | grep -A3 'readinessProbe:')
+echo "$READY_BLOCK" | grep -q 'path: /api/ready' \
+  || fail "readinessProbe does not hit /api/ready — traffic would move to a pod still running its boot chain"
+LIVENESS_BLOCK=$(echo "$API_DEPLOY_BLOCK" | grep -A3 'livenessProbe:')
+echo "$LIVENESS_BLOCK" | grep -q 'path: /api/health' \
+  || fail "livenessProbe does not hit /api/health — liveness must never wait on boot-restore work"
+STARTUP_BLOCK=$(echo "$API_DEPLOY_BLOCK" | grep -A3 'startupProbe:')
+echo "$STARTUP_BLOCK" | grep -q 'path: /api/health' \
+  || fail "startupProbe does not hit /api/health — startup must never wait on boot-restore work"
+pass "probe split: readiness /api/ready, startup+liveness /api/health"
+
 # --- lookup-retain helper present in Secret template ---------------------
 grep -q 'define "valet.retainedSecretValue"' "$CHART_DIR/templates/_helpers.tpl" \
   || fail "retained-secret-value helper not found in _helpers.tpl"

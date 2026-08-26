@@ -128,24 +128,33 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
-          # Boot time is VARIABLE: boot-restore replays unsettled
-          # submissions and reclaims workflow leases before the port
-          # binds, so a busy database pushes boot past any tight
-          # liveness budget. Without a startupProbe the kubelet killed
-          # mid-boot pods after ~40s and the api crash-looped under
-          # backoff (observed live: 7+ restarts on a boot that
-          # eventually needed >40s; a quiet boot takes ~5s). The
-          # startupProbe owns the boot window (up to 5 minutes);
-          # liveness stays tight for steady-state.
+          # Probe split (boot-ordering fix, chart 0.10.2):
+          #
+          # /api/health answers as soon as the port binds — the api binds
+          # the listener BEFORE boot-restore/reconcile work, which runs in
+          # a background chain. /api/ready stays 503 until the chain's
+          # traffic-protecting steps (session restore, config reconcile)
+          # finish; best-effort service starts run after the ready flip.
+          #
+          #   startup + liveness → /api/health ("port bound, event loop
+          #     alive"). Pre-bind work is only DB connect + migrations +
+          #     provider construction, so 90s covers a slow disk with
+          #     room. The old 300s window existed because restore work ran
+          #     in front of the port; keeping it would mask the next
+          #     boot-ordering regression.
+          #   readiness → /api/ready. A pod still restoring stays NotReady
+          #     (the old pod keeps serving) — it is never killed for slow
+          #     boot work, and a bad instance config exits before ready,
+          #     so traffic never moves to it.
           startupProbe:
             httpGet:
               path: /api/health
               port: http
-            periodSeconds: 10
-            failureThreshold: 30
+            periodSeconds: 5
+            failureThreshold: 18
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /api/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

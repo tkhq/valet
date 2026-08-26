@@ -111,6 +111,9 @@ describe("ChannelHost.handleUpdate", () => {
   let fakeTransport: FakeTransport;
   let keyedTransport: KeyedTransport;
   let faux: FauxProviderRegistration;
+  let engineStore: PgSessionStore;
+  let eventStream: PgEventStream;
+  let engineCredentials: PgCredentialStore;
 
   beforeEach(async () => {
     // Hijack the real anthropic-messages api so EngineHost's own model
@@ -129,10 +132,10 @@ describe("ChannelHost.handleUpdate", () => {
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
 
-    const engineStore = new PgSessionStore(pgdb);
+    engineStore = new PgSessionStore(pgdb);
     const sandboxProvider = new VirtualSandboxProvider();
-    const eventStream = new PgEventStream(pgdb);
-    const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    eventStream = new PgEventStream(pgdb);
+    engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
 
     fakeTransport = new FakeTransport();
     keyedTransport = new KeyedTransport();
@@ -178,6 +181,61 @@ describe("ChannelHost.handleUpdate", () => {
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
+  });
+
+  it("stop() completing while start() awaits a probe prevents ingress/outbound from starting", async () => {
+    // start() now runs on the api's background boot chain, so a shutdown can
+    // finish while start() is awaiting a transport probe. The re-checks of
+    // `started` inside start() must then bail before spawning poll loops.
+    let releaseGetMe: (() => void) | undefined;
+    const pollSpy = vi.fn(async function* (): AsyncIterable<never> {
+      // yields nothing; the assertion is that it is never invoked at all
+    });
+    // `getMe` is a duck-typed capability (`hasGetMe` in host.ts), not a
+    // `ChannelTransport` member, so the intersection declares it honestly.
+    const slowTransport: ChannelTransport & { getMe(): Promise<{ username?: string }> } = {
+      channelType: "slow",
+      verifyWebhook: () => null,
+      parseUpdate: () => null,
+      send: async (conversationKey: string) => ({ conversationKey, messageId: "1" }),
+      sendMedia: async (conversationKey: string) => ({ conversationKey, messageId: "m" }),
+      sendGatePrompt: async (conversationKey: string) => ({ conversationKey, messageId: "g" }),
+      updateGatePrompt: async () => {},
+      answerCallback: async () => {},
+      getMe: () =>
+        new Promise((res) => {
+          releaseGetMe = () => res({ username: "slow" });
+        }),
+      poll: pollSpy,
+    };
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slow", {
+      type: "bot_token",
+      accessToken: "slow-bot-token",
+    });
+    const slowHost = new ChannelHost({
+      db: testDb.appDb,
+      engineHost,
+      engineStore,
+      eventStream,
+      engineCredentials,
+      plugins: [
+        {
+          name: "slow",
+          version: "0",
+          transports: [{ channelType: "slow", create: () => slowTransport }],
+        },
+      ],
+      resolveOrgId: async () => ORG_ID,
+    });
+
+    const startP = slowHost.start();
+    // Wait until start() is parked on the getMe probe.
+    while (!releaseGetMe) await new Promise((r) => setTimeout(r, 5));
+    await slowHost.stop();
+    releaseGetMe();
+    await startP;
+
+    expect(pollSpy).not.toHaveBeenCalled();
   });
 
   it("unlinked sender: drop log row + one rate-limited reply", async () => {

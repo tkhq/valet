@@ -72,3 +72,105 @@ export async function restoreOneSession(sessionId: string, deps: RestoreSessionD
   }
   await deps.sessionFor(sessionId, row);
 }
+
+/** Bounds for {@link runBoundedRestore}. */
+export interface BoundedRestoreOpts {
+  /** Max sessions restored at once. */
+  concurrency: number;
+  /** Per-session wait budget in ms. A session past it is abandoned by the
+   * restore pass only — its underlying work keeps running, and
+   * `EngineHost.sessionFor`'s single-flight map hands later callers the same
+   * in-flight promise. */
+  timeoutMs: number;
+  /** Checked before each session is pulled; true stops the pass (shutdown). */
+  shouldStop?: () => boolean;
+}
+
+export interface BoundedRestoreResult {
+  restored: number;
+  failed: number;
+  timedOut: number;
+  /** True when `shouldStop` ended the pass before the id list was drained. */
+  stopped: boolean;
+}
+
+/**
+ * Restore sessions with bounded concurrency and a per-session timeout.
+ *
+ * Boot restore used to run on the critical path in front of the HTTP
+ * listener, strictly sequentially and with no per-session bound — one wedged
+ * in-sandbox exec (a `git fetch` into a full disk, in the sha-a6eadbe
+ * rollout) stalled the whole pass, boot never bound the port, and the
+ * kubelet killed the pod at the startup budget. The listener now binds
+ * first (`main.ts`), and this runner bounds the pass itself so a single
+ * slow session cannot serialize the rest or hold readiness forever.
+ *
+ * Per-session failures and timeouts are logged and counted, never thrown.
+ */
+export async function runBoundedRestore(
+  ids: string[],
+  restore: (sessionId: string) => Promise<void>,
+  opts: BoundedRestoreOpts,
+): Promise<BoundedRestoreResult> {
+  const result: BoundedRestoreResult = { restored: 0, failed: 0, timedOut: 0, stopped: false };
+  let next = 0;
+  // Abandoned (timed-out) attempts that have not settled yet. Real in-flight
+  // work is `concurrency + abandonedInFlight`; the refresh-path exec timeout
+  // (workspace-prep.ts's GIT_REFRESH_TIMEOUT_MS, plus each provider's own
+  // exec bound) makes abandoned attempts self-terminate, which caps the
+  // overlap at roughly `concurrency * (execTimeout / timeoutMs)`. Reported
+  // in the timeout log line so a pile-up is visible as it happens.
+  let abandonedInFlight = 0;
+
+  async function worker(): Promise<void> {
+    while (next < ids.length) {
+      if (opts.shouldStop?.()) {
+        result.stopped = true;
+        return;
+      }
+      const id = ids[next++];
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<"timeout">((res) => {
+        timer = setTimeout(() => res("timeout"), opts.timeoutMs);
+        timer.unref();
+      });
+      try {
+        const attempt = restore(id).then(() => "done" as const);
+        const raced = await Promise.race([attempt, timeout]);
+        if (raced === "timeout") {
+          result.timedOut++;
+          abandonedInFlight++;
+          // The attempt is now unobserved by the race; keep watching it so
+          // its outcome is never silent — a late failure logged here is the
+          // only trail an operator gets for a session that never came back.
+          // Attached synchronously in the same tick the race settles, so a
+          // later rejection cannot surface as an unhandledRejection.
+          attempt
+            .then(
+              () => console.log(`boot restore: abandoned session ${id} finished restoring in the background`),
+              (err: unknown) =>
+                console.error(`boot restore: abandoned session ${id} later failed in the background:`, err),
+            )
+            .finally(() => {
+              abandonedInFlight--;
+            });
+          console.error(
+            `boot restore: session ${id} exceeded ${opts.timeoutMs}ms — abandoning the wait ` +
+              `(${abandonedInFlight} abandoned restore${abandonedInFlight === 1 ? "" : "s"} still running)`,
+          );
+        } else {
+          result.restored++;
+        }
+      } catch (err) {
+        result.failed++;
+        console.error(`boot restore: failed to restore session ${id}:`, err);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.max(1, opts.concurrency) }, () => worker());
+  await Promise.all(workers);
+  return result;
+}

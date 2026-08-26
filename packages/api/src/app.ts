@@ -17,7 +17,7 @@ import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
-import type { AuthConfigResponse, HealthResponse } from "./wire/types.js";
+import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { VALET_VERSION } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
@@ -89,6 +89,16 @@ export interface CreateAppOpts {
    * server serves the web app. See `static-web.ts`.
    */
   webDistDir?: string;
+  /**
+   * Readiness source for `GET /api/ready`. `main.ts` passes a callback that
+   * flips true once the boot chain's traffic-protecting steps (session
+   * restore, child-watch re-arm, config reconcile) complete — the k8s
+   * readinessProbe reads it, so a new pod takes traffic only after that
+   * work is done, while `/api/health` (liveness/startup) answers from the
+   * moment the port binds. Absent → always ready (test harnesses and
+   * embedded callers have no boot chain).
+   */
+  isReady?: () => boolean;
 }
 
 /**
@@ -188,6 +198,18 @@ export function createApp(
       sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
     };
     return c.json(body);
+  });
+
+  // Public readiness check (no auth). Health above answers as soon as the
+  // port binds (liveness: "process up, event loop alive"); this one stays
+  // 503 until the boot chain finishes, so the k8s readinessProbe holds
+  // traffic off a pod that is still restoring — the pod is NEVER killed for
+  // slow boot work, it just stays NotReady. See `main.ts`'s background boot
+  // chain and the sha-a6eadbe rollout RCA that forced the split.
+  app.get("/api/ready", (c) => {
+    const ready = opts.isReady?.() ?? true;
+    const body: ReadyResponse = { ready };
+    return c.json(body, ready ? 200 : 503);
   });
 
   // better-auth owns everything under /api/auth/* (signup, login, session,
