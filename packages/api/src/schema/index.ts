@@ -928,11 +928,9 @@ export type ContentKind = "skills" | "workflows" | "templates";
 //
 // The sync columns are the whole change-detection state: `last_sha` is the
 // commit the last sync read, `last_manifest_hash` is a hash over the tracked
-// files that commit held, and `discovery_scan` names the version of the path
-// rules that read them together with the commit they read. A poll that finds
-// the same commit under the same rules stops after one API call; a poll that
-// finds a moved commit with the same manifest records the commit and writes
-// no mirrored rows.
+// files that commit held, and `discovery_scan` pairs the path-rules version
+// with the commit read under it. The compares that use them are in
+// `services/content-sync/service.ts`.
 //
 // `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
 // and retry state, shaped like `event_deliveries` — see
@@ -975,12 +973,10 @@ export const contentSources = pgTable(
     nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
     lastSha: text("last_sha"),
     lastManifestHash: text("last_manifest_hash"),
-    /** What the last complete sync scanned: the discovery-rules version and
-     * the commit those rules read, as `<version>:<sha>`. NULL on a row that
-     * predates the column, and on a source that never synced. A row whose
-     * value does not describe the current head takes no head-commit
-     * short-circuit, which is what makes the mechanism survive a release
-     * that does not write it — see `services/content-sync/collector.ts`. */
+    /** `<rules version>:<sha>` from the last complete sync. NULL when the
+     * row predates the column or never synced. A value that does not describe
+     * the current head takes no head-commit short-circuit, which is what
+     * makes the mechanism survive a release that does not write it. */
     discoveryScan: text("discovery_scan"),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
     lastError: text("last_error"),

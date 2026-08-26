@@ -213,9 +213,6 @@ export async function createContentSource(
     nextAttemptAt: now,
     lastSha: null,
     lastManifestHash: null,
-    // The first sync has no commit to compare against, so it scans whatever
-    // the current rules find and records the commit and the version it ran
-    // under.
     discoveryScan: null,
     lastSyncedAt: null,
     lastError: null,

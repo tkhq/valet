@@ -193,11 +193,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
   },
   {
-    // What a source last scanned: the discovery-rules version and the commit
-    // it read. Null on every row written before the column existed, and on
-    // every row a release that does not know the column has since advanced,
-    // which both read as "not this commit under these rules" and make that
-    // source re-scan once — see `services/content-sync/collector.ts`.
+    // The discovery-rules version and the commit read under it. Null on
+    // every row written before the column existed, and on every row an older
+    // release has advanced since; both make that source re-scan once.
     describe: "skill_sources.discovery_scan column",
     probe: { kind: "column", table: "skill_sources", column: "discovery_scan" },
     sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "discovery_scan" text',

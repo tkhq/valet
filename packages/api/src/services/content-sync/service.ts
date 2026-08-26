@@ -552,9 +552,6 @@ export class ContentSyncService {
           syncIntervalMs(source.ownerType, { orgWebhookLive: this.deps.orgWebhookLive?.() === true }),
         lastSha: result.complete ? result.headSha : source.lastSha,
         lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
-        // Recorded with the commit and for the same reason: an incomplete
-        // sync did not read the commit it is about to record, so it has not
-        // finished reading the repository under these rules either.
         discoveryScan: result.complete ? discoveryScanMark(result.headSha) : source.discoveryScan,
         lastSyncedAt: now,
         lastError: message,
