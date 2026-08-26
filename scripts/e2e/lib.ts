@@ -14,7 +14,8 @@ export type Need =
   | "e2eK8sOptIn"
   | "telegram"
   | "githubLive"
-  | "openai";
+  | "openai"
+  | "onepassword";
 
 export interface StepDef {
   id: string;
@@ -51,6 +52,7 @@ export interface Probes {
   telegram: boolean;
   githubLive: boolean;
   openai: boolean;
+  onepassword: boolean;
 }
 
 /** Env vars scrubbed from `scrubKeys` steps and probed for cred tiers. */
@@ -72,7 +74,7 @@ const MIN = 60_000;
 /** Integration files run keyless in `integration-core` (key-gated suites in
  * these files self-skip via describe.skip). Explicit lists keep the two
  * integration rows off the dedicated rows' files (cli, telegram, openai,
- * prebuilds, keycloak) — with one deliberate overlap: `github-repo.e2e` is in
+ * onepassword, prebuilds, keycloak) — with one deliberate overlap: `github-repo.e2e` is in
  * core (its GitHub-fixture loop is keyless) AND is the `github-live` row's
  * file (the live block self-gates). lib.test.ts asserts the union of these
  * lists + dedicated rows covers the whole integration dir. */
@@ -115,6 +117,7 @@ export const DEDICATED_INTEGRATION_FILES = [
   "src/integration/llm-providers.e2e.test.ts",
   "src/integration/prebuilds.e2e.test.ts",
   "src/integration/oidc-keycloak.e2e.test.ts",
+  "src/integration/onepassword.live.test.ts",
 ];
 export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INTEGRATION_AGENT_FILES };
 
@@ -194,6 +197,7 @@ export const STEPS: StepDef[] = [
   { id: "telegram", group: "live", title: "live Telegram outbound", command: apiTest("src/integration/telegram.e2e.test.ts"), needs: ["telegram"], timeoutMs: 10 * MIN },
   { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts"), needs: ["githubLive"], timeoutMs: 10 * MIN },
   { id: "openai", group: "live", title: "OpenAI provider path", command: apiTest("src/integration/llm-providers.e2e.test.ts"), needs: ["openai"], timeoutMs: 10 * MIN },
+  { id: "onepassword", group: "live", title: "live 1Password SDK", command: apiTest("src/integration/onepassword.live.test.ts"), needs: ["onepassword"], timeoutMs: 5 * MIN },
 ];
 
 export interface Waves {
@@ -236,6 +240,8 @@ export function needHint(n: Need): string {
       return "set VALET_GITHUB_LIVE_TEST=1 + VALET_GITHUB_LIVE_APP_ID + VALET_GITHUB_LIVE_APP_PRIVATE_KEY_PEM";
     case "openai":
       return "set OPENAI_API_KEY";
+    case "onepassword":
+      return "set OP_SERVICE_ACCOUNT_TOKEN";
   }
 }
 

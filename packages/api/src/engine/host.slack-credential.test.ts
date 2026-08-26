@@ -131,10 +131,10 @@ describe("EngineHost session slack credential resolution", () => {
     expect(cred?.metadata?.["team_id"]).toBe("TUSER");
   });
 
-  it("non-slack service stored org-scoped only → resolves null (no generic fallback leaked)", async () => {
+  it("escalates to the org row on a user-row miss for every service", async () => {
     const { appDb, credentials } = await harness();
-    // Store a linear credential under org scope — the resolver must NOT fall
-    // back to org for non-slack services.
+    // Owner-precedence (1Password plan, Task 6): a user-owner miss falls
+    // back to the org row for every service, not only org-provided ones.
     await credentials.save({ type: "org", id: orgId }, "linear", {
       type: "api_key",
       apiKey: "lin-org-key",
@@ -145,9 +145,10 @@ describe("EngineHost session slack credential resolution", () => {
     fixture = startGithubFixture();
     const h = makeHost(appDb, credentials, fixture.url);
 
-    const session = await h.sessionFor("sess-linear-no-fallback", { userId, orgId, workspace: "/tmp" });
+    const session = await h.sessionFor("sess-linear-org-fallback", { userId, orgId, workspace: "/tmp" });
     const cred = await session.credentialProvider().get("linear");
 
-    expect(cred).toBeNull();
+    // Session.credentialProvider maps StoredCredential.apiKey → accessToken.
+    expect(cred?.accessToken).toBe("lin-org-key");
   });
 });

@@ -111,6 +111,7 @@ const probes: Probes = {
       process.env.VALET_GITHUB_LIVE_APP_PRIVATE_KEY_PEM,
   ),
   openai: Boolean(process.env.OPENAI_API_KEY),
+  onepassword: Boolean(process.env.OP_SERVICE_ACCOUNT_TOKEN),
 };
 
 // ── doctor: environment readiness checklist, no suites ─────────────────────
@@ -166,6 +167,7 @@ if (flag("doctor")) {
     { id: "telegram", label: "Telegram creds", ok: probes.telegram, required: false, hint: needHint("telegram") },
     { id: "github-live", label: "GitHub live-App creds", ok: probes.githubLive, required: false, hint: needHint("githubLive") },
     { id: "openai", label: "OpenAI key", ok: probes.openai, required: false, hint: needHint("openai") },
+    { id: "onepassword", label: "1Password service-account token", ok: probes.onepassword, required: false, hint: needHint("onepassword") },
   ];
   const armed = STEPS.filter((s) => missingNeeds(s, probes).length === 0).length;
   console.log(renderDoctor(checks, armed, STEPS.length));
