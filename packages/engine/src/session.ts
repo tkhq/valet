@@ -1098,7 +1098,13 @@ export class Session {
         return;
       }
     }
-    // Fallback: gate may have already been resolved or never registered.
+    // Orphan repair (TKAI-238): a pending row with no in-memory waiter can
+    // never resolve through the paths above — the row survives every refresh
+    // as an unresolvable approval card. Such rows exist in deployed databases
+    // (gate opens that failed partway on older builds) and can still appear
+    // in the crash window between gate persist and waiter registration, so
+    // this user-initiated repair terminalizes them on the next click.
+    await this.terminalizeOrphanedGate(gateId, { resolution });
   }
 
   /**
@@ -1153,6 +1159,63 @@ export class Session {
         return;
       }
     }
+    // Orphan repair — see resolveDecision.
+    await this.terminalizeOrphanedGate(gateId, { withdrawReason: reason });
+  }
+
+  /**
+   * Terminalize a pending gate row that has no registered waiter. Guard: a
+   * gate referenced by its thread's suspended-turn checkpoint is NOT an
+   * orphan — reconciliation re-arms it for replay after a restart — so it is
+   * left alone. Persists the terminal status, updates the DAG entry, and
+   * emits the matching event so live clients drop the card.
+   */
+  private async terminalizeOrphanedGate(
+    gateId: string,
+    outcome: { resolution: DecisionResolution } | { withdrawReason: DecisionWithdrawReason },
+  ): Promise<void> {
+    const store = this.providers.store;
+    const existing = await store.getDecisionGate(this.id, gateId);
+    if (!existing || existing.status !== "pending") return;
+    const suspended = await store.getSuspendedTurn(this.id, existing.threadId);
+    if (suspended?.gateId === gateId) return;
+    console.warn(
+      `[engine] terminalizing orphaned decision gate ${gateId} (pending row, no registered waiter)`,
+    );
+    if ("resolution" in outcome) {
+      const resolved: DecisionGate = { ...existing, status: "resolved", updatedAt: Date.now() };
+      await store.saveDecisionGate(this.id, existing.threadId, resolved);
+      await store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
+        gate: resolved,
+        resolution: outcome.resolution,
+        resolvedAt: new Date(outcome.resolution.resolvedAt).toISOString(),
+      });
+      await this.emit(
+        {
+          type: "decision_gate_resolved",
+          threadId: existing.threadId,
+          gateId,
+          resolution: outcome.resolution,
+        },
+        { eventKey: `gate:${gateId}:resolved` },
+      );
+      return;
+    }
+    const terminal: DecisionGate = { ...existing, status: "withdrawn", updatedAt: Date.now() };
+    await store.saveDecisionGate(this.id, existing.threadId, terminal);
+    await store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
+      gate: terminal,
+      withdrawnReason: outcome.withdrawReason,
+    });
+    await this.emit(
+      {
+        type: "decision_gate_withdrawn",
+        threadId: existing.threadId,
+        gateId,
+        reason: outcome.withdrawReason,
+      },
+      { eventKey: `gate:${gateId}:withdrawn` },
+    );
   }
 
   async abort(opts: { threadId?: string } = {}): Promise<void> {

@@ -591,6 +591,11 @@ The active conversation path is reconstructed by following `parentId` pointers f
 
 **Suspension history rules:** Decision-gated turns are represented in the DAG by a first-class `DecisionGateEntry`, not by synthetic system messages. The entry is created when the gate is opened and then updated in place as it moves through `pending`, `resolved`, `expired`, or `withdrawn` states. This keeps the history model explicit and replayable: gates are decision artifacts, not conversation utterances.
 
+**One gate cycle at a time per thread (TKAI-238):** pi-agent-core runs a block's tool calls in parallel, but the gate machinery holds two single-slot resources: the strict `running↔blocked_on_decision_gate` queue toggle and the per-thread suspended-turn checkpoint. `Thread` therefore serializes gate open/wait cycles — a second gated tool call waits until the previous gate resolves and releases the blocked toggle, then opens its own gate. Two supporting rules keep pending rows honest:
+
+- A gate open that fails partway (stale fence, store error) terminalizes the row it persisted (`withdrawn`) before the error propagates. A pending row with no registered waiter renders as an approval card that no resolve can clear.
+- `resolveDecision`/`withdrawDecision` on a pending row with no in-memory waiter terminalize the row directly and emit the matching event. This user-initiated repair exists because such orphans persist in deployed databases from before the serialization fix, and a crash window between gate persist and waiter registration remains. Gates referenced by a suspended-turn checkpoint are exempt — reconciliation re-arms them for replay.
+
 **V1 branching stance:** The storage model remains DAG-based so future replay and alternate branches are possible without schema redesign, but V1 does not require exposing full user-facing branch/replay controls in the API. V1 must preserve enough metadata for later branching support without forcing branching UX to ship in the first implementation batch.
 
 ## Engine Internals
