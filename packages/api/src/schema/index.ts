@@ -1502,8 +1502,6 @@ export const eventSubscriptions = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    // Which workspace the subscription belongs to: the requested
-    // orchestrator, or the target workflow's own owner.
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),

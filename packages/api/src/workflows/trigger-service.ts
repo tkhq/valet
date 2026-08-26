@@ -92,8 +92,7 @@ export async function createWorkflowTrigger(
     .values({
       id: randomUUID(),
       orgId: user.orgId,
-      // Filed with the workflow; `created_by` records who armed it. Team
-      // only, for the reason `routes/events.ts` gives at its own insert.
+      // Owner follows the workflow, team only — see the insert in `routes/events.ts`.
       ownerType: owned.ownerType === "team" ? "team" : "user",
       ownerId: owned.ownerType === "team" ? owned.ownerId : user.id,
       name: input.name,
@@ -111,10 +110,9 @@ export async function createWorkflowTrigger(
   return { ok: true, trigger };
 }
 
-/** The row shape `canAccessTriggerRow` judges. The owner arm now admits
- * teammates by itself; the workflow-reach arm stays for rows written before
- * that change, which still carry their creator. One builder so the list
- * filter and the single-row loader cannot disagree about the shape. */
+/** Row shape for `canAccessTriggerRow`. The workflow-reach arm stays for
+ * older rows that still carry their creator as owner. One builder, so the
+ * list filter and the single-row loader judge the same shape. */
 function triggerAccessRow(
   row: typeof eventSubscriptions.$inferSelect,
   trigger: WorkflowTriggerSummary,

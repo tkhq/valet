@@ -1021,8 +1021,7 @@ export async function installWorkflowTemplate(
       await tx.insert(workflowSchedules).values({
         id: scheduleId,
         orgId: owner.orgId,
-        // Filed with the workflow, as `schedule-service.ts` files a
-        // hand-made schedule. `created_by` below records the installer.
+        // Owner follows the workflow; `created_by` records the installer.
         ownerType,
         ownerId,
         targetKind: "workflow",
@@ -1050,7 +1049,6 @@ export async function installWorkflowTemplate(
       await tx.insert(eventSubscriptions).values({
         id,
         orgId: owner.orgId,
-        // Same rule as the schedule above.
         ownerType,
         ownerId,
         name: subscription.name,

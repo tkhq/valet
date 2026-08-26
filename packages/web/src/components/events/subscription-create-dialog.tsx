@@ -20,13 +20,10 @@ function targetFor(scopedTeamId: string | undefined): TargetChoice {
     : { kind: "orchestrator", orchestrator: "user" };
 }
 
-/**
- * Which owner `POST /api/event-subscriptions` will stamp on the row, read
- * off the target the same way the route reads it. Ownership follows the
- * TARGET, not the active workspace: an orchestrator target carries its own
- * owner, and a workflow target follows the workflow's. A workflow the list
- * has not loaded reads as the caller's own, matching the route's fallback.
- */
+/** The owner `POST /api/event-subscriptions` will stamp, read off the TARGET
+ * the same way the route reads it — not off the active workspace. A workflow
+ * the list has not loaded reads as the caller's, the route's own fallback, so
+ * the notice below cannot name the wrong team. */
 function filedOwner(
   target: TargetChoice,
   workflows: { id: string; ownerType: "user" | "team"; ownerId: string }[],
@@ -40,15 +37,10 @@ function filedOwner(
   return wf?.ownerType === "team" ? { type: "team", teamId: wf.ownerId } : { type: "user" };
 }
 
-/**
- * Where the row will be listed, when that is not the workspace on screen;
- * null when the two agree, so the notice suppresses itself.
- *
- * Both directions count. A team workflow armed from the personal workspace
- * leaves that tab just as a personal target armed in a team workspace leaves
- * the team's, and there is no team on screen to gate a warning on. An
- * org-owned row lists everywhere, so it never lands elsewhere.
- */
+/** Where the row will be listed, when that is not the workspace on screen;
+ * null when the two agree. Both directions count: a team-owned row armed
+ * from the personal workspace also lands elsewhere, so the notice cannot be
+ * gated on a team being on screen. Org-owned rows list everywhere. */
 function filedElsewhere(
   filed: { type: "user" | "team" | "org"; teamId?: string },
   ws: ActiveWorkspace | undefined,
@@ -243,8 +235,6 @@ export function SubscriptionCreateDialog({
             </div>
           </div>
 
-          {/* Say where the row lands whenever that is not the workspace on
-              screen. An org-owned row lists everywhere, so it never is. */}
           {elsewhere !== null && ws !== undefined && (
             <p className="text-xs text-muted">
               Ownership follows the target. This subscription will be listed in {elsewhere}, not in{" "}
