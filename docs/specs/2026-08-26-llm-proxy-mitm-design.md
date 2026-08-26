@@ -1,8 +1,12 @@
-# LLM Proxy Design — pass-through recording of Claude Code and Codex traffic
+# LLM Recording Gateway Design — pass-through recording of Claude Code and Codex traffic
 
 **Date:** 2026-08-26
-**Status:** Approved design, not yet implemented
-**Scope:** Adds a transparent recording reverse-proxy in `packages/api` that presents Anthropic Messages and OpenAI Responses endpoints to external agent harnesses (Claude Code, Codex CLI). The harness points its base URL at valet and authenticates with a per-user `vlt_` key. Valet forwards each request verbatim to the real provider, swaps in the org's real upstream key, streams the response back unbuffered, and records the full request/response plus token usage and cost. Every proxied call is attributed to a user. A usage dashboard aggregates spend per user, model, and harness. Reuses the `vlt_` API-key identity (auth middleware rung 4), the `llm_providers` + `CredentialStore` upstream-key path, and the `cost_entries` cost-attribution invariant. Models the proxy behavior and spend-log schema on LiteLLM's pass-through endpoints.
+**Status:** Approved design (revised after adversarial review), not yet implemented
+**Scope:** Adds a transparent recording gateway in `packages/api` that presents Anthropic Messages and OpenAI Responses endpoints to external agent harnesses (Claude Code, Codex CLI). The harness points its base URL at valet and authenticates with a per-user `vlt_` key. Valet forwards each request verbatim to the real provider, swaps in the org's real upstream key, streams the response back unbuffered, and records the full request/response plus token usage and cost. Every proxied call is attributed to a user. A usage dashboard aggregates spend per user, model, and harness. Reuses the `vlt_` API-key identity (auth middleware rung 4), the `llm_providers` + `CredentialStore` upstream-key path, and the `cost_entries` cost-attribution invariant.
+
+**Not MITM.** The name "MITM" was the original framing, but this is not TLS interception: no CA cert, no transparent capture of traffic that still points at the real provider. It is an explicit opt-in reverse proxy — the harness is reconfigured (`base_url`) to send its traffic to valet. This document calls it the "recording gateway."
+
+**Build, not buy.** LiteLLM Proxy is the reference for the pass-through pattern and the spend-log schema, but valet builds its own gateway rather than run LiteLLM as a sidecar. The reasons: native `vlt_`/org identity (no key-mapping glue between two user models), a single deploy and one Postgres, and full control of the recorded data model and the `cost_entries` invariant.
 
 ## Context
 
@@ -45,7 +49,8 @@ This is LiteLLM's pass-through mode, not its unified mode. LiteLLM's unified `/c
 4. **Env auto-provisions a provider.** If `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are present at boot and no matching provider row exists, valet seeds one. The local success-criteria demo works with zero manual setup; production still resolves through the normal provider path.
 5. **Bodies are stored like engine prompts.** Full request and response bodies are plaintext in Postgres, the same substrate and posture as `engine_entries` prompt data. No new encryption path for large blobs.
 6. **`cost_entries` stays the one cost definition.** The view gains a `UNION ALL` of proxy rows mapped into its columns, so Grafana and `/api/usage` pick up proxy spend without a second definition.
-7. **Record per request, not per conversation.** Codex Responses is stateful; a request may carry `previous_response_id` instead of the full transcript. Valet records exactly what crosses the wire and does not reconstruct conversations from `previous_response_id` chains.
+7. **Record per request, not per conversation — but store the chaining ids.** Codex Responses is stateful; a request may carry `previous_response_id` instead of the full transcript. Valet records exactly what crosses the wire and does not reconstruct conversations at MVP. It DOES persist `provider_response_id` and `previous_response_id` (finding 5) so a later stitcher can walk the chain — the alternative (not storing them) makes reconstruction impossible to backfill.
+8. **A per-key spend metric and alert ship with the MVP (finding 7).** A recording gateway whose purpose is spend management must not itself be blind to a runaway or leaked key. Hard budget caps are deferred (they fit "alert, don't auto-repair" poorly), but a per-key/per-user spend metric plus a threshold alert is in scope. Emit it through the existing OTEL meter (`valet.cost.usd`-style counter, tagged by key and user).
 
 ## Architecture
 
@@ -67,9 +72,13 @@ resolveProxyPrincipal(c):
   key = c.req.header("x-api-key") ?? bearer(c.req.header("authorization"))
   if !key: return wireError(kind, 401, "missing API key. Create a proxy key in valet Settings.")
   result = await auth.api.verifyApiKey({ body: { key } })
-  if !result.valid: return wireError(kind, 401, "invalid API key.")
-  return { userId: result.userId, orgId: result.orgId, keyId: result.keyId }
+  if !result.valid || !result.key: return wireError(kind, 401, "invalid API key.")
+  userId = result.key.userId               // verifyApiKey returns the key record, NOT an org
+  orgId  = await resolveOrgId(db, userId)   // org comes from the user row (lib/org.ts), as the auth ladder does
+  return { userId, orgId, keyId: result.key.id }
 ```
+
+`verifyApiKey` returns `{ valid, error, key }` (`ValetVerifyApiKeyResult`); the key record carries `userId`, not an org. The org is resolved from the user, reusing `resolveOrgId` (`packages/api/src/lib/org.ts`) — the same lookup auth-ladder rung 3/4 uses.
 
 `wireError(kind, status, msg)` returns the provider's own error shape so the harness surfaces a clean message:
 - Anthropic: `{ "type": "error", "error": { "type": "authentication_error", "message": "..." } }`
@@ -99,21 +108,21 @@ proxyCompletion(c, kind):
   upstream  = resolveUpstream(principal.orgId, kind);  if error: return wireError
   subpath   = stripPrefix(c.req.path, `/proxy/${kind}`)   // "/v1/messages" | "/v1/responses" | ...
   start     = performanceNow()
+  reqText   = hasBody ? await c.req.text() : undefined     // buffer once: bounded JSON POST, also the recorded request
   res = await fetch(`${upstream.baseUrl}${subpath}${search}`, {
     method: c.req.method,
-    headers: outboundHeaders(c.req.raw.headers, kind, upstream.apiKey), // swap key, strip hop-by-hop + valet key
-    body: hasBody ? c.req.raw.body : undefined,
-    duplex: hasBody ? "half" : undefined,
+    headers: outboundHeaders(c.req.raw.headers, kind, upstream.apiKey), // strip hop-by-hop + valet key, swap in real key
+    body: reqText,
   })
   if isRecordable(subpath) and res.body:
     [toClient, toRecorder] = res.body.tee()
-    void recorder.consume(toRecorder, { principal, kind, model, subpath, requestBody, start, status: res.status })
+    void recorder.consume(toRecorder, { principal, kind, subpath, requestBody: reqText, start, status: res.status })
     return c.body(toClient, { status, headers: sanitized(res.headers) })
   return c.body(res.body, { status, headers: sanitized(res.headers) })   // non-recorded passthrough
 ```
 
-- `outboundHeaders` swaps valet's key for the real upstream key (`x-api-key` for Anthropic, `Authorization: Bearer` for OpenAI), drops the incoming valet key, and strips hop-by-hop headers (`connection`, `transfer-encoding`, `content-encoding`, `content-length` when the body is re-streamed). It forwards provider-required headers verbatim (`anthropic-version`, `anthropic-beta`, `content-type`, `accept`, `openai-beta`).
-- The request body is streamed (`duplex: "half"`), so a large transcript is not buffered in the api.
+- **The request body is read once into `reqText`.** A `ReadableStream` cannot be consumed twice, so the earlier "stream the request with `duplex: half`" idea would have left the recorder with no request to store (adversarial-review finding 1). These are bounded JSON POSTs, not client-streamed uploads, so buffering the request is correct and cheap; `reqText` is both forwarded and recorded.
+- **`outboundHeaders` is a strip-list, not an allowlist** (finding 4). This hop is harness→real-provider — high trust, and fidelity matters — so it forwards **every** incoming header except hop-by-hop headers (`connection`, `keep-alive`, `transfer-encoding`, `content-encoding`, `content-length`, `host`) and the valet key header, then sets the real upstream auth (`x-api-key` for Anthropic, `Authorization: Bearer` for OpenAI). This preserves headers valet does not enumerate — `anthropic-version`, `anthropic-beta`, `openai-beta`, `x-stainless-*` — that change model behavior when dropped. (Contrast `gateway-proxy.ts`, which *allowlists* precisely because its hop crosses into a semi-trusted sandbox — the opposite trust boundary.)
 - `sanitized(res.headers)` drops `content-encoding`/`transfer-encoding` (the tee returns decoded bytes) and forwards the rest so SSE framing reaches the client intact.
 - The client stream is never blocked by the recorder. `tee()` applies backpressure per branch; the recorder branch drains independently.
 
@@ -125,7 +134,11 @@ The model id is read from the request body (both APIs carry `model` in the reque
 - **OpenAI Responses (SSE):** the terminal `response.completed` event carries `response.usage` (`input_tokens`, `output_tokens`, `total_tokens`, and `input_tokens_details.cached_tokens`). The model id is in `response.model`.
 - **Non-streaming JSON** (a harness may request `stream:false`): the same fields live on the single JSON body.
 
-Cost is priced from the model id via the existing pricing/model-catalog code (the same source `cost_entries` and the engine use). If the model is unpriced (custom/unknown) or usage parsing fails, `cost_usd` is NULL. The row is still written with the raw bodies, so a later reprocess can price it.
+**Pricing — one function, not a second cost path (finding 3).** The engine does not expose a standalone `price(model, usage)`; it derives cost inside the agent loop (`thread.ts`) from pi-ai's `MessageUsage`. So this spec extracts a pure `priceUsage(model, usage): number | null` helper (in `packages/shared` or a small `packages/api/src/lib/pricing.ts`) that both the recorder and, ideally, the engine call — otherwise the gateway and the engine price the same tokens on two code paths that drift, and the "one cost definition" holds only at the view layer, not in the numbers. The helper reads the same model-catalog/pi-ai rate table.
+
+**Responses-usage caveat (finding 3, must-verify).** pi-ai's pricing was built for Anthropic Messages and OpenAI Chat Completions; it may not map the OpenAI **Responses** usage shape (`input_tokens` / `output_tokens` / `input_tokens_details.cached_tokens`) at all. If it does not, every Codex row lands unpriced and spend management fails for exactly one of the two harnesses. The implementation MUST add a Responses→rate-table mapping (cached tokens priced at the input-cache rate) and a test asserting a non-null cost for a Codex fixture. Treat "Codex rows priced" as an acceptance criterion, not an afterthought.
+
+If the model is unpriced (custom/unknown) or usage parsing fails, `cost_usd` is NULL — the row is still written with the raw bodies, so a later reprocess can price it (unpriced, never 0-for-free).
 
 The recorder writes exactly one row per recorded call. A parse or DB failure is logged and swallowed — a recording failure must never break the client's stream, which has already been delivered.
 
@@ -144,6 +157,8 @@ CREATE TABLE "llm_proxy_requests" (
   "model"             text,                     -- null until parsed
   "harness"           text,                     -- 'claude-code' | 'codex' | 'unknown' (from user-agent)
   "endpoint"          text NOT NULL,            -- '/v1/messages' | '/v1/responses'
+  "provider_response_id" text,                  -- OpenAI Responses id / Anthropic message id (from the response)
+  "previous_response_id" text,                  -- Codex chaining pointer (from the request), null otherwise
   "stream"            boolean NOT NULL,
   "status_code"       integer NOT NULL,
   "request_body"      text NOT NULL,            -- plaintext, engine-prompt posture
@@ -230,12 +245,21 @@ A settings panel that issues a proxy key and shows copy-paste setup:
 - The `/proxy` router forwards to a fixed allowlist of provider hosts (`api.anthropic.com`, `api.openai.com`) — it is not an open forward-proxy. The subpath is validated to reject `..` segments, matching `gateway-proxy.ts`.
 - Retention is out of MVP scope and matches engine-prompt retention (none automatic today). A retention sweep is a later addition; the schema carries `created_at` to support one.
 
+## Operational risk (finding 6)
+
+The gateway puts valet in the inference hot path for every engineer's local Claude Code and Codex. If the api is down, restarting, or mid-deploy, those harnesses stop working until valet returns — a laptop-blocking dependency valet did not have before. This is a deliberate cost of the design, accepted because full-body recording and key centralization require it (OTEL-only telemetry, the fail-safe alternative, cannot capture bodies or hold keys). Two consequences for implementation:
+
+- The gateway must not fail closed silently. On any upstream or internal error it returns a wire-correct error the harness can display, never a hang.
+- The gateway shares the api process, so a spike in proxied traffic competes with valet's own request handling. At team scale this is fine; a dedicated process/replica is a scaling follow-up, noted so it is a known lever, not a surprise.
+
 ## Testing
 
 - **Principal resolution** — both header forms (`x-api-key`, `Authorization: Bearer`), missing key, invalid key; assert wire-correct error shapes per kind.
 - **Upstream resolution + auto-provision** — env key present seeds a provider; a second call is idempotent; a configured row wins over env.
 - **Usage parser** — fixture SSE streams for Anthropic (`message_start` + `message_delta`) and OpenAI Responses (`response.completed`), plus non-streaming JSON; assert the actual token numbers are reachable (not just "defined" — the tool-call-persistence lesson: assert real values).
-- **Recorder integration** — a fake upstream serving a canned SSE stream; drive `proxyCompletion` and assert one `llm_proxy_requests` row with correct usage, cost, latency, and full bodies; assert the client received the identical stream bytes.
+- **Pricing** — `priceUsage(model, usage)` returns a non-null cost for a real Anthropic model AND a real OpenAI Responses fixture (finding 3 acceptance: Codex rows must price, including cached-token discount); unknown model returns null.
+- **Header fidelity** — `outboundHeaders` forwards `anthropic-version`/`anthropic-beta`/`x-stainless-*` unchanged, drops the valet key and hop-by-hop headers, and sets the real upstream auth (finding 4).
+- **Recorder integration** — a fake upstream serving a canned SSE stream; drive `proxyCompletion` and assert one `llm_proxy_requests` row with the recorded **request body** (finding 1), correct usage, cost, latency, `provider_response_id`, and full response body; assert the client received the identical stream bytes.
 - **cost_entries union** — insert a proxy row; assert `/api/usage/summary` includes its cost.
 - **API authorization** — a member cannot read another member's drill-down; an admin can; a cross-org row 404s.
 
@@ -243,18 +267,20 @@ A settings panel that issues a proxy key and shows copy-paste setup:
 
 ## Build sequence
 
-1. Schema: `llm_proxy_requests` table + `cost_entries` UNION (edit migrations in place; `rm -rf ~/.valet/pg`), Drizzle schema, and `store-postgres` row/mapper if the engine store reads it (it does not — this is app schema).
-2. Upstream resolution + `ensureEnvProviders` boot step, with tests.
-3. `resolveProxyPrincipal` + `wireError`, with tests.
-4. Forward + tee + recorder + usage parser, with the fake-upstream integration test.
-5. `/proxy` router mount for both kinds; wire into `app.ts`.
-6. `/api/proxy/*` endpoints, with authorization tests.
-7. Web dashboard + onboarding panel.
-8. Manual success-criteria run + `make e2e`.
+1. Schema: `llm_proxy_requests` table (incl. `provider_response_id`/`previous_response_id`) + `cost_entries` UNION (edit migrations in place; `rm -rf ~/.valet/pg`), Drizzle schema. App schema only — the engine store does not read it.
+2. `priceUsage(model, usage)` helper extracted as one shared function, with the Anthropic + OpenAI-Responses pricing tests (finding 3).
+3. Upstream resolution + `ensureEnvProviders` boot step, with tests.
+4. `resolveProxyPrincipal` (org via `resolveOrgId`) + `wireError`, with tests.
+5. Forward (request buffered once) + strip-list `outboundHeaders` + tee + recorder + usage parser, with the fake-upstream integration test.
+6. `/proxy` router mount for both kinds; wire into `app.ts`.
+7. Per-key spend metric + alert through the OTEL meter (decision 8).
+8. `/api/proxy/*` endpoints, with authorization tests.
+9. Web dashboard + onboarding panel.
+10. Manual success-criteria run + `make e2e`.
 
 ## Out of scope
 
-- Budgets, rate limits, and per-key quotas (LiteLLM has them; a later spec can add them to the proxy-key row).
+- Hard budget caps, rate limits, and per-key quotas. A per-key/user spend metric + alert IS in scope (decision 8); enforced ceilings that block requests are the deferred part, and fit "alert, don't auto-repair" poorly.
 - Conversation stitching across Codex `previous_response_id` chains (decision 7).
 - Google/OpenRouter and other provider kinds (the mount is per-kind; adding one is a follow-up).
 - Retention/TTL automation (schema supports it; the sweep is later).
