@@ -1,5 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import {
   Engine,
   InMemoryBlobStore,
@@ -247,6 +254,59 @@ describe("engine traces: settle-time patch capture", () => {
     const item = await store.getQueueItem(session.id, receipt.queueItemId);
     expect(item?.outcome?.outcome).toBe("completed");
     expect(item?.settlePatch).toEqual({ status: "skipped", reason: "no_start_ref" });
+    faux.unregister();
+  });
+});
+
+describe("engine traces: transcript.shape on rehydrate", () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+  let contextManager: AsyncLocalStorageContextManager;
+
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    contextManager = new AsyncLocalStorageContextManager();
+    contextManager.enable();
+    otelContext.setGlobalContextManager(contextManager);
+    otelTrace.setGlobalTracerProvider(provider);
+  });
+
+  afterEach(async () => {
+    await provider.shutdown();
+    otelTrace.disable();
+    otelContext.disable();
+  });
+
+  it("rehydrate emits one transcript.shape event carrying source rehydrate", async () => {
+    const faux = registerFauxProvider({ provider: "traces-fp" });
+    faux.setResponses([fauxAssistantMessage("ok")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const receipt = await session.prompt("hi");
+    await waitFor(() =>
+      events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId),
+    );
+
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    session.thread().rehydrateTranscript(entries);
+
+    const rehydrateEvents = exporter
+      .getFinishedSpans()
+      .flatMap((s) => s.events)
+      .filter(
+        (e) =>
+          e.name === "transcript.shape" && e.attributes?.["valet.transcript.source"] === "rehydrate",
+      );
+    expect(rehydrateEvents).toHaveLength(1);
+    expect(String(rehydrateEvents[0]?.attributes?.["valet.pi_ai.version"])).toMatch(/^\d+\.\d+/);
+
     faux.unregister();
   });
 });

@@ -49,6 +49,12 @@ export {
   parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export {
+  fingerprintEntries,
+  fingerprintMessages,
+  piAiVersion,
+  type TranscriptFingerprintSource,
+} from "./transcript-fingerprint.js";
 export { buildRepoInstructionsFragment } from "./repo-instructions.js";
 export {
   capturePatch,

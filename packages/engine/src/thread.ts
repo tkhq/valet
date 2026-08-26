@@ -35,6 +35,12 @@ import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import { recordSettlement, recordTurn } from "./metrics.js";
 import {
+  fingerprintEntries,
+  fingerprintMessages,
+  piAiVersion,
+  type TranscriptFingerprintSource,
+} from "./transcript-fingerprint.js";
+import {
   TRACEPARENT_METADATA_KEY,
   activeTraceparent,
   attrTruncate,
@@ -1300,6 +1306,45 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.agent.state.messages = entriesToAgentMessages(entries, this.session.options.model);
+    this.recordTranscriptShape("rehydrate", this.agent.state.messages, entries);
+  }
+
+  /**
+   * Split-brain diagnostic (TKAI-220). Records a `transcript.shape` span
+   * event on the active turn span (or a short-lived span when none is
+   * open) and prints the same line when VALET_TRANSCRIPT_DEBUG=1.
+   */
+  private recordTranscriptShape(
+    source: TranscriptFingerprintSource,
+    messages: readonly AgentMessage[],
+    entries?: readonly SessionEntry[],
+  ): void {
+    const messagesFp = fingerprintMessages(messages);
+    const entriesFp = entries ? fingerprintEntries(entries) : undefined;
+    const version = piAiVersion();
+    const attrs = {
+      "valet.transcript.source": source,
+      "valet.transcript.messages": messagesFp,
+      ...(entriesFp !== undefined ? { "valet.transcript.entries": entriesFp } : {}),
+      "valet.thread.id": this.id,
+      "valet.pi_ai.version": version,
+    };
+    const span = this.turnSpan ?? this.submissionSpan ?? otelTrace.getActiveSpan();
+    if (span) {
+      span.addEvent("transcript.shape", attrs);
+    } else {
+      const orphan = engineTracer().startSpan("transcript.shape");
+      orphan.addEvent("transcript.shape", attrs);
+      orphan.end();
+    }
+    if (process.env.VALET_TRANSCRIPT_DEBUG === "1") {
+      const lines = [
+        `[transcript] source=${source} thread=${this.id} pi-ai=${version}`,
+        messagesFp && `messages:\n${messagesFp}`,
+        entriesFp && `entries:\n${entriesFp}`,
+      ].filter(Boolean);
+      console.log(lines.join("\n"));
+    }
   }
 
   setMode(mode: QueueMode): void {
@@ -2281,6 +2326,7 @@ export class Thread {
         provider: this.session.options.model.provider,
         id: this.session.options.model.id,
       });
+      this.recordTranscriptShape("resume", this.agent.state.messages, entries);
       this.agent.state.tools = this.buildTools();
 
       // Host resolver (if any) delivers this resumed turn's per-turn key before
@@ -2747,6 +2793,7 @@ export class Thread {
     attachments?: MessageEntry["attachments"],
   ): Promise<void> {
     const content = userContentBlocks(text, attachments);
+    this.recordTranscriptShape("send", this.agent.state.messages);
     await this.agent.prompt({
       role: "user",
       content,
@@ -2918,6 +2965,7 @@ export class Thread {
       provider: session.options.model.provider,
       id: session.options.model.id,
     });
+    this.recordTranscriptShape("compaction", this.agent.state.messages, updatedEntries);
 
     await session.emit(
       { type: "compaction_end", threadId: this.id },
