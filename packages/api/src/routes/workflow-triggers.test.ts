@@ -577,6 +577,36 @@ describe("same-org owner scoping", () => {
     expect(deleteRes.status).toBe(404);
   });
 
+  it("files a team workflow's new trigger with the team, not the creator", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_b");
+    await seedWorkflowRow(a, "wf_team_b", { type: "team", id: "team_b" });
+
+    const res = await fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: "wf_team_b",
+        name: "on PR open",
+        eventKeys: ["github.pull_request.opened"],
+        filters: [],
+      } satisfies CreateWorkflowEventTriggerRequest),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as WorkflowEventTriggerResponse;
+
+    // The subscription follows its workflow, the same rule a schedule on
+    // that workflow follows. `created_by` still names who armed it.
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, created.trigger.triggerId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.ownerType).toBe("team");
+    expect(rows[0]!.ownerId).toBe("team_b");
+    expect(rows[0]!.createdBy).toBe("local-user");
+  });
+
   it("team-owned schedule and team workflow's trigger are visible and mutable for a team member", async () => {
     const a = await boot();
     await seedTeamWithCaller(a, "team_a");

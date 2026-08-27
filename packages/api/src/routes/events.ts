@@ -453,33 +453,26 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   const error = validateSubscription(plugins, { ...body, filters });
   if (error) return c.json({ error }, 400);
 
-  // Workflow targets must be OWNED by the caller, not just exist in their
-  // org — this is the same event_subscriptions row shape (and the same
-  // ownership requirement) createWorkflowTrigger (workflows/trigger-
-  // service.ts) enforces; this route is a second, parallel write path into
-  // the same table and previously checked only orgId, letting any org
-  // member wire event-driven automation onto a workflow they don't own. A
-  // foreign, unowned, or missing id all fail identically (never reveals
-  // whether the id exists at all).
+  // A workflow target must be OWNED by the caller, not only exist in their
+  // org: org scope alone lets any member wire automation onto another's.
+  // Foreign, unowned and missing ids fail alike, so the error never shows
+  // whether the id exists. Team membership is the bar, as it is for team
+  // workflows and team sessions.
+  let ownerType: "user" | "team" | "org" = "user";
+  let ownerId = user.id;
   if (body.target.kind === "workflow") {
     const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
     if (!owned) {
       return c.json({ error: `unknown workflow: ${body.target.workflowId}` }, 400);
     }
-  }
-
-  // Orchestrator targets choose the owning orchestrator: the caller's own
-  // (the default), a team they are on, or the org's. The owner decides which
-  // default assistant the dispatcher delivers into, so a team target is the
-  // whole reason a team can be event-driven at all.
-  //
-  // Membership, not team-admin, is the bar — the same bar team workflows and
-  // team sessions already use. A subscription is automation the team shares,
-  // and a member who can start a team workflow by hand can equally arrange
-  // for an event to start it.
-  let ownerType: "user" | "team" | "org" = "user";
-  let ownerId = user.id;
-  if (body.target.kind === "orchestrator") {
+    // The owner names the workspace; `created_by` names who armed it. Team
+    // only: `canMutateSubscription` lets any org member mutate an org-owned
+    // row, so copying `owned.ownerType` wholesale fails open.
+    if (owned.ownerType === "team") {
+      ownerType = "team";
+      ownerId = owned.ownerId;
+    }
+  } else if (body.target.kind === "orchestrator") {
     const who = body.target.orchestrator ?? "user";
     if (who === "org") {
       ownerType = "org";
